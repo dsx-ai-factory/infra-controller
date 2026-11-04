@@ -21,13 +21,13 @@ import (
 	validation "github.com/go-ozzo/ozzo-validation/v4"
 	"github.com/rs/zerolog/log"
 	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/trace"
 	oteltrace "go.opentelemetry.io/otel/trace"
 	tp "go.temporal.io/sdk/temporal"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 
+	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 
 	"github.com/google/uuid"
@@ -70,6 +70,10 @@ var (
 	ErrAllocationConstraintNotFound = errors.New("Allocation does not have an associated Constraint")
 	// ErrInstanceTypeMachineNotFound
 	ErrInstanceTypeMachineNotFound = errors.New("Instance Type does not have a Machine available for allocation")
+	// ErrSpectrumXMachineSelection distinguishes incompatible selectors from an empty allocation pool.
+	ErrSpectrumXMachineSelection = errors.New("no Machines with the requested SpectrumX capabilities are available for specified Instance Type")
+	// ErrMachineUnavailable is returned when a candidate Machine, re-read under its lock, is no longer Ready, unassigned, or matching the label selector
+	ErrMachineUnavailable = errors.New("machine is no longer available for allocation")
 	// ErrInvalidFunctionParams
 	ErrInvalidFunctionParams = errors.New("invalid function parameters")
 
@@ -187,7 +191,7 @@ func GetSiteFromIDString(ctx context.Context, tx *cdb.Tx, siteID string, dbSessi
 	if err != nil {
 		return nil, ErrInvalidID
 	}
-	return cdbm.NewSiteDAO(dbSession).GetByID(ctx, tx, siteid, nil, false)
+	return cdbm.NewSiteDAO(dbSession).GetByID(ctx, tx, siteid, nil, false, false)
 }
 
 // GetInstanceFromIDString gets the site DB model from the id string
@@ -321,10 +325,11 @@ func GetUnallocatedMachineForInstanceType(ctx context.Context, logger zerolog.Lo
 	// Get all available Machines for the Instance Type
 	// Since this query is occurring outside of a lock, we will have to double check availability of Machines
 	filterInput := cdbm.MachineFilterInput{
-		InstanceTypeIDs: []uuid.UUID{instanceType.ID},
-		IsAssigned:      cutil.GetPtr(false),
-		Statuses:        []string{cdbm.MachineStatusReady},
-		Labels:          machineLabelSelector,
+		InstanceTypeIDs:               []uuid.UUID{instanceType.ID},
+		IsAssigned:                    cutil.GetPtr(false),
+		Statuses:                      []string{cdbm.MachineStatusReady},
+		Labels:                        machineLabelSelector,
+		ExcludeForceDeletionRequested: true,
 	}
 	machines, _, err := mcDAO.GetAll(ctx, tx, filterInput, cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)}, nil)
 	if err != nil {
@@ -346,8 +351,10 @@ func GetUnallocatedMachineForInstanceType(ctx context.Context, logger zerolog.Lo
 	)
 
 	var infiniBandInterfaces []cam.APIInfiniBandInterfaceCreateOrUpdateRequest
+	var spectrumXAttachments []cam.APISpectrumXAttachmentCreateOrUpdateRequest
 	if apiRequest != nil {
 		infiniBandInterfaces = apiRequest.InfiniBandInterfaces
+		spectrumXAttachments = apiRequest.SpectrumXAttachments
 	}
 	requireInfiniBandMatch := len(infiniBandInterfaces) > 0
 	var suggestedByDevice map[string][]int
@@ -373,37 +380,20 @@ func GetUnallocatedMachineForInstanceType(ctx context.Context, logger zerolog.Lo
 		}
 	}
 
+	compatible, err := FilterMachinesBySpectrumXAttachments(ctx, tx, dbSession, machines, spectrumXAttachments)
+	if err != nil {
+		logger.Error().Err(err).Msg("failed to retrieve Machine SpectrumX Capabilities from DB")
+		return nil, err
+	}
+	if len(machines) > 0 && len(compatible) == 0 {
+		return nil, ErrSpectrumXMachineSelection
+	}
+	machines = compatible
+
 	if len(machines) > 0 {
 		for _, mc := range machines {
-			// Acquire an advisory lock on the MachineID, other provider will be look for other is this is being locked
-			// this lock is released when the transaction commits or rollback
-			err = tx.TryAcquireAdvisoryLock(ctx, cdb.GetAdvisoryLockIDFromString(mc.ID), nil)
-			if err != nil {
-				continue
-			}
-
-			// Re-obtain the Machine record, to ensure that it is still available
-			umc, err := mcDAO.GetByID(ctx, tx, mc.ID, nil, true)
-			if err != nil {
-				continue
-			}
-
-			if umc.Status != cdbm.MachineStatusReady {
-				continue
-			}
-
-			if umc.IsAssigned {
-				continue
-			}
-
-			// Labels can change after the initial candidate query. Recheck the
-			// locked Machine before assigning it so the placement constraint is
-			// enforced against the latest record we observed.
-			if !umc.MatchesLabelSelector(machineLabelSelector) {
-				continue
-			}
-
-			// If InfiniBand Interfaces are specified in the request, verify that the Machine has matching InfiniBand Interfaces
+			// If InfiniBand Interfaces are specified in the request, verify that the Machine has matching InfiniBand Interfaces.
+			// The Capabilities were loaded before the loop, so this check doesn't need the Machine lock.
 			if requireInfiniBandMatch {
 				// Get the Machine InfiniBand Capabilities for the Machine
 				machineIbCaps := machineIbCapsByMachineID[mc.ID]
@@ -427,19 +417,54 @@ func GetUnallocatedMachineForInstanceType(ctx context.Context, logger zerolog.Lo
 				}
 			}
 
-			// We should now be able to proceed with the allocation
-			// Update the machine status to assigned
-			updateInput := cdbm.MachineUpdateInput{
-				MachineID:  mc.ID,
-				IsAssigned: cutil.GetPtr(true),
-				Status:     cutil.GetPtr(cdbm.MachineStatusInUse),
-			}
+			// Lock and assign the Machine inside a savepoint, so a rejected Machine is unlocked
+			// right away instead of staying locked until the Instance create transaction ends.
+			var mcu *cdbm.Machine
+			err = tx.WithSavepoint(ctx, func(sp *cdb.Tx) error {
+				// Acquire an advisory lock on the MachineID, so concurrent requests skip this Machine
+				lerr := sp.TryAcquireAdvisoryLock(ctx, cdb.GetAdvisoryLockIDFromString(mc.ID), nil)
+				if lerr != nil {
+					return lerr
+				}
 
-			// return the updated machine
-			mcu, err := mcDAO.Update(ctx, tx, updateInput)
+				// Re-obtain the Machine record, to ensure that it is still available
+				umc, gerr := mcDAO.GetByID(ctx, sp, mc.ID, nil, true)
+				if gerr != nil {
+					return gerr
+				}
+
+				if umc.Status != cdbm.MachineStatusReady {
+					return ErrMachineUnavailable
+				}
+
+				if umc.IsAssigned || umc.IsForceDeletionQuarantined() {
+					return ErrMachineUnavailable
+				}
+
+				// Labels can change after the initial candidate query. Recheck the
+				// locked Machine before assigning it so the placement constraint is
+				// enforced against the latest record we observed.
+				if !umc.MatchesLabelSelector(machineLabelSelector) {
+					return ErrMachineUnavailable
+				}
+
+				// We should now be able to proceed with the allocation
+				// Update the machine status to assigned
+				var uerr error
+				mcu, uerr = mcDAO.Update(ctx, sp, cdbm.MachineUpdateInput{
+					MachineID:  mc.ID,
+					IsAssigned: cutil.GetPtr(true),
+					Status:     cutil.GetPtr(cdbm.MachineStatusInUse),
+				})
+				return uerr
+			})
+			if errors.Is(err, cdb.ErrTransactionSavepoint) {
+				return nil, err
+			}
 			if err != nil {
 				continue
 			}
+
 			_, err = cdbm.NewStatusDetailDAO(dbSession).Create(ctx, tx, cdbm.StatusDetailCreateInput{
 				EntityID: mc.ID,
 				Status:   cdbm.MachineStatusInUse,
@@ -459,10 +484,10 @@ func GetUnallocatedMachineForInstanceType(ctx context.Context, logger zerolog.Lo
 }
 
 // GetCountOfMachinesForInstanceType is a utility function to return count of
-// machines for instance type
+// machines for instance type, excluding recorded force-deletion attempts.
 func GetCountOfMachinesForInstanceType(ctx context.Context, tx *cdb.Tx, dbSession *cdb.Session, instanceTypeID uuid.UUID) (int, error) {
 	mitDAO := cdbm.NewMachineInstanceTypeDAO(dbSession)
-	_, tot, err := mitDAO.GetAll(ctx, tx, cdbm.MachineInstanceTypeFilterInput{InstanceTypeIDs: []uuid.UUID{instanceTypeID}}, cdbp.PageInput{Limit: cutil.GetPtr(0)}, nil)
+	_, tot, err := mitDAO.GetAll(ctx, tx, cdbm.MachineInstanceTypeFilterInput{InstanceTypeIDs: []uuid.UUID{instanceTypeID}, ExcludeForceDeletionRequested: true}, cdbp.PageInput{Limit: cutil.GetPtr(0)}, nil)
 	if err != nil {
 		return 0, err
 	}
@@ -862,8 +887,13 @@ func GetAllInstanceTypeAllocationStats(ctx context.Context, dbSession *cdb.Sessi
 	// instanceTypeIDToMachinesMap is used to keep track of the number of machines assigned to each instance type
 	// This would be the number of potential instances that could be created.
 	instanceTypeIDToMachinesMap := make(map[uuid.UUID]int)
+	allocationCapacityByInstanceType := make(map[uuid.UUID]int)
 	for _, machine := range machines {
 		instanceTypeIDToMachinesMap[*machine.InstanceTypeID]++
+		if machine.IsForceDeletionQuarantined() {
+			continue
+		}
+		allocationCapacityByInstanceType[*machine.InstanceTypeID]++
 
 		// If no instance was found for the machine, then it's unused.
 		// If it's in a Ready state, then record it as unused-but-usable.
@@ -893,12 +923,8 @@ func GetAllInstanceTypeAllocationStats(ctx context.Context, dbSession *cdb.Sessi
 		}
 
 		if tenantID == nil {
-			mtotal := instanceTypeIDToMachinesMap[instanceTypeID]
-			if aas.Total <= mtotal {
-				aas.MaxAllocatable = cutil.GetPtr(mtotal - aas.Total)
-			} else {
-				logger.Error().Int("Total Allocation Count", aas.Total).Int("Total Machines", mtotal).Msg("total Allocation count exceeds Machines assigned to Instance Type")
-			}
+			// Retained owner rows remain Assigned, but cannot back another Allocation.
+			aas.MaxAllocatable = cutil.GetPtr(max(0, allocationCapacityByInstanceType[instanceTypeID]-aas.Total))
 		}
 
 		allocAPIStatsMap[instanceTypeID] = aas
@@ -1253,7 +1279,7 @@ func TerminateWorkflowOnTimeOutError(logger zerolog.Logger, temporalClient tclie
 
 // UnwrapWorkflowError removes Temporal wrappers and maps backend errors to HTTP status codes.
 func UnwrapWorkflowError(err error) (code int, unwrappedError error) {
-	code, unwrappedError = http.StatusInternalServerError, err
+	code = http.StatusInternalServerError
 
 	// Attempt to unwrap our way through Temporal's WorkflowExecutionError
 	// and ActivityError layers to reach the underlying cause. These types
@@ -1352,10 +1378,10 @@ func GRPCStatusMessage(err error) string {
 }
 
 // GetUserAndEnrichLogger retrieves the user from the echo context and enriches the logger
-// and tracer span with user ID information (StarfleetID or AuxiliaryID).
+// and the handler span with user ID information (StarfleetID or AuxiliaryID).
 // This eliminates the repetitive if-else block for user ID logging across handlers.
-// The tracerSpan and handlerSpan parameters are optional and can be nil if tracing is not needed.
-func GetUserAndEnrichLogger(c echo.Context, logger zerolog.Logger, tracerSpan *cutil.TracerSpan, handlerSpan trace.Span) (*cdbm.User, zerolog.Logger, error) {
+// The handlerSpan parameter is optional and can be nil if tracing is not needed.
+func GetUserAndEnrichLogger(c echo.Context, logger zerolog.Logger, handlerSpan oteltrace.Span) (*cdbm.User, zerolog.Logger, error) {
 	// Get user
 	dbUser, ok := c.Get("user").(*cdbm.User)
 	if !ok || dbUser == nil {
@@ -1366,14 +1392,10 @@ func GetUserAndEnrichLogger(c echo.Context, logger zerolog.Logger, tracerSpan *c
 	// Enrich logger and tracer span with user ID
 	if dbUser.StarfleetID != nil {
 		logger = logger.With().Str("Starfleet ID", *dbUser.StarfleetID).Logger()
-		if tracerSpan != nil && handlerSpan != nil {
-			tracerSpan.SetAttribute(handlerSpan, attribute.String("starfleet_id", *dbUser.StarfleetID), logger)
-		}
+		cotel.SetAttribute(handlerSpan, attribute.String("starfleet_id", *dbUser.StarfleetID))
 	} else if dbUser.AuxiliaryID != nil {
 		logger = logger.With().Str("Auxiliary ID", *dbUser.AuxiliaryID).Logger()
-		if tracerSpan != nil && handlerSpan != nil {
-			tracerSpan.SetAttribute(handlerSpan, attribute.String("auxiliary_id", *dbUser.AuxiliaryID), logger)
-		}
+		cotel.SetAttribute(handlerSpan, attribute.String("auxiliary_id", *dbUser.AuxiliaryID))
 	}
 
 	logger.Info().Msg("retrieved user from request context")
@@ -1427,7 +1449,8 @@ type SiteTemporalClientPool interface {
 	GetClientByID(siteID uuid.UUID) (tclient.Client, error)
 }
 
-// AuthorizeProviderSiteForCoreInput carries the inputs for AuthorizeProviderSiteForCore.
+// AuthorizeProviderSiteForCoreInput supplies both Site authorization helpers.
+// Only AuthorizeProviderSiteForCore uses SCP to resolve a Temporal client.
 type AuthorizeProviderSiteForCoreInput struct {
 	Ctx       context.Context
 	Logger    zerolog.Logger
@@ -1438,15 +1461,13 @@ type AuthorizeProviderSiteForCoreInput struct {
 	SiteID    string
 }
 
-// AuthorizeProviderSiteForCore validates that user is a Provider Admin for org,
-// resolves siteStrID to a Site owned by the org's Infrastructure Provider, and
-// returns the per-site Temporal client plus the site ID string. The site ID is
-// the shared key used to encrypt redacted secret fields for transport to the
-// site agent.
-func AuthorizeProviderSiteForCore(in AuthorizeProviderSiteForCoreInput) (tclient.Client, string, *cutil.APIError) {
+// AuthorizeProviderSite checks Provider Admin access and returns the owned Site.
+// It skips Site readiness and SCP so callers can reject requests using REST
+// data, such as a SKU's machine associations, without a Temporal client.
+func AuthorizeProviderSite(in AuthorizeProviderSiteForCoreInput) (*cdbm.Site, *cutil.APIError) {
 	if in.User == nil {
 		in.Logger.Error().Msg("invalid User object found in request context")
-		return nil, "", cutil.NewAPIError(http.StatusInternalServerError, "Failed to retrieve current user", nil)
+		return nil, cutil.NewAPIError(http.StatusInternalServerError, "Failed to retrieve current user", nil)
 	}
 
 	ok, err := auth.ValidateOrgMembership(in.User, in.Org)
@@ -1456,37 +1477,50 @@ func AuthorizeProviderSiteForCore(in AuthorizeProviderSiteForCoreInput) (tclient
 		} else {
 			in.Logger.Warn().Msg("could not validate org membership for user, access denied")
 		}
-		return nil, "", cutil.NewAPIError(http.StatusForbidden, fmt.Sprintf("Failed to validate membership for org: %s", in.Org), nil)
+		return nil, cutil.NewAPIError(http.StatusForbidden, fmt.Sprintf("Failed to validate membership for org: %s", in.Org), nil)
 	}
 
-	if ok := auth.ValidateUserRoles(in.User, in.Org, nil, auth.ProviderAdminRole); !ok {
+	ok = auth.ValidateUserRoles(in.User, in.Org, nil, auth.ProviderAdminRole)
+	if !ok {
 		in.Logger.Warn().Msg("user does not have Provider Admin role, access denied")
-		return nil, "", cutil.NewAPIError(http.StatusForbidden, "User does not have Provider Admin role with org", nil)
+		return nil, cutil.NewAPIError(http.StatusForbidden, "User does not have Provider Admin role with org", nil)
 	}
 
 	provider, err := GetInfrastructureProviderForOrg(in.Ctx, nil, in.DBSession, in.Org)
 	if err != nil {
 		if errors.Is(err, ErrOrgInstrastructureProviderNotFound) {
-			return nil, "", cutil.NewAPIError(http.StatusNotFound,
+			return nil, cutil.NewAPIError(http.StatusNotFound,
 				fmt.Sprintf("Org '%v' does not have an Infrastructure Provider", in.Org), nil)
 		}
 		in.Logger.Error().Err(err).Msg("error retrieving Infrastructure Provider for this org")
-		return nil, "", cutil.NewAPIError(http.StatusInternalServerError, "Failed to retrieve Infrastructure Provider", nil)
+		return nil, cutil.NewAPIError(http.StatusInternalServerError, "Failed to retrieve Infrastructure Provider", nil)
 	}
 
 	site, err := GetSiteFromIDString(in.Ctx, nil, in.SiteID, in.DBSession)
 	if err != nil {
 		if errors.Is(err, cdb.ErrDoesNotExist) || errors.Is(err, ErrInvalidID) {
 			in.Logger.Warn().Err(err).Str("Site ID", in.SiteID).Msg("site not found in request")
-			return nil, "", cutil.NewAPIError(http.StatusBadRequest,
+			return nil, cutil.NewAPIError(http.StatusBadRequest,
 				fmt.Sprintf("Could not find Site with ID specified in request data: %s", in.SiteID), nil)
 		}
 		in.Logger.Error().Err(err).Str("Site ID", in.SiteID).Msg("error retrieving Site from DB")
-		return nil, "", cutil.NewAPIError(http.StatusInternalServerError, "Failed to retrieve Site due to DB error", nil)
+		return nil, cutil.NewAPIError(http.StatusInternalServerError, "Failed to retrieve Site due to DB error", nil)
 	}
 
 	if site.InfrastructureProviderID != provider.ID {
-		return nil, "", cutil.NewAPIError(http.StatusForbidden, "Site specified in request doesn't belong to current org's Provider", nil)
+		return nil, cutil.NewAPIError(http.StatusForbidden, "Site specified in request doesn't belong to current org's Provider", nil)
+	}
+
+	return site, nil
+}
+
+// AuthorizeProviderSiteForCore runs AuthorizeProviderSite, requires a Registered
+// Site, and returns its Temporal client and ID. The Site ID is the key used
+// to encrypt redacted secret fields for transport to the site agent.
+func AuthorizeProviderSiteForCore(in AuthorizeProviderSiteForCoreInput) (tclient.Client, string, *cutil.APIError) {
+	site, apiErr := AuthorizeProviderSite(in)
+	if apiErr != nil {
+		return nil, "", apiErr
 	}
 
 	if site.Status != cdbm.SiteStatusRegistered {
@@ -1552,23 +1586,13 @@ func IsTenant(ctx context.Context, logger zerolog.Logger, dbSession *cdb.Session
 }
 
 // TenantPrivilegeScope narrows where a Tenant's TargetedInstanceCreation
-// capability must be effective for a privilege check.
+// capability must be effective for a privilege check. See
+// cdbm.TenantPrivilegeScope for how its fields select the resolution.
 //
 // The scope pointer's presence is itself the "require privileged" signal for
 // the auth gates (IsTenant / IsProviderOrTenant): a nil *TenantPrivilegeScope
-// means no privilege is required. For TenantHasTargetedInstanceCreation a
-// non-nil scope is required and the fields select how the capability is
-// resolved:
-//
-//   - SiteID set: resolve the effective capability for that exact Site.
-//   - InfrastructureProviderID set: privileged if the Ready TenantAccount for
-//     that Provider has TargetedInstanceCreation enabled globally.
-//
-// SiteID and InfrastructureProviderID must not be set together.
-type TenantPrivilegeScope struct {
-	InfrastructureProviderID *uuid.UUID
-	SiteID                   *uuid.UUID
-}
+// means no privilege is required.
+type TenantPrivilegeScope = cdbm.TenantPrivilegeScope
 
 // TenantHasLegacyTargetedInstanceCreation reports whether the deprecated
 // Tenant.capabilities.targetedInstanceCreation compatibility field may be
@@ -1615,81 +1639,24 @@ func TenantHasLegacyTargetedInstanceCreation(ctx context.Context, tx *cdb.Tx, db
 }
 
 // TenantHasTargetedInstanceCreation reports whether the Tenant has the
-// TargetedInstanceCreation capability enabled within the given scope. It is
-// nil-safe so callers don't have to repeat the tenant nil check, and it
-// deliberately does not read the deprecated tenant-level flag
-// (tenant.Config.TargetedInstanceCreation), which is superseded by
-// TenantAccount.config with per-site TenantSite.config overrides. See
-// TenantPrivilegeScope for how scope selects the resolution strategy.
+// TargetedInstanceCreation capability enabled within the given scope. See
+// cdbm.TenantHasTargetedInstanceCreation.
 func TenantHasTargetedInstanceCreation(ctx context.Context, tx *cdb.Tx, dbSession *cdb.Session, tenant *cdbm.Tenant, scope *TenantPrivilegeScope) (bool, error) {
-	if tenant == nil {
-		return false, nil
+	return cdbm.TenantHasTargetedInstanceCreation(ctx, tx, dbSession, tenant, scope)
+}
+
+// TenantHasSiteAccess reports whether the Tenant has an Allocation or effective TargetedInstanceCreation on the Site.
+func TenantHasSiteAccess(ctx context.Context, tx *cdb.Tx, dbSession *cdb.Session, tenant *cdbm.Tenant, siteID uuid.UUID) (bool, error) {
+	return cdbm.TenantHasSiteAccess(ctx, tx, dbSession, tenant, siteID)
+}
+
+// ValidateTenantSiteAccess returns cdb.ErrDoesNotExist when TenantHasSiteAccess reports no access.
+func ValidateTenantSiteAccess(ctx context.Context, tx *cdb.Tx, dbSession *cdb.Session, tenant *cdbm.Tenant, siteID uuid.UUID) error {
+	ok, err := TenantHasSiteAccess(ctx, tx, dbSession, tenant, siteID)
+	if err == nil && !ok {
+		err = cdb.ErrDoesNotExist
 	}
-
-	if scope == nil {
-		return false, errors.New("scope must be specified when evaluating Tenant's targeted Instance creation capability")
-	}
-
-	if scope.SiteID != nil && scope.InfrastructureProviderID != nil {
-		return false, errors.New("site ID and infrastructure provider ID cannot be specified together when evaluating Tenant's targeted Instance creation capability")
-	}
-
-	siteID := scope.SiteID
-	providerID := scope.InfrastructureProviderID
-	var siteOverride *bool
-
-	// Site-scoped: resolve the effective capability for the exact Site.
-	if siteID != nil {
-		tsDAO := cdbm.NewTenantSiteDAO(dbSession)
-		ts, err := tsDAO.GetByTenantIDAndSiteID(ctx, tx, tenant.ID, *siteID, []string{cdbm.SiteRelationName})
-		if err != nil {
-			if errors.Is(err, cdb.ErrDoesNotExist) {
-				siteDAO := cdbm.NewSiteDAO(dbSession)
-				site, err := siteDAO.GetByID(ctx, tx, *siteID, nil, false)
-				if err != nil {
-					return false, err
-				}
-
-				// Site-scoped: resolve the effective capability for the exact Site.
-				providerID = &site.InfrastructureProviderID
-			} else {
-				return false, err
-			}
-		} else {
-			if ts.Site != nil {
-				providerID = &ts.Site.InfrastructureProviderID
-			} else {
-				return false, errors.New("failed to retrieve related Site for Tenant/Site association, DB error")
-			}
-			// This will ensure TenantAccount is ready for the Site.
-			siteOverride = ts.Config.TargetedInstanceCreation
-		}
-	}
-
-	if providerID != nil {
-		taDAO := cdbm.NewTenantAccountDAO(dbSession)
-		tas, _, err := taDAO.GetAll(ctx, tx, cdbm.TenantAccountFilterInput{
-			InfrastructureProviderID: providerID,
-			TenantIDs:                []uuid.UUID{tenant.ID},
-			Statuses:                 []string{cdbm.TenantAccountStatusReady},
-		}, cdbp.PageInput{Limit: cutil.GetPtr(1)}, nil)
-		if err != nil {
-			return false, err
-		}
-
-		if len(tas) == 0 {
-			return false, nil
-		}
-
-		ta := tas[0]
-		if siteOverride != nil {
-			return *siteOverride, nil
-		}
-
-		return ta.Config.TargetedInstanceCreation, nil
-	}
-
-	return false, nil
+	return err
 }
 
 // GetPrivilegedAccessSiteIDsForTenant returns Site IDs where the Tenant has
@@ -1857,7 +1824,7 @@ func IsProviderOrTenant(ctx context.Context, logger zerolog.Logger, dbSession *c
 // SetupHandler sets up common tasks for handlers not requiring error handling.
 // WARNING: caller MUST defer handlerSpan.End() if handlerSpan is not nil!!!
 // This function can be used across handlers to reduce duplication of initialization logic.
-func SetupHandler(modelName, handlerName string, c echo.Context, s *cutil.TracerSpan) (org string, user *cdbm.User, ctx context.Context, logger zerolog.Logger, hs oteltrace.Span) {
+func SetupHandler(modelName, handlerName string, c echo.Context) (org string, user *cdbm.User, ctx context.Context, logger zerolog.Logger, hs oteltrace.Span) {
 	// Get org
 	org = strings.ToLower(c.Param("orgName"))
 
@@ -1868,16 +1835,13 @@ func SetupHandler(modelName, handlerName string, c echo.Context, s *cutil.Tracer
 	logger = log.With().Str("Model", modelName).Str("Handler", handlerName).Str("Org", org).Logger()
 	logger.Info().Msg("started API handler")
 
-	// Create a child span and set the attributes for current request
-	newctx, hs := s.CreateChildInContext(ctx, handlerName+modelName+"Handler", logger)
-	if hs != nil {
-		// NOTE: caller MUST defer handlerSpan.End()
-		// Set newly created span context as a current context
-		ctx = newctx
-		s.SetAttribute(hs, attribute.String("org", org), logger)
-	}
+	// Create a child span and set the attributes for current request.
+	// cutil.NewAPIErrorResponse records errors on c.Request().Context().
+	ctx, hs = cotel.StartSpan(ctx, handlerName+modelName+"Handler")
+	c.SetRequest(c.Request().WithContext(ctx))
+	cotel.SetAttribute(hs, attribute.String("org", org))
 
-	user, enrichedLogger, _ := GetUserAndEnrichLogger(c, logger, s, hs)
+	user, enrichedLogger, _ := GetUserAndEnrichLogger(c, logger, hs)
 	if user != nil {
 		logger = enrichedLogger
 	}
@@ -2051,7 +2015,7 @@ var queryTagCache sync.Map // map[reflect.Type][]string
 // Results are cached per type.
 func QueryTagsFor(v any) []string {
 	t := reflect.TypeOf(v)
-	if t.Kind() == reflect.Ptr {
+	if t.Kind() == reflect.Pointer {
 		t = t.Elem()
 	}
 	if cached, ok := queryTagCache.Load(t); ok {

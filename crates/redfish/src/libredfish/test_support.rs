@@ -15,7 +15,7 @@
  * limitations under the License.
  */
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -51,6 +51,7 @@ const TRIGGER_EVIDENCE_TASK_ID: &str = "SpdmTriggerEvidenceTaskId";
 struct RedfishSimState {
     hosts: HashMap<String, RedfishSimHostState>,
     users: HashMap<String, String>,
+    ipmi_accounts: HashSet<String>,
     fw_version: Arc<String>,
     secure_boot: AtomicBool,
     no_component_integrities: bool,
@@ -64,12 +65,37 @@ struct RedfishSimState {
     /// preserves the normal successful behavior; `Some(false)` models a BMC
     /// accepting the write without applying the requested policy.
     lockdown_bmc_applies: Option<bool>,
+    next_lockdown_status_error: Option<RedfishError>,
+    next_lockdown_bmc_error: Option<(EnabledDisabled, String)>,
+    /// Fail one power-state read without changing the host's actual power.
+    next_power_state_error: Option<(usize, String)>,
+    next_onboard_nics_error: Option<String>,
+    /// Fail the next matching power action before changing the host's power.
+    next_power_action_error: Option<(SystemPowerControl, RedfishError)>,
+    /// Delay one matching power action before applying or recording it.
+    next_power_action_delay: Option<(
+        SystemPowerControl,
+        Duration,
+        tokio::sync::oneshot::Sender<()>,
+    )>,
+    /// Value of `ac_powercycle_supported_by_power`. Defaults to `false`.
+    ac_powercycle_supported: bool,
+    next_chassis_reset_error: Option<RedfishError>,
+    next_ipmi_access_error: Option<String>,
     job_state_sequence: VecDeque<JobState>,
     /// Offset (in seconds) applied to the BMC `DateTime` returned by
     /// `get_manager`, relative to the controller's `Utc::now()`. Defaults to 0
     /// (perfectly in sync); tests set it to simulate a BMC clock that is out of
     /// sync to exercise the time-sync reset/retry path.
     bmc_time_offset_seconds: i64,
+    /// When enabled, powered-off hosts report the stable BlueField-3
+    /// StandbyOffline state as `Paused`.
+    paused_when_off: bool,
+    /// When enabled, successful `ForceRestart` requests leave power unchanged.
+    force_restart_leaves_power_unchanged: bool,
+    /// Number of `get_tasks` calls to fail after a BMC reset, modelling the
+    /// interval before the reset service is reachable again.
+    bmc_reset_unavailable_polls: usize,
     /// Records every call to `RedfishClientPool::create_client` so tests can
     /// assert what vendor was passed at each call site.
     create_client_calls: Vec<CreateClientCall>,
@@ -88,6 +114,10 @@ struct RedfishSimState {
     /// When set, overrides the `Product` field returned by `get_service_root`.
     /// Tests use this to model a specific DPU generation.
     service_root_product: Option<String>,
+    systems_collection_uri: Option<String>,
+    resources: HashMap<String, String>,
+    resource_requests: Vec<String>,
+    resource_failures: HashSet<String>,
     /// When set, overrides the `Manufacturer` returned by `get_chassis`, so
     /// tests can drive `probe_bmc_vendor`'s Lite-On/Delta chassis fallback.
     chassis_manufacturer: Option<String>,
@@ -97,9 +127,11 @@ struct RedfishSimState {
     machine_setup_status_targets: HashMap<String, Vec<Option<RedfishSimBootInterfaceRef>>>,
     /// Opt-in authentication enforcement. Off by default so existing tests
     /// (which pass arbitrary or anonymous credentials) are undisturbed. When on,
-    /// `get_accounts` returns `401` unless the client was created with a
-    /// `Direct` credential whose password matches the seeded `users` entry, so
-    /// credential-probe paths (e.g. `bmc_credentials_valid`) can be exercised.
+    /// `get_accounts`, `change_password`, `change_password_by_id`,
+    /// `get_systems`, and `get_power_state` return `401` unless the client was
+    /// created with a `Direct` credential whose password matches the seeded
+    /// `users` entry. This makes credential selection and rejection observable
+    /// in callers such as `bmc_credentials_valid`.
     enforce_auth: bool,
     auth_attempts: Vec<RedfishSimAuthAttempt>,
     /// When set, `get_accounts` fails with a non-authentication transport error
@@ -204,6 +236,7 @@ pub struct RedfishSimAuthAttempt {
 #[derive(Debug)]
 struct RedfishSimHostState {
     power: PowerState,
+    onboard_nics: Option<EnabledDisabled>,
     lockdown: libredfish::EnabledDisabled,
     actions: Vec<RedfishSimAction>,
     boot_interface_targets: Vec<Option<RedfishSimBootInterfaceRef>>,
@@ -223,12 +256,14 @@ struct RedfishSimHostState {
     /// Per-host so one host's boot-order state can't flip another host's
     /// `is_boot_order_setup` check.
     is_boot_order_setup: Option<bool>,
+    bmc_reset_unavailable_polls: usize,
 }
 
 impl Default for RedfishSimHostState {
     fn default() -> Self {
         Self {
             power: PowerState::default(),
+            onboard_nics: None,
             lockdown: libredfish::EnabledDisabled::Disabled,
             actions: Vec::default(),
             boot_interface_targets: Vec::default(),
@@ -236,6 +271,7 @@ impl Default for RedfishSimHostState {
             // de-enumeration, see the boot order configure normally.
             http_dev1_enabled: true,
             is_boot_order_setup: None,
+            bmc_reset_unavailable_polls: 0,
         }
     }
 }
@@ -403,11 +439,113 @@ impl RedfishSim {
         self.state.lock().unwrap().lockdown_bmc_applies = Some(applies);
     }
 
+    /// Fail one lockdown observation without changing the actual policy.
+    pub fn fail_next_lockdown_status(&self, error: RedfishError) {
+        self.state.lock().unwrap().next_lockdown_status_error = Some(error);
+    }
+
+    /// Fail the next matching BMC lockdown write without applying it.
+    pub fn fail_next_lockdown_bmc(&self, target: EnabledDisabled, error: &str) {
+        self.state.lock().unwrap().next_lockdown_bmc_error = Some((target, error.to_string()));
+    }
+
+    /// Set one simulated host's power state, as a BMC would report it; the
+    /// host entry is created if no client has touched it yet.
+    pub fn set_power_state(&self, host: &str, power: PowerState) {
+        self.state
+            .lock()
+            .unwrap()
+            .hosts
+            .entry(host.to_string())
+            .or_default()
+            .power = power;
+    }
+
+    /// Inject a transient error into the next power-state read only.
+    pub fn fail_next_power_state_read(&self, error: &str) {
+        self.fail_power_state_read_after(0, error);
+    }
+
+    /// Fail one power-state read after the specified number of successful reads.
+    pub fn fail_power_state_read_after(&self, successful_reads: usize, error: &str) {
+        self.state.lock().unwrap().next_power_state_error =
+            Some((successful_reads, error.to_string()));
+    }
+
+    /// Fail one IPMI access repair before enabling access.
+    pub fn fail_next_ipmi_access(&self, error: &str) {
+        self.state.lock().unwrap().next_ipmi_access_error = Some(error.to_string());
+    }
+
+    /// Fail one onboard NIC write before applying the setting.
+    pub fn fail_next_onboard_nics_write(&self, error: &str) {
+        self.state.lock().unwrap().next_onboard_nics_error = Some(error.to_string());
+    }
+
+    /// Fail the next matching power action, recording the attempt but applying no change.
+    pub fn fail_next_power_action(&self, action: SystemPowerControl, error: &str) {
+        self.fail_next_power_action_with(
+            action,
+            RedfishError::GenericError {
+                error: error.to_string(),
+            },
+        );
+    }
+
+    /// Fail the next matching power action with the supplied error.
+    pub fn fail_next_power_action_with(&self, action: SystemPowerControl, error: RedfishError) {
+        self.state.lock().unwrap().next_power_action_error = Some((action, error));
+    }
+
+    /// Delay the next matching power action before applying or recording it.
+    /// The receiver is notified after its sleep is constructed; cancellation
+    /// during that sleep leaves the simulated power unchanged.
+    pub fn delay_next_power_action(
+        &self,
+        action: SystemPowerControl,
+        delay: Duration,
+    ) -> tokio::sync::oneshot::Receiver<()> {
+        let (started, receiver) = tokio::sync::oneshot::channel();
+        self.state.lock().unwrap().next_power_action_delay = Some((action, delay, started));
+        receiver
+    }
+
+    /// Set whether clients report AC power cycle support through `power`.
+    pub fn set_ac_powercycle_supported(&self, supported: bool) {
+        self.state.lock().unwrap().ac_powercycle_supported = supported;
+    }
+
+    /// Fail one chassis reset with the supplied error, recording the attempt.
+    pub fn fail_next_chassis_reset(&self, error: RedfishError) {
+        self.state.lock().unwrap().next_chassis_reset_error = Some(error);
+    }
+
     /// Set the offset (in seconds) applied to the BMC `DateTime` returned by
     /// `get_manager`, relative to the controller clock. Use a value larger than
     /// the time-sync threshold to simulate an out-of-sync BMC clock.
     pub fn set_bmc_time_offset_seconds(&self, offset: i64) {
         self.state.lock().unwrap().bmc_time_offset_seconds = offset;
+    }
+
+    /// Keep the simulated BMC unavailable to task queries for this many polls
+    /// after reset, before allowing the caller to power the host back on.
+    pub fn set_bmc_reset_unavailable_polls(&self, polls: usize) {
+        self.state.lock().unwrap().bmc_reset_unavailable_polls = polls;
+    }
+
+    /// Make powered-off hosts report `Paused`, matching BlueField-3.
+    /// `On` leaves this state unchanged, modeling a DPU stuck in the UEFI shell;
+    /// a restart is required to boot again.
+    pub fn set_paused_when_off(&self, paused: bool) {
+        self.state.lock().unwrap().paused_when_off = paused;
+    }
+
+    /// Model a BMC accepting `ForceRestart` without changing host power.
+    pub fn set_force_restart_leaves_power_unchanged(&self, enabled: bool) {
+        self.state
+            .lock()
+            .unwrap()
+            .force_restart_leaves_power_unchanged = enabled;
     }
 
     /// Returns a snapshot of every `create_client` call made through this sim,
@@ -436,6 +574,15 @@ impl RedfishSim {
         self.state.lock().unwrap().users.get(account_id).cloned()
     }
 
+    /// Return whether a simulated account has IPMI access.
+    pub fn ipmi_account_access_enabled(&self, account_id: &str) -> bool {
+        self.state
+            .lock()
+            .unwrap()
+            .ipmi_accounts
+            .contains(account_id)
+    }
+
     /// Make `change_password` (the by-username path) fail with
     /// [`RedfishError::PasswordChangeRequired`], modeling a factory BMC that
     /// blocks it until change-on-first-use. `change_password_by_id` still
@@ -451,8 +598,9 @@ impl RedfishSim {
     }
 
     /// Enable opt-in authentication enforcement (see [`RedfishSimState::enforce_auth`]):
-    /// once on, `get_accounts` authorizes against the seeded `users` map, so
-    /// credential-probe paths can distinguish valid from rejected credentials.
+    /// `get_accounts`, `change_password`, `change_password_by_id`,
+    /// `get_systems`, and `get_power_state` authorize against the seeded `users`
+    /// map, so callers can distinguish valid from rejected credentials.
     pub fn set_enforce_auth(&self, enforce: bool) {
         self.state.lock().unwrap().enforce_auth = enforce;
     }
@@ -530,6 +678,34 @@ impl RedfishSim {
         (credentials, resume)
     }
 
+    /// Sets the Systems collection link advertised by the simulated service root.
+    pub fn set_systems_collection_uri(&self, uri: impl Into<String>) {
+        self.state.lock().unwrap().systems_collection_uri = Some(uri.into());
+    }
+
+    /// Supplies the body returned by generic resource reads at the given URI.
+    pub fn set_resource(&self, uri: impl Into<String>, body: serde_json::Value) {
+        self.state
+            .lock()
+            .unwrap()
+            .resources
+            .insert(uri.into(), body.to_string());
+    }
+
+    /// Makes generic reads of the given URI fail with a simulated transport error.
+    pub fn fail_resource(&self, uri: impl Into<String>) {
+        self.state
+            .lock()
+            .unwrap()
+            .resource_failures
+            .insert(uri.into());
+    }
+
+    /// Returns the URIs requested through the generic resource API, in call order.
+    pub fn resource_requests(&self) -> Vec<String> {
+        self.state.lock().unwrap().resource_requests.clone()
+    }
+
     /// Set the BIOS attribute map returned by the sim client's `bios()`,
     /// which is otherwise unimplemented.
     pub fn set_bios_attributes(&self, attributes: HashMap<String, serde_json::Value>) {
@@ -600,10 +776,22 @@ pub struct RedfishSimTimepoint {
 /// Platform-configuration calls recorded separately from power actions.
 #[derive(Debug, Clone, PartialEq)]
 pub enum RedfishSimPlatformAction {
-    SetHostRshim { host: String },
-    SetHostPrivilegeLevel { host: String },
-    IsBiosSetup { host: String },
-    UefiSetup { dpu: bool },
+    SetHostRshim {
+        host: String,
+    },
+    SetIdracLockdown {
+        host: String,
+        enabled: EnabledDisabled,
+    },
+    SetHostPrivilegeLevel {
+        host: String,
+    },
+    IsBiosSetup {
+        host: String,
+    },
+    UefiSetup {
+        dpu: bool,
+    },
 }
 
 /// Owned form of the boot-interface reference observed by the Redfish
@@ -638,7 +826,13 @@ impl From<libredfish::BootInterfaceRef<'_>> for RedfishSimBootInterfaceRef {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum RedfishSimAction {
+    /// Records a successfully applied onboard NIC setting.
+    SetEnableOnboardNics(EnabledDisabled),
+    /// Records an onboard NIC write rejected before it was applied.
+    SetEnableOnboardNicsFailed(EnabledDisabled),
     Power(libredfish::SystemPowerControl),
+    /// A power request rejected before its effect was applied.
+    PowerFailed(libredfish::SystemPowerControl),
     BmcReset(Option<ManagerResetType>),
     /// Records a Redfish `Chassis.Reset` call with its target and reset type.
     ChassisReset {
@@ -756,7 +950,24 @@ impl Redfish for RedfishSimClient {
     fn get_power_state<'a>(
         &'a self,
     ) -> libredfish::RedfishFuture<'a, Result<libredfish::PowerState, RedfishError>> {
-        Box::pin(async move { Ok(self.state.lock().unwrap().hosts[&self._host].power) })
+        Box::pin(async move {
+            let mut state = self.state.lock().unwrap();
+            self.authorize(&mut state, "Systems/System.Embedded.1")?;
+            if let Some((remaining, error)) = state.next_power_state_error.as_mut() {
+                if *remaining == 0 {
+                    let error = error.clone();
+                    state.next_power_state_error = None;
+                    return Err(RedfishError::GenericError { error });
+                }
+                *remaining -= 1;
+            }
+            let power = state.hosts[&self._host].power;
+            Ok(if state.paused_when_off && power == PowerState::Off {
+                PowerState::Paused
+            } else {
+                power
+            })
+        })
     }
 
     fn get_power_metrics<'a>(
@@ -770,21 +981,55 @@ impl Redfish for RedfishSimClient {
         action: libredfish::SystemPowerControl,
     ) -> libredfish::RedfishFuture<'a, Result<(), RedfishError>> {
         Box::pin(async move {
+            let delay = {
+                let mut state = self.state.lock().unwrap();
+                state
+                    .next_power_action_delay
+                    .take_if(|(delayed_action, _, _)| *delayed_action == action)
+            };
+            if let Some((_, delay, started)) = delay {
+                let sleep = tokio::time::sleep(delay);
+                started.send(()).ok();
+                sleep.await;
+            }
             let power_state = match action {
                 libredfish::SystemPowerControl::ForceOff
                 | libredfish::SystemPowerControl::GracefulShutdown => PowerState::Off,
                 _ => PowerState::On,
             };
             let mut state = self.state.lock().unwrap();
+            if state
+                .next_power_action_error
+                .as_ref()
+                .is_some_and(|(failed_action, _)| *failed_action == action)
+            {
+                let (_, error) = state.next_power_action_error.take().unwrap();
+                state
+                    .hosts
+                    .get_mut(&self._host)
+                    .unwrap()
+                    .actions
+                    .push(RedfishSimAction::PowerFailed(action));
+                return Err(error);
+            }
+            let paused_when_off = state.paused_when_off;
+            let force_restart_leaves_power_unchanged = state.force_restart_leaves_power_unchanged;
             let host_state = state.hosts.get_mut(&self._host).unwrap();
-            host_state.power = power_state;
+            if !(paused_when_off
+                && host_state.power == PowerState::Off
+                && action == SystemPowerControl::On)
+                && !(force_restart_leaves_power_unchanged
+                    && action == SystemPowerControl::ForceRestart)
+            {
+                host_state.power = power_state;
+            }
             host_state.actions.push(RedfishSimAction::Power(action));
             Ok(())
         })
     }
 
     fn ac_powercycle_supported_by_power(&self) -> bool {
-        false
+        self.state.lock().unwrap().ac_powercycle_supported
     }
 
     fn bmc_reset<'a>(
@@ -793,10 +1038,12 @@ impl Redfish for RedfishSimClient {
     ) -> libredfish::RedfishFuture<'a, Result<(), RedfishError>> {
         Box::pin(async move {
             let mut state = self.state.lock().unwrap();
+            let unavailable_polls = state.bmc_reset_unavailable_polls;
             let host_state = state.hosts.get_mut(&self._host).unwrap();
             host_state
                 .actions
                 .push(RedfishSimAction::BmcReset(reset_type));
+            host_state.bmc_reset_unavailable_polls = unavailable_polls;
             Ok(())
         })
     }
@@ -912,7 +1159,10 @@ impl Redfish for RedfishSimClient {
         &'a self,
     ) -> libredfish::RedfishFuture<'a, Result<libredfish::Status, RedfishError>> {
         Box::pin(async move {
-            let state = self.state.lock().unwrap();
+            let mut state = self.state.lock().unwrap();
+            if let Some(error) = state.next_lockdown_status_error.take() {
+                return Err(error);
+            }
             Ok(libredfish::Status::build_fake(
                 state.hosts[&self._host].lockdown,
             ))
@@ -1093,6 +1343,33 @@ impl Redfish for RedfishSimClient {
                 ));
             }
             state.users.insert(s_acct, new_pass.to_string());
+            Ok(())
+        })
+    }
+
+    fn enable_ipmi_account_access<'a>(
+        &'a self,
+        account_id: &'a str,
+        password: &'a str,
+    ) -> libredfish::RedfishFuture<'a, Result<(), RedfishError>> {
+        Box::pin(async move {
+            let mut state = self.state.lock().unwrap();
+            self.authorize(&mut state, "AccountService/Accounts")?;
+            if !state
+                .users
+                .get(account_id)
+                .is_some_and(|current| current == password)
+            {
+                return Err(sim_http_error(
+                    http::StatusCode::BAD_REQUEST,
+                    "AccountService/Accounts",
+                    "sim: IPMI access requires the account's current password",
+                ));
+            }
+            if let Some(error) = state.next_ipmi_access_error.take() {
+                return Err(RedfishError::GenericError { error });
+            }
+            state.ipmi_accounts.insert(account_id.to_string());
             Ok(())
         })
     }
@@ -1380,6 +1657,10 @@ impl Redfish for RedfishSimClient {
                 })
                 .collect::<Vec<_>>();
             Ok(libredfish::model::ComputerSystem {
+                odata: libredfish::model::OData {
+                    odata_id: format!("/redfish/v1/Systems/{id}"),
+                    ..Default::default()
+                },
                 id,
                 links: (!chassis.is_empty()).then_some(
                     libredfish::model::system::ComputerSystemLinks {
@@ -1612,6 +1893,7 @@ impl Redfish for RedfishSimClient {
             Ok(ServiceRoot {
                 vendor: Some(vendor),
                 product: Some(product),
+                systems: state.systems_collection_uri.clone().map(ODataId::from),
                 component_integrity: Some(ODataId {
                     odata_id: "Valid Data".to_string(),
                 }),
@@ -1757,7 +2039,17 @@ impl Redfish for RedfishSimClient {
     }
 
     fn get_tasks<'a>(&'a self) -> libredfish::RedfishFuture<'a, Result<Vec<String>, RedfishError>> {
-        Box::pin(async move { Ok(Vec::new()) })
+        Box::pin(async move {
+            let mut state = self.state.lock().unwrap();
+            let host_state = state.hosts.get_mut(&self._host).unwrap();
+            if host_state.bmc_reset_unavailable_polls > 0 {
+                host_state.bmc_reset_unavailable_polls -= 1;
+                return Err(RedfishError::GenericError {
+                    error: "BMC reset is still in progress".to_string(),
+                });
+            }
+            Ok(Vec::new())
+        })
     }
 
     fn add_secure_boot_certificate<'a>(
@@ -1875,25 +2167,56 @@ impl Redfish for RedfishSimClient {
 
     fn get_collection<'a>(
         &'a self,
-        _id: ODataId,
+        id: ODataId,
     ) -> libredfish::RedfishFuture<'a, Result<Collection, RedfishError>> {
         Box::pin(async move {
+            let mut state = self.state.lock().unwrap();
+            state.resource_requests.push(id.odata_id.clone());
+            if state.resource_failures.contains(&id.odata_id) {
+                return Err(RedfishError::GenericError {
+                    error: format!("resource {} is unavailable", id.odata_id),
+                });
+            }
+            let body = match state.resources.get(&id.odata_id) {
+                Some(body) => serde_json::from_str(body).map_err(|source| {
+                    RedfishError::JsonDeserializeError {
+                        url: id.odata_id.clone(),
+                        body: body.clone(),
+                        source,
+                    }
+                })?,
+                None => HashMap::new(),
+            };
             Ok(Collection {
-                url: String::new(),
-                body: HashMap::new(),
+                url: id.odata_id,
+                body,
             })
         })
     }
 
     fn get_resource<'a>(
         &'a self,
-        _id: ODataId,
+        id: ODataId,
     ) -> libredfish::RedfishFuture<'a, Result<Resource, RedfishError>> {
         Box::pin(async move {
-            Ok(Resource {
-                url: String::new(),
-                raw: Default::default(),
-            })
+            let mut state = self.state.lock().unwrap();
+            state.resource_requests.push(id.odata_id.clone());
+            if state.resource_failures.contains(&id.odata_id) {
+                return Err(RedfishError::GenericError {
+                    error: format!("resource {} is unavailable", id.odata_id),
+                });
+            }
+            match state.resources.get(&id.odata_id) {
+                Some(body) => Ok(Resource {
+                    url: id.odata_id,
+                    raw: serde_json::value::RawValue::from_string(body.clone())
+                        .expect("configured resource is valid JSON"),
+                }),
+                None => Ok(Resource {
+                    url: String::new(),
+                    raw: Default::default(),
+                }),
+            }
         })
     }
 
@@ -1956,6 +2279,9 @@ impl Redfish for RedfishSimClient {
                 chassis_id: chassis_id.to_string(),
                 reset_type,
             });
+            if let Some(error) = state.next_chassis_reset_error.take() {
+                return Err(error);
+            }
             Ok(())
         })
     }
@@ -1980,6 +2306,14 @@ impl Redfish for RedfishSimClient {
     ) -> libredfish::RedfishFuture<'a, Result<(), RedfishError>> {
         Box::pin(async move {
             let mut state = self.state.lock().unwrap();
+            if state
+                .next_lockdown_bmc_error
+                .as_ref()
+                .is_some_and(|(failed, _)| *failed == target)
+            {
+                let (_, error) = state.next_lockdown_bmc_error.take().unwrap();
+                return Err(RedfishError::GenericError { error });
+            }
             if state.lockdown_bmc_applies.unwrap_or(true) {
                 let host_state = state.hosts.get_mut(&self._host).unwrap();
                 host_state.lockdown = target;
@@ -2001,6 +2335,43 @@ impl Redfish for RedfishSimClient {
     ) -> libredfish::RedfishFuture<'a, Result<Vec<Drives>, RedfishError>> {
         Box::pin(async move {
             todo!();
+        })
+    }
+
+    fn set_enable_onboard_nics<'a>(
+        &'a self,
+        enable_onboard_nics: EnabledDisabled,
+    ) -> libredfish::RedfishFuture<'a, Result<(), RedfishError>> {
+        Box::pin(async move {
+            let mut state = self.state.lock().unwrap();
+            let error = state.next_onboard_nics_error.take();
+            let host = state.hosts.get_mut(&self._host).unwrap();
+            if let Some(error) = error {
+                host.actions
+                    .push(RedfishSimAction::SetEnableOnboardNicsFailed(
+                        enable_onboard_nics,
+                    ));
+                return Err(RedfishError::GenericError { error });
+            }
+            host.onboard_nics = Some(enable_onboard_nics);
+            host.actions
+                .push(RedfishSimAction::SetEnableOnboardNics(enable_onboard_nics));
+            Ok(())
+        })
+    }
+
+    fn are_onboard_nics_enabled<'a>(
+        &'a self,
+    ) -> libredfish::RedfishFuture<'a, Result<Option<EnabledDisabled>, RedfishError>> {
+        Box::pin(async move {
+            Ok(self
+                .state
+                .lock()
+                .unwrap()
+                .hosts
+                .get(&self._host)
+                .unwrap()
+                .onboard_nics)
         })
     }
 
@@ -2076,9 +2447,17 @@ impl Redfish for RedfishSimClient {
 
     fn set_idrac_lockdown<'a>(
         &'a self,
-        _enabled: EnabledDisabled,
+        enabled: EnabledDisabled,
     ) -> libredfish::RedfishFuture<'a, Result<(), RedfishError>> {
-        Box::pin(async move { Ok(()) })
+        Box::pin(async move {
+            let mut state = self.state.lock().unwrap();
+            let host = self._host.clone();
+            state.hosts.get_mut(&host).unwrap().lockdown = enabled;
+            state
+                .platform_actions
+                .push(RedfishSimPlatformAction::SetIdracLockdown { host, enabled });
+            Ok(())
+        })
     }
 
     fn get_boss_controller<'a>(

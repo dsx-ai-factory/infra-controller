@@ -118,6 +118,11 @@ vault:
     ## `credential add-uefi` only writes Vault metadata (not the value) and preingestion
     ## logs "Missing credential machines/all_{dpus,hosts}/site_default/uefi-metadata-items/auth".
     ## SITE-SPECIFIC SECRET: blank the passwords before committing/MR; operator populates per site.
+    ## A seed is written only when its key has no value yet, on install and on every
+    ## upgrade alike (an upgrade creates keys new to this chart version). Editing a seed
+    ## whose key already holds a value changes nothing; on an existing site use
+    ## `credential add-uefi`. Set site-specific values here before an upgrade that
+    ## introduces their keys.
     - path: "machines/all_dpus/site_default/uefi-metadata-items/auth"
       data:
         UsernamePassword:
@@ -227,20 +232,26 @@ flow:
   namespace: flow
 
 ## ---------------------------------------------------------------------------
-## temporal / keycloak — opt-in Temporal/Keycloak database consolidation onto
-## nico-pg-cluster (the shared, HA Zalando-managed cluster), instead of each
-## staying on the legacy standalone postgres.postgres StatefulSet. Disabled
-## by default; both targets are supported side by side, and existing sites
-## need no changes.
+## temporal / keycloak: where each database lives.
 ##
-## Full story (what gets provisioned, migration steps, namespace caveats):
-## see "Consolidating Temporal/Keycloak onto nico-pg-cluster" in README.md.
+##   auto   (default) The database is created in nico-pg-cluster, the shared
+##          HA cluster, but its location is left unchanged for an existing
+##          Site. With postgresql.enabled: false, nico-pg-cluster is an
+##          external or out-of-band PostgreSQL, and auto means false unless
+##          the database is already there.
+##   true   The database lives in nico-pg-cluster.
+##   false  The database lives on the standalone postgres.postgres
+##          StatefulSet. It's deprecated, and support for it will be removed
+##          in 2.5.
+##
+## Sites still on the StatefulSet are highly encouraged to migrate. Refer to
+## "Consolidating Temporal/Keycloak onto nico-pg-cluster" in README.md.
 ## ---------------------------------------------------------------------------
 temporal:
-  useHaPostgres: false
+  useHaPostgres: auto
 
 keycloak:
-  useHaPostgres: false
+  useHaPostgres: auto
   ## Namespace Keycloak deploys into — must stay in sync with
   ## values/nico-rest.yaml's nico-rest-api.config.keycloak.baseURL host.
   ## See README.md.

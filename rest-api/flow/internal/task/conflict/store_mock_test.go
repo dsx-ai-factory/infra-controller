@@ -111,6 +111,10 @@ func (m *mockStore) ListNonTerminalTasksForRacks(_ context.Context, _ []uuid.UUI
 	panic("mockStore.ListNonTerminalTasksForRacks: not implemented")
 }
 
+func (m *mockStore) ListPowerTasksForRack(_ context.Context, _ uuid.UUID) ([]taskdef.PowerTaskDetails, error) {
+	panic("mockStore.ListPowerTasksForRack: not implemented")
+}
+
 func (m *mockStore) LatestLeakageShutdownTaskStatuses(
 	_ context.Context,
 	_ []uuid.UUID,
@@ -172,4 +176,9 @@ func (m *mockStore) GetRackRuleAssociation(_ context.Context, _ uuid.UUID, _ tas
 
 func (m *mockStore) ListRackRuleAssociations(_ context.Context, _ uuid.UUID) ([]*operationrules.RackRuleAssociation, error) {
 	panic("mockStore.ListRackRuleAssociations: not implemented")
+}
+
+// ListTaskContextForRack fails unexpected context reads in conflict tests.
+func (m *mockStore) ListTaskContextForRack(_ context.Context, _ uuid.UUID) ([]taskdef.TaskContextMetadata, error) {
+	panic("unexpected task context read")
 }

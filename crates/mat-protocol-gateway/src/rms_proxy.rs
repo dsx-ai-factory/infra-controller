@@ -35,10 +35,9 @@
 //! - Job ids in every response are replaced by gateway ids from [`JobMap`], and the job status
 //!   RPCs resolve their id through the same map. A batch split across instances gets one
 //!   aggregate parent whose status is the worst, least advanced of the per-instance parents,
-//!   with no rack or node of its own. An id the map does not know is answered as the RMS mock
-//!   answers an id it never issued:
-//!   complete by `GetJobStatus` and `GetConfigureSwitchCertificateJobStatus`,
-//!   `RETURN_CODE_FAILURE` with `job <id> not found` by `GetFirmwareJobStatus` and
+//!   with no rack or node of its own. An id the map does not know is answered locally:
+//!   `NOT_FOUND` by `GetJobStatus`, `RETURN_CODE_FAILURE` with `job <id> not found`
+//!   by `GetConfigureSwitchCertificateJobStatus`, `GetFirmwareJobStatus` and
 //!   `GetSwitchSystemImageJobStatus`.
 //! - `GetVersion` is answered locally. Every RPC the RMS mock does not implement is
 //!   `UNIMPLEMENTED` here as well.
@@ -1314,7 +1313,7 @@ rack_manager_impl! {
 
         /// Resolves the gateway job id. A single-instance job is forwarded and its ids rewritten;
         /// an aggregate polls every per-instance parent and reports the worst, least advanced of
-        /// them, listing the parents as its children; an unknown id is reported complete.
+        /// them, listing the parents as its children; an unknown id returns NotFound.
         async fn get_job_status(
             &self,
             request: Request<rms::GetJobStatusRequest>,
@@ -1322,14 +1321,7 @@ rack_manager_impl! {
             let request = request.into_inner();
             let include_children = request.include_child_job_states;
             match self.resolve_job(&request.job_id)? {
-                None => Ok(Response::new(rms::GetJobStatusResponse {
-                    job_states: vec![rms::JobStatus {
-                        job_id: request.job_id,
-                        execution_state: JobPhase::Completed.execution_state(),
-                        state_description: JobPhase::Completed.wire_str().to_owned(),
-                        ..rms::JobStatus::default()
-                    }],
-                })),
+                None => Err(Status::not_found(format!("job {} not found", request.job_id))),
                 Some(JobRecord::Single(job)) => {
                     let mut backend = self.backend(&job.source)?;
                     let response = self
@@ -1443,10 +1435,10 @@ rack_manager_impl! {
             };
             match self.resolve_job(&gateway_job_id)? {
                 None => Ok(Response::new(rms::GetConfigureSwitchCertificateJobStatusResponse {
-                    status: return_code(true),
+                    status: return_code(false),
+                    error_message: format!("job {gateway_job_id} not found"),
                     job_id: gateway_job_id,
-                    state: JobPhase::Completed.wire_str().to_owned(),
-                    ..rms::GetConfigureSwitchCertificateJobStatusResponse::default()
+                    ..Default::default()
                 })),
                 Some(JobRecord::Single(job)) => {
                     let backend = self.backend(&job.source)?;
@@ -1487,15 +1479,17 @@ rack_manager_impl! {
     }
 
     unimplemented {
+        execute_cold_reboot(ExecuteColdRebootRequest) -> ExecuteColdRebootResponse,
+        batch_get_firmware_inventory(BatchGetFirmwareInventoryRequest) -> BatchGetFirmwareInventoryResponse,
+        compare_firmware_object(CompareFirmwareObjectRequest) -> CompareFirmwareObjectResponse,
+        inspect_scale_up_fabrics(InspectScaleUpFabricsRequest) -> InspectScaleUpFabricsResponse,
+        batch_collect_switch_spdm_attestation_evidence(BatchCollectSwitchSpdmAttestationEvidenceRequest) -> BatchCollectSwitchSpdmAttestationEvidenceResponse,
         set_power_state(SetPowerStateRequest) -> SetPowerStateResponse,
         get_power_state(GetPowerStateRequest) -> GetPowerStateResponse,
-        sequence_rack_power(SequenceRackPowerRequest) -> SequenceRackPowerResponse,
         list_node_inventory(ListNodeInventoryRequest) -> ListNodeInventoryResponse,
         create_nodes(CreateNodesRequest) -> CreateNodesResponse,
         update_node(UpdateNodeRequest) -> UpdateNodeResponse,
         delete_node(DeleteNodeRequest) -> DeleteNodeResponse,
-        get_rack_power_on_sequence(GetRackPowerOnSequenceRequest) -> GetRackPowerOnSequenceResponse,
-        set_rack_power_on_sequence(SetRackPowerOnSequenceRequest) -> SetRackPowerOnSequenceResponse,
         list_racks(ListRacksRequest) -> ListRacksResponse,
         get_node_device_info(GetNodeDeviceInfoRequest) -> GetNodeDeviceInfoResponse,
         list_node_device_info_by_node_type(ListNodeDeviceInfoByNodeTypeRequest) -> ListNodeDeviceInfoByNodeTypeResponse,
@@ -1542,7 +1536,17 @@ impl RackManagerV2 for RmsProxy {
         Ok(Response::new(
             rms_v2::ConfigureScaleUpFabricManagerResponse {
                 job_id: self.jobs.intern(&backend.source, &response.job_id),
+                ..response
             },
+        ))
+    }
+
+    async fn start_system_validation(
+        &self,
+        _request: Request<rms_v2::StartSystemValidationRequest>,
+    ) -> Result<Response<rms_v2::StartSystemValidationResponse>, Status> {
+        Err(Status::unimplemented(
+            "the machine-a-tron protocol gateway does not route start_system_validation",
         ))
     }
 }
@@ -1648,6 +1652,74 @@ mod tests {
         fn blockers(&self) -> Vec<String> {
             Vec::new()
         }
+    }
+
+    #[tokio::test]
+    async fn fabric_configuration_preserves_selected_members_and_translates_the_job() {
+        struct FabricBackend(rms_v2::ConfigureScaleUpFabricManagerResponse);
+
+        #[tonic::async_trait]
+        impl RackManagerV2 for FabricBackend {
+            async fn configure_scale_up_fabric_manager(
+                &self,
+                _request: Request<rms_v2::ConfigureScaleUpFabricManagerRequest>,
+            ) -> Result<Response<rms_v2::ConfigureScaleUpFabricManagerResponse>, Status>
+            {
+                Ok(Response::new(self.0.clone()))
+            }
+
+            async fn start_system_validation(
+                &self,
+                _request: Request<rms_v2::StartSystemValidationRequest>,
+            ) -> Result<Response<rms_v2::StartSystemValidationResponse>, Status> {
+                Err(Status::unimplemented("system validation is not supported"))
+            }
+        }
+
+        let selected_fabrics = vec![rms_v2::ScaleUpFabricMembers {
+            compute_node_ids: vec!["compute-1".to_owned()],
+            switch_node_ids: vec!["switch-1".to_owned()],
+            primary_switch_node_id: "switch-1".to_owned(),
+        }];
+
+        let backend = FabricBackend(rms_v2::ConfigureScaleUpFabricManagerResponse {
+            job_id: "backend-job".to_owned(),
+            selected_fabrics: selected_fabrics.clone(),
+        });
+
+        let path = format!("/{}/{{*rpc}}", RackManagerV2Server::<FabricBackend>::NAME);
+        let app = Router::new().route_service(&path, RackManagerV2Server::new(backend));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let proxy = proxy_over(
+            Racks(HashMap::from([("rack-1", Owner::Source(source("mat-a")))])),
+            &[("mat-a", format!("http://{address}"))],
+            &RmsConfig::default(),
+        );
+
+        let response = RackManagerV2::configure_scale_up_fabric_manager(
+            &proxy,
+            Request::new(rms_v2::ConfigureScaleUpFabricManagerRequest {
+                nodes: Some(rms::NodeSet {
+                    nodes: vec![rack_node("switch-1", "rack-1")],
+                }),
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+
+        assert_eq!(response.selected_fabrics, selected_fabrics);
+
+        assert_eq!(
+            response.job_id,
+            proxy.jobs.intern(&source("mat-a"), "backend-job")
+        );
+
+        server.abort();
     }
 
     #[test]

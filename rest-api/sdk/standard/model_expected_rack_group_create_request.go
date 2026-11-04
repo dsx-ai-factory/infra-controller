@@ -30,6 +30,8 @@ type ExpectedRackGroupCreateRequest struct {
 	RackGroupId string `json:"rackGroupId"`
 	// External group-level NVLink topology identifier, non-blank and at most 128 characters.
 	Topology string `json:"topology"`
+	// Optional rack fabric protocol, non-blank and at most 128 characters when supplied. Omission or null leaves it unspecified and disables protocol-specific topology normalization. `NVLINK_V6` enables GB-to-VR profile topology normalization.
+	Protocol NullableString `json:"protocol,omitempty"`
 	// Ordered racks and their devices. Rack IDs and device identity tuples must be unique across the group, with case-sensitive comparison. A provided array replaces the complete list; on PATCH, omission or null preserves it and [] clears it. On create, omission or null supplies an empty list.
 	Racks []ExpectedRackGroupRack `json:"racks,omitempty"`
 	// ASCII human-readable name, at most 256 characters. An empty string is allowed.
@@ -132,6 +134,49 @@ func (o *ExpectedRackGroupCreateRequest) GetTopologyOk() (*string, bool) {
 // SetTopology sets field value
 func (o *ExpectedRackGroupCreateRequest) SetTopology(v string) {
 	o.Topology = v
+}
+
+// GetProtocol returns the Protocol field value if set, zero value otherwise (both if not set or set to explicit null).
+func (o *ExpectedRackGroupCreateRequest) GetProtocol() string {
+	if o == nil || IsNil(o.Protocol.Get()) {
+		var ret string
+		return ret
+	}
+	return *o.Protocol.Get()
+}
+
+// GetProtocolOk returns a tuple with the Protocol field value if set, nil otherwise
+// and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
+func (o *ExpectedRackGroupCreateRequest) GetProtocolOk() (*string, bool) {
+	if o == nil {
+		return nil, false
+	}
+	return o.Protocol.Get(), o.Protocol.IsSet()
+}
+
+// HasProtocol returns a boolean if a field has been set.
+func (o *ExpectedRackGroupCreateRequest) HasProtocol() bool {
+	if o != nil && o.Protocol.IsSet() {
+		return true
+	}
+
+	return false
+}
+
+// SetProtocol gets a reference to the given NullableString and assigns it to the Protocol field.
+func (o *ExpectedRackGroupCreateRequest) SetProtocol(v string) {
+	o.Protocol.Set(&v)
+}
+
+// SetProtocolNil sets the value for Protocol to be an explicit nil
+func (o *ExpectedRackGroupCreateRequest) SetProtocolNil() {
+	o.Protocol.Set(nil)
+}
+
+// UnsetProtocol ensures that no value is present for Protocol, not even an explicit nil
+func (o *ExpectedRackGroupCreateRequest) UnsetProtocol() {
+	o.Protocol.Unset()
 }
 
 // GetRacks returns the Racks field value if set, zero value otherwise (both if not set or set to explicit null).
@@ -297,6 +342,9 @@ func (o ExpectedRackGroupCreateRequest) ToMap() (map[string]interface{}, error) 
 	toSerialize["siteId"] = o.SiteId
 	toSerialize["rackGroupId"] = o.RackGroupId
 	toSerialize["topology"] = o.Topology
+	if o.Protocol.IsSet() {
+		toSerialize["protocol"] = o.Protocol.Get()
+	}
 	if o.Racks != nil {
 		toSerialize["racks"] = o.Racks
 	}

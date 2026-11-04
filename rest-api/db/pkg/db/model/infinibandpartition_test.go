@@ -16,7 +16,6 @@ import (
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
-	stracer "github.com/NVIDIA/infra-controller/rest-api/db/pkg/tracer"
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 )
 
@@ -326,8 +325,6 @@ func TestInfiniBandPartitionSQLDAO_GetByID(t *testing.T) {
 			if tt.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -788,11 +785,42 @@ func TestInfiniBandPartition_GetAll(t *testing.T) {
 			if tt.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
+
+	t.Run("include deleted returns a soft-deleted partition", func(t *testing.T) {
+		ibpDAO := NewInfiniBandPartitionDAO(dbSession)
+		deletedID := InfiniBandPartitions[0].ID
+		err := ibpDAO.Delete(ctx, nil, deletedID)
+		require.NoError(t, err)
+
+		active, _, err := ibpDAO.GetAll(
+			ctx,
+			nil,
+			InfiniBandPartitionFilterInput{InfiniBandPartitionIDs: []uuid.UUID{deletedID}},
+			paginator.PageInput{},
+			nil,
+		)
+		require.NoError(t, err)
+		assert.Empty(t, active)
+
+		withDeleted, _, err := ibpDAO.GetAll(
+			ctx,
+			nil,
+			InfiniBandPartitionFilterInput{
+				InfiniBandPartitionIDs: []uuid.UUID{deletedID},
+				IncludeDeleted:         true,
+			},
+			paginator.PageInput{},
+			nil,
+		)
+		require.NoError(t, err)
+
+		if assert.Len(t, withDeleted, 1) {
+			assert.NotNil(t, withDeleted[0].Deleted)
+		}
+	})
 }
 
 func TestInfiniBandPartitionSQLDAO_Create(t *testing.T) {
@@ -933,8 +961,6 @@ func TestInfiniBandPartitionSQLDAO_Create(t *testing.T) {
 			if tt.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -1069,8 +1095,6 @@ func TestInfiniBandPartitionSQLDAO_Update(t *testing.T) {
 			if tt.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -1143,8 +1167,6 @@ func TestInfiniBandPartitionSQLDAO_Delete(t *testing.T) {
 			if tt.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -1173,8 +1195,7 @@ func TestInfiniBandPartitionSQLDAO_Clear(t *testing.T) {
 	_, _, ctx := testCommonTraceProviderSetup(t, context.Background())
 
 	type fields struct {
-		dbSession  *db.Session
-		tracerSpan *stracer.TracerSpan
+		dbSession *db.Session
 	}
 	type args struct {
 		ctx                     context.Context
@@ -1208,8 +1229,7 @@ func TestInfiniBandPartitionSQLDAO_Clear(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			ibpsd := InfiniBandPartitionSQLDAO{
-				dbSession:  tt.fields.dbSession,
-				tracerSpan: tt.fields.tracerSpan,
+				dbSession: tt.fields.dbSession,
 			}
 			got, err := ibpsd.Clear(
 				tt.args.ctx,
@@ -1235,4 +1255,20 @@ func TestInfiniBandPartitionSQLDAO_Clear(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("can clear soft-delete timestamp", func(t *testing.T) {
+		ibpDAO := NewInfiniBandPartitionDAO(dbSession)
+		err := ibpDAO.Delete(ctx, nil, pt.ID)
+		require.NoError(t, err)
+
+		restored, err := ibpDAO.Clear(ctx, nil, InfiniBandPartitionClearInput{
+			InfiniBandPartitionID: pt.ID,
+			Deleted:               true,
+		})
+		require.NoError(t, err)
+
+		if assert.NotNil(t, restored) {
+			assert.Nil(t, restored.Deleted)
+		}
+	})
 }

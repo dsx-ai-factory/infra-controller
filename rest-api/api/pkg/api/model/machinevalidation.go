@@ -356,11 +356,12 @@ func NewAPIMachineValidationRun(proto *corev1.MachineValidationRun) *APIMachineV
 				apio.Status.State = MachineValidationInProgress
 			}
 		} else if sts, ok := protoStatus.GetMachineValidationState().(*corev1.MachineValidationStatus_Completed); ok {
-			if sts.Completed == corev1.MachineValidationCompleted_Success {
+			switch sts.Completed {
+			case corev1.MachineValidationCompleted_Success:
 				apio.Status.State = MachineValidationSuccess
-			} else if sts.Completed == corev1.MachineValidationCompleted_Failed {
+			case corev1.MachineValidationCompleted_Failed:
 				apio.Status.State = MachineValidationFailed
-			} else if sts.Completed == corev1.MachineValidationCompleted_Skipped {
+			case corev1.MachineValidationCompleted_Skipped:
 				apio.Status.State = MachineValidationSkipped
 			}
 		}

@@ -41,7 +41,7 @@ pub async fn create(
     let query = r#"
         INSERT INTO attestation_profiles (hardware_class, version, policy_document, updated_by)
         VALUES ($1, $2, $3::jsonb, $4)
-        RETURNING *
+        RETURNING hardware_class, version, policy_document, updated_at, updated_by
     "#;
     sqlx::query_as(query)
         .bind(hardware_class)
@@ -67,7 +67,8 @@ pub async fn find(
     db: impl DbReader<'_>,
     hardware_class: &str,
 ) -> DatabaseResult<Option<AttestationProfile>> {
-    let query = "SELECT * FROM attestation_profiles WHERE hardware_class = $1";
+    let query = "SELECT hardware_class, version, policy_document, updated_at, updated_by
+                 FROM attestation_profiles WHERE hardware_class = $1";
     sqlx::query_as(query)
         .bind(hardware_class)
         .fetch_optional(db)
@@ -81,7 +82,8 @@ pub async fn find_for_update(
     txn: &mut PgConnection,
     hardware_class: &str,
 ) -> DatabaseResult<Option<AttestationProfile>> {
-    let query = "SELECT * FROM attestation_profiles WHERE hardware_class = $1 FOR UPDATE";
+    let query = "SELECT hardware_class, version, policy_document, updated_at, updated_by
+                 FROM attestation_profiles WHERE hardware_class = $1 FOR UPDATE";
     sqlx::query_as(query)
         .bind(hardware_class)
         .fetch_optional(txn)
@@ -124,7 +126,8 @@ where
 
 /// Every profile, ordered by class so pages and diffs stay stable.
 pub async fn list(db: impl DbReader<'_>) -> DatabaseResult<Vec<AttestationProfile>> {
-    let query = "SELECT * FROM attestation_profiles ORDER BY hardware_class";
+    let query = "SELECT hardware_class, version, policy_document, updated_at, updated_by
+                 FROM attestation_profiles ORDER BY hardware_class";
     sqlx::query_as(query)
         .fetch_all(db)
         .await
@@ -150,7 +153,7 @@ pub async fn update(
             updated_at = now()
         WHERE hardware_class = $4
           AND version = $5
-        RETURNING *
+        RETURNING hardware_class, version, policy_document, updated_at, updated_by
     "#;
     sqlx::query_as(query)
         .bind(sqlx::types::Json(policy_document))
@@ -194,7 +197,9 @@ pub async fn delete(
 
 #[cfg(test)]
 mod test {
+    use chrono::{DateTime, Utc};
     use model::attestation::profile::{AttesterSelection, AttesterSelectionMode, ComponentIdMatch};
+    use sqlx::Connection;
 
     use super::*;
 
@@ -215,6 +220,109 @@ mod test {
             AttesterSelectionMode::Allowlist,
             vec![ComponentIdMatch::Prefix("HGX_IRoT_GPU_".to_string())],
         )
+    }
+
+    #[crate::sqlx_test]
+    async fn attestation_profile_queries_survive_added_columns(pool: sqlx::PgPool) {
+        let mut api_connection = pool.acquire().await.unwrap();
+        let mut txn = api_connection.begin().await.unwrap();
+        exercise_profile_queries(&mut txn).await;
+        // Release the row lock and fixture, but keep the connection's cached statements.
+        txn.rollback().await.unwrap();
+        assert!(api_connection.cached_statements_size() > 0);
+
+        // A migration commits on another connection while the API connection stays open.
+        let mut migration = pool.begin().await.unwrap();
+        sqlx::raw_sql(
+            "SET LOCAL lock_timeout = '5s';
+             ALTER TABLE attestation_profiles ADD COLUMN test_added_column text;",
+        )
+        .execute(&mut *migration)
+        .await
+        .unwrap();
+        migration.commit().await.unwrap();
+
+        let mut txn = api_connection.begin().await.unwrap();
+        let updated = exercise_profile_queries(&mut txn).await;
+        txn.commit().await.unwrap();
+
+        let stored = find(&mut *api_connection, &updated.hardware_class)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_profile(&stored, &updated);
+    }
+
+    async fn exercise_profile_queries(txn: &mut PgConnection) -> AttestationProfile {
+        // Both the insert default and update use `now()`, which is fixed for this transaction.
+        let transaction_time: DateTime<Utc> = sqlx::query_scalar("SELECT now()")
+            .fetch_one(&mut *txn)
+            .await
+            .unwrap();
+        let created = create(txn, "dell-inc_poweredge-r750", &gpu_allowlist(), OPERATOR)
+            .await
+            .unwrap();
+        assert_eq!(
+            created.version.version_nr(),
+            ConfigVersion::initial().version_nr()
+        );
+        let expected = AttestationProfile {
+            hardware_class: "dell-inc_poweredge-r750".to_string(),
+            version: created.version,
+            policy_document: gpu_allowlist(),
+            updated_at: transaction_time,
+            updated_by: OPERATOR.to_string(),
+        };
+        assert_profile(&created, &expected);
+
+        let found = find(&mut *txn, &expected.hardware_class)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_profile(&found, &expected);
+        let locked = find_for_update(txn, &expected.hardware_class)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_profile(&locked, &expected);
+        let listed = list(&mut *txn).await.unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_profile(&listed[0], &expected);
+
+        let replacement = policy(
+            AttesterSelectionMode::Denylist,
+            vec![ComponentIdMatch::Exact("BMC_IRoT".to_string())],
+        );
+        let updated = update(
+            txn,
+            &expected.hardware_class,
+            &replacement,
+            "external-role/profile-editor",
+            expected.version,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            updated.version.version_nr(),
+            expected.version.increment().version_nr()
+        );
+        let expected_update = AttestationProfile {
+            hardware_class: expected.hardware_class,
+            version: updated.version,
+            policy_document: replacement,
+            updated_at: transaction_time,
+            updated_by: "external-role/profile-editor".to_string(),
+        };
+        assert_profile(&updated, &expected_update);
+        updated
+    }
+
+    fn assert_profile(actual: &AttestationProfile, expected: &AttestationProfile) {
+        assert_eq!(actual.hardware_class, expected.hardware_class);
+        assert_eq!(actual.version, expected.version);
+        assert_eq!(actual.policy_document, expected.policy_document);
+        assert_eq!(actual.updated_at, expected.updated_at);
+        assert_eq!(actual.updated_by, expected.updated_by);
     }
 
     #[crate::sqlx_test]

@@ -8,6 +8,7 @@ import (
 	"database/sql"
 	"fmt"
 	"testing"
+	"time"
 
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
@@ -17,7 +18,6 @@ import (
 
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
-	stracer "github.com/NVIDIA/infra-controller/rest-api/db/pkg/tracer"
 	"github.com/google/uuid"
 )
 
@@ -291,8 +291,6 @@ func TestMachineSQLDAO_Create(t *testing.T) {
 				if tc.verifyChildSpanner {
 					span := otrace.SpanFromContext(ctx)
 					assert.True(t, span.SpanContext().IsValid())
-					_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-					assert.True(t, ok)
 				}
 
 				if err != nil {
@@ -493,8 +491,6 @@ func TestMachineSQLDAO_GetByID(t *testing.T) {
 			if tc.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -703,8 +699,6 @@ func TestMachineSQLDAO_GetCountByStatus(t *testing.T) {
 			if tt.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -795,7 +789,7 @@ func TestMachineSQLDAO_GetAll(t *testing.T) {
 	assert.NoError(t, err)
 
 	// Delete the capability
-	mcd.DeleteByID(ctx, nil, mcToDelete.ID, false)
+	require.NoError(t, mcd.DeleteByID(ctx, nil, mcToDelete.ID, false))
 
 	// Machine Set 2
 	ms2 := []Machine{}
@@ -1263,8 +1257,6 @@ func TestMachineSQLDAO_GetAll(t *testing.T) {
 			if tc.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -1613,8 +1605,6 @@ func TestMachineSQLDAO_Update(t *testing.T) {
 				if tc.verifyChildSpanner {
 					span := otrace.SpanFromContext(ctx)
 					assert.True(t, span.SpanContext().IsValid())
-					_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-					assert.True(t, ok)
 				}
 			}
 		})
@@ -1767,8 +1757,6 @@ func TestMachineSQLDAO_Clear(t *testing.T) {
 			if tc.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -1860,8 +1848,6 @@ func TestMachineSQLDAO_Delete(t *testing.T) {
 			if tc.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -2358,11 +2344,39 @@ func TestMachineSQLDAO_UpdateMultiple(t *testing.T) {
 			if tc.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
+	t.Run("mixed batch preserves omitted force-deletion state", func(t *testing.T) {
+		for _, id := range []string{m1.ID, m3.ID} {
+			_, err := msd.Update(ctx, nil, MachineUpdateInput{MachineID: id, IsForceDeletionRequested: cutil.GetPtr(true), IsForceDeletionComplete: cutil.GetPtr(true), ForceDeletionWorkflowID: cutil.GetPtr("prior-" + id)})
+			require.NoError(t, err)
+		}
+		updated, err := msd.UpdateMultiple(ctx, nil, []MachineUpdateInput{
+			{MachineID: m1.ID, Status: cutil.GetPtr(MachineStatusError)},
+			{MachineID: m2.ID, IsForceDeletionRequested: cutil.GetPtr(true), IsForceDeletionComplete: cutil.GetPtr(false), ForceDeletionWorkflowID: cutil.GetPtr("next-attempt")},
+			{MachineID: m3.ID, IsForceDeletionRequested: cutil.GetPtr(false), IsForceDeletionComplete: cutil.GetPtr(false)},
+		})
+		require.NoError(t, err)
+		require.Len(t, updated, 3)
+		for i, want := range []bool{true, true, false} {
+			persisted, readErr := msd.GetByID(ctx, nil, updated[i].ID, nil, false)
+			require.NoError(t, readErr)
+			assert.Equal(t, want, persisted.IsForceDeletionRequested)
+			assert.Equal(t, i == 0, persisted.IsForceDeletionComplete)
+			wantID := "prior-" + persisted.ID
+			if i == 1 {
+				wantID = "next-attempt"
+			}
+			assert.Equal(t, cutil.GetPtr(wantID), persisted.ForceDeletionWorkflowID)
+		}
+		cleared, err := msd.Clear(ctx, nil, MachineClearInput{MachineID: m2.ID, ForceDeletionWorkflowID: true})
+		require.NoError(t, err)
+		assert.Nil(t, cleared.ForceDeletionWorkflowID)
+		assert.True(t, cleared.IsForceDeletionRequested)
+		assert.False(t, cleared.IsForceDeletionComplete)
+	})
+
 }
 
 func TestMachineSQLDAO_UpdateMultiple_ExceedsMaxBatchItems(t *testing.T) {
@@ -2457,6 +2471,90 @@ func TestMachineSQLDAO_UpdateMultiple_AllFields(t *testing.T) {
 	assert.Equal(t, MachineStatusReady, updated.Status, "Status not updated")
 	assert.Equal(t, map[string]string{"env": "prod", "team": "infra"}, updated.Labels, "Labels not updated")
 	assert.True(t, updated.IsMissingOnSite, "IsMissingOnSite not updated")
+}
+
+// Machine inventory anchors every write of one reconcile to the time that reconcile started, so
+// the staleness guard reading the same column does not treat the reconciler's own write as an
+// external change. Both write paths have to honor the anchor and both have to keep stamping the
+// current time when the caller does not supply one.
+func TestMachineSQLDAO_WriteTimeAnchor(t *testing.T) {
+	ctx := context.Background()
+	dbSession := testInstanceTypeInitDB(t)
+	defer dbSession.Close()
+	testMachineSetupSchema(t, dbSession)
+
+	mcsExp := testMachineSQLDAOCreateMachines(ctx, t, dbSession)
+	msd := NewMachineDAO(dbSession)
+	anchor := db.GetCurTime().Add(-30 * time.Second)
+
+	tests := []struct {
+		desc  string
+		write func(machineID string) (*Machine, error)
+		want  func(t *testing.T, before time.Time, got *Machine)
+	}{
+		{
+			desc: "Update stamps the supplied anchor",
+			write: func(machineID string) (*Machine, error) {
+				return msd.Update(ctx, nil, MachineUpdateInput{
+					MachineID: machineID,
+					Status:    cutil.GetPtr(MachineStatusReady),
+					Updated:   &anchor,
+				})
+			},
+			want: func(t *testing.T, _ time.Time, got *Machine) {
+				assert.Equal(t, anchor.UTC(), got.Updated.UTC())
+			},
+		},
+		{
+			desc: "Update without an anchor stamps the write time",
+			write: func(machineID string) (*Machine, error) {
+				return msd.Update(ctx, nil, MachineUpdateInput{
+					MachineID: machineID,
+					Status:    cutil.GetPtr(MachineStatusReady),
+				})
+			},
+			want: func(t *testing.T, before time.Time, got *Machine) {
+				assert.False(t, got.Updated.Before(before), "want a write time at or after the call")
+			},
+		},
+		{
+			desc: "Clear stamps the supplied anchor",
+			write: func(machineID string) (*Machine, error) {
+				return msd.Clear(ctx, nil, MachineClearInput{
+					MachineID: machineID,
+					Hostname:  true,
+					Updated:   &anchor,
+				})
+			},
+			want: func(t *testing.T, _ time.Time, got *Machine) {
+				assert.Equal(t, anchor.UTC(), got.Updated.UTC())
+			},
+		},
+		{
+			desc: "Clear without an anchor stamps the write time",
+			write: func(machineID string) (*Machine, error) {
+				return msd.Clear(ctx, nil, MachineClearInput{
+					MachineID: machineID,
+					Vendor:    true,
+				})
+			},
+			want: func(t *testing.T, before time.Time, got *Machine) {
+				assert.False(t, got.Updated.Before(before), "want a write time at or after the call")
+			},
+		},
+	}
+
+	for i, tc := range tests {
+		t.Run(tc.desc, func(t *testing.T) {
+			before := db.GetCurTime()
+
+			got, err := tc.write(mcsExp[i].ID)
+			assert.NoError(t, err)
+			assert.NotNil(t, got)
+
+			tc.want(t, before, got)
+		})
+	}
 }
 
 func TestSiteControllerMachine_GetNormalizedState(t *testing.T) {

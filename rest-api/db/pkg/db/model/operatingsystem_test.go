@@ -18,7 +18,6 @@ import (
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
-	stracer "github.com/NVIDIA/infra-controller/rest-api/db/pkg/tracer"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/util"
 )
 
@@ -313,8 +312,6 @@ func TestOperatingSystemSQLDAO_Create(t *testing.T) {
 				if tc.verifyChildSpanner {
 					span := otrace.SpanFromContext(ctx)
 					assert.True(t, span.SpanContext().IsValid())
-					_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-					assert.True(t, ok)
 				}
 			}
 		})
@@ -465,8 +462,6 @@ func TestOperatingSystemSQLDAO_GetByID(t *testing.T) {
 			if tc.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -1078,8 +1073,6 @@ func TestOperatingSystemSQLDAO_GetAll(t *testing.T) {
 			if tc.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -1539,8 +1532,6 @@ func TestOperatingSystemSQLDAO_Update(t *testing.T) {
 			if tc.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -1634,6 +1625,26 @@ func TestOperatingSystemSQLDAO_Clear(t *testing.T) {
 	// OTEL Spanner configuration
 	_, _, ctx = testCommonTraceProviderSetup(t, ctx)
 
+	deletedOS, err := ossd.Create(ctx, nil, OperatingSystemCreateInput{
+		Name:      "restore-deleted-os",
+		Org:       tenant1.Org,
+		TenantID:  &tenant1.ID,
+		OsType:    OperatingSystemTypeImage,
+		ImageURL:  cutil.GetPtr("https://example.invalid/image"),
+		ImageSHA:  cutil.GetPtr("sha256:restore"),
+		Status:    OperatingSystemStatusDeleting,
+		CreatedBy: user.ID,
+	})
+	require.NoError(t, err)
+	require.NoError(t, ossd.Delete(ctx, nil, deletedOS.ID))
+	deletedRows, _, err := ossd.GetAll(ctx, nil, OperatingSystemFilterInput{
+		OperatingSystemIds: []uuid.UUID{deletedOS.ID},
+		IncludeDeleted:     true,
+	}, paginator.PageInput{Limit: cutil.GetPtr(1)}, nil)
+	require.NoError(t, err)
+	require.Len(t, deletedRows, 1)
+	require.NotNil(t, deletedRows[0].Deleted)
+
 	tests := []struct {
 		desc                             string
 		os                               *OperatingSystem
@@ -1651,6 +1662,7 @@ func TestOperatingSystemSQLDAO_Clear(t *testing.T) {
 		paramRootFsLabel                 bool
 		paramIpxeScript                  bool
 		paramUserData                    bool
+		paramDeleted                     bool
 
 		expectedDescription                 *string
 		expectedInfrastructureProviderID    *uuid.UUID
@@ -2008,6 +2020,15 @@ func TestOperatingSystemSQLDAO_Clear(t *testing.T) {
 			expectedUpdate:                      true,
 		},
 		{
+			desc:             "can clear soft-delete",
+			os:               &deletedRows[0],
+			paramDeleted:     true,
+			expectedTenantID: deletedRows[0].TenantID,
+			expectedImageURL: deletedRows[0].ImageURL,
+			expectedImageSHA: deletedRows[0].ImageSHA,
+			expectedUpdate:   true,
+		},
+		{
 			desc: "nop when no cleared fields are specified",
 			os:   os2tenant1,
 
@@ -2046,6 +2067,7 @@ func TestOperatingSystemSQLDAO_Clear(t *testing.T) {
 				RootFsLabel:                 tc.paramRootFsLabel,
 				IpxeScript:                  tc.paramIpxeScript,
 				UserData:                    tc.paramUserData,
+				Deleted:                     tc.paramDeleted,
 			}
 			tmp, err := ossd.Clear(ctx, nil, input)
 			assert.Nil(t, err)
@@ -2106,6 +2128,9 @@ func TestOperatingSystemSQLDAO_Clear(t *testing.T) {
 			if tc.expectedUserData != nil {
 				assert.Equal(t, *tc.expectedUserData, *tmp.UserData)
 			}
+			if tc.paramDeleted {
+				assert.Nil(t, tmp.Deleted)
+			}
 
 			if tc.expectedUpdate {
 				assert.True(t, tmp.Updated.After(tc.os.Updated))
@@ -2113,11 +2138,10 @@ func TestOperatingSystemSQLDAO_Clear(t *testing.T) {
 			if tc.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
+
 }
 
 func TestOperatingSystemSQLDAO_Delete(t *testing.T) {
@@ -2185,8 +2209,6 @@ func TestOperatingSystemSQLDAO_Delete(t *testing.T) {
 			if tc.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}

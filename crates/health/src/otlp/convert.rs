@@ -15,6 +15,7 @@
  * limitations under the License.
  */
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 use std::time::SystemTime;
@@ -26,17 +27,17 @@ use serde::Serialize;
 
 use super::collector_logs::ExportLogsServiceRequest;
 use super::collector_metrics::ExportMetricsServiceRequest;
-use super::common::KeyValue as OtlpKeyValue;
+use super::common::{AnyValue as OtlpAnyValue, KeyValue as OtlpKeyValue, any_value};
 use super::logs::{LogRecord as OtlpLogRecord, ResourceLogs, ScopeLogs, SeverityNumber};
 use super::metrics::{
-    Gauge as OtlpGauge, Metric as OtlpMetric, NumberDataPoint, ResourceMetrics, ScopeMetrics,
-    metric, number_data_point,
+    AggregationTemporality, Gauge as OtlpGauge, Metric as OtlpMetric, NumberDataPoint,
+    ResourceMetrics, ScopeMetrics, Sum as OtlpSum, metric, number_data_point,
 };
 use super::resource::Resource;
 use crate::endpoint::SwitchEndpointRole;
 use crate::sink::{
     CollectorEvent, EventContext, HealthReport, HealthReportAlert, HealthReportSuccess,
-    LogSeverity, MetricSample,
+    LogSeverity, MetricSample, MetricSemantics, PrometheusSink,
 };
 
 /// Maximum alerts serialized into the `health_report.alerts` attribute.
@@ -458,13 +459,17 @@ pub fn build_export_request(
     ExportLogsServiceRequest { resource_logs }
 }
 
-/// Builds an OTLP metric export request grouped by endpoint and metric descriptor.
+/// `build_metrics_export_request` groups metric samples by endpoint and descriptor.
 ///
-/// Every sample maps to an OTLP `Gauge` point stamped with `observed_nanos`,
-/// the batch's export time. Samples with the same name, type, and unit share
-/// one metric envelope within their endpoint, preserving their input order as
-/// datapoints. Sum and Histogram mapping can be added when the health metric
-/// model exposes those temporality choices.
+/// Samples with the same name, type, and unit share a descriptor within an
+/// endpoint. Each sample adds a `Gauge` point. Finite, nonnegative cumulative
+/// readings also add a monotonic cumulative `Sum` point under the same name
+/// with `_total` appended.
+///
+/// Points use `observed_nanos`, the batch's export time. Samples sharing a
+/// descriptor within an endpoint keep their input order and individual starts.
+/// Sum points preserve a source accumulation start when it fits in Unix
+/// nanoseconds and does not follow the export time; zero means an unknown start.
 pub fn build_metrics_export_request(
     batch: &[(EventContext, MetricSample)],
     observed_nanos: u64,
@@ -490,6 +495,28 @@ pub(crate) fn build_queued_metrics_export_request(
     )
 }
 
+/// The labels each metric point of `context` carries besides its own: those
+/// the Prometheus sink puts on its series, custom endpoint labels included. A
+/// backend that keeps resource attributes off its series, like the
+/// collector's Prometheus exporter, would otherwise lose which endpoint,
+/// switch, or rack a point belongs to.
+fn point_identity(context: &EventContext) -> Vec<(Cow<'static, str>, String)> {
+    let mut identity = context.series_labels();
+    identity.extend(
+        context
+            .labels()
+            .iter()
+            .map(|(name, value)| (Cow::Owned(name.clone()), value.clone())),
+    );
+    identity
+}
+
+#[derive(Clone, Copy, Eq, Hash, PartialEq)]
+enum MetricOutput {
+    Gauge,
+    CumulativeCounter,
+}
+
 fn build_metrics_export_request_from_pairs<'a>(
     batch: impl IntoIterator<Item = (&'a EventContext, &'a MetricSample)>,
     observed_nanos: u64,
@@ -498,67 +525,131 @@ fn build_metrics_export_request_from_pairs<'a>(
     type EndpointMetrics<'a> = (
         Vec<KeyValue>,
         Vec<OtlpMetric>,
-        HashMap<(&'a str, &'a str, &'a str), usize>,
+        HashMap<(&'a str, &'a str, &'a str, MetricOutput), usize>,
     );
 
     let mut by_endpoint: HashMap<(&str, &str), EndpointMetrics<'_>> = HashMap::new();
 
     for (context, sample) in batch {
-        // Switch identity rides once on the resource attributes (switch.id,
-        // switch.serial_number, switch.ip). VictoriaMetrics flattens resource
-        // attributes onto every series, so promoting them onto the datapoint too
-        // only duplicates the same value under a second (underscore) label name.
+        let (_, metrics, descriptor_indices) = by_endpoint
+            .entry((&context.endpoint_key, context.collector_type))
+            .or_insert_with(|| (resource_attributes(context), Vec::new(), HashMap::new()));
+        // Built from each point's own context: points grouped under one
+        // endpoint key can still carry different labels or metadata.
+        let identity = point_identity(context);
+
+        // A label the sample sets itself keeps the sample's value, compared
+        // as Prometheus names them, so the two cannot meet under one name.
+        let own_names: Vec<_> = sample
+            .labels
+            .iter()
+            .map(|(name, _)| PrometheusSink::normalize_label_name(name.clone()))
+            .collect();
         let attributes = sample
             .labels
             .iter()
-            .map(|(k, v)| KeyValue::new(k.to_string(), v.clone()));
+            .map(|(name, value)| (name.clone(), Cow::Borrowed(value.as_str())))
+            .chain(
+                identity
+                    .into_iter()
+                    .filter(|(name, _)| !own_names.contains(name))
+                    .map(|(name, value)| (name, Cow::Owned(value))),
+            )
+            .map(|(name, value)| OtlpKeyValue {
+                key: name.into_owned(),
+                value: Some(OtlpAnyValue {
+                    value: Some(any_value::Value::StringValue(value.into_owned())),
+                }),
+                ..Default::default()
+            })
+            .collect();
 
         let data_point = NumberDataPoint {
-            attributes: otlp_attributes(attributes),
+            attributes,
             time_unix_nano: observed_nanos,
             value: Some(number_data_point::Value::AsDouble(sample.value)),
             ..Default::default()
         };
 
-        let (_, metrics, descriptor_indices) = by_endpoint
-            .entry((&context.endpoint_key, context.collector_type))
-            .or_insert_with(|| (resource_attributes(context), Vec::new(), HashMap::new()));
+        let counter_point = match sample.semantics {
+            MetricSemantics::CumulativeCounter {
+                description,
+                start_time,
+            } if sample.semantics.exports_counter(sample.value) => {
+                Some((
+                    MetricOutput::CumulativeCounter,
+                    NumberDataPoint {
+                        // The device's accumulation can predate this process and survive
+                        // a reconnect. Only a source timestamp establishes its start.
+                        // A source start after our export clock would invert the interval,
+                        // so leave it unset.
+                        start_time_unix_nano: start_time
+                            .and_then(|start| start.duration_since(SystemTime::UNIX_EPOCH).ok())
+                            .and_then(|duration| u64::try_from(duration.as_nanos()).ok())
+                            .filter(|start| *start <= observed_nanos)
+                            .unwrap_or_default(),
+                        ..data_point.clone()
+                    },
+                    description,
+                ))
+            }
+            _ => None,
+        };
 
-        let metric_index =
-            match descriptor_indices.entry((&sample.name, &sample.metric_type, &sample.unit)) {
+        for (output, point, description) in
+            std::iter::once((MetricOutput::Gauge, data_point, "")).chain(counter_point)
+        {
+            let metric_index = match descriptor_indices.entry((
+                &sample.name,
+                &sample.metric_type,
+                &sample.unit,
+                output,
+            )) {
                 Entry::Occupied(entry) => *entry.get(),
                 Entry::Vacant(entry) => {
                     entry.insert(metrics.len());
 
+                    // Keep these names in sync with `GaugeMetrics::collect` in `metrics.rs`.
+                    let mut name = format!(
+                        "{}_{}_{}_{}",
+                        metric_name_prefix, sample.name, sample.metric_type, sample.unit
+                    );
+                    let data = match output {
+                        MetricOutput::Gauge => metric::Data::Gauge(OtlpGauge {
+                            data_points: Vec::new(),
+                        }),
+                        MetricOutput::CumulativeCounter => {
+                            name.push_str("_total");
+                            metric::Data::Sum(OtlpSum {
+                                data_points: Vec::new(),
+                                aggregation_temporality: AggregationTemporality::Cumulative as i32,
+                                is_monotonic: true,
+                            })
+                        }
+                    };
+
                     metrics.push(OtlpMetric {
-                        // Match the Prometheus sink's full series name exactly so
-                        // Grafana queries resolve identically across both export paths.
-                        name: format!(
-                            "{}_{}_{}_{}",
-                            metric_name_prefix, sample.name, sample.metric_type, sample.unit
-                        ),
-                        description: String::new(),
+                        name,
+                        description: description.to_string(),
                         unit: sample.unit.clone(),
-                        data: Some(metric::Data::Gauge(OtlpGauge {
-                            data_points: vec![data_point],
-                        })),
+                        data: Some(data),
                         ..Default::default()
                     });
 
-                    continue;
+                    metrics.len() - 1
                 }
             };
 
-        // Entries are created as Gauges above; adding a point must not replace
-        // earlier points that share this descriptor.
-        let Some(metric::Data::Gauge(gauge)) = metrics
-            .get_mut(metric_index)
-            .and_then(|metric| metric.data.as_mut())
-        else {
-            unreachable!("metric descriptor map contains only gauges");
-        };
-
-        gauge.data_points.push(data_point);
+            // Each descriptor indexes the metric created for its output kind.
+            match metrics
+                .get_mut(metric_index)
+                .and_then(|metric| metric.data.as_mut())
+            {
+                Some(metric::Data::Gauge(gauge)) => gauge.data_points.push(point),
+                Some(metric::Data::Sum(sum)) => sum.data_points.push(point),
+                _ => unreachable!("metric descriptor map contains only gauges and sums"),
+            }
+        }
     }
 
     let resource_metrics = by_endpoint
@@ -585,6 +676,7 @@ mod tests {
     use std::borrow::Cow;
     use std::net::{IpAddr, Ipv4Addr};
     use std::str::FromStr;
+    use std::time::Duration;
 
     use carbide_test_support::value_scenarios;
     use carbide_uuid::nvlink::NvLinkDomainId;
@@ -798,8 +890,9 @@ mod tests {
             collector_type: "test",
             labels: Default::default(),
             metadata: Some(EndpointMetadata::Switch(SwitchData {
+                log_checkpoint_identity: None,
                 id: Some(switch_id),
-                serial: "SN-SWITCH-001".to_string(),
+                serial: Some("SN-SWITCH-001".to_string()),
                 slot_number: Some(7),
                 tray_index: Some(3),
                 nvlink_domain_uuid: Some(nvlink_domain_uuid),
@@ -842,8 +935,9 @@ mod tests {
             collector_type: "nvue_gnmi",
             labels: Default::default(),
             metadata: Some(EndpointMetadata::Switch(SwitchData {
+                log_checkpoint_identity: None,
                 id: Some(switch_id),
-                serial: "SN-SWITCH-001".to_string(),
+                serial: Some("SN-SWITCH-001".to_string()),
                 slot_number: Some(7),
                 tray_index: Some(3),
                 nvlink_domain_uuid: None,
@@ -898,8 +992,9 @@ mod tests {
             collector_type: "logs_collector",
             labels: Default::default(),
             metadata: Some(EndpointMetadata::Switch(SwitchData {
+                log_checkpoint_identity: None,
                 id: Some(switch_id),
-                serial: "SN-SWITCH-BMC-001".to_string(),
+                serial: Some("SN-SWITCH-BMC-001".to_string()),
                 slot_number: Some(8),
                 tray_index: Some(4),
                 nvlink_domain_uuid: Some(nvlink_domain_uuid),
@@ -961,8 +1056,9 @@ mod tests {
             collector_type: "logs_collector",
             labels: Default::default(),
             metadata: Some(EndpointMetadata::Switch(SwitchData {
+                log_checkpoint_identity: None,
                 id: None,
-                serial: "SN-SWITCH-BMC-002".to_string(),
+                serial: Some("SN-SWITCH-BMC-002".to_string()),
                 slot_number: None,
                 tray_index: None,
                 nvlink_domain_uuid: None,
@@ -1352,7 +1448,11 @@ mod tests {
                         .to_string(),
                 ),
                 message: "Leak detected: 2 detector alerts reached threshold 1".to_string(),
-                classifications: vec![Classification::Leak, Classification::PreventAllocations],
+                classifications: vec![
+                    Classification::TrayLeak,
+                    Classification::SensorCritical,
+                    Classification::PreventAllocations,
+                ],
             },
             sensor_alert(),
         ];
@@ -1385,7 +1485,7 @@ mod tests {
         );
         assert_eq!(
             details[0]["classifications"],
-            serde_json::json!(["Leak", "PreventAllocations"])
+            serde_json::json!(["TrayLeak", "SensorCritical", "PreventAllocations"])
         );
 
         assert_eq!(details[1]["probe_id"], "BmcSensor");
@@ -1674,6 +1774,7 @@ mod tests {
             ..base_ctx
         };
         let sample = |name: &str| MetricSample {
+            semantics: crate::sink::MetricSemantics::Gauge,
             key: "status:swp1".to_string(),
             name: name.to_string(),
             metric_type: "interface_oper_status".to_string(),
@@ -1714,6 +1815,7 @@ mod tests {
         };
 
         let sample = |metric_type: &str, unit: &str, interface: &str, value: f64| MetricSample {
+            semantics: crate::sink::MetricSemantics::Gauge,
             key: interface.to_string(),
             name: "nvue_gnmi".to_string(),
             metric_type: metric_type.to_string(),
@@ -1722,12 +1824,47 @@ mod tests {
             labels: vec![(Cow::Borrowed("interface_name"), interface.to_string())],
             context: None,
         };
+        let counter = |interface, value, start_time| MetricSample {
+            semantics: MetricSemantics::CumulativeCounter {
+                description: "Number of packets reported by the interface",
+                start_time,
+            },
+            ..sample("packets", "count", interface, value)
+        };
 
         let batch = [
             (first.clone(), sample("status", "state", "swp1", 1.0)),
             (first.clone(), sample("power", "watts", "swp1", 10.0)),
+            (
+                first.clone(),
+                MetricSample {
+                    name: "other_source".to_string(),
+                    ..sample("power", "watts", "swp1", 20.0)
+                },
+            ),
+            (first.clone(), sample("power", "kilowatts", "swp1", 0.01)),
             (first.clone(), sample("status", "state", "swp2", 0.0)),
             (second, sample("status", "state", "swp3", 3.0)),
+            (
+                first.clone(),
+                counter(
+                    "swp1",
+                    10.0,
+                    Some(SystemTime::UNIX_EPOCH + Duration::from_nanos(100)),
+                ),
+            ),
+            (first.clone(), counter("swp3", -1.0, None)),
+            (first.clone(), counter("swp2", 0.0, None)),
+            (
+                first.clone(),
+                MetricSample {
+                    semantics: MetricSemantics::CumulativeCounter {
+                        description: "Number of errors reported by the interface",
+                        start_time: None,
+                    },
+                    ..sample("errors", "count", "swp1", 2.0)
+                },
+            ),
             (first, sample("status", "state", "swp4", -0.0)),
         ];
 
@@ -1747,7 +1884,52 @@ mod tests {
 
         let metrics = &first_resource.scope_metrics[0].metrics;
 
-        assert_eq!(metrics.len(), 2);
+        assert_eq!(metrics.len(), 8);
+
+        let power_descriptor = |name: &str| {
+            let metric = metrics
+                .iter()
+                .find(|metric| metric.name == name)
+                .unwrap_or_else(|| panic!("missing power descriptor {name}"));
+            let Some(metric::Data::Gauge(gauge)) = &metric.data else {
+                panic!("power metric must be a gauge");
+            };
+            let values: Vec<_> = gauge.data_points.iter().map(|point| point.value).collect();
+
+            (metric.unit.as_str(), metric.description.as_str(), values)
+        };
+
+        value_scenarios!(run = power_descriptor;
+            "original descriptor" {
+                "health_nvue_gnmi_power_watts" => (
+                    "watts", "", vec![Some(number_data_point::Value::AsDouble(10.0))]
+                )
+            }
+            "only the descriptor name differs" {
+                "health_other_source_power_watts" => (
+                    "watts", "", vec![Some(number_data_point::Value::AsDouble(20.0))]
+                )
+            }
+            "only the descriptor unit differs" {
+                "health_nvue_gnmi_power_kilowatts" => (
+                    "kilowatts", "", vec![Some(number_data_point::Value::AsDouble(0.01))]
+                )
+            }
+        );
+
+        for (name, description) in [
+            ("health_nvue_gnmi_errors_count", ""),
+            (
+                "health_nvue_gnmi_errors_count_total",
+                "Number of errors reported by the interface",
+            ),
+        ] {
+            let metric = metrics
+                .iter()
+                .find(|metric| metric.name == name)
+                .expect("errors metric");
+            assert_eq!(metric.description, description);
+        }
 
         let status = metrics
             .iter()
@@ -1784,6 +1966,87 @@ mod tests {
             ]
         );
 
+        let counter = metrics
+            .iter()
+            .find(|metric| metric.name == "health_nvue_gnmi_packets_count_total")
+            .expect("counter metric");
+        let Some(metric::Data::Sum(sum)) = &counter.data else {
+            panic!("counter metric must be a Sum");
+        };
+
+        assert_eq!(counter.unit, "count");
+        assert_eq!(
+            counter.description,
+            "Number of packets reported by the interface"
+        );
+        assert_eq!(
+            sum.aggregation_temporality,
+            AggregationTemporality::Cumulative as i32
+        );
+        assert!(sum.is_monotonic);
+
+        let points: Vec<_> = sum
+            .data_points
+            .iter()
+            .map(|point| {
+                (
+                    attr_value(&point.attributes, "interface_name"),
+                    point.value,
+                    point.start_time_unix_nano,
+                    point.time_unix_nano,
+                )
+            })
+            .collect();
+
+        assert_eq!(
+            points,
+            [
+                (
+                    Some("swp1"),
+                    Some(number_data_point::Value::AsDouble(10.0)),
+                    100,
+                    EXPORT_NANOS
+                ),
+                (
+                    Some("swp2"),
+                    Some(number_data_point::Value::AsDouble(0.0)),
+                    0,
+                    EXPORT_NANOS
+                ),
+            ]
+        );
+
+        let legacy = metrics
+            .iter()
+            .find(|metric| metric.name == "health_nvue_gnmi_packets_count")
+            .expect("legacy counter gauge");
+        let Some(metric::Data::Gauge(gauge)) = &legacy.data else {
+            panic!("legacy metric must remain a Gauge");
+        };
+
+        assert_eq!(legacy.description, "");
+        assert_eq!(gauge.data_points.len(), 3);
+        for (point, (interface, value)) in
+            gauge
+                .data_points
+                .iter()
+                .zip([("swp1", 10.0), ("swp3", -1.0), ("swp2", 0.0)])
+        {
+            assert_eq!(
+                attr_value(&point.attributes, "interface_name"),
+                Some(interface)
+            );
+            assert_eq!(point.value, Some(number_data_point::Value::AsDouble(value)));
+            assert_eq!(point.time_unix_nano, EXPORT_NANOS);
+            assert_eq!(point.start_time_unix_nano, 0);
+        }
+        for (gauge_point, sum_point) in [&gauge.data_points[0], &gauge.data_points[2]]
+            .into_iter()
+            .zip(&sum.data_points)
+        {
+            assert_eq!(gauge_point.attributes, sum_point.attributes);
+        }
+
         let second_resource = request
             .resource_metrics
             .iter()
@@ -1815,6 +2078,7 @@ mod tests {
     fn metric_export_name_uses_full_prometheus_series_name() {
         let ctx = test_context();
         let sample = MetricSample {
+            semantics: crate::sink::MetricSemantics::Gauge,
             key: "asic0/oper_status".to_string(),
             name: "nvue_gnmi".to_string(),
             metric_type: "interface_oper_status".to_string(),
@@ -1837,7 +2101,218 @@ mod tests {
     }
 
     #[test]
-    fn switch_nmxt_identity_is_resource_only_not_on_datapoint() {
+    fn invalid_counter_values_keep_only_the_legacy_gauge() {
+        let exported_value = |value| {
+            let sample = MetricSample {
+                semantics: MetricSemantics::CumulativeCounter {
+                    description: "Number of packets reported by the interface",
+                    start_time: None,
+                },
+                key: "swp1/packets".to_string(),
+                name: "nvue_gnmi".to_string(),
+                metric_type: "packets".to_string(),
+                unit: "count".to_string(),
+                value,
+                labels: vec![],
+                context: None,
+            };
+            let request =
+                build_metrics_export_request(&[(test_context(), sample)], EXPORT_NANOS, "health");
+            let metrics = &request.resource_metrics[0].scope_metrics[0].metrics;
+
+            assert_eq!(metrics.len(), 1);
+            assert_eq!(metrics[0].name, "health_nvue_gnmi_packets_count");
+            let Some(metric::Data::Gauge(gauge)) = &metrics[0].data else {
+                panic!("legacy metric must remain a Gauge");
+            };
+            let Some(number_data_point::Value::AsDouble(actual)) = gauge.data_points[0].value
+            else {
+                panic!("gauge must retain its floating-point value");
+            };
+
+            actual.to_bits()
+        };
+
+        value_scenarios!(run = exported_value;
+            "negative total" { -1.0 => (-1.0_f64).to_bits() }
+            "non-finite total" { f64::NAN => f64::NAN.to_bits() }
+            "infinite total" { f64::INFINITY => f64::INFINITY.to_bits() }
+        );
+    }
+
+    #[test]
+    fn counter_start_times_must_fit_the_observation_interval() {
+        let exported_start = |start_time| {
+            let sample = MetricSample {
+                semantics: MetricSemantics::CumulativeCounter {
+                    description: "Number of correctable ECC errors over the memory lifetime",
+                    start_time: Some(start_time),
+                },
+                key: "memory1/errors".to_string(),
+                name: "hw_metric".to_string(),
+                metric_type: "lifetime_correctable_ecc_errors".to_string(),
+                unit: "count".to_string(),
+                value: 10.0,
+                labels: vec![],
+                context: None,
+            };
+            let request =
+                build_metrics_export_request(&[(test_context(), sample)], EXPORT_NANOS, "health");
+            let counter = request.resource_metrics[0].scope_metrics[0]
+                .metrics
+                .iter()
+                .find(|metric| metric.name.ends_with("_total"))
+                .expect("counter alias");
+            let Some(metric::Data::Sum(sum)) = &counter.data else {
+                panic!("counter must be a Sum");
+            };
+
+            assert_eq!(
+                sum.data_points[0].value,
+                Some(number_data_point::Value::AsDouble(10.0)),
+            );
+            sum.data_points[0].start_time_unix_nano
+        };
+
+        value_scenarios!(run = exported_start;
+            "before Unix epoch" {
+                SystemTime::UNIX_EPOCH - Duration::from_secs(1) => 0
+            }
+            "overflows Unix nanoseconds" {
+                SystemTime::UNIX_EPOCH + Duration::from_nanos(u64::MAX)
+                    + Duration::from_nanos(2) => 0
+            }
+            "starts at observation" {
+                SystemTime::UNIX_EPOCH + Duration::from_nanos(EXPORT_NANOS) => EXPORT_NANOS
+            }
+            "starts after observation" {
+                SystemTime::UNIX_EPOCH + Duration::from_nanos(EXPORT_NANOS)
+                    + Duration::from_nanos(1) => 0
+            }
+        );
+    }
+
+    /// Points grouped under one endpoint key each carry the labels of their
+    /// own context, not those of the first point in the group.
+    #[test]
+    fn each_point_carries_its_own_contexts_labels() {
+        let context = |team: &str| EventContext {
+            endpoint_key: "11:22:33:44:55:66".to_string(),
+            addr: BmcAddr {
+                ip: IpAddr::V4(Ipv4Addr::new(10, 0, 1, 1)),
+                port: Some(443),
+                mac: Some(MacAddress::from_str("11:22:33:44:55:66").expect("valid mac")),
+            },
+            collector_type: "nvue_gnmi",
+            labels: std::collections::BTreeMap::from([("team".to_string(), team.to_string())]),
+            metadata: None,
+            rack_id: None,
+        };
+        let sample = |key: &str| MetricSample {
+            semantics: crate::sink::MetricSemantics::Gauge,
+            key: key.to_string(),
+            name: "switch_nmxt".to_string(),
+            metric_type: "effective_ber".to_string(),
+            unit: "ratio".to_string(),
+            value: 0.5,
+            labels: vec![],
+            context: None,
+        };
+
+        let request = build_metrics_export_request(
+            &[
+                (context("a"), sample("first")),
+                (context("b"), sample("second")),
+            ],
+            EXPORT_NANOS,
+            "carbide_hardware_health",
+        );
+        let metric::Data::Gauge(gauge) = request.resource_metrics[0].scope_metrics[0].metrics[0]
+            .data
+            .as_ref()
+            .expect("metric data")
+        else {
+            panic!("expected gauge data");
+        };
+        let teams: Vec<_> = gauge
+            .data_points
+            .iter()
+            .map(|point| attr_value(&point.attributes, "team"))
+            .collect();
+        assert_eq!(teams, [Some("a"), Some("b")]);
+    }
+
+    #[test]
+    fn metric_point_preserves_label_order_duplicates_and_empty_values() {
+        let mut context = test_context();
+
+        context.labels = std::collections::BTreeMap::from([
+            ("sensor".to_string(), "context".to_string()),
+            ("team".to_string(), "operations".to_string()),
+        ]);
+
+        let sample = MetricSample {
+            key: "temperature".to_string(),
+            name: "hw".to_string(),
+            metric_type: "temperature".to_string(),
+            unit: "celsius".to_string(),
+            value: 20.0,
+            semantics: crate::sink::MetricSemantics::Gauge,
+            labels: vec![
+                (Cow::Borrowed("sensor"), "first".to_string()),
+                (Cow::Owned("sensor".to_string()), "second".to_string()),
+                (Cow::Owned("empty.owned".to_string()), String::new()),
+            ],
+            context: None,
+        };
+
+        let request = build_metrics_export_request(&[(context, sample)], EXPORT_NANOS, "health");
+
+        let Some(metric::Data::Gauge(gauge)) =
+            &request.resource_metrics[0].scope_metrics[0].metrics[0].data
+        else {
+            panic!("expected gauge data");
+        };
+
+        let attributes = gauge.data_points[0]
+            .attributes
+            .iter()
+            .map(|attribute| {
+                let value = attribute
+                    .value
+                    .as_ref()
+                    .and_then(|value| value.value.as_ref());
+
+                let Some(any_value::Value::StringValue(value)) = value else {
+                    panic!("expected string attribute");
+                };
+
+                (attribute.key.as_str(), value.as_str())
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            attributes,
+            [
+                ("sensor", "first"),
+                ("sensor", "second"),
+                ("empty.owned", ""),
+                ("endpoint_key", "42:9e:b1:bd:9d:dd"),
+                ("endpoint_mac", "42:9E:B1:BD:9D:DD"),
+                ("endpoint_ip", "10.0.0.1"),
+                ("collector_type", "test"),
+                ("team", "operations"),
+            ]
+        );
+    }
+
+    /// Switch identity and placement, and custom endpoint labels, ride on
+    /// each point under the Prometheus sink's label names, as well as on the
+    /// resource, so a backend that keeps resource attributes off the series
+    /// still tells switches apart. A label the sample sets itself keeps the
+    /// sample's value, also against a name it normalizes to.
+    #[test]
+    fn switch_identity_is_on_each_point_and_the_resource() {
         let switch_id = test_switch_id("switch-nmxt");
         let switch_id_attr = switch_id.to_string();
         let context = EventContext {
@@ -1848,10 +2323,14 @@ mod tests {
                 mac: Some(MacAddress::from_str("11:22:33:44:55:66").expect("valid mac")),
             },
             collector_type: "nvue_gnmi",
-            labels: Default::default(),
+            labels: std::collections::BTreeMap::from([
+                ("site".to_string(), "rno-dev7".to_string()),
+                ("team".to_string(), "health".to_string()),
+            ]),
             metadata: Some(EndpointMetadata::Switch(SwitchData {
+                log_checkpoint_identity: None,
                 id: Some(switch_id),
-                serial: "SN-SWITCH-001".to_string(),
+                serial: Some("SN-SWITCH-001".to_string()),
                 slot_number: Some(7),
                 tray_index: Some(3),
                 nvlink_domain_uuid: None,
@@ -1863,12 +2342,16 @@ mod tests {
             rack_id: Some(RackId::new("RACK_2")),
         };
         let sample = MetricSample {
+            semantics: crate::sink::MetricSemantics::Gauge,
             key: "effective_ber".to_string(),
             name: "switch_nmxt".to_string(),
             metric_type: "effective_ber".to_string(),
             unit: "ratio".to_string(),
             value: 0.5,
-            labels: vec![],
+            labels: vec![
+                (Cow::Borrowed("rack-id"), "from-sample".to_string()),
+                (Cow::Borrowed("site"), "from-sample".to_string()),
+            ],
             context: None,
         };
 
@@ -1889,12 +2372,28 @@ mod tests {
         let metric::Data::Gauge(gauge) = metrics[0].data.as_ref().expect("metric data") else {
             panic!("expected gauge data");
         };
-        // Identity must NOT be promoted onto the datapoint (VM duplicates it from the resource).
         let attrs = &gauge.data_points[0].attributes;
-        assert_eq!(attr_value(attrs, "switch_serial"), None);
-        assert_eq!(attr_value(attrs, "switch_id"), None);
+        assert_eq!(
+            attr_value(attrs, "switch_id"),
+            Some(switch_id_attr.as_str())
+        );
+        assert_eq!(attr_value(attrs, "serial_number"), Some("SN-SWITCH-001"));
+        assert_eq!(attr_value(attrs, "switch_slot_number"), Some("7"));
+        assert_eq!(attr_value(attrs, "switch_tray_index"), Some("3"));
+        assert_eq!(attr_value(attrs, "endpoint_key"), Some("11:22:33:44:55:66"));
+        assert_eq!(attr_value(attrs, "team"), Some("health"), "a custom label");
+        let named = |key: &str| attrs.iter().filter(|attr| attr.key == key).count();
+        assert_eq!(
+            (named("site"), attr_value(attrs, "site")),
+            (1, Some("from-sample")),
+            "the sample's label wins over a custom label of its name"
+        );
+        assert_eq!(
+            (named("rack_id"), attr_value(attrs, "rack-id")),
+            (0, Some("from-sample")),
+            "the sample's label wins over an identity label it normalizes to"
+        );
 
-        // It lives once, on the resource (dotted form).
         let resource_attrs = &resource_metrics
             .resource
             .as_ref()

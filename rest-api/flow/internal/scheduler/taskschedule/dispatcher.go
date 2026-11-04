@@ -327,7 +327,7 @@ func (d *Dispatcher) advanceOnly(
 	case dbmodel.SpecTypeOneTime:
 		// Consume the schedule: clear next_run_at (nil → NULL in the store)
 		// and set enabled=false so it is never picked up again.
-		return d.store.UpdateAfterFire(
+		if err := d.store.UpdateAfterFire(
 			ctx,
 			ts.ID,
 			AfterFireUpdate{
@@ -335,7 +335,11 @@ func (d *Dispatcher) advanceOnly(
 				Enabled:   false,
 				// NextRunAt left nil → store sets next_run_at to NULL.
 			},
-		)
+		); err != nil {
+			return fmt.Errorf("advance schedule: %w", err)
+		}
+
+		return nil
 
 	case dbmodel.SpecTypeInterval:
 		dur, err := time.ParseDuration(ts.Spec)
@@ -348,16 +352,34 @@ func (d *Dispatcher) advanceOnly(
 
 		next := now.Add(dur)
 		_, err = d.store.Update(ctx, ts.ID, UpdateFields{NextRunAt: &next})
-		return err
+		if err != nil {
+			return fmt.Errorf("advance schedule: %w", err)
+		}
+
+		return nil
 
 	case dbmodel.SpecTypeCron:
 		next, err := nextCronTime(ts.Spec, ts.Timezone, now)
 		if err != nil {
-			return fmt.Errorf("advance cron spec: %w", err)
+			log.Warn().
+				Err(err).
+				Str("task_schedule_id", ts.ID.String()).
+				Str("task_schedule_name", ts.Name).
+				Msg("task schedule dispatcher: disabling schedule with invalid cron configuration") //nolint:lll
+
+			if err := d.store.Disable(ctx, ts.ID); err != nil {
+				return fmt.Errorf("disable schedule: %w", err)
+			}
+
+			return nil
 		}
 
 		_, err = d.store.Update(ctx, ts.ID, UpdateFields{NextRunAt: &next})
-		return err
+		if err != nil {
+			return fmt.Errorf("advance schedule: %w", err)
+		}
+
+		return nil
 
 	default:
 		return fmt.Errorf("unknown spec_type %q", ts.SpecType)
@@ -499,13 +521,12 @@ func (d *Dispatcher) applyAfterFire(
 	ts *dbmodel.TaskSchedule,
 	now time.Time,
 ) error {
-	u := AfterFireUpdate{
-		LastRunAt: now,
-	}
+	u := AfterFireUpdate{LastRunAt: now}
 
 	switch ts.SpecType {
 	case dbmodel.SpecTypeOneTime:
-		u.Enabled = false // consumed; next_run_at stays nil → set to NULL by store
+		u.Enabled = false
+		u.NextRunAt = nil // Consumed; the store clears next_run_at.
 
 	case dbmodel.SpecTypeInterval:
 		// ComputeFirstRunAt validates that the duration is positive at create/update
@@ -526,11 +547,20 @@ func (d *Dispatcher) applyAfterFire(
 	case dbmodel.SpecTypeCron:
 		next, err := nextCronTime(ts.Spec, ts.Timezone, now)
 		if err != nil {
-			return fmt.Errorf("advance cron spec: %w", err)
+			// A schedule persisted before creation-time validation may have no
+			// valid future run. Disable it and clear next_run_at so the dispatcher
+			// does not claim it again on every poll.
+			log.Warn().
+				Err(err).
+				Str("task_schedule_id", ts.ID.String()).
+				Str("task_schedule_name", ts.Name).
+				Msg("task schedule dispatcher: disabling schedule with invalid cron configuration") //nolint:lll
+			u.Enabled = false
+			u.NextRunAt = nil
+		} else {
+			u.Enabled = ts.Enabled // Preserve enabled state from the current schedule.
+			u.NextRunAt = &next
 		}
-
-		u.Enabled = ts.Enabled // Preserve enabled state from the current schedule.
-		u.NextRunAt = &next
 
 	default:
 		return fmt.Errorf("unknown spec_type %q", ts.SpecType)
@@ -852,5 +882,10 @@ func nextCronTime(spec string, tz string, after time.Time) (time.Time, error) {
 		return time.Time{}, fmt.Errorf("invalid cron spec %q: %w", spec, err)
 	}
 
-	return schedule.Next(after.In(loc)).UTC(), nil
+	next := schedule.Next(after.In(loc))
+	if next.IsZero() {
+		return time.Time{}, fmt.Errorf("invalid cron spec %q: no future run time exists", spec)
+	}
+
+	return next.UTC(), nil
 }

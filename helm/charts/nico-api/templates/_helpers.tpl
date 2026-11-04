@@ -244,6 +244,7 @@ enabled with a non-empty (and non-null) objectTypes list.
 {{/* Roll nico-api when an input to its ConfigMaps changes. */}}
 {{- define "nico-api.configChecksum" -}}
 {{- $inputs := dict
+  "apiAdmissionControl" .Values.apiAdmissionControl
   "auth" .Values.auth
   "bmcProxy" .Values.bmcProxy
   "componentManager" .Values.componentManager

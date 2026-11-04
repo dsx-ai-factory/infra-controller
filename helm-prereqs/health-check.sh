@@ -733,7 +733,8 @@ else
     -o jsonpath='{.status.loadBalancer.ingress[0].ip}' || true)
   if [[ -z "${_UNBOUND_VIP:-}" ]]; then
     _UNBOUND_VIP=$(kc get svc -n "${NICO_NS}" -l "app.kubernetes.io/name=unbound" \
-      --no-headers 2>/dev/null | awk '$2=="LoadBalancer" && $4!="<pending>"{print $4; exit}' || true)
+      -o jsonpath='{range .items[?(@.spec.type=="LoadBalancer")]}{range .status.loadBalancer.ingress[*]}{.ip}{"\n"}{end}{end}' | \
+      awk 'NF {print; exit}' || true)
   fi
 
   if [[ -n "${_SPEAKER:-}" && -n "${_UNBOUND_VIP:-}" ]]; then

@@ -18,8 +18,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
-	"go.opentelemetry.io/otel/trace"
-	"go.opentelemetry.io/otel/trace/noop"
 	temporalEnums "go.temporal.io/api/enums/v1"
 	tclient "go.temporal.io/sdk/client"
 	tmocks "go.temporal.io/sdk/mocks"
@@ -31,7 +29,6 @@ import (
 	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
 	authz "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
 	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/grpcproxy"
-	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/otelecho"
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
 	flowv1 "github.com/NVIDIA/infra-controller/rest-api/proto/flow/gen/v1"
@@ -195,7 +192,6 @@ type nvLinkDomainHandlerTestFixture struct {
 	site         *cdbm.Site
 	providerUser *cdbm.User
 	tenantUser   *cdbm.User
-	tracer       trace.Tracer
 }
 
 func newNVLinkDomainHandlerTestFixture(t *testing.T) *nvLinkDomainHandlerTestFixture {
@@ -218,7 +214,6 @@ func newNVLinkDomainHandlerTestFixture(t *testing.T) *nvLinkDomainHandlerTestFix
 		site:         site,
 		providerUser: testRackBuildUser(t, dbSession, "provider-user-domain", org, []string{authz.ProviderAdminRole}),
 		tenantUser:   testRackBuildUser(t, dbSession, "tenant-user-domain", org, []string{authz.TenantAdminRole}),
-		tracer:       noop.NewTracerProvider().Tracer("test"),
 	}
 }
 
@@ -294,8 +289,6 @@ func (f *nvLinkDomainHandlerTestFixture) echoContext(
 		ec.SetParamValues(f.org, nvLinkDomainID)
 	}
 	ec.Set("user", user)
-	ctx := context.WithValue(context.Background(), otelecho.TracerKey, f.tracer) //nolint:staticcheck // Middleware owns the context key.
-	ec.SetRequest(ec.Request().WithContext(ctx))
 
 	return ec, rec
 }

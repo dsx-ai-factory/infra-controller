@@ -38,6 +38,7 @@ import (
 	identifier "github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/Identifier"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/devicetypes"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/inventoryobjects/component"
+	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/inventoryobjects/nvldomain"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/inventoryobjects/rack"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/metadata"
 	pb "github.com/NVIDIA/infra-controller/rest-api/flow/pkg/proto/v1"
@@ -47,6 +48,7 @@ import (
 // It acts as an adapter between gRPC protobuf messages and the internal managers,
 // handling protobuf conversion and delegating business logic to the InventoryManager.
 type FlowServerImpl struct {
+	powerReader                componentPowerReader        // Shared NICo client for passive power details
 	inventoryManager           inventorymanager.Manager    // Business logic manager for inventory operations
 	taskManager                taskmanager.Manager         // Task manager for orchestrating task lifecycle
 	taskStore                  taskstore.Store             // Task store for task queries
@@ -67,6 +69,7 @@ type FlowServerImpl struct {
 //   - taskManager: The Task manager for orchestrating task lifecycle
 //   - taskStore: The task store for task queries
 //   - operationRunManager: The operation-run manager for planning and persisting operation runs
+//   - powerReader: Shared passive Core reader, or nil when the NICo provider is absent
 //
 // Returns:
 //   - *FlowServerImpl: A new server implementation instance
@@ -80,6 +83,7 @@ func newServerImplementation(
 	operationRunManager operationrunmanager.Manager,
 	eventRuleManager eventRuleManager,
 	dataCipher *secret.Cipher,
+	powerReader componentPowerReader,
 ) (*FlowServerImpl, error) {
 	return &FlowServerImpl{
 		inventoryManager:       inventoryManager,
@@ -90,6 +94,7 @@ func newServerImplementation(
 		operationRunManager:    operationRunManager,
 		eventRuleManager:       eventRuleManager,
 		dataCipher:             dataCipher,
+		powerReader:            powerReader,
 		conflictResolver:       conflict.NewResolver(taskStore),
 	}, nil
 }
@@ -168,17 +173,15 @@ func (rs *FlowServerImpl) GetNVLinkDomain(ctx context.Context, req *pb.GetNVLink
 	if strings.TrimSpace(req.GetId()) == "" {
 		return nil, status.Error(codes.InvalidArgument, "domain identifier is required")
 	}
-	racks, err := rs.inventoryManager.GetRacksForNVLDomain(ctx, externalRackIdentifier(req.GetId()), req.GetWithComponents())
+	domain, err := rs.inventoryManager.GetNVLDomain(ctx, identifier.Identifier{ExternalID: req.GetId()})
 	if err != nil {
 		return nil, err
 	}
-	if len(racks) == 0 {
-		return nil, status.Error(codes.NotFound, "NVLink domain not found")
+	racks, err := rs.inventoryManager.GetRacksForNVLDomain(ctx, identifier.Identifier{ID: domain.ID()}, req.GetWithComponents())
+	if err != nil {
+		return nil, err
 	}
-	if len(racks) != 1 {
-		return nil, status.Error(codes.FailedPrecondition, "domain resolves to multiple racks; specify a rack external ID")
-	}
-	return &pb.GetNVLinkDomainResponse{Domain: protobuf.NVLinkDomainFromRack(protobuf.RackTo(racks[0]))}, nil
+	return &pb.GetNVLinkDomainResponse{Domain: protobuf.NVLinkDomainFromInventory(domain, racks)}, nil
 }
 
 // GetListOfNVLinkDomains retrieves paginated domain inventory.
@@ -191,19 +194,31 @@ func (rs *FlowServerImpl) GetListOfNVLinkDomains(ctx context.Context, req *pb.Ge
 	default:
 		return nil, status.Error(codes.InvalidArgument, "order_by must be NAME_ASC or NAME_DESC")
 	}
-	racks, err := rs.GetListOfRacks(ctx, &pb.GetListOfRacksRequest{
-		Filters:        []*pb.Filter{{Field: &pb.Filter_RackField{RackField: pb.RackFilterField_RACK_FILTER_FIELD_NAME}, QueryInfo: req.GetInfo()}},
-		WithComponents: req.GetWithComponents(), Pagination: req.GetPagination(), WithExternalIdOnly: true,
-		OrderBy: &pb.OrderBy{Field: &pb.OrderBy_RackField{RackField: pb.RackOrderByField_RACK_ORDER_BY_FIELD_NAME}, Direction: direction},
-	})
+	page := protobuf.PaginationFrom(req.GetPagination())
+	if err := page.Validate(); err != nil {
+		return nil, status.Error(codes.InvalidArgument, err.Error())
+	}
+	info := dbquery.StringQueryInfo{}
+	if req.GetInfo() != nil {
+		info = *protobuf.StringQueryInfoFrom(req.GetInfo())
+	}
+	rows, total, err := rs.inventoryManager.GetListOfNVLDomains(ctx, info, page, nvldomain.ListOptions{ExternalOnly: true, Descending: direction == "DESC"})
 	if err != nil {
 		return nil, err
 	}
-	domains := make([]*pb.NVLinkDomain, 0, len(racks.GetRacks()))
-	for _, r := range racks.GetRacks() {
-		domains = append(domains, protobuf.NVLinkDomainFromRack(r))
+	domains := make([]*pb.NVLinkDomain, 0, len(rows))
+	domainIDs := make([]uuid.UUID, 0, len(rows))
+	for _, domain := range rows {
+		domainIDs = append(domainIDs, domain.ID())
 	}
-	return &pb.GetListOfNVLinkDomainsResponse{Domains: domains, Total: racks.GetTotal()}, nil
+	members, err := rs.inventoryManager.GetRacksForNVLDomains(ctx, domainIDs, req.GetWithComponents())
+	if err != nil {
+		return nil, err
+	}
+	for _, domain := range rows {
+		domains = append(domains, protobuf.NVLinkDomainFromInventory(domain, members[domain.ID()]))
+	}
+	return &pb.GetListOfNVLinkDomainsResponse{Domains: domains, Total: total}, nil
 }
 
 func externalRackIdentifier(rawID string) identifier.Identifier {
@@ -418,31 +433,34 @@ func (rs *FlowServerImpl) PatchComponent(
 		return nil, status.Errorf(codes.InvalidArgument, "rack_id %v", err)
 	}
 
-	// Get the existing component
-	existing, err := rs.inventoryManager.GetComponentByID(ctx, compID)
+	// Confirm the component exists before validating related resources.
+	_, err = rs.inventoryManager.GetComponentByID(ctx, compID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get component: %w", err)
 	}
 
-	// Apply patch fields
+	patch := inventorymanager.ComponentPatch{ID: compID}
 	if req.FirmwareVersion != nil {
-		existing.FirmwareVersion = *req.FirmwareVersion
+		patch.FirmwareVersion = req.FirmwareVersion
 	}
 
 	if req.Position != nil {
 		if positionPaths == nil || positionPaths["position.slot_id"] {
-			existing.Position.SlotID = int(req.Position.SlotId)
+			slotID := int(req.Position.SlotId)
+			patch.SlotID = &slotID
 		}
 		if positionPaths == nil || positionPaths["position.tray_idx"] {
-			existing.Position.TrayIndex = int(req.Position.TrayIdx)
+			trayIndex := int(req.Position.TrayIdx)
+			patch.TrayIndex = &trayIndex
 		}
 		if positionPaths == nil || positionPaths["position.host_id"] {
-			existing.Position.HostID = int(req.Position.HostId)
+			hostID := int(req.Position.HostId)
+			patch.HostID = &hostID
 		}
 	}
 
 	if req.Description != nil {
-		existing.Info.Description = *req.Description
+		patch.Description = req.Description
 	}
 
 	if rackID != nil {
@@ -450,15 +468,15 @@ func (rs *FlowServerImpl) PatchComponent(
 		if err != nil {
 			return nil, fmt.Errorf("rack not found: %w", err)
 		}
-		existing.RackID = *rackID
+		patch.RackID = rackID
 	}
 
 	if len(req.GetBmcs()) > 0 {
-		existing.BmcsByType = protobuf.BMCsFrom(req.GetBmcs())
+		patch.BMCsByType = protobuf.BMCsFrom(req.GetBmcs())
 	}
 
 	// Persist the update
-	if err := rs.inventoryManager.PatchComponent(ctx, existing); err != nil {
+	if err := rs.inventoryManager.PatchComponent(ctx, patch); err != nil {
 		return nil, fmt.Errorf("failed to patch component: %w", err)
 	}
 
@@ -613,12 +631,9 @@ func (rs *FlowServerImpl) GetListOfRacks(
 		return nil, fmt.Errorf("invalid pagination information: %w", err)
 	}
 
-	var orderBy *dbquery.OrderBy
-	if req.GetOrderBy() != nil {
-		orderBy = protobuf.OrderByFrom(req.GetOrderBy())
-		if err := orderBy.Validate(); err != nil {
-			return nil, fmt.Errorf("invalid order by: %w", err)
-		}
+	orderBy, orderByErr := protobuf.RackOrderByFrom(req.GetOrderBy())
+	if orderByErr != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "invalid order by: %v", orderByErr)
 	}
 
 	// Extract filters from the filters array
@@ -1639,12 +1654,9 @@ func (rs *FlowServerImpl) GetComponents(
 		return nil, fmt.Errorf("invalid pagination information: %w", err)
 	}
 
-	var orderBy *dbquery.OrderBy
-	if req.GetOrderBy() != nil {
-		orderBy = protobuf.OrderByFrom(req.GetOrderBy())
-		if err := orderBy.Validate(); err != nil {
-			return nil, fmt.Errorf("invalid order by: %w", err)
-		}
+	orderBy, orderByErr := protobuf.ComponentOrderByFrom(req.GetOrderBy())
+	if orderByErr != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "invalid order by: %v", orderByErr)
 	}
 
 	// Extract filters from the filters array
@@ -1781,12 +1793,9 @@ func (rs *FlowServerImpl) ValidateComponents(
 		return nil, fmt.Errorf("invalid pagination information: %w", err)
 	}
 
-	var orderBy *dbquery.OrderBy
-	if req.GetOrderBy() != nil {
-		orderBy = protobuf.OrderByFrom(req.GetOrderBy())
-		if err := orderBy.Validate(); err != nil {
-			return nil, fmt.Errorf("invalid order by: %w", err)
-		}
+	orderBy, orderByErr := protobuf.ComponentOrderByFrom(req.GetOrderBy())
+	if orderByErr != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "invalid order by: %v", orderByErr)
 	}
 
 	// Extract filters from the filters array

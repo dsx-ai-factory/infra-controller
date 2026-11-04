@@ -13,6 +13,8 @@ export NICO_DPF_DPU_INTERFACE=<control-plane-nic>     # NIC facing the DPUs
 export NICO_DPF_DPU_CLUSTER_VIP=<free-routable-ip>    # DPU cluster control-plane VIP
 # Optional: seed the watched version-0 credential Secret before Core starts.
 # export NICO_DPF_BMC_ROOT_PASSWORD=<existing-site-wide-password>
+# Optional: KMIP KEK provider client material (ca.pem, client.pem, client.key).
+# export NICO_KMIP_CLIENT_DIR=/path/to/kmip-client
 
 ./setup.sh        # interactive - prompts before deploying Core and REST
 ./setup.sh -y     # non-interactive - deploys everything (DPF included)
@@ -50,11 +52,17 @@ helm-prereqs/
 ├── clean.sh                    # Teardown script - removes everything in reverse order
 ├── unseal_vault.sh             # Vault init + unseal (called by setup.sh Phase 4)
 ├── bootstrap_ssh_host_key.sh   # SSH host key generation (called by setup.sh Phase 4)
+├── check-external-service-vips.py  # Core VIP preflight (called by preflight.sh)
+├── check-mat-service-cidr.py   # machine-a-tron BMC network vs ServiceCIDR preflight
+├── ingestion-rate-report.sh    # machine-a-tron ingestion curves from the database timestamps
 ├── helmfile.yaml               # Helmfile release definitions for all prerequisite components
 ├── Chart.yaml                  # nico-prereqs Helm chart metadata
 ├── values.yaml                 # Top-level values (siteName, PostgreSQL tuning)
 ├── values/
 │   ├── nico-core.yaml           # NICo Core deployment values (hostname, siteConfig, VIPs)
+│   ├── nico-core-simulation.yaml  # NICo Core values for a machine-a-tron simulation site
+│   ├── nico-core-10k-hosts.yaml   # NICo Core values for the 556-rack (10,008-host) machine-a-tron fleet
+│   ├── machine-a-tron*.yaml     # machine-a-tron chart values: Override Mode and the scale profiles
 │   ├── nico-rest.yaml           # NICo REST deployment values (Keycloak config)
 │   ├── nico-site-agent.yaml     # Site-agent deployment values (DB config, gRPC settings)
 │   └── metallb-config.yaml     # MetalLB IP pools, BGP peers, and advertisements
@@ -88,11 +96,13 @@ config it edits.
    `perPodAnnotations` for `nico-ntp` / `nico-dns`) must match a VIP from the
    pools you carved out in step 1.
    → `values/nico-core.yaml`.
-5. **Set the DHCP hook parameters.** `nico-dhcp.config.kea.hookParameters`
-   (`nameservers`, `ntpServer`, `provisioningServer`) tells DHCP clients
-   where to find DNS / NTP / PXE. These must equal the VIPs you set in step 4.
-   The chart default is `127.0.0.1` — leaving it there silently breaks DPU
-   bring-up.
+5. **Set the DHCP hook parameters.** Under `nico-dhcp.config.kea.hookParameters`,
+   set `nameservers` to the VIP of Unbound or another recursive resolver that
+   resolves site, infrastructure, and external names. Do not use a `nico-dns`
+   VIP; it serves authoritative zones only. Set `ntpServer` and
+   `provisioningServer` to their corresponding NTP and PXE Service VIPs from
+   step 4. Replace the chart placeholders with addresses reachable from the
+   DPU network.
    → `values/nico-core.yaml`.
 6. **Decide how the `.forge` compatibility zone is served.** Built-in unbound
    (enable in `values/nico-core.yaml`) or your external DNS. Required for
@@ -129,6 +139,12 @@ config it edits.
    to `rack-manager` to match, so no Core config change is needed. Set
    `NICO_RMS_IMAGE_REPO` only for a mirrored or self-built image (the default
    NGC image is entitlement-gated).
+
+10. **KMIP KEK provider (opt-in).** To wrap the credential store's keys with a
+    key held in a KMIP server instead of Vault Transit, export
+    `NICO_KMIP_CLIENT_DIR`, mount the Secret it creates, and declare the
+    provider in the site config. Refer to
+    [Opting in to the KMIP KEK provider](#opting-in-to-the-kmip-kek-provider).
 
 ### Building the RMS image
 
@@ -189,6 +205,7 @@ The tables below summarize the keys that must be set per site.
 | `NICO_DPF_DPU_CLUSTER_VIP` | Unless `--skip-dpf` | Floating IP the DPUs use to reach their (Kamaji) control plane. |
 | `NICO_DPF_BMC_ROOT_PASSWORD` | No (DPF only) | Existing site-wide BMC password used to seed `nico-system/nico-bmc-v0-credentials` after Core deployment is accepted and before Core starts. setup.sh stores username `admin`, mounts the Secret as the authoritative version-0 credential source, and unsets the variable before invoking child tools. A DPF-enabled rerun reuses the Secret and rejects a different value rather than changing a credential managed hardware may use. Declining Core deployment leaves the Secret untouched. A later non-DPF Core deployment preserves this configuration only when the installed release already uses it; a stray Secret is not adopted. Using the variable with `--skip-core` or `--skip-dpf` is an error. Not needed when `siteCredentials` renders the credential file, and not usable with it: setup fails when the Core values already name a different `existingSecret`. Refer to [Site Credentials Secret](#site-credentials-secret). |
 | `NICO_DPF_METALLB_POOL` | No | MetalLB address pool used to advertise the DPU cluster VIP. When unset, the VIP LoadBalancer Service is skipped — the VIP must then be routable from the DPUs by other means. |
+| `NICO_KMIP_CLIENT_DIR` | No | Directory holding `ca.pem`, `client.pem`, and `client.key` for the opt-in KMIP KEK provider. When set, `setup.sh` creates or updates the `nico-system/nico-kmip-client` Secret from them before Phase 6 and refuses to overwrite a Secret it did not create. An error with `--skip-core`. Refer to [Opting in to the KMIP KEK provider](#opting-in-to-the-kmip-kek-provider). |
 | `NICO_DPF_IMAGE_REPO` | No | DPF operator image repository. Defaults to the public `nvcr.io/nvidia/doca/dpf-system`. Point at your own registry (mirror or self-built) to match where you push Core/REST images. See [DPF images and registries](#dpf-images-and-registries). |
 | `NICO_DPF_IMAGE_TAG` | No | DPF operator image tag. Defaults to `v26.4.0`, the release the doca-platform submodule is pinned to. Set separately when your self-built image uses a different tag than the chart version. |
 | `NICO_DPF_IMAGE_PULL_SECRET` | No | Pull secret for the DPF operator/DOCA images. Unset by default — the GA `nvidia/doca` images are public and pull anonymously. Set only for a private DPF/DOCA registry or mirror. |
@@ -207,10 +224,10 @@ The tables below summarize the keys that must be set per site.
 | `postgresql.instances` | `3` | No | Number of PostgreSQL replicas |
 | `postgresql.volumeSize` | `"10Gi"` | No | PVC size per PostgreSQL replica |
 | `postgresql.storageClass` | `"local-path-persistent"` | No | StorageClass for the nico-prereqs PostgreSQL PVCs. Override through Helm values when using a non-local StorageClass. |
-| `temporal.useHaPostgres` | `false` | No | Move Temporal's default/visibility stores onto `nico-pg-cluster` instead of `postgres.postgres`. Named `useHaPostgres`, not `enabled`, because it only moves the database — it doesn't gate whether Temporal is deployed. See [Consolidating Temporal/Keycloak onto nico-pg-cluster](#consolidating-temporalkeycloak-onto-nico-pg-cluster). |
-| `keycloak.useHaPostgres` | `false` | No | Move Keycloak's database onto `nico-pg-cluster` instead of `postgres.postgres`. Distinct from `nico-rest-api.config.keycloak.enabled` in `values/nico-rest.yaml`, which controls whether Keycloak is deployed at all — this toggle provisions the database regardless, so it just goes unused if Keycloak itself isn't deployed. |
+| `temporal.useHaPostgres` | `auto` | No | Where Temporal's default and visibility databases live. When set to `auto`, the DBs will be created in `nico-pg-cluster`, but database location is left unchanged for an existing Site. With `postgresql.enabled: false`, `nico-pg-cluster` is an external or out-of-band PostgreSQL, and `auto` means `false` unless the DBs are already there. `true` means the DB location is `nico-pg-cluster`, and `false` means the DB lives on the deprecated standalone `postgres.postgres` StatefulSet. The flag only decides database location, not whether Temporal is deployed. Refer to [Consolidating Temporal/Keycloak onto nico-pg-cluster](#consolidating-temporalkeycloak-onto-nico-pg-cluster). |
+| `keycloak.useHaPostgres` | `auto` | No | Where Keycloak's database lives. When set to `auto`, the DB will be created in `nico-pg-cluster`, but database location is left unchanged for an existing Site. With `postgresql.enabled: false`, `nico-pg-cluster` is an external or out-of-band PostgreSQL, and `auto` means `false` unless the DB is already there. `true` means the DB location is `nico-pg-cluster`, and `false` means the DB lives on the deprecated standalone `postgres.postgres` StatefulSet. The flag only decides database location, not whether Keycloak is deployed. When `values/nico-rest.yaml` disables Keycloak, `setup.sh` ignores the flag. |
 | `siteCredentials.enabled` | `false` | No | Render the site-wide BMC root and the Unified Extensible Firmware Interface (UEFI) site defaults as a credential-file Secret for `nico-api`. Refer to [Site Credentials Secret](#site-credentials-secret). |
-| `siteCredentials.secretName` | `"nico-site-credentials"` | No | Name of that Secret in `nico-system`. It must match `nico-api.credentials.file.existingSecret.name` in the Core values. |
+| `siteCredentials.secretName` | `"nico-site-credentials"` | No | Name of that Secret in `nico-system`. It must match `nico-api.credentials.file.existingSecret.name` in the Core values and, on a machine-a-tron site, `machineATron.siteCredentialsSecret.name` in the machine-a-tron values. |
 | `siteCredentials.bmcRoot.username` / `.password` | `"root"` / `""` | No | Site-wide BMC root password that site-explorer rotates every BMC to. Leave the password empty to generate a random 32-character value on the first install, which upgrades keep. An explicit value must differ from the factory defaults, which is not checked. The username is stored but not used by NICo. |
 | `siteCredentials.uefi.dpu.username` / `.password` | `""` / `""` | No | DPU UEFI site default. An empty password is generated in the same way. The username is not used. |
 | `siteCredentials.uefi.host.username` / `.password` | `""` / `""` | No | Host UEFI site default, same rules. |
@@ -285,12 +302,16 @@ Secrets Operator, Sealed Secrets, or a Vault sync) and point
 `nico-api.credentials.file.existingSecret` at it, as the manual recipe above
 does without this block.
 
-On a machine-a-tron site, `setup-machine-a-tron.sh` Phase 4 still seeds the
-same three credentials in Vault and the file shadows them. Keep the chart
-passwords equal to the script's `BMC_PASSWORD` and `UEFI_*_PASSWORD` values,
-`NicoSiteRoot1` and `bluefield` by default, which are for simulated hardware
-only. A generated password does not match them, so set the passwords explicitly
-on a script-driven site.
+On a machine-a-tron site, the machine-a-tron chart reads
+`bmc_site_wide_root.password` from this Secret when it renders, so a generated
+password reaches the mocks without a manual step. With the scale profiles the
+mock BMCs start at the site root without a copy of the password in the
+machine-a-tron values. `helm-prereqs/values/machine-a-tron.yaml` disables the
+lookup (`machineATron.siteCredentialsSecret.name: ""`) so Override Mode
+exercises credential rotation from the factory defaults.
+`machineATron.hostBmcPassword` and `machineATron.dpuBmcPassword` override the
+looked-up value. Refer to
+[Helm-Only Deployment](../helm/charts/nico-machine-a-tron/README.md#helm-only-deployment).
 
 ### `values/nico-core.yaml`
 
@@ -309,13 +330,15 @@ VIP requirements below apply to enabled external `LoadBalancer` Services.
 | `siteConfig.[pools.lo-ip]` ranges | `{ start = "10.180.62.84", end = "10.180.62.86" }` | **Yes** | Loopback IP range for bare-metal hosts |
 | `siteConfig.[pools.vlan-id]` ranges | `{ start = "100", end = "501" }` | **Yes** | VLAN ID allocation range |
 | `siteConfig.[pools.vni]` ranges | `{ start = "1024500", end = "1024800" }` | **Yes** | VXLAN Network Identifier range |
-| `siteConfig.[networks.admin]` | example values | **Yes** | Admin network: `type = "admin"`, `prefix`, `mtu`, and `reserve_first`. Every IPv4 prefix requires a `gateway`. DPU provisioning requires an IPv4 admin prefix. Refer to [Initial Network Configuration](../docs/provisioning/ip-and-network-configuration.md#initial-network-configuration) for IPv6 fields, valid combinations, and compatibility. |
+| `siteConfig.[networks.admin]` | example values | **Yes** | Admin network: `type = "admin"`, `prefix`, `mtu`, and `reserve_first`. Every IPv4 prefix requires a `gateway`. IPv6-only admin requires a configured FNN site and compatible Core and DPU-agent builds. Retain IPv4 DPU loopbacks and IPv4 VXLAN tunnel endpoints; this does not restrict the address families of physical underlay segments. Non-FNN admin requires an IPv4 prefix and gateway. Refer to [Initial Network Configuration](../docs/provisioning/ip-and-network-configuration.md#initial-network-configuration) for settings and compatibility requirements. |
 | `siteConfig.[networks.<underlay>]` | `[networks.RNO1-M04-D04-IPMITOR-01]` | **Yes** | One block per underlay data-plane L3 segment to create at startup, with `type = "underlay"` and the same field requirements. Rename the block to match your site segment name. Add additional blocks for each underlay segment. |
-| `nico-api / nico-dhcp / nico-dns / nico-pxe / nico-ssh-console-rs .externalService.annotations.metallb.universe.tf/loadBalancerIPs` | example IPs | **Yes** | Single MetalLB VIP per service. Must be inside the matching IPAddressPool from `metallb-config.yaml` (external pool for `nico-api`, internal pool for the rest). |
-| `nico-ntp.externalService.perPodAnnotations` | 3-element example list | **Yes** | `nico-ntp` is a StatefulSet — one MetalLB VIP per replica (3 by default). List entry `[0]` goes on the LB Service for pod `nico-ntp-0`, `[1]` on `nico-ntp-1`, etc. These three VIPs are what DPUs sync clocks against. |
-| `nico-dhcp.config.kea.hookParameters.nameservers` | `"127.0.0.1"` (chart default) | **Yes** | IP(s) advertised to DHCP clients as their DNS resolver. Must be the `nico-dns` VIP (or whichever DNS the DPUs should use). Leaving the `127.0.0.1` chart default silently breaks DPU name resolution. |
-| `nico-dhcp.config.kea.hookParameters.ntpServer` | `"127.0.0.1"` (chart default) | **Yes** | Comma-separated IPs advertised to DHCP clients as their NTP servers. Must match the three `nico-ntp.externalService.perPodAnnotations` VIPs. DPU pre-ingestion fails on clock divergence if this is left at the default. |
-| `nico-dhcp.config.kea.hookParameters.provisioningServer` | `"127.0.0.1"` (chart default) | **Yes** | IP advertised as the PXE / provisioning server. Must be the `nico-pxe` VIP. |
+| `nico-api / nico-dhcp / nico-pxe / nico-ssh-console-rs .externalService.annotations.metallb.universe.tf/loadBalancerIPs` | example IPs | **Yes** | Single MetalLB VIP per service. Must be inside the matching IPAddressPool from `metallb-config.yaml` (external pool for `nico-api`, internal pool for the rest). |
+| `nico-dns.externalService.perPodAnnotations` | 2-element example list | **Yes** | Each list entry supplies annotations for one replica's UDP and TCP Services. Use VIPs from matching MetalLB pools. Refer to [`nico-dns` External Services](../docs/configuration/dns.md#nico-dns-external-services) for IPv6-only and dual-stack values, defaults, and primary-family restrictions. |
+| `nico-ntp.externalService.perPodAnnotations` | 3-element example list | **Yes** | `nico-ntp` is a StatefulSet — one MetalLB VIP per replica (3 by default). List entry `[0]` goes on the LB Service for pod `nico-ntp-0`, `[1]` on `nico-ntp-1`, etc. These VIPs are what DPUs sync clocks against. |
+| `nico-dhcp.config.kea.hookParameters.nameservers` | `"REPLACE_WITH_NICO_DNS_VIP"` (chart default) | **Yes** | Comma-separated IPv4 addresses advertised to DHCP clients as DNS resolvers in option 6. The placeholder name and chart comment refer to `nico-dns`, but this setting requires a recursive resolver. Set it to the VIP of Unbound or another recursive resolver that can resolve site, infrastructure, and external names. Do not use a `nico-dns` VIP, which serves authoritative zones only. |
+| `nico-dhcp.config.kea.hookParameters.ntpServer` | `"REPLACE_WITH_NICO_NTP_VIPS"` (chart default) | **Yes** | Comma-separated IPs advertised to DHCP clients as their NTP servers. Must include one `nico-ntp.externalService.perPodAnnotations` VIP per configured replica. |
+| `nico-dhcp.config.kea.hookParameters.provisioningServer` | `"REPLACE_WITH_NICO_PXE_VIP"` (chart default) | **Yes** | IP advertised as the PXE / provisioning server. Must be the `nico-pxe` VIP. |
+| `nico-api.extraVolumes` / `nico-api.extraVolumeMounts` | omitted | No | Extra Pod volumes and `nico-api` container mounts, such as the Secret holding the KMIP client TLS material. Refer to [Opting in to the KMIP KEK provider](#opting-in-to-the-kmip-kek-provider). |
 
 ### `values/nico-rest.yaml`
 
@@ -329,8 +352,8 @@ VIP requirements below apply to enabled external `LoadBalancer` Services.
 
 | Key | Default | Must change? | Description |
 |-----|---------|-------------|-------------|
-| `envConfig.DB_ADDR` | `"postgres.postgres.svc.cluster.local"` | For prod | PostgreSQL host address |
-| `envConfig.DB_DATABASE` | `"elektratest"` | For prod | Database name |
+| `envConfig.DB_ADDR` | `"nico-pg-cluster.postgres.svc.cluster.local"` | For prod | PostgreSQL host address |
+| `envConfig.DB_DATABASE` | `"nico_rest"` | For prod | Database name |
 | `envConfig.DEV_MODE` | `"true"` | For prod | Set to `"false"` in production |
 | `envConfig.NICO_SEC_OPT` | `"2"` | No | Security mode: 0=insecure, 1=TLS, 2=mTLS (required) |
 | `CLUSTER_ID` | — | No (auto) | Site UUID. Set automatically by `setup.sh` via `--set` from `NICO_SITE_UUID`. |
@@ -351,7 +374,7 @@ VIP requirements below apply to enabled external `LoadBalancer` Services.
 ## Setup options
 
 `setup.sh` runs preflight validation automatically before making cluster changes.
-Core VIP validation requires Python 3 with PyYAML installed in the `python3` environment. It parses `--core-values` as YAML, so indentation and Boolean capitalization do not affect VIP validation for enabled external `LoadBalancer` Services. Existing `externalService` configurations may omit VIP annotations for automatic allocation; explicitly blank annotations are errors. An enabled DHCPv6 external Service requires an explicit IPv6 VIP annotation. Configurable `externalService.type` values such as `NodePort` and `ClusterIP` do not require VIPs; the DHCPv6 external Service always uses `LoadBalancer`. Missing parser dependencies or invalid YAML produce a preflight error. This VIP check is skipped with `--skip-core`.
+Core VIP validation requires Python 3 with PyYAML installed in the `python3` environment. It parses `--core-values` as YAML, so indentation and Boolean capitalization do not affect VIP validation for enabled external `LoadBalancer` Services. Existing `externalService` configurations may omit VIP annotations for automatic allocation; explicitly blank annotations are errors. An enabled DHCPv6 external Service requires an explicit IPv6 VIP annotation. Configurable `externalService.type` values such as `NodePort` and `ClusterIP` do not require VIPs; the DHCPv6 external Service always uses `LoadBalancer`. Missing parser dependencies or invalid YAML produce a preflight error. This VIP check is skipped with `--skip-core`. A VIP used by more than one Service is a warning unless every Service on it has the same `allow-shared-ip` value, the same `externalTrafficPolicy`, and distinct protocol and port pairs, and `Local` Services share only within one chart; these warnings do not stop `setup.sh`.
 
 It supports these common deployment modes:
 
@@ -362,6 +385,7 @@ It supports these common deployment modes:
 | `--skip-rest` | Install prerequisites and Core, but skip all REST phases and REST repo checks. |
 | `--skip-core --skip-rest` | Infrastructure-only run; image tags, image registry, and REST repo are not required. |
 | `--core-values <file>` | Use site-specific Core values instead of `helm-prereqs/values/nico-core.yaml`. |
+| `--flow-values <file>` | Pass a site-specific NICo Flow values file to the `flow` Helm release. Every run resets the release to the chart defaults plus the image and pull-secret settings, so Flow overrides made with `helm upgrade` outside `setup.sh` are lost unless they are in this file. The file must not set `namespaceOverride`: `setup.sh` and the site-agent address Flow in the `flow` namespace. |
 | `--metallb-config <path>` | Use a site-specific MetalLB manifest file or kustomize directory. |
 | `--skip-dpf` | Skip the DPF (DOCA Platform Framework) DPU provisioning stack, which installs **by default**. Use for sites with no DPUs or that still use the deprecated iPXE DPU path. See [DPF](#dpf). |
 | `--install-contour` | Install the optional Contour/Envoy ingress controller. The Envoy Service is `LoadBalancer` and is pinned to the `vip-pool-external` MetalLB pool, so that pool must have addresses before the install. Setup aborts if `projectcontour` already runs a Contour that NICo does not manage, rather than upgrading it with these values. |
@@ -386,6 +410,111 @@ warnings (malformed image references and unexpected HTTP responses remain
 errors, as does a missing `curl` when validation is required), and an
 unreachable registry host skips the image checks entirely
 (air-gapped/preloaded installs).
+
+## Opting in to the KMIP KEK provider
+
+`nico-api` can wrap the data-encryption keys of its PostgreSQL credential store
+with a key held in a KMIP server instead of Vault Transit. The server-side
+steps (creating the non-exportable key and the client identity), the startup
+checks, and the operating guidance are on the
+[KMIP KEK Provider](https://docs.nvidia.com/infra-controller/documentation/configuration-day-1/kmip-kek-provider)
+page. This section covers what the installer needs: one environment variable,
+two chart values, and a TOML block in the site config.
+
+1. **Export the client material directory.** Put the CA bundle, the client
+   certificate chain, and the client key that the KMIP server issued for
+   `nico-api` in one directory under exactly these names, and export it:
+
+   ```bash
+   export NICO_KMIP_CLIENT_DIR=/path/to/kmip-client   # holds ca.pem, client.pem, client.key
+   ```
+
+   When you confirm the Core deployment (or immediately, with `-y`), and before Phase 6
+   installs it, `setup.sh` creates the Secret `nico-kmip-client` in
+   `nico-system` from the three files and labels it
+   `app.kubernetes.io/managed-by: helm-prereqs`. A declined deployment leaves
+   the Secret untouched. A rerun with renewed files
+   updates the Secret, and `nico-api` reads the files again on its next
+   connection, so a renewed certificate needs no restart. A Secret of that name
+   without the label is yours, and `setup.sh` stops rather than overwrite it.
+   Leave the variable unset to manage the Secret yourself, for example through
+   the External Secrets Operator; any Secret name then works. The variable is
+   an error with `--skip-core`.
+
+2. **Mount the Secret into `nico-api`.** Add the chart's `extraVolumes` and
+   `extraVolumeMounts` to the Core values (`values/nico-core.yaml` or your
+   `--core-values` file):
+
+   ```yaml
+   nico-api:
+     extraVolumes:
+       - name: kmip-client
+         secret:
+           secretName: nico-kmip-client
+           defaultMode: 0400
+     extraVolumeMounts:
+       - name: kmip-client
+         mountPath: /etc/nico/kmip
+         readOnly: true
+   ```
+
+   `defaultMode: 0400` keeps the client key readable by root only, the user
+   `nico-api` runs as in the release image and the chart. Remove it before
+   running `nico-api` as a non-root user: a root-owned `0400` file is
+   unreadable to any other user.
+
+3. **Declare the provider in the site config.** Add the `[secrets]` tables to
+   `nico-api.siteConfig.nicoApiSiteConfig`, with the TLS paths under the mount
+   above. Every field is described in
+   [Configure the Provider](https://docs.nvidia.com/infra-controller/documentation/configuration-day-1/kmip-kek-provider#configure-the-provider)
+   on the feature page.
+
+   ```toml
+   [secrets]
+   backends = ["postgres"]
+   writer = "postgres"
+
+   [secrets.kms]
+   active = "hsm"
+
+   [secrets.kms.providers.hsm]
+   type = "kmip"
+   endpoint = "kms.example.com:5696"
+   ca_bundle = "/etc/nico/kmip/ca.pem"
+   client_cert = "/etc/nico/kmip/client.pem"
+   client_key = "/etc/nico/kmip/client.key"
+   keys = { "site-kek-1" = "f0a1c2d3-5e6f-4a7b-8c9d-0e1f2a3b4c5d" }
+
+   [secrets.routing]
+   "/" = "site-kek-1"
+   ```
+
+Preflight checks the three pieces together: the directory holds the three
+files; each `ca_bundle`, `client_cert`, and `client_key` path lies under an
+`extraVolumeMounts` mount whose `extraVolumes` entry is a Secret; and that
+Secret exists in `nico-system` with every key the paths and the volume's
+`items` need, unless it is the `nico-kmip-client` Secret that `setup.sh` is
+about to create, which may only exist if `setup.sh` created it. A path under
+one of the chart's own mounts, such as the site CA at
+`/var/run/secrets/nico-roots/ca.crt`, needs no extra volume and is accepted as
+is. A missing piece
+is a preflight error naming the provider table and field; a mount that is not
+backed by a Secret, or a `NICO_KMIP_CLIENT_DIR` that no provider or mount uses,
+is a warning. The check parses the site TOML with Python's `tomllib` whenever
+the site config mentions KMIP, so such a site needs Python 3.11 or later, or
+the `tomli` package, in the `python3` environment that already provides PyYAML;
+without either, preflight warns that it could not look for a `kmip` provider,
+or fails when `NICO_KMIP_CLIENT_DIR` is set, since that opt-in must be checked.
+
+Each `setup.sh` run is one `nico-api` rollout. A site that already stores
+credentials under Vault Transit keeps both providers configured and moves in
+the two rollouts described in
+[Migrating from Transit](https://docs.nvidia.com/infra-controller/documentation/configuration-day-1/kmip-kek-provider#migrating-from-transit):
+one run that adds the `kmip` provider and its mount while `active` and
+`[secrets.routing]` stay on Transit, and a second run that makes the KMIP
+provider `active` and routes every prefix to its `kek_id`, followed by
+`nico-admin-cli secrets re-wrap`. A new site, as in the example above, needs
+one run.
 
 ## Upgrading deployments that bundled PSM and NSM
 
@@ -500,9 +629,9 @@ NICo Core                  (../helm - nico-core.yaml values)
   └── unbound               (Deployment - .forge zone DNS, opt-in)
 NICo REST                  (../helm/rest/nico-rest)
   ├── nico-rest-ca-issuer   (ClusterIssuer - cert-manager.io)
-  ├── postgres StatefulSet  (legacy standalone DB; default target for Temporal when temporal.useHaPostgres is false and for Keycloak when keycloak.useHaPostgres is false — the two are independent)
-  ├── keycloak              (dev OIDC IdP, nico-dev realm)
-  ├── temporal              (temporal-helm/temporal, mTLS)
+  ├── postgres StatefulSet  (deprecated standalone DB, only while Temporal or Keycloak uses it)
+  ├── keycloak              (dev OIDC IdP, nico realm - DB on nico-pg-cluster unless useHaPostgres resolves to false)
+  ├── temporal              (temporal-helm/temporal, mTLS - DB on nico-pg-cluster unless useHaPostgres resolves to false)
   └── nico-rest             (API, cert-manager, workflow, site-manager - DB on nico-pg-cluster)
 NICo Flow                  (../helm/nico-flow - task, policy, and automation service)
 NICo REST site-agent       (../helm/rest/nico-rest-site-agent - StatefulSet, bootstrap via site-manager)
@@ -516,56 +645,168 @@ Observability (opt-in)     (observability/ - only with --with-observability; als
 
 ## Consolidating Temporal/Keycloak onto nico-pg-cluster
 
-The NICo REST API database was consolidated onto the shared, Zalando-managed
-`nico-pg-cluster` in #3081/#3182. Temporal and Keycloak still default to a
-separate, standalone `postgres.postgres` StatefulSet — both targets are
-supported side by side so existing sites are not forced onto a new database
-on their next `setup.sh` run.
+> [!WARNING]
+> The standalone `postgres.postgres` StatefulSet for Temporal and Keycloak is
+> deprecated. Support for it will be removed in `2.5`. Sites still
+> on it are highly encouraged to migrate to `nico-pg-cluster`. Refer to
+> [Migrating an existing Site's data](#migrating-an-existing-sites-data).
 
-Two toggles in `helm-prereqs/values.yaml` opt a site in:
+The NICo REST API database moved onto the shared, Zalando-managed
+`nico-pg-cluster` in #3081/#3182. Two values in `helm-prereqs/values.yaml`
+decide where the Temporal and Keycloak databases live:
 
 - `temporal.useHaPostgres`
-- `keycloak.useHaPostgres` (also has a `namespace` field — see the caveat below)
+- `keycloak.useHaPostgres` (the `keycloak` block also has a `namespace` field,
+  refer to [Namespace caveats](#namespace-caveats))
 
-The leaf field is `useHaPostgres`, not `enabled`: these toggles only move
-where the *database* lives, not whether Temporal/Keycloak are deployed at
-all. `keycloak.enabled` already means something else, in
-`values/nico-rest.yaml` (whether Keycloak is deployed) — reusing that name
-here for a different meaning would be confusing.
+| Value | Database |
+| --- | --- |
+| `auto` (default) | The databases are created in `nico-pg-cluster`, but their location is left unchanged for an existing Site. With `postgresql.enabled: false`, it means `false` unless the databases are already on an external or out-of-band PostgreSQL. |
+| `true` | The databases live in `nico-pg-cluster`. |
+| `false` | The databases live on the deprecated standalone StatefulSet. It keeps an existing Site there, but it can't move a Site back off `nico-pg-cluster`. |
 
-Sites that don't opt in need no changes: `setup.sh` keeps deploying the
-legacy `postgres.postgres` StatefulSet and pointing Temporal/Keycloak at it,
-exactly as before.
+`preflight.sh` resolves `auto` on every `setup.sh` run. It checks which
+database Temporal's server config and the Keycloak Deployment point at, and
+keeps them there. `setup.sh` only runs them on `nico-pg-cluster` or the standalone
+StatefulSet. A workload on any other database host fails preflight, whatever
+the value.
 
-### Migrating an existing site's data
+If Temporal or Keycloak isn't deployed, preflight uses the location `setup.sh`
+recorded after its last deploy, in the `nico-workload-databases` ConfigMap in
+the `postgres` namespace. A recorded standalone location only counts while the
+StatefulSet or its volume is still there, because removing both removes the
+data. Without a record, Keycloak's database is created in
+`nico-pg-cluster`, since a missing Keycloak usually was never deployed. Temporal
+is different, because REST always deploys it. If the `postgres` StatefulSet or
+its `postgres-data-postgres-0` volume is still in the same namespace, Temporal's
+database stays there, so no data is left behind. Otherwise it's created in
+`nico-pg-cluster`.
 
-1. Set `temporal.useHaPostgres: true` and/or `keycloak.useHaPostgres: true`, then run
-   `helmfile sync -l name=nico-prereqs` (or `setup.sh` through Phase 6). This
-   provisions the `temporal.nico`/`keycloak.nico` users and empty
-   `temporal`/`temporal_visibility`/`keycloak` databases on `nico-pg-cluster`,
-   and the ESO `ClusterExternalSecret`s that sync their credentials.
-2. Run `helm-prereqs/scripts/migrate-temporal-keycloak-db.sh --db temporal`,
-   `--db keycloak`, or `--db both` — matching whichever toggle(s) you just
-   enabled; the default (`both`) fails if you only provisioned one target.
-   This scales the workload(s) to zero, dumps the existing database(s) off
-   `postgres.postgres`, and restores them into `nico-pg-cluster`. It's a
-   stop-the-world cutover: Temporal workflow processing / Keycloak logins are
-   unavailable while it runs, and stay down afterward — see "Why does the
-   migration script leave things scaled down?" below.
-3. Re-run `setup.sh`. Phases 7d/7f detect the enabled toggles, point
-   Temporal/Keycloak at `nico-pg-cluster` instead of `postgres.postgres`, and
-   scale the workloads back up already on the new database.
+With `postgresql.enabled: false`, the chart creates no `nico-pg-cluster`, so
+the name refers to an external or out-of-band PostgreSQL. Refer to
+[Using an external or out-of-band PostgreSQL](#using-an-external-or-out-of-band-postgresql).
 
-A fresh site can instead set both toggles to `true` before the first
-`setup.sh` run and skip the migration script — there is no existing data to
-move.
+Phase 7c only deploys the StatefulSet while either value resolves to `false`.
+So a new Site only gets it when a value is set to `false`, or when
+`postgresql.enabled` is `false` and the value isn't `true`. Check for `false`
+in a `values.yaml` copied from an older Site. While either database stays on
+it, preflight warns that it's deprecated, and `setup.sh` repeats the warning
+at the end of the run.
 
-`preflight.sh` guards against skipping step 2 by mistake: if a toggle is
-`true` and `postgres.postgres` still has real Temporal/Keycloak data that the
-matching `nico-pg-cluster` database doesn't fully have yet (missing, empty,
-or fewer rows than the legacy source), it fails with an error pointing at the
-migration script, instead of letting `setup.sh` silently start against an
-empty or incomplete database.
+When `postgresql.enabled` is `true` and the value isn't `false`, the
+`nico-prereqs` chart creates the `temporal`, `temporal_visibility`, and
+`keycloak` databases on `nico-pg-cluster` ahead of time. It also creates their `temporal.nico` and `keycloak.nico` users, and the
+ESO `ClusterExternalSecret`s that sync their credentials. So an existing Site
+on `auto` already has empty databases to migrate into.
+
+These values only decide where the databases live, not whether Temporal or
+Keycloak is deployed. `nico-rest-api.config.keycloak.enabled` in
+`values/nico-rest.yaml` decides that for Keycloak. When it's `false`,
+`setup.sh` ignores `keycloak.useHaPostgres`, because it doesn't deploy a
+Keycloak that needs a database.
+
+### Using an external or out-of-band PostgreSQL
+
+With `postgresql.enabled: false`, the chart doesn't create `nico-pg-cluster`,
+its databases, or the ESO `ClusterExternalSecret`s. When a value is `true`,
+`setup.sh` still points Temporal or Keycloak at
+`nico-pg-cluster.postgres.svc.cluster.local`, so that name has to reach a
+PostgreSQL you provide, outside the cluster or deployed out of band. Flow
+connects to the same hostname, and `setup.sh` doesn't override it.
+
+Before you set a value to `true`, provision these yourself:
+
+- The `temporal` and `temporal_visibility` databases, owned by a
+  `temporal.nico` user with `CREATEDB`. Temporal's schema job runs
+  `CREATE DATABASE` even when the database already exists.
+- The `keycloak` database, owned by a `keycloak.nico` user.
+- TLS on that PostgreSQL, because Temporal and Keycloak both connect with
+  TLS.
+- A `nico-temporal-pg-creds` Secret in the `temporal` namespace and a
+  `nico-keycloak-pg-creds` Secret in `keycloak.namespace`. Each one holds its
+  user's password under the `password` key.
+- A `nico-pg-cluster` Service in the `postgres` namespace that reaches that
+  PostgreSQL. `--external-name` takes a hostname outside the cluster, or the
+  cluster DNS name of the Service an out-of-band PostgreSQL runs behind, for
+  example:
+
+  ```bash
+  kubectl create service externalname nico-pg-cluster -n postgres --external-name db.example.com
+  ```
+
+Without the Secret, phase 7d or 7f stops after waiting `120s` for it.
+
+With `auto`, a new Site stays on the standalone StatefulSet, and a Site whose
+databases already run on that PostgreSQL stays there. Moving an existing
+Site's data off the StatefulSet onto an external or out-of-band PostgreSQL
+isn't supported in 2.4, because the migration script only copies into the
+`nico-pg-cluster` the chart creates. Preflight stops `true` for such a Site,
+so keep it on `auto`. Support is tracked in
+[#7989](https://github.com/dsx-ai-factory/infra-controller/issues/7989).
+
+### Migrating an existing Site's data
+
+1. Run `setup.sh` on the release you're upgrading to, with both values on
+   `auto`. It creates the users, databases, and `ClusterExternalSecret`s
+   above, and it brings everything else up to date. So the run in step 3 has
+   little left to change, which keeps the outage short. Then set
+   `temporal.useHaPostgres: true`, `keycloak.useHaPostgres: true`, or both.
+   `auto` isn't enough, because it leaves an existing Site's databases where
+   they are.
+2. Run `helm-prereqs/scripts/migrate-temporal-keycloak-db.sh` with
+   `--db temporal`, `--db keycloak`, or `--db both`, to match the values you
+   set to `true`. The default is `both`. The script refuses a workload that
+   already uses `nico-pg-cluster`, so a repeated run can't overwrite its live
+   data with the old copy. It scales the workloads to zero and dumps their
+   databases from `postgres.postgres`. It then restores them into
+   `nico-pg-cluster`. When every copy succeeds, it leaves a receipt in the
+   `nico-workload-databases` ConfigMap. A new run clears the old receipt
+   before it copies anything. This is a stop-the-world cutover.
+   Temporal stops processing workflows and Keycloak stops serving logins from
+   this step until step 3 brings them back, as
+   [Why does the migration script leave things scaled down?](#why-does-the-migration-script-leave-things-scaled-down)
+   explains.
+3. Re-run `setup.sh`. Phases 7d and 7f point Temporal and Keycloak at
+   `nico-pg-cluster` and scale them back up. Once both are on
+   `nico-pg-cluster`, phase 7c stops applying the standalone StatefulSet. The
+   StatefulSet keeps running with the old data until you remove it, as
+   [Removing the standalone StatefulSet](#removing-the-standalone-statefulset)
+   describes.
+
+If step 3 fails before it repoints a workload, there are two ways forward:
+
+- **Retry the cutover.** Leave every Deployment the script stopped at zero,
+  fix the cause, and run `setup.sh` again. The receipt stays valid while those
+  Deployments are untouched.
+- **Abandon the cutover.** Set the value back to `auto`. For Temporal, roll
+  its release back to the revision `helm history` lists as `deployed`, which
+  restores its `postgres.postgres` config and replica counts:
+
+  ```bash
+  helm history temporal -n temporal
+  helm rollback temporal <deployed-revision> -n temporal
+  ```
+
+  Scaling Temporal up by hand isn't enough, because a failed upgrade can
+  leave its ConfigMaps on `nico-pg-cluster` without updating its
+  Deployments. For Keycloak, scale it back to the replica count the script
+  printed, for example
+  `kubectl scale -n nico-rest --replicas=1 deploy/keycloak`.
+
+  Either way the copy is now stale, so a later migration starts again from
+  step 2. Leaving the value at `true` would stop the next `setup.sh` run on
+  that stale receipt.
+
+`preflight.sh` stops `setup.sh` from moving a database off the StatefulSet
+before step 2 is done. When `true` would move it, preflight requires the
+receipt from step 2. The Deployments the script stopped also have to be
+unchanged since, because a restart, scale, or recreate in between means the
+copy may be stale. Preflight also stops `false` from moving a database back
+off `nico-pg-cluster`, since there's no supported reverse migration. Both
+checks stop setup, even with `-y`. `auto` never moves a database, so these
+checks only apply to `true` and `false`. `setup.sh` runs them again right
+before phases 7d and 7f repoint Keycloak and Temporal, in case a workload was
+restarted while the earlier phases ran.
 
 ### Why does the migration script leave things scaled down?
 
@@ -578,6 +819,54 @@ endpoint over. So the migration script leaves a successfully-migrated
 workload at zero replicas, and step 3 is what brings it back up. A *failed*
 migration is the exception: the script restores the original replica count
 immediately, since nothing was cut over.
+
+Preflight relies on this too. A workload that runs again before step 3 makes
+the copy stale, so preflight asks for a new migration.
+
+### Removing the standalone StatefulSet
+
+`setup.sh` never deletes the standalone StatefulSet or its data. Once Temporal
+and Keycloak both run on `nico-pg-cluster`, you can remove it.
+
+1. Check that `setup.sh` recorded both on `nico-pg-cluster`. Keycloak has no
+   entry when it isn't deployed.
+
+   ```bash
+   kubectl get configmap nico-workload-databases -n postgres -o jsonpath='{.data}'
+   ```
+
+   Also check that neither value is `false` in `values.yaml`. With `false`,
+   the next `setup.sh` run stops in preflight until the value is `auto` or
+   `true`.
+
+2. Back up the old databases, in case you need them later.
+
+   ```bash
+   kubectl exec -n postgres postgres-0 -- pg_dumpall -U postgres > standalone-postgres.sql
+   ```
+
+3. Delete the StatefulSet and the resources that only serve it. Keycloak's
+   legacy password Secret lives in `keycloak.namespace`, `nico-rest` by
+   default.
+
+   ```bash
+   kubectl delete statefulset postgres -n postgres
+   kubectl delete deployment adminer -n postgres
+   kubectl delete service postgres adminer adminer-nodeport -n postgres
+   kubectl delete configmap postgres-init -n postgres
+   kubectl delete secret admin-creds -n postgres
+   kubectl delete secret keycloak-legacy-db-creds -n nico-rest --ignore-not-found
+   ```
+
+4. Delete the volume. This removes the old data for good.
+
+   ```bash
+   kubectl delete pvc postgres-data-postgres-0 -n postgres
+   ```
+
+Don't delete the `postgres` namespace, and don't run `kubectl delete -k` on
+`deploy/kustomize/base/postgres`. That kustomization includes the `postgres`
+Namespace, which also holds `nico-pg-cluster`.
 
 ### Namespace caveats
 
@@ -592,6 +881,11 @@ immediately, since nothing was cut over.
   `externalBaseURL` (a hand-edited site value, not templated) — if you change
   it from `nico-rest`, update that hostname to match, or REST won't be able
   to reach Keycloak.
+- **Set Keycloak's namespace in `keycloak.namespace`, not `KEYCLOAK_NS`.**
+  ESO only syncs Keycloak's `nico-pg-cluster` credentials into
+  `keycloak.namespace`. So when Keycloak uses `nico-pg-cluster`, preflight
+  stops setup if the `KEYCLOAK_NS` environment variable names a different
+  namespace.
 
 ## DPF
 
@@ -889,8 +1183,12 @@ responsible for resolving them. Two ways to do that:
    fill the addresses with the VIPs you've already assigned to the
    corresponding service above (those live in the same file under each
    chart's `externalService.annotations.metallb.universe.tf/loadBalancerIPs`).
-2. Assign a MetalLB VIP to unbound itself (so DPUs can reach it via DHCP
-   option 6). Add it as another `externalService` entry the same way.
+2. Assign an IPv4 MetalLB VIP to unbound itself and advertise it through
+   DHCP option 6. Add it as another `externalService` entry the same way.
+   IPv6 resolver addresses use DHCPv6 option 23 instead. For IPv6-only or
+   dual-stack resolver VIPs, refer to
+   [Unbound External Services](../docs/configuration/dns.md#unbound-external-services)
+   for address-family settings, IPv4 defaults, and Service update restrictions.
 3. Re-run `setup.sh`. The chart deploys unbound with the `.forge` zone
    pre-populated; DPUs reach it via DHCP-served DNS.
 4. Verify with `helm-prereqs/health-check.sh` — the `.forge DNS Endpoint

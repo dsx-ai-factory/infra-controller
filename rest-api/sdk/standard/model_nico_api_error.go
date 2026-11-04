@@ -22,7 +22,7 @@ var _ MappedNullable = &NICoAPIError{}
 
 // NICoAPIError Describes the error response from NVIDIA Infra Controller REST API
 type NICoAPIError struct {
-	// Source of the error.
+	// Source of the error, taken from `api.name` in the REST API server configuration file (`/app/config.yaml` in the supplied Kubernetes deployment; default API name `nico`). This is a configurable string, for example `nico` or `carbide`
 	Source *string `json:"source,omitempty"`
 	// Message describing the error
 	Message *string `json:"message,omitempty"`

@@ -18,8 +18,23 @@
 import datetime
 import socket
 import time
+from ipaddress import AddressValueError, IPv6Address
 
 import requests
+
+
+def url_host(hostname: str) -> str:
+    """Format a URL authority host, bracketing bare IPv6 addresses only."""
+    try:
+        IPv6Address(hostname)
+    except AddressValueError:
+        return hostname
+    return f"[{hostname}]"
+
+
+def redfish_url(hostname: str, path: str) -> str:
+    """Build a Redfish HTTPS URL, bracketing bare IPv6 addresses only."""
+    return f"https://{url_host(hostname)}{path}"
 
 
 def wait_for_host_port(
@@ -65,7 +80,7 @@ def wait_for_redfish_endpoint(
         f"Attempting to connect to Redfish API on {hostname} up to {max_retries} times with "
         f"{sleep_time=}, requiring {consecutive_successes} consecutive successes"
     )
-    url = f"https://{hostname}/redfish/v1/"
+    url = redfish_url(hostname, "/redfish/v1/")
     retry_count = 0
     success_count = 0
 

@@ -317,6 +317,7 @@ async fn convert_instance_to_nice_format(
                             .unwrap_or_default(),
                     ),
                     ("ADDRESSES", status.addresses.as_slice().join(", ").into()),
+                    ("PREFIXES", status.prefixes.as_slice().join(", ").into()),
                     (
                         "VPC ID",
                         vpc.map(|v| {

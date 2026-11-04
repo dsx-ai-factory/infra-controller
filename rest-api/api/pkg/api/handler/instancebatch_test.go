@@ -6,10 +6,12 @@ package handler
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/NVIDIA/infra-controller/rest-api/api/internal/config"
@@ -29,6 +31,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
+	"github.com/uptrace/bun"
 	"github.com/uptrace/bun/extra/bundebug"
 	tmocks "go.temporal.io/sdk/mocks"
 )
@@ -61,12 +64,65 @@ func testBatchBuildMachineWithNVLinkDomain(t *testing.T, dbSession *cdb.Session,
 	return mc
 }
 
+// testBatchInvalidateOnLockHook changes the first candidate from another connection before
+// the row lock, so the locked re-read must reject it. The hook fires only once.
+type testBatchInvalidateOnLockHook struct {
+	once      sync.Once
+	dbSession *cdb.Session
+	// lockQueries maps each candidate's pg_try_advisory_xact_lock call to its Machine ID
+	lockQueries   map[string]string
+	assigned      string
+	forceDeletion bool
+	err           error
+}
+
+func (h *testBatchInvalidateOnLockHook) BeforeQuery(ctx context.Context, _ *bun.QueryEvent) context.Context {
+	return ctx
+}
+
+func (h *testBatchInvalidateOnLockHook) AfterQuery(_ context.Context, event *bun.QueryEvent) {
+	if event.Err != nil {
+		return
+	}
+	for lockQuery, machineID := range h.lockQueries {
+		if !strings.Contains(event.Query, lockQuery) {
+			continue
+		}
+		h.once.Do(func() {
+			h.assigned = machineID
+			update := cdbm.MachineUpdateInput{MachineID: machineID, IsAssigned: cutil.GetPtr(true)}
+			if h.forceDeletion {
+				update.IsAssigned = nil
+				update.IsForceDeletionRequested = cutil.GetPtr(true)
+				update.IsUsableByTenant = cutil.GetPtr(false)
+			}
+			_, h.err = cdbm.NewMachineDAO(h.dbSession).Update(context.Background(), nil, update)
+		})
+		return
+	}
+}
+
 func TestAllocateMachinesForBatch(t *testing.T) {
 	dbSession := testBatchInstanceInitDB(t)
 	defer dbSession.Close()
 	common.TestSetupSchema(t, dbSession)
 
 	ctx := context.Background()
+
+	// machineLockedElsewhere reports whether another transaction is holding the Machine's advisory lock
+	machineLockedElsewhere := func(t *testing.T, machineID string) bool {
+		t.Helper()
+		other, err := cdb.BeginTx(ctx, dbSession, nil)
+		require.NoError(t, err)
+		defer func() { _ = other.Rollback() }()
+		lockErr := other.AcquireAdvisoryLock(ctx, cdb.GetAdvisoryLockIDFromString(machineID), false)
+		if errors.Is(lockErr, cdb.ErrXactAdvisoryLockFailed) {
+			return true
+		}
+		require.NoError(t, lockErr)
+		return false
+	}
+
 	providerOrg := "test-label-filter-provider"
 	providerUser := testInstanceBuildUser(t, dbSession, "test-label-filter-user", providerOrg, []string{authz.ProviderAdminRole})
 	provider := testInstanceSiteBuildInfrastructureProvider(t, dbSession, "test-label-filter-provider", providerOrg, providerUser)
@@ -74,7 +130,7 @@ func TestAllocateMachinesForBatch(t *testing.T) {
 	instanceType := testInstanceBuildInstanceType(t, dbSession, provider, "test-label-filter-type", site, cdbm.InstanceStatusReady)
 
 	for i, failureDomain := range []string{"fd-a", "fd-a", "fd-b"} {
-		machine := testBatchBuildMachineWithNVLinkDomain(t, dbSession, provider.ID, site.ID, "nvlink-domain-1")
+		machine := testBatchBuildMachineWithNVLinkDomain(t, dbSession, provider.ID, site.ID, failureDomain)
 		machine.Labels = map[string]string{
 			"failure-domain": failureDomain,
 			"power-domain":   fmt.Sprintf("pd-%d", i),
@@ -85,6 +141,9 @@ func TestAllocateMachinesForBatch(t *testing.T) {
 		})
 		require.NoError(t, err)
 		testInstanceBuildMachineInstanceType(t, dbSession, machine, instanceType)
+		if i != 1 {
+			common.TestBuildMachineCapability(t, dbSession, &machine.ID, nil, cdbm.MachineCapabilityTypeNetwork, "ConnectX-8", nil, nil, nil, cutil.GetPtr(1), cutil.GetPtr(cdbm.MachineCapabilityDeviceTypeSpectrumX), nil)
+		}
 	}
 
 	tests := []struct {
@@ -92,6 +151,8 @@ func TestAllocateMachinesForBatch(t *testing.T) {
 		machineLabelSelector map[string]string
 		wantStatus           int
 		wantFailureDomain    string
+		spectrumXAttachments []model.APISpectrumXAttachmentCreateOrUpdateRequest
+		wantMessage          string
 	}{
 		{
 			name:                 "insufficient matching capacity",
@@ -103,6 +164,35 @@ func TestAllocateMachinesForBatch(t *testing.T) {
 			machineLabelSelector: map[string]string{"failure-domain": "fd-a"},
 			wantFailureDomain:    "fd-a",
 		},
+		{
+			name:                 "SpectrumX filter reports partial compatible capacity",
+			machineLabelSelector: map[string]string{"failure-domain": "fd-a"},
+			spectrumXAttachments: []model.APISpectrumXAttachmentCreateOrUpdateRequest{{
+				Device:         "ConnectX-8",
+				DeviceInstance: cutil.GetPtr(0),
+			}},
+			wantStatus:  http.StatusConflict,
+			wantMessage: "Insufficient Machines with the requested SpectrumX capabilities: requested 2, compatible 1",
+		},
+		{
+			name:                 "empty candidate pool retains ordinary capacity error",
+			machineLabelSelector: map[string]string{"failure-domain": "missing"},
+			spectrumXAttachments: []model.APISpectrumXAttachmentCreateOrUpdateRequest{{
+				Device:         "ConnectX-8",
+				DeviceInstance: cutil.GetPtr(0),
+			}},
+			wantStatus:  http.StatusConflict,
+			wantMessage: "Insufficient machines available: requested 2, available 0",
+		},
+		{
+			name: "SpectrumX filtering reports incompatible topology capacity",
+			spectrumXAttachments: []model.APISpectrumXAttachmentCreateOrUpdateRequest{{
+				Device:         "ConnectX-8",
+				DeviceInstance: cutil.GetPtr(0),
+			}},
+			wantStatus:  http.StatusConflict,
+			wantMessage: "Topology optimization requires all 2 machines with the requested SpectrumX capabilities on same NVLink domain, but best domain only has 1 compatible",
+		},
 	}
 
 	for _, test := range tests {
@@ -113,11 +203,14 @@ func TestAllocateMachinesForBatch(t *testing.T) {
 
 			machines, apiErr := allocateMachinesForBatch(
 				ctx, tx, dbSession, instanceType, 2, true,
-				test.machineLabelSelector, zerolog.Nop(),
+				test.machineLabelSelector, test.spectrumXAttachments, zerolog.Nop(),
 			)
 			if test.wantStatus != 0 {
 				require.NotNil(t, apiErr)
 				assert.Equal(t, test.wantStatus, apiErr.Code)
+				if test.wantMessage != "" {
+					assert.Equal(t, test.wantMessage, apiErr.Message)
+				}
 				return
 			}
 
@@ -147,9 +240,42 @@ func TestAllocateMachinesForBatch(t *testing.T) {
 			}
 		})
 	}
+
+	for _, tc := range []struct {
+		name          string
+		forceDeletion bool
+	}{
+		{"assignment", false},
+		{"force deletion", true},
+	} {
+		t.Run("rejects concurrent "+tc.name+" and releases the candidate lock", func(t *testing.T) {
+			lockedInstanceType := testInstanceBuildInstanceType(t, dbSession, provider, "test-rejected-lock-type-"+tc.name, site, cdbm.InstanceStatusReady)
+			hook := &testBatchInvalidateOnLockHook{dbSession: dbSession, lockQueries: map[string]string{}, forceDeletion: tc.forceDeletion}
+			for range 2 {
+				machine := testInstanceBuildMachine(t, dbSession, provider.ID, site.ID, cutil.GetPtr(false), nil)
+				testInstanceBuildMachineInstanceType(t, dbSession, machine, lockedInstanceType)
+				hook.lockQueries[fmt.Sprintf("pg_try_advisory_xact_lock(%d)", cdb.GetAdvisoryLockIDFromString(machine.ID))] = machine.ID
+			}
+			dbSession.DB.AddQueryHook(hook)
+
+			tx, err := cdb.BeginTx(ctx, dbSession, nil)
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = tx.Rollback() })
+
+			machines, apiErr := allocateMachinesForBatch(ctx, tx, dbSession, lockedInstanceType, 1, false, nil, nil, zerolog.Nop())
+			require.Nil(t, apiErr)
+			require.NoError(t, hook.err)
+			require.NotEmpty(t, hook.assigned, "batch never locked a candidate Machine")
+			require.Len(t, machines, 1)
+			assert.NotEqual(t, hook.assigned, machines[0].ID)
+			assert.False(t, machineLockedElsewhere(t, hook.assigned), "rejected Machine must be unlocked before the transaction ends")
+			assert.True(t, machineLockedElsewhere(t, machines[0].ID), "verified Machine must stay locked until the transaction ends")
+		})
+	}
 }
 
 func TestBatchCreateInstanceHandler_Handle(t *testing.T) {
+	ctx := context.Background()
 	dbSession := testBatchInstanceInitDB(t)
 	defer dbSession.Close()
 
@@ -176,13 +302,36 @@ func TestBatchCreateInstanceHandler_Handle(t *testing.T) {
 	// Tenant 1
 	tnu1 := testInstanceBuildUser(t, dbSession, "test-starfleet-id-2", tnOrg, tnOrgRoles)
 	tn1 := testInstanceBuildTenant(t, dbSession, "test-tenant-1", tnOrg, tnu1)
-	_ = common.TestBuildTenantAccountWithTargetedInstanceCreation(t, dbSession, ip, &tn1.ID, tnOrg, cdbm.TenantAccountStatusReady, tnu1)
+	tenantAccount := common.TestBuildTenantAccountWithCapabilities(t, dbSession, ip, &tn1.ID, tnOrg, cdbm.TenantAccountStatusReady, tnu1, cdbm.TenantAccountConfig{
+		TargetedInstanceCreation:     true,
+		CrossTenantInterfaceCreation: true,
+	})
 
 	// Tenant-Site association
 	ts1 := testBuildTenantSiteAssociation(t, dbSession, tnOrg, tn1.ID, st1.ID, tnu1.ID)
 	assert.NotNil(t, ts1)
 	ts2 := testBuildTenantSiteAssociation(t, dbSession, tnOrg, tn1.ID, st2.ID, tnu1.ID)
 	assert.NotNil(t, ts2)
+
+	disableCrossTenantInterfaceCreation := func(t *testing.T) {
+		accountDAO := cdbm.NewTenantAccountDAO(dbSession)
+		disabledConfig := tenantAccount.Config
+		disabledConfig.CrossTenantInterfaceCreation = false
+		_, err := accountDAO.Update(ctx, nil, cdbm.TenantAccountUpdateInput{
+			TenantAccountID: tenantAccount.ID,
+			Config:          &disabledConfig,
+		})
+		require.NoError(t, err)
+		t.Cleanup(func() {
+			enabledConfig := tenantAccount.Config
+			enabledConfig.CrossTenantInterfaceCreation = true
+			_, cleanupErr := accountDAO.Update(ctx, nil, cdbm.TenantAccountUpdateInput{
+				TenantAccountID: tenantAccount.ID,
+				Config:          &enabledConfig,
+			})
+			assert.NoError(t, cleanupErr)
+		})
+	}
 
 	// Allocation for tenant 1
 	al1 := testInstanceSiteBuildAllocation(t, dbSession, st1, tn1, "test-allocation-1", ipu)
@@ -200,6 +349,10 @@ func TestBatchCreateInstanceHandler_Handle(t *testing.T) {
 	alc1 := testInstanceSiteBuildAllocationContraints(t, dbSession, al1, cdbm.AllocationResourceTypeInstanceType, ist1.ID, cdbm.AllocationConstraintTypeReserved, 15, ipu)
 	assert.NotNil(t, alc1)
 
+	// Instance Type without a matching Allocation Constraint for tenant entitlement testing.
+	istWithoutAllocation := testInstanceBuildInstanceType(t, dbSession, ip, "test-instance-type-without-allocation", st1, cdbm.InstanceStatusReady)
+	assert.NotNil(t, istWithoutAllocation)
+
 	// Use dedicated allocation inventory for VPC-selection coverage so the
 	// request cannot consume capacity needed by unrelated table cases.
 	istVpcSelection := testInstanceBuildInstanceType(t, dbSession, ip, "test-instance-type-vpc-selection", st1, cdbm.InstanceStatusReady)
@@ -209,6 +362,15 @@ func TestBatchCreateInstanceHandler_Handle(t *testing.T) {
 	for i := 0; i < 2; i++ {
 		mc := testBatchBuildMachineWithNVLinkDomain(t, dbSession, ip.ID, st1.ID, "nvlink-domain-vpc-selection")
 		testInstanceBuildMachineInstanceType(t, dbSession, mc, istVpcSelection)
+	}
+
+	istCrossTenantVpc := testInstanceBuildInstanceType(t, dbSession, ip, "test-instance-type-cross-tenant-vpc", st1, cdbm.InstanceStatusReady)
+	assert.NotNil(t, istCrossTenantVpc)
+	alcCrossTenantVpc := testInstanceSiteBuildAllocationContraints(t, dbSession, al1, cdbm.AllocationResourceTypeInstanceType, istCrossTenantVpc.ID, cdbm.AllocationConstraintTypeReserved, 2, ipu)
+	assert.NotNil(t, alcCrossTenantVpc)
+	for range 2 {
+		mc := testBatchBuildMachineWithNVLinkDomain(t, dbSession, ip.ID, st1.ID, "nvlink-domain-cross-tenant-vpc")
+		testInstanceBuildMachineInstanceType(t, dbSession, mc, istCrossTenantVpc)
 	}
 
 	// Create 15 machines for ist1 (all on same NVLink domain for topology optimization test)
@@ -324,6 +486,7 @@ func TestBatchCreateInstanceHandler_Handle(t *testing.T) {
 	tnu2 := testInstanceBuildUser(t, dbSession, "test-starfleet-id-3", tnOrg2, tnOrgRoles2)
 	tn2 := testInstanceBuildTenant(t, dbSession, "test-tenant-2", tnOrg2, tnu2)
 	vpcOtherTenant := testInstanceBuildVPC(t, dbSession, "test-vpc-other-tenant", ip, tn2, st1, cutil.GetPtr(uuid.New()), nil, cutil.GetPtr(cdbm.VpcEthernetVirtualizer), nil, cdbm.VpcStatusReady, tnu2)
+	crossTenantVpcFNN := testInstanceBuildVPC(t, dbSession, "test-cross-tenant-vpc-fnn", ip, tn2, st1, cutil.GetPtr(uuid.New()), nil, cutil.GetPtr(cdbm.VpcFNN), nil, cdbm.VpcStatusReady, tnu2)
 	subnetOtherTenant := testInstanceBuildSubnet(t, dbSession, "test-subnet-other-tenant", tn2, vpcOtherTenant, cutil.GetPtr(uuid.New()), cdbm.SubnetStatusReady, tnu2)
 
 	// OS owned by different tenant (for OS ownership test)
@@ -371,20 +534,24 @@ func TestBatchCreateInstanceHandler_Handle(t *testing.T) {
 	}
 
 	type args struct {
-		reqData  *model.APIBatchInstanceCreateRequest
-		reqOrg   string
-		reqUser  *cdbm.User
-		respCode int
-		respMsg  string
+		reqData     *model.APIBatchInstanceCreateRequest
+		reqOrg      string
+		reqUser     *cdbm.User
+		respCode    int
+		respMsg     string
+		prepareReq  func(t *testing.T, req *model.APIBatchInstanceCreateRequest)
+		afterHandle func(t *testing.T, rec *httptest.ResponseRecorder)
 	}
 
-	tests := []struct {
+	type batchCase struct {
 		name                     string
 		fields                   fields
 		args                     args
 		expectedControllerVpcIDs map[string]uuid.UUID
 		wantErr                  bool
-	}{
+		checkResponse            func(t *testing.T, response []model.APIInstance)
+	}
+	tests := []batchCase{
 		{
 			name: "test batch instance create API endpoint succeeds with valid request",
 			fields: fields{
@@ -434,6 +601,136 @@ func TestBatchCreateInstanceHandler_Handle(t *testing.T) {
 				respMsg:  "Tenant does not have capability to create Instances using Machine label selector",
 			},
 			wantErr: false,
+		},
+		{
+			name: "batch create rejects a cross-Tenant VPC attachment without crossTenantInterfaceCreation",
+			fields: fields{
+				dbSession: dbSession,
+				tc:        tc,
+				scp:       scp,
+				cfg:       cfg,
+			},
+			args: args{
+				reqData: &model.APIBatchInstanceCreateRequest{
+					NamePrefix:      "test-batch-cross-tenant-denied",
+					Count:           2,
+					TenantID:        tn1.ID.String(),
+					InstanceTypeID:  istCrossTenantVpc.ID.String(),
+					VpcID:           vpcFNN.ID.String(),
+					SecondaryVpcIDs: []string{crossTenantVpcFNN.ID.String()},
+					IpxeScript:      cutil.GetPtr("test script"),
+					Interfaces: []model.APIInterfaceCreateOrUpdateRequest{
+						{
+							VpcID:      cutil.GetPtr(vpcFNN.ID.String()),
+							IPFamilies: []model.IPFamily{model.IPFamilyIPv4},
+							IsPhysical: true,
+						},
+						{
+							VpcID:      cutil.GetPtr(crossTenantVpcFNN.ID.String()),
+							IPFamilies: []model.IPFamily{model.IPFamilyIPv4},
+						},
+					},
+				},
+				prepareReq: func(t *testing.T, _ *model.APIBatchInstanceCreateRequest) {
+					disableCrossTenantInterfaceCreation(t)
+				},
+				reqOrg:   tnOrg,
+				reqUser:  tnu1,
+				respCode: http.StatusForbidden,
+				respMsg:  "Tenant does not have crossTenantInterfaceCreation capability enabled",
+			},
+		},
+		{
+			name: "batch create does not reveal cross-Tenant VPC state without crossTenantInterfaceCreation",
+			fields: fields{
+				dbSession: dbSession,
+				tc:        tc,
+				scp:       scp,
+				cfg:       cfg,
+			},
+			args: args{
+				reqData: &model.APIBatchInstanceCreateRequest{
+					NamePrefix:      "test-batch-cross-tenant-state-hidden",
+					Count:           2,
+					TenantID:        tn1.ID.String(),
+					InstanceTypeID:  istCrossTenantVpc.ID.String(),
+					VpcID:           vpcFNN.ID.String(),
+					SecondaryVpcIDs: []string{vpcOtherTenant.ID.String()},
+					IpxeScript:      cutil.GetPtr("test script"),
+					Interfaces: []model.APIInterfaceCreateOrUpdateRequest{
+						{
+							VpcID:      cutil.GetPtr(vpcFNN.ID.String()),
+							IPFamilies: []model.IPFamily{model.IPFamilyIPv4},
+							IsPhysical: true,
+						},
+						{
+							// Not FNN, so validation would reject it with a 400 if it ran first.
+							VpcID:      cutil.GetPtr(vpcOtherTenant.ID.String()),
+							IPFamilies: []model.IPFamily{model.IPFamilyIPv4},
+						},
+					},
+				},
+				prepareReq: func(t *testing.T, _ *model.APIBatchInstanceCreateRequest) {
+					disableCrossTenantInterfaceCreation(t)
+				},
+				reqOrg:   tnOrg,
+				reqUser:  tnu1,
+				respCode: http.StatusForbidden,
+				respMsg:  "Tenant does not have crossTenantInterfaceCreation capability enabled",
+			},
+		},
+		{
+			name: "batch create permits a cross-Tenant VPC attachment with crossTenantInterfaceCreation",
+			fields: fields{
+				dbSession: dbSession,
+				tc:        tc,
+				scp:       scp,
+				cfg:       cfg,
+			},
+			args: args{
+				reqData: &model.APIBatchInstanceCreateRequest{
+					NamePrefix:      "test-batch-cross-tenant-allowed",
+					Count:           2,
+					TenantID:        tn1.ID.String(),
+					InstanceTypeID:  istCrossTenantVpc.ID.String(),
+					VpcID:           vpcFNN.ID.String(),
+					SecondaryVpcIDs: []string{crossTenantVpcFNN.ID.String()},
+					IpxeScript:      cutil.GetPtr("test script"),
+					Interfaces: []model.APIInterfaceCreateOrUpdateRequest{
+						{
+							VpcID:      cutil.GetPtr(vpcFNN.ID.String()),
+							IPFamilies: []model.IPFamily{model.IPFamilyIPv4},
+							IsPhysical: true,
+						},
+						{
+							VpcID:      cutil.GetPtr(crossTenantVpcFNN.ID.String()),
+							IPFamilies: []model.IPFamily{model.IPFamilyIPv4},
+						},
+					},
+				},
+				reqOrg:   tnOrg,
+				reqUser:  tnu1,
+				respCode: http.StatusCreated,
+			},
+			checkResponse: func(t *testing.T, response []model.APIInstance) {
+				require.Len(t, response, 2)
+				for _, instance := range response {
+					require.Len(t, instance.Interfaces, 2)
+					for _, apiInterface := range instance.Interfaces {
+						if apiInterface.VpcID != nil && *apiInterface.VpcID == crossTenantVpcFNN.ID.String() {
+							assert.Equal(t, cutil.GetPtr(tn1.ID.String()), apiInterface.InstanceTenantID)
+							assert.Equal(t, cutil.GetPtr(tn2.ID.String()), apiInterface.VpcTenantID)
+						} else {
+							assert.Nil(t, apiInterface.InstanceTenantID)
+							assert.Nil(t, apiInterface.VpcTenantID)
+						}
+					}
+				}
+			},
+			expectedControllerVpcIDs: map[string]uuid.UUID{
+				vpcFNN.ID.String():            *vpcFNN.ControllerVpcID,
+				crossTenantVpcFNN.ID.String(): *crossTenantVpcFNN.ControllerVpcID,
+			},
 		},
 		{
 			name: "test batch instance create API endpoint preserves IPv6-only and dual-stack VPC selection intent",
@@ -844,6 +1141,31 @@ func TestBatchCreateInstanceHandler_Handle(t *testing.T) {
 				reqUser:  tnu1,
 				respCode: http.StatusBadRequest,
 				respMsg:  fmt.Sprintf("VPC Prefix: %s specified in request does not belong to Site", vpcPrefixSite2.ID.String()),
+			},
+			wantErr: false,
+		},
+		{
+			name: "test batch instance create API endpoint rejects Instance Type without an Allocation",
+			fields: fields{
+				dbSession: dbSession,
+				tc:        tc,
+				scp:       scp,
+				cfg:       cfg,
+			},
+			args: args{
+				reqData: &model.APIBatchInstanceCreateRequest{
+					NamePrefix:     "test-no-instance-type-allocation",
+					Count:          2,
+					TenantID:       tn1.ID.String(),
+					InstanceTypeID: istWithoutAllocation.ID.String(),
+					VpcID:          vpc1.ID.String(),
+					Interfaces:     createInterfacesForCount(2, subnet1.ID.String()),
+					IpxeScript:     cutil.GetPtr("test script"),
+				},
+				reqOrg:   tnOrg,
+				reqUser:  tnu1,
+				respCode: http.StatusForbidden,
+				respMsg:  "No Allocations for specified Instance Type were found for current Tenant",
 			},
 			wantErr: false,
 		},
@@ -1442,6 +1764,125 @@ func TestBatchCreateInstanceHandler_Handle(t *testing.T) {
 		},
 	}
 
+	for _, scenario := range []struct {
+		name       string
+		compatible bool
+		status     int
+	}{
+		{
+			name:       "SpectrumX filters capacity before selecting the NVLink domain",
+			compatible: true,
+			status:     http.StatusCreated,
+		},
+		{
+			name:   "SpectrumX insufficient compatible capacity leaves the batch unallocated",
+			status: http.StatusConflict,
+		},
+	} {
+		var candidates []*cdbm.Machine
+		var compatibleIDs map[string]bool
+		var partition *cdbm.SpectrumXPartition
+		var siteClient *tmocks.Client
+		tests = append(tests, batchCase{
+			name: scenario.name,
+			fields: fields{
+				dbSession: dbSession,
+				tc:        tc,
+				scp:       scp,
+				cfg:       cfg,
+			},
+			args: args{
+				reqData:  &model.APIBatchInstanceCreateRequest{},
+				reqOrg:   tnOrg,
+				reqUser:  tnu1,
+				respCode: scenario.status,
+				prepareReq: func(t *testing.T, req *model.APIBatchInstanceCreateRequest) {
+					it := testInstanceBuildInstanceType(t, dbSession, ip, uuid.NewString(), st1, cdbm.InstanceStatusReady)
+					testInstanceSiteBuildAllocationContraints(t, dbSession, al1, cdbm.AllocationResourceTypeInstanceType, it.ID, cdbm.AllocationConstraintTypeReserved, 2, ipu)
+					common.TestBuildMachineCapability(t, dbSession, nil, &it.ID, cdbm.MachineCapabilityTypeNetwork, "MT42822 BlueField-2 integrated ConnectX-6 Dx network controller", nil, nil, cutil.GetPtr("Mellanox Technologies"), cutil.GetPtr(2), cutil.GetPtr(cdbm.MachineCapabilityDeviceTypeDPU), nil)
+					partition = testBuildSpectrumXPartition(t, dbSession, uuid.NewString(), tnOrg, st1, tn1, nil, cdbm.SpectrumXPartitionStatusReady)
+					compatibleIDs = map[string]bool{}
+					for i := range 5 {
+						domain := "larger-incompatible-domain"
+						if i >= 3 {
+							domain = "smaller-compatible-domain"
+						}
+						machine := testBatchBuildMachineWithNVLinkDomain(t, dbSession, ip.ID, st1.ID, domain)
+						testInstanceBuildMachineInstanceType(t, dbSession, machine, it)
+						candidates = append(candidates, machine)
+						count := 0
+						if i >= 3 && scenario.compatible {
+							count = 1
+							compatibleIDs[machine.ID] = true
+						}
+						common.TestBuildMachineCapability(t, dbSession, &machine.ID, nil, cdbm.MachineCapabilityTypeNetwork, "ConnectX-8", nil, nil, nil, &count, cutil.GetPtr(cdbm.MachineCapabilityDeviceTypeSpectrumX), nil)
+					}
+					*req = model.APIBatchInstanceCreateRequest{
+						NamePrefix:     "spectrumx-batch",
+						Count:          2,
+						TenantID:       tn1.ID.String(),
+						InstanceTypeID: it.ID.String(),
+						VpcID:          vpc1.ID.String(),
+						Interfaces:     createInterfacesForCount(2, subnet1.ID.String()),
+						IpxeScript:     cutil.GetPtr("test script"),
+						SpectrumXAttachments: []model.APISpectrumXAttachmentCreateOrUpdateRequest{{
+							SpectrumXPartitionID: partition.ID.String(),
+							Device:               "ConnectX-8",
+							DeviceInstance:       cutil.GetPtr(0),
+							AttachmentType:       cdbm.SpectrumXAttachmentTypePhysical,
+						}},
+					}
+					siteClient = &tmocks.Client{}
+					previous := scp.IDClientMap[st1.ID.String()]
+					scp.IDClientMap[st1.ID.String()] = siteClient
+					t.Cleanup(func() { scp.IDClientMap[st1.ID.String()] = previous })
+					if scenario.compatible {
+						siteClient.On("ExecuteWorkflow", mock.Anything, mock.Anything, "CreateInstances", mock.Anything).Return(wrun, nil).Once()
+					}
+				},
+				afterHandle: func(t *testing.T, rec *httptest.ResponseRecorder) {
+					siteClient.AssertExpectations(t)
+					if !scenario.compatible {
+						assert.Contains(t, rec.Body.String(), "Insufficient Machines with the requested SpectrumX capabilities: requested 2, compatible 0")
+						var response struct {
+							Source string `json:"source"`
+						}
+						require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &response))
+						assert.Equal(t, "nico", response.Source)
+					}
+					machineIDs := make([]string, 0, len(candidates))
+					for _, candidate := range candidates {
+						machineIDs = append(machineIDs, candidate.ID)
+						machine, readErr := cdbm.NewMachineDAO(dbSession).GetByID(ctx, nil, candidate.ID, nil, false)
+						require.NoError(t, readErr)
+						assert.Equal(t, compatibleIDs[candidate.ID], machine.IsAssigned)
+						if !scenario.compatible {
+							assert.Equal(t, cdbm.MachineStatusReady, machine.Status)
+							details, _, readErr := cdbm.NewStatusDetailDAO(dbSession).GetAll(ctx, nil, cdbm.StatusDetailFilterInput{EntityIDs: []string{candidate.ID}}, cdbp.PageInput{})
+							require.NoError(t, readErr)
+							assert.Empty(t, details)
+						}
+					}
+					instances, _, readErr := cdbm.NewInstanceDAO(dbSession).GetAll(ctx, nil, cdbm.InstanceFilterInput{MachineIDs: machineIDs}, cdbp.PageInput{}, nil)
+					require.NoError(t, readErr)
+					assert.Len(t, instances, len(compatibleIDs))
+					attachments, _, readErr := cdbm.NewSpectrumXAttachmentDAO(dbSession).GetAll(ctx, nil, cdbm.SpectrumXAttachmentFilterInput{SpectrumXPartitionIDs: []uuid.UUID{partition.ID}}, cdbp.PageInput{}, nil)
+					require.NoError(t, readErr)
+					assert.Len(t, attachments, len(compatibleIDs))
+					if scenario.compatible {
+						var response []model.APIInstance
+						require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &response))
+						require.Len(t, response, 2)
+						for _, instance := range response {
+							require.NotNil(t, instance.MachineID)
+							assert.True(t, compatibleIDs[*instance.MachineID])
+							assert.Len(t, instance.SpectrumXAttachments, 1)
+						}
+					}
+				},
+			},
+		})
+	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			bcih := BatchCreateInstanceHandler{
@@ -1449,6 +1890,9 @@ func TestBatchCreateInstanceHandler_Handle(t *testing.T) {
 				tc:        tt.fields.tc,
 				scp:       tt.fields.scp,
 				cfg:       tt.fields.cfg,
+			}
+			if tt.args.prepareReq != nil {
+				tt.args.prepareReq(t, tt.args.reqData)
 			}
 
 			jsonData, _ := json.Marshal(tt.args.reqData)
@@ -1463,7 +1907,14 @@ func TestBatchCreateInstanceHandler_Handle(t *testing.T) {
 			ec.SetParamValues(tt.args.reqOrg)
 			ec.Set("user", tt.args.reqUser)
 
+			ec.Set(cutil.APINameContextKey, "nico")
 			err := bcih.Handle(ec)
+			if tt.args.afterHandle != nil {
+				require.NoError(t, err)
+				assert.Equal(t, tt.args.respCode, rec.Code, rec.Body.String())
+				tt.args.afterHandle(t, rec)
+				return
+			}
 			if tt.wantErr {
 				assert.NotNil(t, err)
 			} else {
@@ -1479,6 +1930,9 @@ func TestBatchCreateInstanceHandler_Handle(t *testing.T) {
 					jsonErr := json.Unmarshal(rec.Body.Bytes(), &response)
 					assert.Nil(t, jsonErr)
 					assert.Equal(t, tt.args.reqData.Count, len(response), "Expected %d instances, got %d", tt.args.reqData.Count, len(response))
+					if tt.checkResponse != nil {
+						tt.checkResponse(t, response)
+					}
 
 					hasInlineRoutingProfile := false
 					for _, reqIfc := range tt.args.reqData.Interfaces {

@@ -20,6 +20,7 @@ import (
 	goset "github.com/deckarep/golang-set/v2"
 	validation "github.com/go-ozzo/ozzo-validation/v4"
 	validationis "github.com/go-ozzo/ozzo-validation/v4/is"
+	"github.com/google/uuid"
 
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
@@ -935,6 +936,149 @@ func (icr *APIInstanceCreateRequest) ValidateInfiniBandInterfaces(itIbCaps []cdb
 	return ValidateInfiniBandInterfaces(itIbCaps, icr.InfiniBandInterfaces)
 }
 
+// HasNewCrossTenantInterface reports whether a requested Interface selects another Tenant's
+// VPC or VPC Prefix and has no persisted Interface, other than a Deleting one, with the same
+// identity to reuse.
+func HasNewCrossTenantInterface(tenantID uuid.UUID, requested, existing []cdbm.Interface) (bool, error) {
+	existingByKey := make(map[string]int, len(existing))
+	for _, ifc := range existing {
+		if ifc.Status == cdbm.InterfaceStatusDeleting {
+			continue
+		}
+		existingByKey[ifc.EthernetInterfaceKey()]++
+	}
+
+	for _, ifc := range requested {
+		crossTenant := false
+		switch {
+		case ifc.VpcID != nil:
+			if ifc.Vpc == nil {
+				return false, fmt.Errorf("interface selecting VPC %s is missing its VPC relation", ifc.VpcID.String())
+			}
+			crossTenant = ifc.Vpc.TenantID != tenantID
+		case ifc.VpcPrefixID != nil:
+			if ifc.VpcPrefix == nil {
+				return false, fmt.Errorf("interface selecting VPC Prefix %s is missing its VPC Prefix relation", ifc.VpcPrefixID.String())
+			}
+			crossTenant = ifc.VpcPrefix.TenantID != tenantID
+		}
+		if !crossTenant {
+			continue
+		}
+
+		key := ifc.EthernetInterfaceKey()
+		if existingByKey[key] > 0 {
+			existingByKey[key]--
+			continue
+		}
+		return true, nil
+	}
+
+	return false, nil
+}
+
+// BuildInterfacesForCrossTenantAuthorization converts loaded VPC and VPC Prefix selectors
+// into the normalized Interface identity fields needed before detailed selector validation.
+// Selectors absent from the maps are left to the existing not-found checks.
+func BuildInterfacesForCrossTenantAuthorization(interfaces []APIInterfaceCreateOrUpdateRequest, vpcMap map[uuid.UUID]*cdbm.Vpc, vpcPrefixMap map[uuid.UUID]*cdbm.VpcPrefix) []cdbm.Interface {
+	requested := make([]cdbm.Interface, 0, len(interfaces))
+	for _, ifc := range interfaces {
+		dbIfc := cdbm.Interface{
+			Device:               ifc.Device,
+			DeviceInstance:       ifc.DeviceInstance,
+			VirtualFunctionID:    ifc.VirtualFunctionID,
+			IsPhysical:           ifc.IsPhysical,
+			RequestedIpAddress:   ifc.IPAddress,
+			InlineRoutingProfile: ifc.InlineRoutingProfile.ToDB(),
+		}
+
+		switch {
+		case ifc.VpcID != nil:
+			vpcID, err := uuid.Parse(*ifc.VpcID)
+			if err != nil {
+				continue
+			}
+			vpc, ok := vpcMap[vpcID]
+			if !ok {
+				continue
+			}
+			dbIfc.VpcID = &vpcID
+			dbIfc.Vpc = vpc
+			dbIfc.VpcIPFamilyMode = cutil.GetPtr(ifc.VpcIPFamilyMode())
+		case ifc.VpcPrefixID != nil:
+			vpcPrefixID, err := uuid.Parse(*ifc.VpcPrefixID)
+			if err != nil {
+				continue
+			}
+			vpcPrefix, ok := vpcPrefixMap[vpcPrefixID]
+			if !ok {
+				continue
+			}
+			dbIfc.VpcPrefixID = &vpcPrefixID
+			dbIfc.VpcPrefix = vpcPrefix
+		default:
+			continue
+		}
+
+		requested = append(requested, dbIfc)
+	}
+	return requested
+}
+
+// HasCrossTenantInterface return `true` of the array of Interfaces argument includes at least
+// one non-Deleting Interface that attaches to a different Tenant's VPC or VPC Prefix
+// Returns `false` otherwise
+func HasCrossTenantInterface(interfaces []APIInterfaceCreateOrUpdateRequest, tenantID uuid.UUID, vpcMap map[uuid.UUID]*cdbm.Vpc, vpcPrefixMap map[uuid.UUID]*cdbm.VpcPrefix) bool {
+	for _, ifc := range interfaces {
+		if ifc.VpcID != nil {
+			if vpcID, err := uuid.Parse(*ifc.VpcID); err == nil {
+				if vpc, ok := vpcMap[vpcID]; ok && vpc.TenantID != tenantID {
+					return true
+				}
+			}
+		}
+		if ifc.VpcPrefixID != nil {
+			if vpcPrefixID, err := uuid.Parse(*ifc.VpcPrefixID); err == nil {
+				if vpcPrefix, ok := vpcPrefixMap[vpcPrefixID]; ok && vpcPrefix.TenantID != tenantID {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// ValidateInterfaceVpcs checks the Site, readiness, and network virtualization
+// type of each VPC selected by an Interface. Run it only after any cross-Tenant
+// authorization, so a Tenant without the capability can't read another Tenant's
+// VPC state from these errors.
+func ValidateInterfaceVpcs(vpcs map[uuid.UUID]*cdbm.Vpc, interfaces []APIInterfaceCreateOrUpdateRequest, siteID uuid.UUID) *cutil.APIError {
+	seenVpcIDs := make(map[uuid.UUID]struct{}, len(vpcs))
+	for _, ifc := range interfaces {
+		if ifc.VpcID == nil {
+			continue
+		}
+		vpcID := uuid.MustParse(*ifc.VpcID)
+		if _, ok := seenVpcIDs[vpcID]; ok {
+			continue
+		}
+		seenVpcIDs[vpcID] = struct{}{}
+
+		vpc := vpcs[vpcID]
+		if vpc.SiteID != siteID {
+			return cutil.NewAPIError(http.StatusBadRequest, fmt.Sprintf("VPC: %v specified in Interface request does not belong to Site", vpcID), nil)
+		}
+		if vpc.ControllerVpcID == nil || vpc.Status != cdbm.VpcStatusReady {
+			return cutil.NewAPIError(http.StatusBadRequest, fmt.Sprintf("VPC: %v specified in Interface request data is not in Ready state", vpcID), nil)
+		}
+		if vpc.NetworkVirtualizationType == nil || *vpc.NetworkVirtualizationType != cdbm.VpcFNN {
+			return cutil.NewAPIError(http.StatusBadRequest, fmt.Sprintf("VPC: %v specified in Interface request must have FNN network virtualization type", vpcID), nil)
+		}
+	}
+
+	return nil
+}
+
 // ValidateDpuExtensionServiceDeployments validates the DpuExtensionServiceDeployments for the Instance create request
 func (icr *APIInstanceCreateRequest) ValidateDpuExtensionServiceDeployments(desdrs []APIDpuExtensionServiceDeploymentRequest) error {
 	return ValidateDpuExtensionServiceDeployments(desdrs)
@@ -951,6 +1095,8 @@ func (bicr APIBatchInstanceCreateRequest) Validate() error {
 			validation.Required.Error(validationErrorValueRequired),
 			validation.Min(2).Error("Count must be at least 2"),
 			// TODO: the number 18 is a temporary limit until we have a better way to handle topology-optimized allocation. 18 is the largest possible GB200 domain size.
+			// Batch allocation keeps one Postgres subtransaction per allocated Machine until the create commits.
+			// Keep this below 64, past which the per-backend subtransaction cache overflows and slows snapshots on every connection.
 			validation.Max(18).Error("Count cannot exceed 18")),
 		validation.Field(&bicr.Description,
 			validation.When(bicr.Description != nil,
@@ -1748,10 +1894,9 @@ func (idr *APIInstanceDeleteRequest) Validate() error {
 			),
 			validation.Field(&idr.MachineHealthIssue.Summary,
 				validation.Required,
-				validation.Length(0, 1024).Error(validationErrorStringLength)),
-			// TODO: what are the constrains on Summary and Details? For now limiting to 1024..
+				validation.RuneLength(0, MachineHealthIssueSummaryMaxLength).Error(validationErrorStringLength)),
 			validation.Field(&idr.MachineHealthIssue.Details,
-				validation.Length(0, 1024).Error(validationErrorStringLength)),
+				validation.RuneLength(0, MachineHealthIssueDetailsMaxLength).Error(validationErrorStringLength)),
 		)
 
 		if err != nil {
@@ -1946,8 +2091,8 @@ func InstanceListQueryParamDeprecations() []APIDeprecation {
 }
 
 // NewAPIInstance accepts a DB layer Instance object returns an API layer object.
-// SecondaryVpcIDs are derived from Interface.VpcID or the explicit prefix relation, so
-// callers must preload Interface.VpcPrefix when explicit-prefix IDs should be populated.
+// SecondaryVpcIDs and cross-Tenant ownership are derived from Interface VPC relations,
+// so callers must preload Interface.Vpc and Interface.VpcPrefix.
 func NewAPIInstance(dbinst *cdbm.Instance, dbSite *cdbm.Site, dbiss []cdbm.Interface, dbibis []cdbm.InfiniBandInterface, dbsxas []cdbm.SpectrumXAttachment, dbdesds []cdbm.DpuExtensionServiceDeployment, dbnvlis []cdbm.NVLinkInterface, dbskgs []cdbm.SSHKeyGroup, dbsds []cdbm.StatusDetail) *APIInstance {
 	var instanceTypeID *string
 	if dbinst.InstanceTypeID != nil {
@@ -2041,7 +2186,10 @@ func NewAPIInstance(dbinst *cdbm.Instance, dbSite *cdbm.Site, dbiss []cdbm.Inter
 	apiInstance.Interfaces = []APIInterface{}
 	for _, dbis := range dbiss {
 		curis := dbis
-		apiInstance.Interfaces = append(apiInstance.Interfaces, *NewAPIInterface(&curis))
+		curis.Instance = dbinst
+		apiInterface := NewAPIInterface(&curis)
+		apiInterface.Instance = nil
+		apiInstance.Interfaces = append(apiInstance.Interfaces, *apiInterface)
 		if dbis.VpcID != nil && *dbis.VpcID != dbinst.VpcID {
 			secondaryVpcIDs.Add(dbis.VpcID.String())
 		} else if dbis.VpcID == nil && dbis.VpcPrefix != nil && dbis.VpcPrefix.VpcID != dbinst.VpcID {
@@ -2076,6 +2224,7 @@ func NewAPIInstance(dbinst *cdbm.Instance, dbSite *cdbm.Site, dbiss []cdbm.Inter
 		apiInstance.DpuExtensionServiceDeployments = append(apiInstance.DpuExtensionServiceDeployments, *NewAPIDpuExtensionServiceDeployment(&curdesd))
 	}
 
+	apiInstance.SSHKeyGroupIDs = []string{}
 	apiInstance.SSHKeyGroups = []APISSHKeyGroupSummary{}
 	for _, dbskg := range dbskgs {
 		skg := dbskg

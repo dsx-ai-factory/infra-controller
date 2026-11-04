@@ -16,6 +16,7 @@
  */
 use std::ops::DerefMut;
 
+use carbide_uuid::DbTable;
 use carbide_uuid::dpu_remediations::RemediationId;
 use carbide_uuid::machine::DpuMachineId;
 use model::dpu_remediation::{
@@ -28,12 +29,22 @@ use sqlx::Postgres;
 use super::{ColumnInfo, FilterableQueryBuilder, ObjectColumnFilter};
 use crate::{DatabaseError, DatabaseResult};
 
+#[cfg(test)]
+mod test_decode;
+#[cfg(test)]
+mod test_explicit_columns;
+#[cfg(test)]
+mod test_retry_budget;
+
 pub async fn persist_remediation(
     value: NewRemediation,
     txn: &mut sqlx::Transaction<'_, Postgres>,
 ) -> DatabaseResult<Remediation> {
     let (query, intermediate_query) = if let Some(metadata) = value.metadata.as_ref() {
-        let query = "INSERT INTO dpu_remediations (metadata_name, metadata_description, metadata_labels, script, retries, script_author) VALUES ($1, $2, $3, $4, $5, $6) returning *";
+        let query = "INSERT INTO dpu_remediations (metadata_name, metadata_description, metadata_labels, script, retries, script_author) VALUES ($1, $2, $3, $4, $5, $6)
+        RETURNING
+            id, script, retries, enabled, script_reviewed_by, script_author, creation_time,
+            metadata_name, metadata_description, metadata_labels";
         (
             query,
             sqlx::query_as(query)
@@ -42,7 +53,11 @@ pub async fn persist_remediation(
                 .bind(sqlx::types::Json(&metadata.labels)),
         )
     } else {
-        let query = "INSERT INTO dpu_remediations (script, retries, script_author) VALUES ($1, $2, $3) returning *";
+        let query =
+            "INSERT INTO dpu_remediations (script, retries, script_author) VALUES ($1, $2, $3)
+        RETURNING
+            id, script, retries, enabled, script_reviewed_by, script_author, creation_time,
+            metadata_name, metadata_description, metadata_labels";
         (query, sqlx::query_as(query))
     };
 
@@ -104,7 +119,13 @@ pub async fn find_remediations_by<'a, C: ColumnInfo<'a, TableType = Remediation>
     txn: &mut sqlx::Transaction<'_, Postgres>,
     filter: ObjectColumnFilter<'a, C>,
 ) -> Result<Vec<Remediation>, DatabaseError> {
-    let mut query = FilterableQueryBuilder::new("SELECT * FROM dpu_remediations").filter(&filter);
+    let mut query = FilterableQueryBuilder::new(
+        "SELECT
+            id, script, retries, enabled, script_reviewed_by, script_author, creation_time,
+            metadata_name, metadata_description, metadata_labels
+        FROM dpu_remediations",
+    )
+    .filter(&filter);
     query
         .build_query_as()
         .fetch_all(txn.deref_mut())
@@ -120,13 +141,14 @@ pub async fn find_next_remediation_for_machine(
         .await?
         .into_iter()
     {
-        let max_attempts = remediation.retries + 1;
         let remediations_applied =
             find_remediations_by_remediation_id_and_machine(txn, remediation.id, &machine_id)
                 .await?;
 
-        let attempted_so_far = remediations_applied.len() as i32;
-        if attempted_so_far < max_attempts {
+        let attempted_so_far = remediations_applied.len();
+        // `retries` excludes the initial attempt, so equality permits one more.
+        // Compare directly to avoid overflowing at i32::MAX; negative counts stay ineligible.
+        if usize::try_from(remediation.retries).is_ok_and(|retries| attempted_so_far <= retries) {
             if let Some(last_attempted) = remediations_applied.first()
                 && last_attempted.succeeded
             {
@@ -170,9 +192,13 @@ pub async fn persist_applied_remediation(
     value: NewAppliedRemediation,
     txn: &mut sqlx::Transaction<'_, Postgres>,
 ) -> Result<AppliedRemediation, DatabaseError> {
-    let query = "INSERT INTO applied_dpu_remediations (id, dpu_machine_id, attempt, succeeded, status) VALUES ($1, $2, $3, $4, $5) returning *";
+    let query = format!(
+        "INSERT INTO applied_dpu_remediations (id, dpu_machine_id, attempt, succeeded, status) VALUES ($1, $2, $3, $4, $5)
+        RETURNING {}",
+        AppliedRemediation::db_table_columns(),
+    );
 
-    sqlx::query_as(query)
+    sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
         .bind(value.id)
         .bind(&value.dpu_machine_id)
         .bind(value.attempt)
@@ -180,7 +206,7 @@ pub async fn persist_applied_remediation(
         .bind(sqlx::types::Json(&value.status))
         .fetch_one(txn.deref_mut())
         .await
-        .map_err(|err| DatabaseError::new(query, err))
+        .map_err(|err| DatabaseError::new(&query, err))
 }
 
 #[derive(Clone, Copy)]
@@ -251,8 +277,12 @@ pub async fn find_applied_remediations_by<'a, C: ColumnInfo<'a, TableType = Appl
     txn: &mut sqlx::Transaction<'_, Postgres>,
     filter: ObjectColumnFilter<'a, C>,
 ) -> Result<Vec<AppliedRemediation>, DatabaseError> {
-    let mut query =
-        FilterableQueryBuilder::new("SELECT * FROM applied_dpu_remediations").filter(&filter);
+    let mut query = FilterableQueryBuilder::new(format!(
+        "SELECT {}
+        FROM applied_dpu_remediations",
+        AppliedRemediation::db_table_columns(),
+    ))
+    .filter(&filter);
     query
         .build_query_as()
         .fetch_all(txn.deref_mut())
@@ -266,13 +296,17 @@ pub async fn find_remediations_by_remediation_id_and_machine(
     remediation_id: RemediationId,
     machine_id: &DpuMachineId,
 ) -> Result<Vec<AppliedRemediation>, DatabaseError> {
-    let query = "SELECT * FROM applied_dpu_remediations WHERE id=$1 AND dpu_machine_id=$2 ORDER BY attempt DESC";
-    sqlx::query_as(query)
+    let query = format!(
+        "SELECT {}
+        FROM applied_dpu_remediations WHERE id=$1 AND dpu_machine_id=$2 ORDER BY attempt DESC",
+        AppliedRemediation::db_table_columns(),
+    );
+    sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
         .bind(remediation_id)
         .bind(machine_id)
         .fetch_all(txn.deref_mut())
         .await
-        .map_err(|e| DatabaseError::new(query, e))
+        .map_err(|e| DatabaseError::new(&query, e))
 }
 
 /// Records the script's approver in `script_reviewed_by`. Locks the remediation
@@ -285,7 +319,10 @@ pub async fn persist_approve_remediation(
     value: ApproveRemediation,
     txn: &mut sqlx::Transaction<'_, Postgres>,
 ) -> Result<(), DatabaseError> {
-    let existing_query = "SELECT * FROM dpu_remediations WHERE id=$1 FOR NO KEY UPDATE";
+    let existing_query = "SELECT
+            id, script, retries, enabled, script_reviewed_by, script_author, creation_time,
+            metadata_name, metadata_description, metadata_labels
+        FROM dpu_remediations WHERE id=$1 FOR NO KEY UPDATE";
     let existing_remediation: Remediation = sqlx::query_as(existing_query)
         .bind(value.id)
         .fetch_optional(txn.deref_mut())
@@ -340,7 +377,10 @@ pub async fn persist_enable_remediation(
     value: EnableRemediation,
     txn: &mut sqlx::Transaction<'_, Postgres>,
 ) -> Result<(), DatabaseError> {
-    let existing_query = "SELECT * FROM dpu_remediations WHERE id=$1 FOR NO KEY UPDATE";
+    let existing_query = "SELECT
+            id, script, retries, enabled, script_reviewed_by, script_author, creation_time,
+            metadata_name, metadata_description, metadata_labels
+        FROM dpu_remediations WHERE id=$1 FOR NO KEY UPDATE";
     let existing_remediation: Remediation = sqlx::query_as(existing_query)
         .bind(value.id)
         .fetch_optional(txn.deref_mut())

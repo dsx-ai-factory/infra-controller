@@ -10,15 +10,16 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
+	"github.com/uptrace/bun"
+	"go.opentelemetry.io/otel/attribute"
+	otrace "go.opentelemetry.io/otel/trace"
+
+	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
-	"github.com/google/uuid"
-
-	"github.com/uptrace/bun"
-
-	stracer "github.com/NVIDIA/infra-controller/rest-api/db/pkg/tracer"
 )
 
 const (
@@ -52,6 +53,7 @@ type ExpectedRackGroup struct {
 	Site        *Site                   `bun:"rel:belongs-to,join:site_id=id"`
 	RackGroupID string                  `bun:"rack_group_id,notnull"`
 	Topology    string                  `bun:"topology,notnull"`
+	Protocol    *string                 `bun:"protocol"`
 	Racks       []ExpectedRackGroupRack `bun:"racks,type:jsonb,notnull"`
 	Name        string                  `bun:"name,notnull,default:''"`
 	Description string                  `bun:"description,notnull,default:''"`
@@ -203,6 +205,7 @@ type ExpectedRackGroupCreateInput struct {
 	SiteID              uuid.UUID
 	RackGroupID         string
 	Topology            string
+	Protocol            *string
 	Racks               []ExpectedRackGroupRack
 	Name                string
 	Description         string
@@ -215,6 +218,8 @@ type ExpectedRackGroupUpdateInput struct {
 	ExpectedRackGroupID uuid.UUID
 	RackGroupID         *string
 	Topology            *string
+	ProtocolSet         bool
+	Protocol            *string
 	Racks               []ExpectedRackGroupRack
 	Name                *string
 	Description         *string
@@ -242,6 +247,9 @@ func (er *ExpectedRackGroup) ToProto() *corev1.ExpectedRackGroup {
 			Name:        er.Name,
 			Description: er.Description,
 		},
+	}
+	if er.Protocol != nil {
+		proto.Protocol = *er.Protocol
 	}
 
 	for _, rack := range er.Racks {
@@ -282,6 +290,11 @@ func (er *ExpectedRackGroup) FromProto(proto *corev1.ExpectedRackGroup) error {
 		er.RackGroupID = proto.RackGroupId.Id
 	}
 	er.Topology = proto.GetTopology()
+	if proto.GetProtocol() == "" {
+		er.Protocol = nil
+	} else {
+		er.Protocol = cutil.GetPtr(proto.GetProtocol())
+	}
 	er.Racks = converted.Racks
 	if proto.Metadata != nil {
 		er.Name = proto.Metadata.Name
@@ -343,8 +356,7 @@ type ExpectedRackGroupDAO interface {
 
 // ExpectedRackGroupSQLDAO is an implementation of the ExpectedRackGroupDAO interface
 type ExpectedRackGroupSQLDAO struct {
-	dbSession  *db.Session
-	tracerSpan *stracer.TracerSpan
+	dbSession *db.Session
 
 	ExpectedRackGroupDAO
 }
@@ -353,12 +365,10 @@ type ExpectedRackGroupSQLDAO struct {
 // The returned ExpectedRackGroup will not have any related structs filled in.
 // Since there are 2 operations (INSERT, SELECT), it is required that
 // this library call happens within a transaction
-func (erd ExpectedRackGroupSQLDAO) Create(ctx context.Context, tx *db.Tx, input ExpectedRackGroupCreateInput) (*ExpectedRackGroup, error) {
+func (erd ExpectedRackGroupSQLDAO) Create(ctx context.Context, tx *db.Tx, input ExpectedRackGroupCreateInput) (_ *ExpectedRackGroup, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, expectedRackGroupDAOSpan := erd.tracerSpan.CreateChildInCurrentContext(ctx, "ExpectedRackGroupDAO.Create")
-	if expectedRackGroupDAOSpan != nil {
-		defer expectedRackGroupDAOSpan.End()
-	}
+	ctx, expectedRackGroupDAOSpan := cotel.StartSpan(ctx, "ExpectedRackGroupDAO.Create")
+	defer func() { cotel.EndSpan(expectedRackGroupDAOSpan, retErr) }()
 
 	results, err := erd.CreateMultiple(ctx, tx, []ExpectedRackGroupCreateInput{input})
 	if err != nil {
@@ -371,13 +381,11 @@ func (erd ExpectedRackGroupSQLDAO) Create(ctx context.Context, tx *db.Tx, input 
 // The returned ExpectedRackGroups will not have any related structs filled in.
 // Since there are 2 operations (INSERT, SELECT), it is required that
 // this library call happens within a transaction
-func (erd ExpectedRackGroupSQLDAO) CreateMultiple(ctx context.Context, tx *db.Tx, inputs []ExpectedRackGroupCreateInput) ([]ExpectedRackGroup, error) {
+func (erd ExpectedRackGroupSQLDAO) CreateMultiple(ctx context.Context, tx *db.Tx, inputs []ExpectedRackGroupCreateInput) (_ []ExpectedRackGroup, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, expectedRackGroupDAOSpan := erd.tracerSpan.CreateChildInCurrentContext(ctx, "ExpectedRackGroupDAO.CreateMultiple")
-	if expectedRackGroupDAOSpan != nil {
-		defer expectedRackGroupDAOSpan.End()
-		erd.tracerSpan.SetAttribute(expectedRackGroupDAOSpan, "batch_size", len(inputs))
-	}
+	ctx, expectedRackGroupDAOSpan := cotel.StartSpan(ctx, "ExpectedRackGroupDAO.CreateMultiple")
+	defer func() { cotel.EndSpan(expectedRackGroupDAOSpan, retErr) }()
+	cotel.SetAttribute(expectedRackGroupDAOSpan, attribute.Int("batch_size", len(inputs)))
 
 	if len(inputs) == 0 {
 		return []ExpectedRackGroup{}, nil
@@ -396,6 +404,7 @@ func (erd ExpectedRackGroupSQLDAO) CreateMultiple(ctx context.Context, tx *db.Tx
 			SiteID:      input.SiteID,
 			RackGroupID: input.RackGroupID,
 			Topology:    input.Topology,
+			Protocol:    input.Protocol,
 			Racks:       input.Racks,
 			Name:        input.Name,
 			Description: input.Description,
@@ -408,10 +417,10 @@ func (erd ExpectedRackGroupSQLDAO) CreateMultiple(ctx context.Context, tx *db.Tx
 	}
 
 	// Add summary tracing attributes
-	if expectedRackGroupDAOSpan != nil && len(inputs) > 0 {
-		erd.tracerSpan.SetAttribute(expectedRackGroupDAOSpan, "first_id", ids[0].String())
+	if len(inputs) > 0 {
+		cotel.SetAttribute(expectedRackGroupDAOSpan, attribute.String("first_id", ids[0].String()))
 		if len(ids) > 1 {
-			erd.tracerSpan.SetAttribute(expectedRackGroupDAOSpan, "last_id", ids[len(ids)-1].String())
+			cotel.SetAttribute(expectedRackGroupDAOSpan, attribute.String("last_id", ids[len(ids)-1].String()))
 		}
 	}
 
@@ -445,14 +454,11 @@ func (erd ExpectedRackGroupSQLDAO) CreateMultiple(ctx context.Context, tx *db.Tx
 
 // Get returns an ExpectedRackGroup by ID
 // returns db.ErrDoesNotExist error if the record is not found
-func (erd ExpectedRackGroupSQLDAO) Get(ctx context.Context, tx *db.Tx, expectedRackGroupID uuid.UUID, includeRelations []string, forUpdate bool) (*ExpectedRackGroup, error) {
+func (erd ExpectedRackGroupSQLDAO) Get(ctx context.Context, tx *db.Tx, expectedRackGroupID uuid.UUID, includeRelations []string, forUpdate bool) (_ *ExpectedRackGroup, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, expectedRackGroupDAOSpan := erd.tracerSpan.CreateChildInCurrentContext(ctx, "ExpectedRackGroupDAO.Get")
-	if expectedRackGroupDAOSpan != nil {
-		defer expectedRackGroupDAOSpan.End()
-
-		erd.tracerSpan.SetAttribute(expectedRackGroupDAOSpan, "id", expectedRackGroupID.String())
-	}
+	ctx, expectedRackGroupDAOSpan := cotel.StartSpan(ctx, "ExpectedRackGroupDAO.Get")
+	defer func() { cotel.EndSpan(expectedRackGroupDAOSpan, retErr) }()
+	cotel.SetAttribute(expectedRackGroupDAOSpan, attribute.String("id", expectedRackGroupID.String()))
 
 	er := &ExpectedRackGroup{}
 
@@ -478,33 +484,21 @@ func (erd ExpectedRackGroupSQLDAO) Get(ctx context.Context, tx *db.Tx, expectedR
 }
 
 // setQueryWithFilter populates the lookup query based on specified filter
-func (erd ExpectedRackGroupSQLDAO) setQueryWithFilter(filter ExpectedRackGroupFilterInput, query *bun.SelectQuery, expectedRackGroupDAOSpan *stracer.CurrentContextSpan) (*bun.SelectQuery, error) {
+func (erd ExpectedRackGroupSQLDAO) setQueryWithFilter(filter ExpectedRackGroupFilterInput, query *bun.SelectQuery, expectedRackGroupDAOSpan otrace.Span) (*bun.SelectQuery, error) {
 	if filter.SiteIDs != nil {
 		query = query.Where("er.site_id IN (?)", bun.In(filter.SiteIDs))
-		if expectedRackGroupDAOSpan != nil {
-			erd.tracerSpan.SetAttribute(expectedRackGroupDAOSpan, "site_ids", filter.SiteIDs)
-		}
 	}
 
 	if filter.ExpectedRackGroupIDs != nil {
 		query = query.Where("er.id IN (?)", bun.In(filter.ExpectedRackGroupIDs))
-		if expectedRackGroupDAOSpan != nil {
-			erd.tracerSpan.SetAttribute(expectedRackGroupDAOSpan, "expected_rack_group_ids", filter.ExpectedRackGroupIDs)
-		}
 	}
 
 	if filter.RackGroupIDs != nil {
 		query = query.Where("er.rack_group_id IN (?)", bun.In(filter.RackGroupIDs))
-		if expectedRackGroupDAOSpan != nil {
-			erd.tracerSpan.SetAttribute(expectedRackGroupDAOSpan, "rack_group_ids", filter.RackGroupIDs)
-		}
 	}
 
 	if filter.Topologies != nil {
 		query = query.Where("er.topology IN (?)", bun.In(filter.Topologies))
-		if expectedRackGroupDAOSpan != nil {
-			erd.tracerSpan.SetAttribute(expectedRackGroupDAOSpan, "topologys", filter.Topologies)
-		}
 	}
 
 	if filter.SearchQuery != nil {
@@ -520,9 +514,7 @@ func (erd ExpectedRackGroupSQLDAO) setQueryWithFilter(filter ExpectedRackGroupFi
 				WhereOr("er.id::text ILIKE ?", "%"+*filter.SearchQuery+"%").
 				WhereOr("er.site_id::text ILIKE ?", "%"+*filter.SearchQuery+"%")
 		})
-		if expectedRackGroupDAOSpan != nil {
-			erd.tracerSpan.SetAttribute(expectedRackGroupDAOSpan, "search_query", *filter.SearchQuery)
-		}
+		cotel.SetAttribute(expectedRackGroupDAOSpan, attribute.String("search_query", *filter.SearchQuery))
 	}
 
 	return query, nil
@@ -532,12 +524,10 @@ func (erd ExpectedRackGroupSQLDAO) setQueryWithFilter(filter ExpectedRackGroupFi
 // Errors are returned only when there is a db related error
 // If records not found, then error is nil, but length of returned slice is 0
 // If orderBy is nil, then records are ordered by column specified in ExpectedRackGroupOrderByDefault in ascending order
-func (erd ExpectedRackGroupSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter ExpectedRackGroupFilterInput, page paginator.PageInput, includeRelations []string) ([]ExpectedRackGroup, int, error) {
+func (erd ExpectedRackGroupSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter ExpectedRackGroupFilterInput, page paginator.PageInput, includeRelations []string) (_ []ExpectedRackGroup, _ int, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, expectedRackGroupDAOSpan := erd.tracerSpan.CreateChildInCurrentContext(ctx, "ExpectedRackGroupDAO.GetAll")
-	if expectedRackGroupDAOSpan != nil {
-		defer expectedRackGroupDAOSpan.End()
-	}
+	ctx, expectedRackGroupDAOSpan := cotel.StartSpan(ctx, "ExpectedRackGroupDAO.GetAll")
+	defer func() { cotel.EndSpan(expectedRackGroupDAOSpan, retErr) }()
 
 	var expectedRackGroups []ExpectedRackGroup
 
@@ -582,13 +572,11 @@ func (erd ExpectedRackGroupSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter
 // The updated fields are assumed to be set to non-null values
 // since there are 2 operations (UPDATE, SELECT), it is required that
 // this library call happens within a transaction
-func (erd ExpectedRackGroupSQLDAO) Update(ctx context.Context, tx *db.Tx, input ExpectedRackGroupUpdateInput) (*ExpectedRackGroup, error) {
+func (erd ExpectedRackGroupSQLDAO) Update(ctx context.Context, tx *db.Tx, input ExpectedRackGroupUpdateInput) (_ *ExpectedRackGroup, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, expectedRackGroupDAOSpan := erd.tracerSpan.CreateChildInCurrentContext(ctx, "ExpectedRackGroupDAO.Update")
-	if expectedRackGroupDAOSpan != nil {
-		defer expectedRackGroupDAOSpan.End()
-		// Detailed per-field tracing is recorded in the UpdateMultiple child span.
-	}
+	ctx, expectedRackGroupDAOSpan := cotel.StartSpan(ctx, "ExpectedRackGroupDAO.Update")
+	defer func() { cotel.EndSpan(expectedRackGroupDAOSpan, retErr) }()
+	// Detailed per-field tracing is recorded in the UpdateMultiple child span.
 
 	results, err := erd.UpdateMultiple(ctx, tx, []ExpectedRackGroupUpdateInput{input})
 	if err != nil {
@@ -599,7 +587,11 @@ func (erd ExpectedRackGroupSQLDAO) Update(ctx context.Context, tx *db.Tx, input 
 
 // UpdateMultiple preserves omitted fields independently for each input.
 // Pass a transaction when the batch must be atomic.
-func (erd ExpectedRackGroupSQLDAO) UpdateMultiple(ctx context.Context, tx *db.Tx, inputs []ExpectedRackGroupUpdateInput) ([]ExpectedRackGroup, error) {
+func (erd ExpectedRackGroupSQLDAO) UpdateMultiple(ctx context.Context, tx *db.Tx, inputs []ExpectedRackGroupUpdateInput) (_ []ExpectedRackGroup, retErr error) {
+	ctx, expectedRackGroupDAOSpan := cotel.StartSpan(ctx, "ExpectedRackGroupDAO.UpdateMultiple")
+	defer func() { cotel.EndSpan(expectedRackGroupDAOSpan, retErr) }()
+	cotel.SetAttribute(expectedRackGroupDAOSpan, attribute.Int("batch_size", len(inputs)))
+
 	result := make([]ExpectedRackGroup, 0, len(inputs))
 	for _, input := range inputs {
 		row := &ExpectedRackGroup{ID: input.ExpectedRackGroupID}
@@ -611,6 +603,10 @@ func (erd ExpectedRackGroupSQLDAO) UpdateMultiple(ctx context.Context, tx *db.Tx
 		if input.Topology != nil {
 			row.Topology = *input.Topology
 			columns = append(columns, "topology")
+		}
+		if input.ProtocolSet {
+			row.Protocol = input.Protocol
+			columns = append(columns, "protocol")
 		}
 		if input.Racks != nil {
 			row.Racks = input.Racks
@@ -655,14 +651,11 @@ func (erd ExpectedRackGroupSQLDAO) UpdateMultiple(ctx context.Context, tx *db.Tx
 
 // Delete deletes an ExpectedRackGroup by ID
 // Error is returned only if there is a db error
-func (erd ExpectedRackGroupSQLDAO) Delete(ctx context.Context, tx *db.Tx, expectedRackGroupID uuid.UUID) error {
+func (erd ExpectedRackGroupSQLDAO) Delete(ctx context.Context, tx *db.Tx, expectedRackGroupID uuid.UUID) (retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, expectedRackGroupDAOSpan := erd.tracerSpan.CreateChildInCurrentContext(ctx, "ExpectedRackGroupDAO.Delete")
-	if expectedRackGroupDAOSpan != nil {
-		defer expectedRackGroupDAOSpan.End()
-
-		erd.tracerSpan.SetAttribute(expectedRackGroupDAOSpan, "id", expectedRackGroupID.String())
-	}
+	ctx, expectedRackGroupDAOSpan := cotel.StartSpan(ctx, "ExpectedRackGroupDAO.Delete")
+	defer func() { cotel.EndSpan(expectedRackGroupDAOSpan, retErr) }()
+	cotel.SetAttribute(expectedRackGroupDAOSpan, attribute.String("id", expectedRackGroupID.String()))
 
 	er := &ExpectedRackGroup{
 		ID: expectedRackGroupID,
@@ -677,7 +670,11 @@ func (erd ExpectedRackGroupSQLDAO) Delete(ctx context.Context, tx *db.Tx, expect
 }
 
 // DeleteIfUnchanged returns false when the row was changed or removed after inventory read it.
-func (erd ExpectedRackGroupSQLDAO) DeleteIfUnchanged(ctx context.Context, tx *db.Tx, expectedRackGroupID uuid.UUID, updated time.Time) (bool, error) {
+func (erd ExpectedRackGroupSQLDAO) DeleteIfUnchanged(ctx context.Context, tx *db.Tx, expectedRackGroupID uuid.UUID, updated time.Time) (_ bool, retErr error) {
+	ctx, expectedRackGroupDAOSpan := cotel.StartSpan(ctx, "ExpectedRackGroupDAO.DeleteIfUnchanged")
+	defer func() { cotel.EndSpan(expectedRackGroupDAOSpan, retErr) }()
+	cotel.SetAttribute(expectedRackGroupDAOSpan, attribute.String("id", expectedRackGroupID.String()))
+
 	result, err := db.GetIDB(tx, erd.dbSession).NewDelete().Model((*ExpectedRackGroup)(nil)).
 		Where("id = ?", expectedRackGroupID).Where("updated = ?", updated).Exec(ctx)
 	if err != nil {
@@ -691,12 +688,10 @@ func (erd ExpectedRackGroupSQLDAO) DeleteIfUnchanged(ctx context.Context, tx *db
 // scoped by site). Callers must supply at least one filter; an empty filter
 // is rejected with db.ErrInvalidParams to prevent wiping the entire table.
 // Error is returned only if there is a db error or no filter was supplied.
-func (erd ExpectedRackGroupSQLDAO) DeleteAll(ctx context.Context, tx *db.Tx, filter ExpectedRackGroupFilterInput) error {
+func (erd ExpectedRackGroupSQLDAO) DeleteAll(ctx context.Context, tx *db.Tx, filter ExpectedRackGroupFilterInput) (retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, expectedRackGroupDAOSpan := erd.tracerSpan.CreateChildInCurrentContext(ctx, "ExpectedRackGroupDAO.DeleteAll")
-	if expectedRackGroupDAOSpan != nil {
-		defer expectedRackGroupDAOSpan.End()
-	}
+	ctx, expectedRackGroupDAOSpan := cotel.StartSpan(ctx, "ExpectedRackGroupDAO.DeleteAll")
+	defer func() { cotel.EndSpan(expectedRackGroupDAOSpan, retErr) }()
 
 	query := db.GetIDB(tx, erd.dbSession).NewDelete().Model((*ExpectedRackGroup)(nil))
 
@@ -704,30 +699,18 @@ func (erd ExpectedRackGroupSQLDAO) DeleteAll(ctx context.Context, tx *db.Tx, fil
 	if filter.SiteIDs != nil {
 		query = query.Where("site_id IN (?)", bun.In(filter.SiteIDs))
 		hasFilter = true
-		if expectedRackGroupDAOSpan != nil {
-			erd.tracerSpan.SetAttribute(expectedRackGroupDAOSpan, "site_ids", filter.SiteIDs)
-		}
 	}
 	if filter.ExpectedRackGroupIDs != nil {
 		query = query.Where("id IN (?)", bun.In(filter.ExpectedRackGroupIDs))
 		hasFilter = true
-		if expectedRackGroupDAOSpan != nil {
-			erd.tracerSpan.SetAttribute(expectedRackGroupDAOSpan, "expected_rack_group_ids", filter.ExpectedRackGroupIDs)
-		}
 	}
 	if filter.RackGroupIDs != nil {
 		query = query.Where("rack_group_id IN (?)", bun.In(filter.RackGroupIDs))
 		hasFilter = true
-		if expectedRackGroupDAOSpan != nil {
-			erd.tracerSpan.SetAttribute(expectedRackGroupDAOSpan, "rack_group_ids", filter.RackGroupIDs)
-		}
 	}
 	if filter.Topologies != nil {
 		query = query.Where("topology IN (?)", bun.In(filter.Topologies))
 		hasFilter = true
-		if expectedRackGroupDAOSpan != nil {
-			erd.tracerSpan.SetAttribute(expectedRackGroupDAOSpan, "topologys", filter.Topologies)
-		}
 	}
 
 	// Make sure at least one filter was provided; don't allow someone
@@ -746,13 +729,11 @@ func (erd ExpectedRackGroupSQLDAO) DeleteAll(ctx context.Context, tx *db.Tx, fil
 
 // ReplaceAll deletes all ExpectedRackGroups matching the given filter and replaces them with the provided inputs.
 // Both operations occur in the same transaction so callers must provide a transaction.
-func (erd ExpectedRackGroupSQLDAO) ReplaceAll(ctx context.Context, tx *db.Tx, filter ExpectedRackGroupFilterInput, inputs []ExpectedRackGroupCreateInput) ([]ExpectedRackGroup, error) {
+func (erd ExpectedRackGroupSQLDAO) ReplaceAll(ctx context.Context, tx *db.Tx, filter ExpectedRackGroupFilterInput, inputs []ExpectedRackGroupCreateInput) (_ []ExpectedRackGroup, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, expectedRackGroupDAOSpan := erd.tracerSpan.CreateChildInCurrentContext(ctx, "ExpectedRackGroupDAO.ReplaceAll")
-	if expectedRackGroupDAOSpan != nil {
-		defer expectedRackGroupDAOSpan.End()
-		erd.tracerSpan.SetAttribute(expectedRackGroupDAOSpan, "batch_size", len(inputs))
-	}
+	ctx, expectedRackGroupDAOSpan := cotel.StartSpan(ctx, "ExpectedRackGroupDAO.ReplaceAll")
+	defer func() { cotel.EndSpan(expectedRackGroupDAOSpan, retErr) }()
+	cotel.SetAttribute(expectedRackGroupDAOSpan, attribute.Int("batch_size", len(inputs)))
 
 	if err := erd.DeleteAll(ctx, tx, filter); err != nil {
 		return nil, err
@@ -768,7 +749,6 @@ func (erd ExpectedRackGroupSQLDAO) ReplaceAll(ctx context.Context, tx *db.Tx, fi
 // NewExpectedRackGroupDAO returns a new ExpectedRackGroupDAO
 func NewExpectedRackGroupDAO(dbSession *db.Session) ExpectedRackGroupDAO {
 	return &ExpectedRackGroupSQLDAO{
-		dbSession:  dbSession,
-		tracerSpan: stracer.NewTracerSpan(),
+		dbSession: dbSession,
 	}
 }

@@ -15,7 +15,7 @@ spec:
   subject:
     organizations:
       - Nvidia
-  commonName: carbide-rest-site-manager
+  commonName: nico-rest-site-manager
   isCA: false
   privateKey:
     algorithm: RSA
@@ -24,12 +24,17 @@ spec:
   usages:
     - server auth
     - client auth
+  # The API, workflow, and Site Agent configs dial the short name, but any of
+  # these forms is a valid way to reach the Service, so all of them need to be
+  # SANs here. These assume the nico-rest namespace the overlays deploy into;
+  # change them alongside it.
   dnsNames:
-    - carbide-rest-site-manager
-    - carbide-rest-site-manager.carbide-rest
-    - carbide-rest-site-manager.carbide-rest.svc.cluster.local
+    - nico-rest-site-manager
+    - nico-rest-site-manager.nico-rest
+    - nico-rest-site-manager.nico-rest.svc
+    - nico-rest-site-manager.nico-rest.svc.cluster.local
     - localhost
   issuerRef:
-    name: carbide-rest-ca-issuer
+    name: nico-rest-ca-issuer
     kind: ClusterIssuer
     group: cert-manager.io

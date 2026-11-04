@@ -21,6 +21,8 @@ pub mod domain;
 pub mod dpa_interface;
 pub mod dpu_remediations;
 pub mod extension_service;
+/// Typed identities for the external-validation workflow.
+pub mod external_validation;
 pub mod infiniband;
 pub mod instance;
 pub mod instance_type;
@@ -53,15 +55,75 @@ pub trait DbPrimaryUuid {
     fn db_primary_uuid_name() -> &'static str;
 }
 
-/// DbTable is a trait intended for table records which derive
-/// sqlx FromRow. The intent here is db_table_name() will return
-/// the actual name of the table the records are in, allowing for
-/// dynamic composition of an SQL query for that table.
+/// `DbTable` identifies the table and columns for records decoded by
+/// `sqlx::FromRow`, allowing queries to use the record's column contract
+/// without including unrelated columns from the table.
+///
+/// Records with direct field-to-column mappings can derive this trait with
+/// `carbide_macros::DbTable`; other records can implement it explicitly.
 ///
 /// This was originally introduced as part of the measured boot
 /// generics (and lived in src/measured_boot/), but moved here.
 pub trait DbTable {
     fn db_table_name() -> &'static str;
+
+    /// `db_table_columns` returns the trusted, unqualified column names
+    /// required by this record's decoder, in a fixed order. Format the
+    /// returned `DbColumns` directly for `SELECT` and `RETURNING` clauses;
+    /// these are SQL identifiers, not bound data. Do not include `*`:
+    /// unrelated added columns must not change a cached query's result type.
+    fn db_table_columns() -> DbColumns;
+
+    /// `db_aliased_table` returns the table reference for a `FROM` or `JOIN`
+    /// clause, such as `tenant_identity_config AS tic`. Without a declared
+    /// alias, it returns `db_table_name()` unchanged.
+    /// To declare an alias, manual implementations must override both
+    /// aliased helpers with that same alias.
+    fn db_aliased_table() -> &'static str {
+        Self::db_table_name()
+    }
+
+    /// `db_aliased_columns` returns the decoder's columns qualified by the
+    /// alias declared in `db_aliased_table`, in the same order as
+    /// `db_table_columns`. Qualification does not rename result fields.
+    /// Without a declared alias, it returns the unqualified columns.
+    fn db_aliased_columns() -> DbColumns {
+        Self::db_table_columns()
+    }
+}
+
+/// `DbColumns` formats trusted SQL column references without allocating an
+/// intermediate joined string. References are written verbatim in slice order,
+/// separated by `", "`; an empty list formats as an empty string.
+pub struct DbColumns(&'static [&'static str]);
+
+impl DbColumns {
+    /// `new` wraps static SQL column references without validating or quoting them.
+    /// Callers must supply trusted column references required by their
+    /// record's decoder, optionally qualified by a table alias, not user
+    /// input or `*`.
+    pub const fn new(columns: &'static [&'static str]) -> Self {
+        Self(columns)
+    }
+
+    /// `as_slice` returns the original column references in their declared order.
+    pub const fn as_slice(&self) -> &'static [&'static str] {
+        self.0
+    }
+}
+
+impl std::fmt::Display for DbColumns {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Some((first, rest)) = self.0.split_first() else {
+            return Ok(());
+        };
+        f.write_str(first)?;
+        for column in rest {
+            f.write_str(", ")?;
+            f.write_str(column)?;
+        }
+        Ok(())
+    }
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -90,4 +152,47 @@ pub enum UuidConversionError {
 pub(crate) struct CommonUuidPlaceholder {
     #[prost(string, tag = "1")]
     pub value: ::prost::alloc::string::String,
+}
+
+#[cfg(test)]
+mod tests {
+    use carbide_test_support::value_scenarios;
+
+    use super::{DbColumns, DbTable};
+
+    #[test]
+    fn manual_db_table_without_alias_uses_existing_metadata() {
+        struct Record;
+
+        impl DbTable for Record {
+            fn db_table_name() -> &'static str {
+                "records"
+            }
+
+            fn db_table_columns() -> DbColumns {
+                DbColumns::new(&["id"])
+            }
+        }
+
+        assert_eq!(Record::db_aliased_table(), Record::db_table_name());
+        assert_eq!(
+            Record::db_aliased_columns().as_slice(),
+            Record::db_table_columns().as_slice(),
+        );
+    }
+
+    #[test]
+    fn db_columns_display_uses_comma_space_separators() {
+        value_scenarios!(run = |columns: DbColumns| columns.to_string();
+            "no columns" {
+                DbColumns::new(&[]) => String::new(),
+            }
+            "one column has no separator" {
+                DbColumns::new(&["id"]) => "id".to_string(),
+            }
+            "multiple columns retain their order" {
+                DbColumns::new(&["z_value", "first"]) => "z_value, first".to_string(),
+            }
+        );
+    }
 }

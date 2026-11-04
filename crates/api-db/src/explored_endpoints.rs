@@ -16,6 +16,7 @@
  */
 use std::net::IpAddr;
 
+use carbide_uuid::machine::MachineId;
 use chrono::{DateTime, Utc};
 use config_version::ConfigVersion;
 use const_format::concatcp;
@@ -32,6 +33,18 @@ use sqlx::{FromRow, PgConnection, Row};
 use crate::db_read::DbReader;
 use crate::{BIND_LIMIT, ConditionalWrite, DatabaseError};
 
+#[cfg(test)]
+mod test_explicit_columns;
+
+// An in-flight exploration must retain requests queued while it was probing a
+// BMC that is now suppressed. Keep this check in the report write transaction.
+const KEEP_SUPPRESSED_EXPLORATION_REQUEST: &str = "exploration_requested AND EXISTS (
+    SELECT 1 FROM machine_interface_addresses mia
+    JOIN machine_interfaces mi ON mi.id = mia.interface_id
+    JOIN bmc_suppressions s ON s.bmc_mac_address = mi.mac_address
+    WHERE mia.address = explored_endpoints.address AND s.subsystem = 'site_explorer'
+)";
+
 #[derive(Debug)]
 struct DbExploredEndpoint {
     /// The IP address of the node we explored
@@ -45,7 +58,7 @@ struct DbExploredEndpoint {
     preingestion_state: PreingestionState,
     /// Indicates that preingestion is waiting for site explorer to refresh the state
     waiting_for_explorer_refresh: bool,
-    /// Whether the endpoint will be explored in the next site-explorer run
+    /// Whether exploration is queued. Pending requests remain queued while suppressed.
     exploration_requested: bool,
     /// The last time site explorer issued a redfish call to reset this BMC
     last_redfish_bmc_reset: Option<chrono::DateTime<chrono::Utc>>,
@@ -148,7 +161,13 @@ pub async fn find_by_ips(
     db: impl DbReader<'_>,
     ips: Vec<IpAddr>,
 ) -> Result<Vec<ExploredEndpoint>, DatabaseError> {
-    let query = "SELECT * FROM explored_endpoints WHERE address=ANY($1)";
+    let query = "SELECT
+            address, exploration_report, version, preingestion_state,
+            waiting_for_explorer_refresh, exploration_requested, last_redfish_bmc_reset,
+            last_ipmitool_bmc_reset, last_redfish_reboot, last_redfish_powercycle,
+            pause_ingestion_and_poweron, pause_remediation, boot_interface_mac, boot_interface_id
+        FROM explored_endpoints
+        WHERE address=ANY($1)";
 
     sqlx::query_as::<_, DbExploredEndpoint>(query)
         .bind(ips)
@@ -172,9 +191,14 @@ pub async fn find_by_dpu_serial_numbers(
     db: impl DbReader<'_>,
     serials: Vec<String>,
 ) -> Result<Vec<ExploredEndpoint>, DatabaseError> {
-    let query = "SELECT * FROM explored_endpoints \
-                 WHERE exploration_report->'Systems'->0->>'SerialNumber' = ANY($1) \
-                 AND exploration_report->'Systems'->0->>'Id' = 'Bluefield'";
+    let query = "SELECT
+            address, exploration_report, version, preingestion_state,
+            waiting_for_explorer_refresh, exploration_requested, last_redfish_bmc_reset,
+            last_ipmitool_bmc_reset, last_redfish_reboot, last_redfish_powercycle,
+            pause_ingestion_and_poweron, pause_remediation, boot_interface_mac, boot_interface_id
+        FROM explored_endpoints
+        WHERE exploration_report->'Systems'->0->>'SerialNumber' = ANY($1)
+          AND exploration_report->'Systems'->0->>'Id' = 'Bluefield'";
 
     sqlx::query_as::<_, DbExploredEndpoint>(query)
         .bind(serials)
@@ -186,7 +210,12 @@ pub async fn find_by_dpu_serial_numbers(
 
 /// find_all returns all explored endpoints that site explorer has been able to probe
 pub async fn find_all(txn: impl DbReader<'_>) -> Result<Vec<ExploredEndpoint>, DatabaseError> {
-    let query = "SELECT * FROM explored_endpoints";
+    let query = "SELECT
+            address, exploration_report, version, preingestion_state,
+            waiting_for_explorer_refresh, exploration_requested, last_redfish_bmc_reset,
+            last_ipmitool_bmc_reset, last_redfish_reboot, last_redfish_powercycle,
+            pause_ingestion_and_poweron, pause_remediation, boot_interface_mac, boot_interface_id
+        FROM explored_endpoints";
 
     sqlx::query_as::<_, DbExploredEndpoint>(query)
         .fetch_all(txn)
@@ -212,8 +241,13 @@ pub async fn find_preingest_not_waiting_not_error(
     txn: impl DbReader<'_>,
 ) -> Result<Vec<ExploredEndpoint>, DatabaseError> {
     const QUERY: &str = concatcp!(
-        "SELECT * FROM explored_endpoints
-                        WHERE ",
+        "SELECT
+            address, exploration_report, version, preingestion_state,
+            waiting_for_explorer_refresh, exploration_requested, last_redfish_bmc_reset,
+            last_ipmitool_bmc_reset, last_redfish_reboot, last_redfish_powercycle,
+            pause_ingestion_and_poweron, pause_remediation, boot_interface_mac, boot_interface_id
+        FROM explored_endpoints
+        WHERE ",
         PREINGEST_NOT_WAITING_NOT_ERROR_WHERE
     );
 
@@ -267,7 +301,13 @@ pub async fn find_preingest_installing(
     txn: impl DbReader<'_>,
 ) -> Result<Vec<ExploredEndpoint>, DatabaseError> {
     const QUERY: &str = concatcp!(
-        "SELECT * FROM explored_endpoints WHERE ",
+        "SELECT
+            address, exploration_report, version, preingestion_state,
+            waiting_for_explorer_refresh, exploration_requested, last_redfish_bmc_reset,
+            last_ipmitool_bmc_reset, last_redfish_reboot, last_redfish_powercycle,
+            pause_ingestion_and_poweron, pause_remediation, boot_interface_mac, boot_interface_id
+        FROM explored_endpoints
+        WHERE ",
         PREINGEST_INSTALLING_WHERE
     );
 
@@ -302,8 +342,13 @@ pub async fn count_preingest_installing(txn: impl DbReader<'_>) -> Result<i64, D
 pub async fn find_all_preingestion_complete(
     txn: &mut PgConnection,
 ) -> Result<Vec<ExploredEndpoint>, DatabaseError> {
-    let query =
-        "SELECT * FROM explored_endpoints WHERE preingestion_state->'state' = '\"complete\"'";
+    let query = "SELECT
+            address, exploration_report, version, preingestion_state,
+            waiting_for_explorer_refresh, exploration_requested, last_redfish_bmc_reset,
+            last_ipmitool_bmc_reset, last_redfish_reboot, last_redfish_powercycle,
+            pause_ingestion_and_poweron, pause_remediation, boot_interface_mac, boot_interface_id
+        FROM explored_endpoints
+        WHERE preingestion_state->'state' = '\"complete\"'";
 
     sqlx::query_as::<_, DbExploredEndpoint>(query)
         .fetch_all(txn)
@@ -317,7 +362,13 @@ pub async fn find_all_by_ip(
     address: IpAddr,
     txn: &mut PgConnection,
 ) -> Result<Vec<ExploredEndpoint>, DatabaseError> {
-    let query = "SELECT * FROM explored_endpoints WHERE address = $1";
+    let query = "SELECT
+            address, exploration_report, version, preingestion_state,
+            waiting_for_explorer_refresh, exploration_requested, last_redfish_bmc_reset,
+            last_ipmitool_bmc_reset, last_redfish_reboot, last_redfish_powercycle,
+            pause_ingestion_and_poweron, pause_remediation, boot_interface_mac, boot_interface_id
+        FROM explored_endpoints
+        WHERE address = $1";
 
     sqlx::query_as::<_, DbExploredEndpoint>(query)
         .bind(address)
@@ -450,7 +501,8 @@ fn attester_digest(report: &EndpointExplorationReport) -> Option<String> {
 /// Replaces an endpoint's report if its version still matches.
 ///
 /// An applied write advances the report version, stores the supplied
-/// `waiting_for_explorer_refresh`, and clears `exploration_requested` in the
+/// `waiting_for_explorer_refresh`, and clears `exploration_requested` unless
+/// Site Explorer is suppressed for the endpoint. The write stays in the
 /// caller's transaction. A missing endpoint or changed report version returns
 /// `NotApplied(EndpointReportNotCurrent)`; database failures remain errors.
 pub async fn try_update(
@@ -462,10 +514,10 @@ pub async fn try_update(
 ) -> Result<ConditionalWrite<(), EndpointReportNotCurrent>, DatabaseError> {
     let new_version = old_version.increment();
     let attester_digest = attester_digest(exploration_report);
-    let query = "
-UPDATE explored_endpoints SET version=$1, exploration_report=$2, waiting_for_explorer_refresh=$3, exploration_requested = false, hardware_class=$4,
+    let query = concatcp!("
+UPDATE explored_endpoints SET version=$1, exploration_report=$2, waiting_for_explorer_refresh=$3, exploration_requested = ", KEEP_SUPPRESSED_EXPLORATION_REQUEST, ", hardware_class=$4,
     attester_digest = CASE WHEN $5 THEN attester_digest ELSE $6 END
-WHERE address=$7 AND version=$8";
+WHERE address=$7 AND version=$8");
     let query_result = sqlx::query(query)
         .bind(new_version)
         .bind(sqlx::types::Json(exploration_report))
@@ -496,7 +548,8 @@ pub struct EndpointReportNotCurrent;
 /// replacing the last successful exploration report.
 ///
 /// An applied write advances the report version, sets `waiting_for_explorer_refresh`,
-/// and clears `exploration_requested` in the caller's transaction. A missing
+/// and clears `exploration_requested` unless Site Explorer is suppressed for the
+/// endpoint, in the caller's transaction. A missing
 /// endpoint or changed report version returns `NotApplied(EndpointReportNotCurrent)`;
 /// database failures remain errors.
 pub async fn try_update_last_exploration_error(
@@ -507,15 +560,19 @@ pub async fn try_update_last_exploration_error(
     txn: &mut PgConnection,
 ) -> Result<ConditionalWrite<(), EndpointReportNotCurrent>, DatabaseError> {
     let new_version = old_version.increment();
-    let query = "UPDATE explored_endpoints
+    let query = concatcp!(
+        "UPDATE explored_endpoints
 SET version=$1,
     exploration_report=jsonb_set(
         jsonb_set(exploration_report, '{LastExplorationError}', $2::jsonb, true),
         '{LastExplorationLatency}', $3::jsonb, true
     ),
     waiting_for_explorer_refresh=true,
-    exploration_requested=false
-WHERE address=$4 AND version=$5";
+    exploration_requested=",
+        KEEP_SUPPRESSED_EXPLORATION_REQUEST,
+        "
+WHERE address=$4 AND version=$5"
+    );
     let query_result = sqlx::query(query)
         .bind(new_version)
         .bind(sqlx::types::Json(error))
@@ -542,7 +599,13 @@ pub async fn clear_last_known_error(
     address: IpAddr,
     txn: &mut PgConnection,
 ) -> Result<(), DatabaseError> {
-    let query = "SELECT * FROM explored_endpoints WHERE address = $1 FOR UPDATE";
+    let query = "SELECT
+            address, exploration_report, version, preingestion_state,
+            waiting_for_explorer_refresh, exploration_requested, last_redfish_bmc_reset,
+            last_ipmitool_bmc_reset, last_redfish_reboot, last_redfish_powercycle,
+            pause_ingestion_and_poweron, pause_remediation, boot_interface_mac, boot_interface_id
+        FROM explored_endpoints
+        WHERE address = $1 FOR UPDATE";
     let Some(row) = sqlx::query_as::<_, DbExploredEndpoint>(query)
         .bind(address)
         .fetch_optional(&mut *txn)
@@ -623,6 +686,26 @@ pub async fn request_exploration_for_addresses(
         "UPDATE explored_endpoints SET exploration_requested = true WHERE address = ANY($1)";
     sqlx::query(query)
         .bind(addresses)
+        .execute(txn)
+        .await
+        .map_err(|e| DatabaseError::query(query, e))?;
+    Ok(())
+}
+
+/// Sets `exploration_requested = true` on the BMC endpoints of `machine_id`
+/// so the site explorer revisits the machine on its next tick. A machine
+/// whose BMC interface has no address or no endpoint row is left alone.
+pub(crate) async fn request_exploration_for_machine(
+    machine_id: &MachineId,
+    txn: &mut PgConnection,
+) -> Result<(), DatabaseError> {
+    let query = "UPDATE explored_endpoints SET exploration_requested = true \
+                 WHERE address IN (\
+                     SELECT mia.address FROM machine_interfaces mi \
+                     JOIN machine_interface_addresses mia ON mia.interface_id = mi.id \
+                     WHERE mi.interface_type = 'Bmc' AND mi.machine_id = $1)";
+    sqlx::query(query)
+        .bind(machine_id)
         .execute(txn)
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
@@ -720,6 +803,15 @@ pub async fn set_preingestion_time_sync_reset(
         attempt,
     };
     set_preingestion(address, state, txn).await
+}
+
+/// The firmware check asked for one refreshed report; the endpoint waits in
+/// `FirmwareCheckRefreshWait` and the check runs again on that report.
+pub async fn set_preingestion_firmware_check_refresh_wait(
+    address: IpAddr,
+    txn: &mut PgConnection,
+) -> Result<(), DatabaseError> {
+    set_preingestion(address, PreingestionState::FirmwareCheckRefreshWait, txn).await
 }
 
 pub async fn set_preingestion_recheck_versions_reason(
@@ -982,14 +1074,19 @@ pub async fn find_by_mac_address(
     mac: MacAddress,
 ) -> Result<Vec<ExploredEndpoint>, DatabaseError> {
     let query = r#"
-            SELECT * FROM explored_endpoints
-            WHERE (
-                jsonb_path_query_array(exploration_report, '$.Systems[*].EthernetInterfaces[*].MACAddress')
-                ||
-                jsonb_path_query_array(exploration_report, '$.Managers[*].EthernetInterfaces[*].MACAddress')
-                ||
-                jsonb_path_query_array(exploration_report, '$.Chassis[*].NetworkAdapters[*].PortMacAddresses[*]')
-            ) @> to_jsonb(ARRAY[$1]);
+        SELECT
+            address, exploration_report, version, preingestion_state,
+            waiting_for_explorer_refresh, exploration_requested, last_redfish_bmc_reset,
+            last_ipmitool_bmc_reset, last_redfish_reboot, last_redfish_powercycle,
+            pause_ingestion_and_poweron, pause_remediation, boot_interface_mac, boot_interface_id
+        FROM explored_endpoints
+        WHERE (
+            jsonb_path_query_array(exploration_report, '$.Systems[*].EthernetInterfaces[*].MACAddress')
+            ||
+            jsonb_path_query_array(exploration_report, '$.Managers[*].EthernetInterfaces[*].MACAddress')
+            ||
+            jsonb_path_query_array(exploration_report, '$.Chassis[*].NetworkAdapters[*].PortMacAddresses[*]')
+        ) @> to_jsonb(ARRAY[$1]);
         "#;
     sqlx::query_as::<_, DbExploredEndpoint>(query)
         // NOTE: Don't just pass mac here, do our own string conversion. Postgres's string
@@ -1103,7 +1200,7 @@ pub async fn set_pause_ingestion_and_poweron(
 
 #[cfg(test)]
 mod tests {
-    use model::site_explorer::{Chassis, NetworkAdapter};
+    use model::site_explorer::{Chassis, EndpointExplorationError, EndpointType, NetworkAdapter};
 
     use super::*;
 
@@ -1212,6 +1309,56 @@ mod tests {
         let requested = find_all_by_ip(address, &mut txn).await.unwrap().remove(0);
         assert!(requested.exploration_requested);
         assert_eq!(requested.report_version, endpoint.report_version);
+    }
+
+    /// A failed first probe is persisted the way a report is: the row holds
+    /// the error and the latency on a report without an endpoint type, starts
+    /// in `Initial` at version one, and later failures advance it in place.
+    /// The planner then sees a never-explored endpoint, not an unexplored
+    /// interface.
+    #[crate::sqlx_test]
+    async fn a_failed_first_probe_persists_an_initial_row_that_later_failures_advance(
+        pool: sqlx::PgPool,
+    ) {
+        let mut txn = pool.begin().await.unwrap();
+        let address: IpAddr = "10.0.5.1".parse().unwrap();
+        let refused = EndpointExplorationError::ConnectionRefused {
+            details: "connection refused".to_string(),
+        };
+        let mut report = EndpointExplorationReport::new_with_error(refused);
+        report.last_exploration_latency = Some(std::time::Duration::from_millis(1500));
+        insert(address, &report, false, &mut txn).await.unwrap();
+
+        let inserted = find_all_by_ip(address, &mut txn).await.unwrap().remove(0);
+        assert_eq!(inserted.report, report);
+        assert_eq!(inserted.preingestion_state, PreingestionState::Initial);
+        assert_eq!(inserted.report_version.version_nr(), 1);
+        assert!(!inserted.waiting_for_explorer_refresh);
+
+        let timeout = EndpointExplorationError::ConnectionTimeout {
+            details: "deadline exceeded".to_string(),
+            consecutive_count: 1,
+        };
+        let latency = std::time::Duration::from_secs(2);
+        assert_eq!(
+            try_update_last_exploration_error(
+                address,
+                inserted.report_version,
+                &timeout,
+                latency,
+                &mut txn,
+            )
+            .await
+            .unwrap(),
+            ConditionalWrite::Applied(())
+        );
+        let retried = find_all_by_ip(address, &mut txn).await.unwrap().remove(0);
+        assert_eq!(retried.report.endpoint_type, EndpointType::Unknown);
+        assert_eq!(retried.report.last_exploration_error, Some(timeout));
+        assert_eq!(retried.report.last_exploration_latency, Some(latency));
+        assert_eq!(retried.report_version.version_nr(), 2);
+        assert!(retried.waiting_for_explorer_refresh);
+        txn.rollback().await.unwrap();
     }
 
     /// An `UpgradeFirmwareWait` state — the one the "installing" predicate keys

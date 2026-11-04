@@ -14,7 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestExpectedInventoryBulkPaths(t *testing.T) {
+func TestExpectedInventoryBatchPaths(t *testing.T) {
 	const siteID = "f97df110-f4de-492e-8849-4a6af68026b0"
 	tests := []struct {
 		name    string

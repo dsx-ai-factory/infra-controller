@@ -38,6 +38,17 @@ suppressions, and retained boot targets):
     --delete-interfaces --delete-bmc-interfaces --delete-bmc-suppressions \
     --delete-retained-boot-interfaces
 
+Force delete a machine assigned to an Instance Type:
+    $ nico-admin-cli machine force-delete --machine 12345678-1234-5678-90ab-cdef01234567 \
+    --allow-delete-with-instance-type
+
+Force delete a machine with an attached Instance. This removes the attached \
+Instance control-plane record without first requesting a graceful workload \
+shutdown; force-delete cleanup may forcibly restart the host:
+    $ nico-admin-cli machine force-delete --machine 12345678-1234-5678-90ab-cdef01234567 \
+    --allow-delete-with-instance
+
+
 Force delete and permanently release preserved address reservations \
 instead of parking them:
     $ nico-admin-cli machine force-delete --machine 12345678-1234-5678-90ab-cdef01234567 \
@@ -90,9 +101,26 @@ pub(crate) struct Args {
     #[clap(
         long,
         action,
-        help = "Delete machine with allocated instance. This flag acknowledges destroying the user instance as well."
+        help = "Delete Machine with an assigned Instance Type. This flag acknowledges removing the Instance Type association."
+    )]
+    pub(super) allow_delete_with_instance_type: bool,
+
+    #[clap(
+        long,
+        action,
+        help = "Delete Machine with an attached Instance. This flag also allows removing an assigned Instance Type and removes the attached Instance control-plane record without first requesting a graceful workload shutdown; force-delete cleanup may forcibly restart the host."
     )]
     pub(super) allow_delete_with_instance: bool,
+
+    #[clap(
+        long,
+        action,
+        help = "Wait for all attached DPUs to acknowledge Admin networking for an allocated instance",
+        long_help = "Wait for all attached DPUs to acknowledge the Admin network configuration before deleting a host that has an instance when force deletion starts. Disabled by default; a fresh deletion without this flag does not wait for DPU acknowledgements. A fresh deletion without an instance does not wait.\n\n\
+            Once recorded, the wait survives retries; omitting this flag cannot cancel it. Only servers supporting this option enforce a recorded wait. An older server can complete deletion without acknowledgement, even if a newer server already recorded the wait.\n\n\
+            An unavailable DPU can prevent completion indefinitely. The CLI waits 5 seconds between polling calls, with a nominal 20-minute retry limit. It checks the limit after RPC calls, so slow calls can extend the total time. A timeout does not cancel deletion. This flag does not replace --allow-delete-with-instance."
+    )]
+    wait_for_instance_dpu: bool,
 
     #[clap(
         long,
@@ -112,7 +140,11 @@ impl From<&Args> for AdminForceDeleteMachineRequest {
             allow_delete_with_orphaned_dpf_crds: args.allow_delete_with_orphaned_dpf_crds,
             delete_bmc_suppressions: args.delete_bmc_suppressions,
             delete_retained_boot_interfaces: args.delete_retained_boot_interfaces,
+            allow_delete_with_instance_type: args.allow_delete_with_instance_type
+                || args.allow_delete_with_instance,
+            allow_delete_with_instance: args.allow_delete_with_instance,
             release_preserved_addresses: args.release_preserved_addresses,
+            wait_for_instance_dpu: args.wait_for_instance_dpu,
         }
     }
 }
@@ -130,6 +162,33 @@ mod tests {
     #[test]
     fn arg_config_is_valid() {
         Args::command().debug_assert();
+    }
+
+    #[test]
+    fn instance_dpu_wait_is_opt_in_and_does_not_grant_deletion_consent() {
+        scenarios!(
+            run = |extra: &[&str]| {
+                let argv = ["force-delete", "--machine", MACHINE]
+                    .into_iter()
+                    .chain(extra.iter().copied());
+                Args::try_parse_from(argv)
+                    .map(|args| {
+                        let request = AdminForceDeleteMachineRequest::from(&args);
+                        (request.wait_for_instance_dpu, args.allow_delete_with_instance)
+                    })
+                    .map_err(drop)
+            };
+            "omitting the wait flag preserves cleanup without acknowledgements" {
+                [].as_slice() => Yields((false, false)),
+            }
+            "waiting does not grant consent to delete an allocated instance" {
+                ["--wait-for-instance-dpu"].as_slice() => Yields((true, false)),
+            }
+            "waiting and deletion consent can be requested together" {
+                ["--allow-delete-with-instance", "--wait-for-instance-dpu"].as_slice()
+                    => Yields((true, true)),
+            }
+        );
     }
 
     #[test]
@@ -165,5 +224,56 @@ mod tests {
                 ["--delete-interfaces"].as_slice() => Yields((false, true, false)),
             }
         );
+    }
+}
+
+#[cfg(test)]
+mod override_tests {
+    use super::*;
+
+    #[test]
+    fn instance_override_maps_to_type_and_instance_permissions() {
+        for (name, argv, expected_type, expected_instance) in [
+            (
+                "omitted",
+                vec!["force-delete", "--machine", "machine-1"],
+                false,
+                false,
+            ),
+            (
+                "instance type only",
+                vec![
+                    "force-delete",
+                    "--machine",
+                    "machine-1",
+                    "--allow-delete-with-instance-type",
+                ],
+                true,
+                false,
+            ),
+            (
+                "instance implies instance type",
+                vec![
+                    "force-delete",
+                    "--machine",
+                    "machine-1",
+                    "--allow-delete-with-instance",
+                ],
+                true,
+                true,
+            ),
+        ] {
+            let args = Args::try_parse_from(argv).unwrap_or_else(|error| panic!("{name}: {error}"));
+            let request = AdminForceDeleteMachineRequest::from(&args);
+
+            assert_eq!(
+                request.allow_delete_with_instance_type, expected_type,
+                "{name}"
+            );
+            assert_eq!(
+                request.allow_delete_with_instance, expected_instance,
+                "{name}"
+            );
+        }
     }
 }

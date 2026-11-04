@@ -934,6 +934,22 @@ pub async fn retire_tenant_managed(
     Ok(site_prefix)
 }
 
+/// Physically removes a retired tenant root after its exact children are gone.
+///
+/// The caller holds the routing and parent row locks and verifies that the root
+/// is TenantManaged and Deleting. The child foreign key prevents premature removal.
+pub async fn final_delete(
+    site_prefix_id: SitePrefixId,
+    txn: &mut PgConnection,
+) -> DatabaseResult<SitePrefixId> {
+    let query = "DELETE FROM site_prefixes WHERE id = $1 RETURNING id";
+    sqlx::query_as(query)
+        .bind(site_prefix_id)
+        .fetch_one(txn)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))
+}
+
 pub async fn find_ids(
     db: impl DbReader<'_>,
     filter: SitePrefixSearchFilter,

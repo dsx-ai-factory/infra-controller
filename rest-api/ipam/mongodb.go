@@ -40,11 +40,7 @@ func (m *mongodb) Name() string {
 }
 
 func newMongo(ctx context.Context, config MongoConfig) (*mongodb, error) {
-	m, err := mongo.NewClient(config.MongoClientOptions)
-	if err != nil {
-		return nil, err
-	}
-	err = m.Connect(ctx)
+	m, err := mongo.Connect(ctx, config.MongoClientOptions)
 	if err != nil {
 		return nil, err
 	}

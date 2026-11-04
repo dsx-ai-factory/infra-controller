@@ -24,13 +24,17 @@ var _ MappedNullable = &NVLinkDomain{}
 
 // NVLinkDomain NVLink Domain inventory and its components.
 type NVLinkDomain struct {
-	// Case-sensitive Domain ID, equal to its Rack external ID.
+	// Case-sensitive Domain external ID, equal to its rack group ID.
 	Id string `json:"id"`
-	// Domain name, equal to its Rack name.
+	// Rack group ID, identical to id.
+	RackGroupId string `json:"rackGroupId"`
+	// NMX-C cluster UUID observed on the group's switches. Null when no valid observation is available. Conflicting observations are logged and preserve the last valid cluster without interrupting inventory sync.
+	NmxcClusterId NullableString `json:"nmxcClusterId"`
+	// Domain display name. Empty for newly inventory-created Domains; inventory sync preserves existing names.
 	Name string `json:"name"`
-	// Rack profile ID without the qualified vendor and optional _NO_POWERSHELF suffix. Null when unavailable or unrecognized.
+	// Common member-rack profile ID without the qualified vendor and optional _NO_POWERSHELF suffix. Null when unavailable, unrecognized, or inconsistent across member racks.
 	Topology NullableString `json:"topology"`
-	// Operability phase aggregated from the Rack components, not the Core lifecycle state.
+	// Operability phase aggregated across member racks, not the Core lifecycle state.
 	OperationStatus string `json:"operationStatus"`
 	// Components belonging to this Domain. Null when includeComponents is false; an empty array when requested but none are known.
 	Components []RackComponent `json:"components"`
@@ -42,9 +46,11 @@ type _NVLinkDomain NVLinkDomain
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewNVLinkDomain(id string, name string, topology NullableString, operationStatus string, components []RackComponent) *NVLinkDomain {
+func NewNVLinkDomain(id string, rackGroupId string, nmxcClusterId NullableString, name string, topology NullableString, operationStatus string, components []RackComponent) *NVLinkDomain {
 	this := NVLinkDomain{}
 	this.Id = id
+	this.RackGroupId = rackGroupId
+	this.NmxcClusterId = nmxcClusterId
 	this.Name = name
 	this.Topology = topology
 	this.OperationStatus = operationStatus
@@ -82,6 +88,56 @@ func (o *NVLinkDomain) GetIdOk() (*string, bool) {
 // SetId sets field value
 func (o *NVLinkDomain) SetId(v string) {
 	o.Id = v
+}
+
+// GetRackGroupId returns the RackGroupId field value
+func (o *NVLinkDomain) GetRackGroupId() string {
+	if o == nil {
+		var ret string
+		return ret
+	}
+
+	return o.RackGroupId
+}
+
+// GetRackGroupIdOk returns a tuple with the RackGroupId field value
+// and a boolean to check if the value has been set.
+func (o *NVLinkDomain) GetRackGroupIdOk() (*string, bool) {
+	if o == nil {
+		return nil, false
+	}
+	return &o.RackGroupId, true
+}
+
+// SetRackGroupId sets field value
+func (o *NVLinkDomain) SetRackGroupId(v string) {
+	o.RackGroupId = v
+}
+
+// GetNmxcClusterId returns the NmxcClusterId field value
+// If the value is explicit nil, the zero value for string will be returned
+func (o *NVLinkDomain) GetNmxcClusterId() string {
+	if o == nil || o.NmxcClusterId.Get() == nil {
+		var ret string
+		return ret
+	}
+
+	return *o.NmxcClusterId.Get()
+}
+
+// GetNmxcClusterIdOk returns a tuple with the NmxcClusterId field value
+// and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
+func (o *NVLinkDomain) GetNmxcClusterIdOk() (*string, bool) {
+	if o == nil {
+		return nil, false
+	}
+	return o.NmxcClusterId.Get(), o.NmxcClusterId.IsSet()
+}
+
+// SetNmxcClusterId sets field value
+func (o *NVLinkDomain) SetNmxcClusterId(v string) {
+	o.NmxcClusterId.Set(&v)
 }
 
 // GetName returns the Name field value
@@ -194,6 +250,8 @@ func (o NVLinkDomain) MarshalJSON() ([]byte, error) {
 func (o NVLinkDomain) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
 	toSerialize["id"] = o.Id
+	toSerialize["rackGroupId"] = o.RackGroupId
+	toSerialize["nmxcClusterId"] = o.NmxcClusterId.Get()
 	toSerialize["name"] = o.Name
 	toSerialize["topology"] = o.Topology.Get()
 	toSerialize["operationStatus"] = o.OperationStatus
@@ -209,6 +267,8 @@ func (o *NVLinkDomain) UnmarshalJSON(data []byte) (err error) {
 	// that every required field exists as a key in the generic map.
 	requiredProperties := []string{
 		"id",
+		"rackGroupId",
+		"nmxcClusterId",
 		"name",
 		"topology",
 		"operationStatus",

@@ -33,6 +33,8 @@ from typing import Literal
 
 import requests
 
+from lib import network
+
 
 class GB200FactoryResetError(Exception):
     pass
@@ -63,7 +65,9 @@ class GB200FactoryResetMethods:
         :raises GB200FactoryResetError: on an unexpected status code, or a
           task that fails or times out.
         """
-        url = f"https://{self.host_bmc_ip}/redfish/v1/Systems/System_0/Bios/Actions/Bios.ResetBios"
+        url = network.redfish_url(
+            self.host_bmc_ip, "/redfish/v1/Systems/System_0/Bios/Actions/Bios.ResetBios"
+        )
         print(f"Resetting GB200 BIOS settings via redfish.\nURL: {url}")
         response = requests.post(
             url,
@@ -103,9 +107,8 @@ class GB200FactoryResetMethods:
         :raises GB200FactoryResetError: on an unexpected (non-transport)
           status code.
         """
-        url = (
-            f"https://{self.host_bmc_ip}/redfish/v1/Managers/BMC_0/Actions/"
-            f"Manager.ResetToDefaults"
+        url = network.redfish_url(
+            self.host_bmc_ip, "/redfish/v1/Managers/BMC_0/Actions/Manager.ResetToDefaults"
         )
         payload = {"ResetToDefaultsType": reset_type}
         print(f"Factory-resetting GB200 BMC via redfish.\nPayload: {payload}\nURL: {url}")
@@ -140,7 +143,9 @@ class GB200FactoryResetMethods:
         """Poll a redfish task to ``Completed`` (used for an async BIOS reset)."""
         if not task_id:
             raise GB200FactoryResetError("BIOS reset returned 202 but no task Id")
-        url = f"https://{self.host_bmc_ip}/redfish/v1/TaskService/Tasks/{task_id}"
+        url = network.redfish_url(
+            self.host_bmc_ip, f"/redfish/v1/TaskService/Tasks/{task_id}"
+        )
         for _ in range(self._TASK_POLL_ATTEMPTS):
             response = requests.get(url, auth=self._auth, verify=False, timeout=30)
             if response.status_code != 200:

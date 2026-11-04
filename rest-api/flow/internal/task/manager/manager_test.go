@@ -97,6 +97,41 @@ func TestManagerImpl_SubmitTask(t *testing.T) {
 		require.Zero(t, store.createTaskCalls)
 	})
 
+	t.Run("rejects unsupported firmware options before creating a task", func(t *testing.T) {
+		rackID := uuid.New()
+		resolvedRack := newTestRack(rackID, "rack-1")
+		resolvedRack.AddComponent(newTestComponent(
+			uuid.New(),
+			rackID,
+			devicetypes.ComponentTypeCompute,
+			"compute-1",
+		))
+		store := &managerTaskStore{}
+		executor := &managerExecutor{
+			validateErr: errors.New("compute firmware sub-target selection is not supported"),
+		}
+		manager := &ManagerImpl{
+			inventoryStore: &submitTaskInventory{rack: resolvedRack},
+			taskStore:      store,
+			ruleResolver:   operationrules.NewResolver(store),
+			executor:       executor,
+		}
+
+		taskIDs, err := manager.SubmitTask(context.Background(), &operation.Request{
+			Operation: testFirmwareControlOperation(t),
+			TargetSpec: operation.TargetSpec{Racks: []operation.RackTarget{{
+				Identifier: identifier.Identifier{ID: rackID},
+			}}},
+		})
+
+		require.Nil(t, taskIDs)
+		require.Equal(t, codes.FailedPrecondition, status.Code(err))
+		require.ErrorContains(t, err, "compute firmware sub-target selection is not supported")
+		require.Equal(t, 1, executor.validateCalls)
+		require.Zero(t, executor.executeCalls)
+		require.Zero(t, store.createTaskCalls)
+	})
+
 	t.Run("rejects an unlinked operation target", func(t *testing.T) {
 		rackID := uuid.New()
 		resolvedRack := newTestRack(rackID, "rack-1")
@@ -1360,6 +1395,22 @@ func testPowerControlOperation(t *testing.T) operation.Wrapper {
 	}
 }
 
+func testFirmwareControlOperation(t *testing.T) operation.Wrapper {
+	t.Helper()
+
+	info, err := (&operations.FirmwareControlTaskInfo{
+		Operation:  operations.FirmwareOperationUpgrade,
+		SubTargets: []string{"bmc"},
+	}).Marshal()
+	require.NoError(t, err)
+
+	return operation.Wrapper{
+		Type: taskcommon.TaskTypeFirmwareControl,
+		Code: taskcommon.OpCodeFirmwareControlUpgrade,
+		Info: info,
+	}
+}
+
 func testPowerControlOperationWithRule(
 	t *testing.T,
 	ruleID uuid.UUID,
@@ -1510,6 +1561,10 @@ func (s *managerTaskStore) ListNonTerminalTasksForRacks(
 	_ []uuid.UUID,
 ) ([]*taskdef.Task, error) {
 	panic("managerTaskStore.ListNonTerminalTasksForRacks: not implemented")
+}
+
+func (s *managerTaskStore) ListPowerTasksForRack(_ context.Context, _ uuid.UUID) ([]taskdef.PowerTaskDetails, error) {
+	panic("managerTaskStore.ListPowerTasksForRack: not implemented")
 }
 
 func (s *managerTaskStore) LatestLeakageShutdownTaskStatuses(
@@ -1667,6 +1722,9 @@ var _ interface {
 
 type managerExecutor struct {
 	executionID                    string
+	validateCalls                  int
+	validateErr                    error
+	lastValidatedRequest           *taskdef.ExecutionRequest
 	executeCalls                   int
 	lastRequest                    *taskdef.ExecutionRequest
 	terminateCalls                 int
@@ -1709,6 +1767,12 @@ func (e *managerExecutor) Type() taskcommon.ExecutorType {
 	return taskcommon.ExecutorTypeTemporal
 }
 
+func (e *managerExecutor) Validate(req *taskdef.ExecutionRequest) error {
+	e.validateCalls++
+	e.lastValidatedRequest = req
+	return e.validateErr
+}
+
 func (e *managerExecutor) Execute(
 	_ context.Context,
 	req *taskdef.ExecutionRequest,
@@ -1739,4 +1803,9 @@ func (e *managerExecutor) TerminateTask(
 		e.terminationObservedTransaction = e.transactionActive()
 	}
 	return e.terminateErr
+}
+
+// ListTaskContextForRack fails unexpected context reads in task-manager tests.
+func (s *managerTaskStore) ListTaskContextForRack(_ context.Context, _ uuid.UUID) ([]taskdef.TaskContextMetadata, error) {
+	panic("unexpected task context read")
 }

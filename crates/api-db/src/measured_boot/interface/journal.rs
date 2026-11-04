@@ -20,6 +20,7 @@
  *  tables in the database, leveraging the journal-specific record types.
  */
 
+use carbide_uuid::DbTable;
 use carbide_uuid::machine::MachineId;
 use carbide_uuid::measured_boot::{
     MeasurementBundleId, MeasurementJournalId, MeasurementReportId, MeasurementSystemProfileId,
@@ -42,8 +43,11 @@ pub async fn insert_measurement_journal_record(
     bundle_id: Option<MeasurementBundleId>,
     state: MeasurementMachineState,
 ) -> Result<MeasurementJournalRecord, DatabaseError> {
-    let query = "insert into measurement_journal(machine_id, report_id, profile_id, bundle_id, state) values($1, $2, $3, $4, $5) returning *";
-    sqlx::query_as(query)
+    let query = format!(
+        "insert into measurement_journal(machine_id, report_id, profile_id, bundle_id, state) values($1, $2, $3, $4, $5) returning {}",
+        MeasurementJournalRecord::db_table_columns(),
+    );
+    sqlx::query_as(sqlx::AssertSqlSafe(query))
         .bind(machine_id)
         .bind(report_id)
         .bind(profile_id)
@@ -64,8 +68,11 @@ pub async fn update_measurement_journal_record(
     bundle_id: Option<MeasurementBundleId>,
     state: MeasurementMachineState,
 ) -> Result<MeasurementJournalRecord, DatabaseError> {
-    let query = "update measurement_journal set profile_id = $1, bundle_id = $2, state = $3, ts = $4 where report_id = $5 returning *";
-    sqlx::query_as(query)
+    let query = format!(
+        "update measurement_journal set profile_id = $1, bundle_id = $2, state = $3, ts = $4 where report_id = $5 returning {}",
+        MeasurementJournalRecord::db_table_columns(),
+    );
+    sqlx::query_as(sqlx::AssertSqlSafe(query))
         .bind(profile_id)
         .bind(bundle_id)
         .bind(state)

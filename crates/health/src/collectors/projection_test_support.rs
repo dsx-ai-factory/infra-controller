@@ -353,6 +353,7 @@ fn mock_resources() -> HashMap<String, MockResponse> {
         "Processor metrics",
         json!({
             "BandwidthPercent": 42.0,
+            "PowerLimitThrottleDuration": "PT1.25S",
             "CoreVoltage": {
                 "DataSourceUri": "/redfish/v1/Chassis/CH0/Sensors/CPU0_Voltage",
                 "Reading": 1.2
@@ -473,10 +474,13 @@ fn mock_resources() -> HashMap<String, MockResponse> {
     insert_resource(
         &mut resources,
         &dimm_metrics,
-        "#MemoryMetrics.v1_7_0.MemoryMetrics",
+        "#MemoryMetrics.v1_8_0.MemoryMetrics",
         "Metrics",
         "Memory metrics",
-        json!({ "BlockSizeBytes": 4096 }),
+        json!({
+            "LifetimeStartDateTime": "1970-01-01T00:01:40Z",
+            "LifeTime": { "UncorrectableECCErrorCount": 9 }
+        }),
     );
     // HBM reports row remapping through the NVIDIA OEM extension.
     let oem_dimm = memory("DIMM-oem");

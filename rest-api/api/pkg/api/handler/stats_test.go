@@ -20,7 +20,6 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/handler/util/common"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
 	authz "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
-	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/otelecho"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
@@ -217,8 +216,7 @@ func testStatsBuildVpc(t *testing.T, dbSession *cdb.Session, ip *cdbm.Infrastruc
 
 func testStatsSetupEchoContext(t *testing.T, org, siteID string, user *cdbm.User) (echo.Context, *httptest.ResponseRecorder) {
 	ctx := context.Background()
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
-	ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	e := echo.New()
 	q := url.Values{}
@@ -727,8 +725,7 @@ func TestStatsHandlers(t *testing.T) {
 
 	t.Run("GetMachineGPUStats_MissingSiteId", func(t *testing.T) {
 		ctx := context.Background()
-		tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
-		ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
+		ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 		e := echo.New()
 		req := httptest.NewRequest(http.MethodGet, "/", nil)

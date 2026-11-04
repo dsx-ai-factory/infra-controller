@@ -47,8 +47,12 @@ func genericComponentStepWorkflow(
 
 	// Build activity options from step configuration
 	activityOpts := buildActivityOptions(step)
+	if stepReportsFirmwareProgress(step) && firmwareTimeoutBudgetEnabled(ctx) {
+		activityOpts.ScheduleToCloseTimeout = activityRetryBudget(step)
+	}
 	ctx = workflow.WithActivityOptions(ctx, activityOpts)
 	maxParallel := versionedMaxParallel(ctx, step.MaxParallel)
+	ctx = withFirmwareProgressReporter(ctx, step, target)
 
 	// 1. Execute pre-operation actions
 	if shouldDo, actions := step.DoPreOperations(); shouldDo {

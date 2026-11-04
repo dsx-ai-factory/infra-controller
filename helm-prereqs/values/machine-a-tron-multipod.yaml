@@ -73,7 +73,7 @@ pods:
         hostCount: 100
         dpuPerHostCount: 2
         bmcDhcpRelayAddress: "10.200.0.1"  # All pods share same relay
-        underlayDhcpRelayAddress: "10.104.0.1"  # simulated-underlay gateway (nico-core-simulation.yaml)
+        underlayDhcpRelayAddress: "10.201.0.1"  # simulated-underlay gateway (nico-core-simulation.yaml)
   mat-1:
     machines:
       compute:
@@ -81,7 +81,7 @@ pods:
         hostCount: 100
         dpuPerHostCount: 2
         bmcDhcpRelayAddress: "10.200.0.1"  # NICo assigns unique IPs
-        underlayDhcpRelayAddress: "10.104.0.1"  # simulated-underlay gateway (nico-core-simulation.yaml)
+        underlayDhcpRelayAddress: "10.201.0.1"  # simulated-underlay gateway (nico-core-simulation.yaml)
 
 resources:
   limits:

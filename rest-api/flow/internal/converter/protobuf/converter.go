@@ -418,9 +418,14 @@ func NVLDomainFrom(info *pb.NVLDomain) *nvldomain.NVLDomain {
 		return nil
 	}
 
-	return &nvldomain.NVLDomain{
+	domain := &nvldomain.NVLDomain{
 		Identifier: *IdentifierFrom(info.GetIdentifier()),
 	}
+	domain.Identifier.ExternalID = info.GetExternalId()
+	if clusterID, err := uuid.Parse(info.GetNmxcClusterId()); err == nil && clusterID != uuid.Nil {
+		domain.NMXCClusterID = &clusterID
+	}
+	return domain
 }
 
 // PowerControlOpFrom converts a protobuf PowerControlOp to an internal PowerOperation.
@@ -677,19 +682,20 @@ func ComponentTo(c *component.Component) *pb.Component {
 	}
 
 	return &pb.Component{
-		Type:            ComponentTypeTo(c.Type),
-		Info:            DeviceInfoTo(&c.Info),
-		FirmwareVersion: c.FirmwareVersion,
-		Position:        RackPositionTo(&c.Position),
-		Bmcs:            bmcInfos,
-		ComponentId:     c.ComponentID,
-		RackId:          UUIDTo(c.RackID),
-		NvlDomainId:     UUIDTo(c.NVLDomainID),
-		PowerState:      c.PowerState,
-		Status:          ComponentOperationStatusTo(c.Status),
-		Health:          HealthReportTo(c.Health),
-		LeakStatus:      LeakStatusTo(c.LeakStatus),
-		RackExternalId:  c.RackExternalID,
+		Type:                ComponentTypeTo(c.Type),
+		Info:                DeviceInfoTo(&c.Info),
+		FirmwareVersion:     c.FirmwareVersion,
+		Position:            RackPositionTo(&c.Position),
+		Bmcs:                bmcInfos,
+		ComponentId:         c.ComponentID,
+		RackId:              UUIDTo(c.RackID),
+		NvlDomainId:         UUIDTo(c.NVLDomainID),
+		NvlDomainExternalId: c.NVLDomainExternalID,
+		PowerState:          c.PowerState,
+		Status:              ComponentOperationStatusTo(c.Status),
+		Health:              HealthReportTo(c.Health),
+		LeakStatus:          LeakStatusTo(c.LeakStatus),
+		RackExternalId:      c.RackExternalID,
 	}
 }
 
@@ -843,26 +849,41 @@ func ComponentOperationStatusTo(s *types.ComponentOperationStatus) *pb.Component
 	}
 }
 
-// NVLinkDomainFromRack projects rack inventory into domain inventory.
-func NVLinkDomainFromRack(r *pb.Rack) *pb.NVLinkDomain {
-	if r == nil {
-		return nil
+// NVLinkDomainFromInventory exposes group identity while aggregating its member racks.
+func NVLinkDomainFromInventory(domain *nvldomain.NVLDomain, racks []*rack.Rack) *pb.NVLinkDomain {
+	d := &pb.NVLinkDomain{Id: domain.Identifier.ExternalID, RackGroupId: domain.Identifier.ExternalID, Name: domain.Name()}
+	if domain.NMXCClusterID != nil {
+		clusterID := domain.NMXCClusterID.String()
+		d.NmxcClusterId = &clusterID
 	}
-	d := &pb.NVLinkDomain{
-		Id: r.GetExternalId(), Name: r.GetInfo().GetName(),
-		OperationStatus: r.GetOperationStatus(), Components: r.GetComponents(),
+	statuses := make([]*types.ComponentOperationStatus, 0, len(racks))
+	for i, rack := range racks {
+		projected := RackTo(rack)
+		topology := rackTopology(projected.GetRackProfileId())
+		if i == 0 {
+			d.Topology = topology
+		} else if topology == nil || d.GetTopology() != *topology {
+			d.Topology = nil
+		}
+		d.Components = append(d.Components, projected.Components...)
+		statuses = append(statuses, &types.ComponentOperationStatus{Phase: rack.OperationStatus})
 	}
-	profile := strings.TrimSuffix(r.GetRackProfileId(), "_NO_POWERSHELF")
+	d.OperationStatus = PhaseTo(types.AggregateComponentOperationStatus(statuses))
+	return d
+}
+
+func rackTopology(profile string) *string {
+	profile = strings.TrimSuffix(profile, "_NO_POWERSHELF")
 	for _, suffix := range []string{"_WIWYNN", "_LENOVO", "_SMC", "_NVIDIA"} {
 		if strings.HasSuffix(profile, suffix) {
 			topology := strings.TrimSuffix(profile, suffix)
 			if topology != "" {
-				d.Topology = &topology
+				return &topology
 			}
 			break
 		}
 	}
-	return d
+	return nil
 }
 
 // RackTo converts an internal Rack to a protobuf Rack.
@@ -876,6 +897,7 @@ func RackTo(r *rack.Rack) *pb.Rack {
 		if c.NVLDomainID == uuid.Nil {
 			c.NVLDomainID = r.NVLDomainID
 		}
+		c.NVLDomainExternalID = r.NVLDomainExternalID
 		components = append(components, ComponentTo(&c))
 	}
 
@@ -890,6 +912,9 @@ func RackTo(r *rack.Rack) *pb.Rack {
 	}
 	if r.NVLDomainID != uuid.Nil {
 		result.NvlDomainIds = UUIDsTo([]uuid.UUID{r.NVLDomainID})
+	}
+	if r.NVLDomainExternalID != nil {
+		result.NvlDomainExternalIds = []string{*r.NVLDomainExternalID}
 	}
 
 	return result
@@ -920,32 +945,57 @@ func StringQueryInfoTo(info *dbquery.StringQueryInfo) *pb.StringQueryInfo {
 	}
 }
 
-// OrderByFrom converts a protobuf OrderBy to an internal OrderBy
-func OrderByFrom(ob *pb.OrderBy) *dbquery.OrderBy {
+// RackOrderByFrom converts and validates a rack OrderBy.
+func RackOrderByFrom(ob *pb.OrderBy) (*dbquery.OrderBy, error) {
 	if ob == nil {
-		return nil
+		return nil, nil
 	}
 
-	var column string
-	rackField := ob.GetRackField()
-	componentField := ob.GetComponentField()
-
-	if rackField != pb.RackOrderByField_RACK_ORDER_BY_FIELD_UNSPECIFIED {
-		column = rackOrderByFieldToColumn(rackField)
-	} else if componentField != pb.ComponentOrderByField_COMPONENT_ORDER_BY_FIELD_UNSPECIFIED {
-		column = componentOrderByFieldToColumn(componentField)
-	} else {
-		return nil
+	field, ok := ob.GetField().(*pb.OrderBy_RackField)
+	if !ok {
+		return nil, errors.New("rack order by field is required")
 	}
 
+	column := rackOrderByFieldToColumn(field.RackField)
 	if column == "" {
-		return nil
+		return nil, fmt.Errorf("unsupported rack order by field: %v", field.RackField)
 	}
 
-	return &dbquery.OrderBy{
+	return validatedOrderBy(&dbquery.OrderBy{
+		Column:       column,
+		Direction:    dbquery.OrderDirection(ob.GetDirection()),
+		IsExpression: field.RackField == pb.RackOrderByField_RACK_ORDER_BY_FIELD_MODEL,
+	})
+}
+
+// ComponentOrderByFrom converts and validates a component OrderBy.
+func ComponentOrderByFrom(ob *pb.OrderBy) (*dbquery.OrderBy, error) {
+	if ob == nil {
+		return nil, nil
+	}
+
+	field, ok := ob.GetField().(*pb.OrderBy_ComponentField)
+	if !ok {
+		return nil, errors.New("component order by field is required")
+	}
+
+	column := componentOrderByFieldToColumn(field.ComponentField)
+	if column == "" {
+		return nil, fmt.Errorf("unsupported component order by field: %v", field.ComponentField)
+	}
+
+	return validatedOrderBy(&dbquery.OrderBy{
 		Column:    column,
 		Direction: dbquery.OrderDirection(ob.GetDirection()),
+	})
+}
+
+func validatedOrderBy(orderBy *dbquery.OrderBy) (*dbquery.OrderBy, error) {
+	if err := orderBy.Validate(); err != nil {
+		return nil, err
 	}
+
+	return orderBy, nil
 }
 
 // QueryType represents the type of query (rack or component)
@@ -1065,9 +1115,17 @@ func NVLDomainTo(info *nvldomain.NVLDomain) *pb.NVLDomain {
 		return nil
 	}
 
-	return &pb.NVLDomain{
+	domain := &pb.NVLDomain{
 		Identifier: IdentifierTo(&info.Identifier),
 	}
+	if info.Identifier.ExternalID != "" {
+		domain.ExternalId = &info.Identifier.ExternalID
+	}
+	if info.NMXCClusterID != nil {
+		clusterID := info.NMXCClusterID.String()
+		domain.NmxcClusterId = &clusterID
+	}
+	return domain
 }
 
 // ========================================
@@ -1656,5 +1714,24 @@ func QueueOptionsFrom(
 		return operation.ConflictStrategyQueue, timeout
 	default:
 		return operation.ConflictStrategyReject, timeout
+	}
+}
+
+// TaskKindTo describes a task without its operation payload. Stored task types
+// without a known API kind map to Unspecified.
+func TaskKindTo(kind taskcommon.TaskType) pb.TaskKind {
+	switch kind {
+	case taskcommon.TaskTypePowerControl:
+		return pb.TaskKind_TASK_KIND_POWER_CONTROL
+	case taskcommon.TaskTypeFirmwareControl:
+		return pb.TaskKind_TASK_KIND_FIRMWARE_CONTROL
+	case taskcommon.TaskTypeBringUp:
+		return pb.TaskKind_TASK_KIND_BRING_UP
+	case taskcommon.TaskTypeDecommission:
+		return pb.TaskKind_TASK_KIND_DECOMMISSION
+	case taskcommon.TaskTypeInjectExpectation:
+		return pb.TaskKind_TASK_KIND_INJECT_EXPECTATION
+	default:
+		return pb.TaskKind_TASK_KIND_UNSPECIFIED
 	}
 }

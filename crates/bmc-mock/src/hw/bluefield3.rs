@@ -62,7 +62,7 @@ impl Bluefield3<'_> {
             chassis: vec![
                 redfish::chassis::SingleChassisConfig {
                     id: "Bluefield_BMC".into(),
-                    chassis_type: "Component".into(),
+                    chassis_type: redfish::schema::chassis::ChassisType::Component,
                     manufacturer: Some("Nvidia".into()),
                     model: Some("BlueField-3 DPU".into()),
                     network_adapters: Some(vec![]),
@@ -73,14 +73,14 @@ impl Bluefield3<'_> {
                 },
                 redfish::chassis::SingleChassisConfig {
                     id: "Bluefield_ERoT".into(),
-                    chassis_type: "Component".into(),
+                    chassis_type: redfish::schema::chassis::ChassisType::Component,
                     manufacturer: Some(Cow::Borrowed("NVIDIA")),
                     serial_number: Some("".into()),
                     ..redfish::chassis::SingleChassisConfig::defaults()
                 },
                 redfish::chassis::SingleChassisConfig {
                     id: "CPU_0".into(),
-                    chassis_type: "Component".into(),
+                    chassis_type: redfish::schema::chassis::ChassisType::Component,
                     manufacturer: Some("https://www.mellanox.com".into()),
                     model: Some("Mellanox BlueField-3 [A1] A78(D42) 16 Cores r0p1".into()),
                     network_adapters: Some(vec![]),
@@ -91,7 +91,7 @@ impl Bluefield3<'_> {
                 },
                 redfish::chassis::SingleChassisConfig {
                     id: "Card1".into(),
-                    chassis_type: "Card".into(),
+                    chassis_type: redfish::schema::chassis::ChassisType::Card,
                     manufacturer: Some("Nvidia".into()),
                     model: Some("BlueField-3 DPU".into()),
                     network_adapters: Some(vec![]),
@@ -113,8 +113,8 @@ impl Bluefield3<'_> {
         callbacks: Arc<C>,
     ) -> redfish::computer_system::Config<C> {
         let system_id = "Bluefield";
-        let boot_opt_builder = |id: &str, kind| {
-            redfish::boot_option::builder(&redfish::boot_option::resource(system_id, id), kind)
+        let boot_opt_builder = |id: &str| {
+            redfish::boot_option::builder(&redfish::boot_option::resource(system_id, id))
                 .boot_option_reference(id)
         };
         let nic_mode = if let hw::bluefield3::Mode::SuperNIC { nic_mode: true } = self.mode {
@@ -129,26 +129,26 @@ impl Bluefield3<'_> {
                     redfish::ethernet_interface::builder(
                         &redfish::ethernet_interface::system_resource("Bluefield", "oob_net0"),
                     )
-                    .mac_address(*mac)
+                    .mac_address((*mac).to_string())
                     .description("1G DPU OOB network interface")
                     .build()
                 })
                 .collect();
         let boot_options = [
-            boot_opt_builder("Boot0040", BootOptionKind::Disk)
+            boot_opt_builder("Boot0040")
                 .display_name("ubuntu0")
                 .uefi_device_path("HD(1,GPT,2FAFB38D-05F6-DF41-AE01-F9991E2CC0F0,0x800,0x19000)/\\EFI\\ubuntu\\shimaa64.efi")
-                .build()
+                .build(BootOptionKind::Disk)
         ].into_iter().chain(self.oob_mac_address.iter().flat_map(|mac| {
             let mocked_mac_no_colons = mac
                 .to_string()
                 .replace(':', "")
                 .to_ascii_uppercase();
             vec![
-                boot_opt_builder("Boot0000", BootOptionKind::Network)
+                boot_opt_builder("Boot0000")
                     .display_name("NET-OOB-IPV4-HTTP")
-                    .uefi_device_path(&format!("MAC({mocked_mac_no_colons},0x1)/IPv4(0.0.0.0,0x0,DHCP,0.0.0.0,0.0.0.0,0.0.0.0)/Uri()"))
-                    .build(),
+                    .uefi_device_path(format!("MAC({mocked_mac_no_colons},0x1)/IPv4(0.0.0.0,0x0,DHCP,0.0.0.0,0.0.0.0,0.0.0.0)/Uri()"))
+                    .build(BootOptionKind::Network),
             ]
         })).collect::<Vec<_>>();
 
@@ -167,14 +167,14 @@ impl Bluefield3<'_> {
                 bios_mode: redfish::computer_system::BiosMode::Generic,
                 oem: redfish::computer_system::Oem::NvidiaBluefield,
                 base_bios: Some(
-                    redfish::bios::builder(&redfish::bios::resource(system_id))
-                        .attributes(json!({
+                    redfish::bios::builder(&redfish::bios::resource(system_id)).with_attributes(
+                        json!({
                             "NicMode": nic_mode,
                             "HostPrivilegeLevel": "Unavailable",
                             "InternalCPUModel": "Unavailable",
                             "CurrentUefiPassword": "",
-                        }))
-                        .build(),
+                        }),
+                    ),
                 ),
                 log_services: Some(redfish::log_service::LogServices::event_log([
                     "DPU Warm Reset",
@@ -200,7 +200,7 @@ impl Bluefield3<'_> {
                     redfish::ethernet_interface::builder(
                         &redfish::ethernet_interface::manager_resource("Bluefield_BMC", "eth0"),
                     )
-                    .mac_address(self.bmc_mac_address)
+                    .mac_address((self.bmc_mac_address).to_string())
                     .interface_enabled(true)
                     .build(),
                 ]),

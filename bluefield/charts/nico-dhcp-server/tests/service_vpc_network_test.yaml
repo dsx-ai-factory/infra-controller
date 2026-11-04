@@ -1,0 +1,111 @@
+suite: IPv4 service-VPC network
+templates:
+  - service-vpc-ipv4-nad.yaml
+tests:
+  # Default omission keeps existing DHCP installations from acquiring a shared platform resource.
+  - it: omits the NAD by default
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  # Explicit false supports staged configuration without changing the rendered resource set.
+  - it: omits the NAD when explicitly disabled
+    set:
+      serviceVpcNetworks.ipv4.enabled: false
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  # Enablement pins every consumer-facing identity and CNI field needed for IPv4 attachment.
+  # A nondefault namespace proves the NAD follows the Helm release rather than the DPF default.
+  - it: renders the qualified IPv4 OVS and DHCP contract
+    release:
+      name: dhcp-owner
+      namespace: custom-dpu-namespace
+    set:
+      serviceVpcNetworks.ipv4.enabled: true
+    asserts:
+      - hasDocuments:
+          count: 1
+      - isKind:
+          of: NetworkAttachmentDefinition
+      - equal:
+          path: apiVersion
+          value: k8s.cni.cncf.io/v1
+      - equal:
+          path: metadata.name
+          value: nico-service-vpc-ipv4
+      - equal:
+          path: metadata.namespace
+          value: custom-dpu-namespace
+      - equal:
+          path: metadata.labels["app.kubernetes.io/instance"]
+          value: dhcp-owner
+      - equal:
+          path: metadata.labels["app.kubernetes.io/managed-by"]
+          value: Helm
+      - equal:
+          path: metadata.annotations["k8s.v1.cni.cncf.io/resourceName"]
+          value: nvidia.com/bf_sf
+      - equal:
+          path: spec.config
+          value: '{"bridge":"br-sfc","cniVersion":"0.4.0","interface_type":"dpdk","ipam":{"daemonSocketPath":"/run/vpc/cni/dhcp.sock","type":"dhcp"},"mtu":9000,"name":"nico-service-vpc-ipv4","type":"ovs"}'
+
+  # Release-specific labels may change, but consumers always use the same shared NAD name.
+  - it: keeps the shared NAD identity stable for another release name
+    release:
+      name: competing-dhcp
+      namespace: dpf-operator-system
+    set:
+      serviceVpcNetworks.ipv4.enabled: true
+    asserts:
+      - equal:
+          path: metadata.name
+          value: nico-service-vpc-ipv4
+      - equal:
+          path: metadata.labels["app.kubernetes.io/instance"]
+          value: competing-dhcp
+
+  # A non-Boolean switch must fail schema validation rather than relying on template truthiness.
+  - it: rejects a non-Boolean enablement value
+    set:
+      serviceVpcNetworks.ipv4.enabled: enabled
+    asserts:
+      - failedTemplate:
+          errorPattern: serviceVpcNetworks.ipv4.enabled
+
+  # Unknown fields must fail so a misspelled network contract cannot be silently ignored.
+  - it: rejects an unknown IPv4 network property
+    set:
+      serviceVpcNetworks.ipv4.enabled: true
+      serviceVpcNetworks.ipv4.unexpected: true
+    asserts:
+      - failedTemplate:
+          errorPattern: serviceVpcNetworks.ipv4
+
+  # Fractional MTUs must fail before template conversion can truncate the configured value.
+  - it: rejects a fractional MTU
+    set:
+      serviceVpcNetworks.ipv4.enabled: true
+      serviceVpcNetworks.ipv4.mtu: 9000.5
+    asserts:
+      - failedTemplate:
+          errorPattern: serviceVpcNetworks.ipv4.mtu
+
+  # Rejecting a renamed NAD prevents Helm overlays from diverging from Core's fixed reference.
+  - it: rejects an inconsistent NAD name
+    set:
+      serviceVpcNetworks.ipv4.enabled: true
+      serviceVpcNetworks.ipv4.name: release-specific-name
+    asserts:
+      - failedTemplate:
+          errorPattern: 'serviceVpcNetworks\.ipv4\.name must remain nico-service-vpc-ipv4'
+
+  # Rejecting another MTU prevents silent fragmentation differences across the service chain.
+  - it: rejects an inconsistent MTU
+    set:
+      serviceVpcNetworks.ipv4.enabled: true
+      serviceVpcNetworks.ipv4.mtu: 1500
+    asserts:
+      - failedTemplate:
+          errorPattern: 'serviceVpcNetworks\.ipv4\.mtu must remain 9000'

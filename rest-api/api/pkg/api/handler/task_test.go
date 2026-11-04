@@ -19,7 +19,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
-	oteltrace "go.opentelemetry.io/otel/trace"
 	tClient "go.temporal.io/sdk/client"
 	tmocks "go.temporal.io/sdk/mocks"
 	tp "go.temporal.io/sdk/temporal"
@@ -30,7 +29,6 @@ import (
 	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
 	authz "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
 	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/grpcproxy"
-	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/otelecho"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
 	flowv1 "github.com/NVIDIA/infra-controller/rest-api/proto/flow/gen/v1"
 	swe "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/error"
@@ -73,9 +71,9 @@ func TestGetTaskHandler_Handle(t *testing.T) {
 		Description: "Power on rack",
 		Status:      flowv1.TaskStatus_TASK_STATUS_RUNNING,
 		Message:     "Processing",
+		Report:      `{"version":1,"stages":[{"number":1,"status":"completed","steps":[{"component_type":"Compute","status":"skipped"}]}]}`,
 	}
 
-	tracer := oteltrace.NewNoopTracerProvider().Tracer("test")
 	ctx := context.Background()
 
 	tests := []struct {
@@ -177,7 +175,6 @@ func TestGetTaskHandler_Handle(t *testing.T) {
 			ec.SetParamValues(tt.reqOrg, tt.taskUUID)
 			ec.Set("user", tt.user)
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			err := handler.Handle(ec)
@@ -198,6 +195,7 @@ func TestGetTaskHandler_Handle(t *testing.T) {
 			assert.Equal(t, "Running", apiTask.Status)
 			assert.Equal(t, "Power on rack", apiTask.Description)
 			assert.Equal(t, "Processing", apiTask.Message)
+			assertZeroTaskReportCounters(t, rec.Body.Bytes())
 		})
 	}
 }
@@ -206,23 +204,23 @@ func TestGetTaskHandler_Handle(t *testing.T) {
 // handlers with a shared case matrix. pathFmt and the path parameter differ per
 // handler; all invoke Flow ListTasks through the generic proxy.
 type GetTasksHandlerTestCase struct {
-	name           string
-	reqOrg         string
-	user           *cdbm.User
-	pathParam      string
-	queryParams    map[string]string
-	mockTasks      []*flowv1.Task
-	expectedStatus int
-	expectedPage   *pagination.PageResponse
-	expectedFlowID string
-	assertFlowReq  func(t *testing.T, req *flowv1.ListTasksRequest, pathParam string)
-	assertResponse func(t *testing.T, tasks []model.APITask)
+	name              string
+	reqOrg            string
+	user              *cdbm.User
+	pathParam         string
+	queryParams       map[string]string
+	mockTasks         []*flowv1.Task
+	expectedStatus    int
+	expectedPage      *pagination.PageResponse
+	expectedFlowID    string
+	assertFlowReq     func(t *testing.T, req *flowv1.ListTasksRequest, pathParam string)
+	assertResponse    func(t *testing.T, tasks []model.APITask)
+	assertRawResponse func(t *testing.T, body []byte)
 }
 
 func ExecuteGetTasksHandlerTestCases(t *testing.T, pathFmt string, handle func(echo.Context) error, scp *sc.ClientPool, siteID string, testCases []GetTasksHandlerTestCase) {
 	t.Helper()
 	e := echo.New()
-	tracer := oteltrace.NewNoopTracerProvider().Tracer("test")
 	for _, tt := range testCases {
 		t.Run(tt.name, func(t *testing.T) {
 			mockTemporalClient := &tmocks.Client{}
@@ -274,9 +272,6 @@ func ExecuteGetTasksHandlerTestCases(t *testing.T, pathFmt string, handle func(e
 			}
 			ec.Set("user", tt.user)
 
-			ctx := context.WithValue(context.Background(), otelecho.TracerKey, tracer)
-			ec.SetRequest(ec.Request().WithContext(ctx))
-
 			err := handle(ec)
 			require.Equal(t, tt.expectedStatus, rec.Code, "body=%s err=%v", rec.Body.String(), err)
 
@@ -296,8 +291,19 @@ func ExecuteGetTasksHandlerTestCases(t *testing.T, pathFmt string, handle func(e
 			if tt.assertResponse != nil {
 				tt.assertResponse(t, tasks)
 			}
+			if tt.assertRawResponse != nil {
+				tt.assertRawResponse(t, rec.Body.Bytes())
+			}
 		})
 	}
+}
+
+func assertZeroTaskReportCounters(t *testing.T, body []byte) {
+	t.Helper()
+	for _, field := range []string{"totalComponents", "succeededComponents", "failedComponents"} {
+		assert.Contains(t, string(body), `"`+field+`":0`)
+	}
+	assert.NotContains(t, string(body), `"completedComponents"`)
 }
 
 func TestGetAllTaskHandler_Handle(t *testing.T) {
@@ -331,7 +337,7 @@ func TestGetAllTaskHandler_Handle(t *testing.T) {
 		RackId:      &flowv1.UUID{Id: uuid.New().String()},
 		Description: "Power on rack",
 		Status:      flowv1.TaskStatus_TASK_STATUS_RUNNING,
-		Report:      `{"version":1,"stages":[]}`,
+		Report:      `{"version":1,"stages":[{"number":1,"status":"completed","steps":[{"component_type":"Compute","status":"skipped"}]}]}`,
 	}}
 	defaultPageNumber, defaultPageSize := 1, 20
 	filteredPageNumber, filteredPageSize := 2, 10
@@ -371,14 +377,15 @@ func TestGetAllTaskHandler_Handle(t *testing.T) {
 			},
 		},
 		{
-			name:           "success - filters and pagination pass through",
-			reqOrg:         org,
-			user:           providerUser,
-			queryParams:    map[string]string{"siteId": site.ID.String(), "activeOnly": "true", "includeReport": "true", "pageNumber": "2", "pageSize": "10"},
-			mockTasks:      listed,
-			expectedStatus: http.StatusOK,
-			expectedPage:   &pagination.PageResponse{PageNumber: 2, PageSize: 10, Total: 1},
-			expectedFlowID: filteredFlowID,
+			name:              "success - filters and pagination pass through",
+			assertRawResponse: assertZeroTaskReportCounters,
+			reqOrg:            org,
+			user:              providerUser,
+			queryParams:       map[string]string{"siteId": site.ID.String(), "activeOnly": "true", "includeReport": "true", "pageNumber": "2", "pageSize": "10"},
+			mockTasks:         listed,
+			expectedStatus:    http.StatusOK,
+			expectedPage:      &pagination.PageResponse{PageNumber: 2, PageSize: 10, Total: 1},
+			expectedFlowID:    filteredFlowID,
 			assertFlowReq: func(t *testing.T, req *flowv1.ListTasksRequest, _ string) {
 				t.Helper()
 				assert.True(t, req.GetActiveOnly())
@@ -630,7 +637,6 @@ func TestCancelTaskHandler_Handle(t *testing.T) {
 		Message:     "Cancelled by user",
 	}
 
-	tracer := oteltrace.NewNoopTracerProvider().Tracer("test")
 	ctx := context.Background()
 
 	tests := []struct {
@@ -746,7 +752,6 @@ func TestCancelTaskHandler_Handle(t *testing.T) {
 			ec.SetParamValues(tt.reqOrg, tt.taskUUID)
 			ec.Set("user", tt.user)
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			err = handler.Handle(ec)

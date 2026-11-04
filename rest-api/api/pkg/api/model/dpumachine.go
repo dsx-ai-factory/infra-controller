@@ -455,6 +455,8 @@ type APIDpuMachine struct {
 	LastRebooted *time.Time `json:"lastRebooted"`
 	// PlacementInRack is the physical placement of the DPU Machine within its Rack
 	PlacementInRack *APIPlacementInRack `json:"placementInRack"`
+	// LldpNeighbors is the list of LLDP neighbors observed on the DPU's ports, as last reported by the DPU agent
+	LldpNeighbors []APIMachineLldpNeighbor `json:"lldpNeighbors"`
 }
 
 // APIDpuMachineProtoContext carries the host Machine ID, Site ID and
@@ -506,10 +508,7 @@ func (apd *APIDpuMachine) FromProto(protoDpuMachine *corev1.DpuMachine, ctx APID
 		apd.DpuAgentVersion = *protoMachineStatus.DpuAgentVersion
 	}
 
-	if protoMachine.BmcInfo != nil {
-		apd.BMCInfo = &APIBMCInfo{}
-		apd.BMCInfo.FromProto(protoMachine.BmcInfo)
-	}
+	apd.BMCInfo = newAPIBMCInfoFromMachine(protoMachine)
 
 	if protoMachineStatus.GetDiscoveryInfo() != nil && protoMachineStatus.GetDiscoveryInfo().DmiData != nil {
 		apd.DMIData = &APIDMIData{}
@@ -566,5 +565,16 @@ func (apd *APIDpuMachine) FromProto(protoDpuMachine *corev1.DpuMachine, ctx APID
 			SlotNumber: placement.SlotNumber,
 			TrayIndex:  placement.TrayIndex,
 		}
+	}
+
+	// LLDP neighbors reported by the DPU agent
+	apd.LldpNeighbors = []APIMachineLldpNeighbor{}
+	for _, protoNeighbor := range protoMachine.GetStatus().GetLldpNeighbors() {
+		if protoNeighbor == nil {
+			continue
+		}
+		neighbor := APIMachineLldpNeighbor{}
+		neighbor.FromProto(protoNeighbor)
+		apd.LldpNeighbors = append(apd.LldpNeighbors, neighbor)
 	}
 }

@@ -52,7 +52,8 @@
       "ldflags": [
         "-extldflags=-static",
         "-w",
-        "-s"
+        "-s",
+        "-X=github.com/NVIDIA/infra-controller/rest-api/cert-manager/pkg/core.Version=${VERSION}"
       ],
       "output": "bin/sitemgr"
     },
@@ -106,7 +107,8 @@
       "ldflags": [
         "-extldflags=-static",
         "-w",
-        "-s"
+        "-s",
+        "-X=github.com/NVIDIA/infra-controller/rest-api/cert-manager/pkg/core.Version=${VERSION}"
       ],
       "output": "bin/credsmgr"
     },
@@ -201,7 +203,8 @@
       "ldflags": [
         "-extldflags=-static",
         "-w",
-        "-s"
+        "-s",
+        "-X=github.com/NVIDIA/infra-controller/rest-api/cert-manager/pkg/core.Version=${VERSION}"
       ],
       "output": "bin/sitemgr"
     },
@@ -255,7 +258,8 @@
       "ldflags": [
         "-extldflags=-static",
         "-w",
-        "-s"
+        "-s",
+        "-X=github.com/NVIDIA/infra-controller/rest-api/cert-manager/pkg/core.Version=${VERSION}"
       ],
       "output": "bin/credsmgr"
     },
@@ -340,7 +344,9 @@
       "package": "./site-manager/cmd/sitemgr",
       "target": "darwin-arm64",
       "cgo_enabled": false,
-      "ldflags": [],
+      "ldflags": [
+        "-X=github.com/NVIDIA/infra-controller/rest-api/cert-manager/pkg/core.Version=${VERSION}"
+      ],
       "output": "bin/sitemgr"
     },
     {
@@ -383,7 +389,9 @@
       "package": "./cert-manager/cmd/credsmgr",
       "target": "darwin-arm64",
       "cgo_enabled": false,
-      "ldflags": [],
+      "ldflags": [
+        "-X=github.com/NVIDIA/infra-controller/rest-api/cert-manager/pkg/core.Version=${VERSION}"
+      ],
       "output": "bin/credsmgr"
     },
     {

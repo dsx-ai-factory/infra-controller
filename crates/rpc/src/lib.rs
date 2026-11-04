@@ -1076,6 +1076,7 @@ impl forge_agent_control_response::Action {
             Self::MachineValidation(_) => "MACHINE_VALIDATION",
             Self::MlxAction(_) => "MLX_ACTION",
             Self::FirmwareUpgrade(_) => "FIRMWARE_UPGRADE",
+            Self::MlxDeviceInfoReport(_) => "MLX_DEVICE_INFO_REPORT",
         }
     }
 }
@@ -1219,6 +1220,7 @@ mod tests {
             id: Some(uuid),
             name: "MyDomain".to_string(),
             default_ttl: None,
+            vpc_id: None,
             created: Some(ts.into()),
             updated: Some(ts2.into()),
             deleted: None,

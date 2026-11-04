@@ -110,7 +110,7 @@ Print help (see a summary with -h)
 
 ```sh
 nico-admin-cli extension-service create --name my-service --type kubernetes-pod --data '{"image":"my-registry/my-service:1.0"}'
-nico-admin-cli extension-service create --name my-helm-service --type dpf-helm-chart --dpu-target all-active --data '{"repoURL":"oci://registry.example.com/charts","chartName":"my-service","chartVersion":"1.2.3","security.privileged":false}'
+nico-admin-cli extension-service create --name my-helm-service --type dpf-helm-chart --dpu-target all-active --data '{"repoURL":"oci://registry.example.com/charts","chartName":"my-service","chartVersion":"1.2.3","security":{"privileged":false,"spiffe":{}}}'
 nico-admin-cli extension-service create --id 12345678-1234-5678-90ab-cdef01234567 --name my-service --type kubernetes-pod --data '{"image":"my-registry/my-service:1.0"}' --description "Front-end telemetry agent"
 nico-admin-cli extension-service create --name my-service --type kubernetes-pod --data '{"image":"my-registry/my-service:1.0"}' --tenant-organization-id fds34511233a
 nico-admin-cli extension-service create --name my-service --type kubernetes-pod --data '{"image":"my-registry/my-service:1.0"}' --registry-url my-registry.example.com --username admin --password mypassword

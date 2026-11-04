@@ -202,6 +202,8 @@ func (r *APINVLinkDomainGetAllRequest) QueryValues() url.Values {
 // APINVLinkDomain is the NVLink domain inventory response.
 type APINVLinkDomain struct {
 	ID              string              `json:"id"`
+	RackGroupID     string              `json:"rackGroupId"`
+	NMXCClusterID   *string             `json:"nmxcClusterId"`
 	Name            string              `json:"name"`
 	Topology        *string             `json:"topology"`
 	OperationStatus string              `json:"operationStatus"`
@@ -214,6 +216,8 @@ func (d *APINVLinkDomain) FromProto(r *flowv1.NVLinkDomain, includeComponents bo
 		return
 	}
 	d.ID = r.GetId()
+	d.RackGroupID = r.GetRackGroupId()
+	d.NMXCClusterID = r.NmxcClusterId
 	d.Name = r.GetName()
 	d.Topology = r.Topology
 	d.OperationStatus = enumOr(ProtoToAPIPhaseName, r.GetOperationStatus(), "Unknown")

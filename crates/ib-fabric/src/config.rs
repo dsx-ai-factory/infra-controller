@@ -154,14 +154,55 @@ pub struct IbFabricDefinition {
     /// Note that editing the pkey ranges will never shrink the currently defined
     /// ranges. It can only be used to expand the range
     pub pkeys: Vec<model::resource_pool::define::Range>,
+    /// Name from `resource_pool_backends` for this fabric's PKeys. Omission
+    /// uses Integrated; v2.4 rejects a selected gRPC backend at startup.
+    #[serde(default)]
+    pub backend: Option<String>,
+    /// Provider lookup name. Omission uses `ib_fabrics.<fabric>.pkey`;
+    /// Integrated also requires that logical name when supplied explicitly.
+    #[serde(default)]
+    pub remote_pool: Option<String>,
 }
 
 #[cfg(test)]
 mod test {
+    use carbide_test_support::Outcome::*;
+    use carbide_test_support::scenarios;
     use figment::Figment;
     use figment::providers::{Format, Toml};
 
     use super::*;
+
+    #[test]
+    fn fabric_definition_preserves_pool_selectors_and_legacy_pkeys() {
+        scenarios!(
+            run = |selectors| {
+                let input = format!(
+                    "endpoints = [\"https://ufm.example\"]\npkeys = [{{ start = \"1\", end = \"100\" }}]\n{selectors}"
+                );
+                let config: IbFabricDefinition = Figment::new()
+                    .merge(Toml::string(&input))
+                    .extract()
+                    .map_err(drop)?;
+                assert_eq!(config.endpoints, vec!["https://ufm.example"]);
+                assert_eq!(config.pkeys, vec![model::resource_pool::define::Range {
+                    start: "1".to_string(),
+                    end: "100".to_string(),
+                    auto_assign: true,
+                }]);
+                Ok::<_, ()>((config.backend, config.remote_pool))
+            };
+            "legacy defaults" {
+                "" => Yields((None, None)),
+            }
+            "configured selection" {
+                "backend = \"shared\"\nremote_pool = \"provider-pkeys\"" => Yields((Some("shared".to_string()), Some("provider-pkeys".to_string()))),
+            }
+            "unknown selector" {
+                "bakend = \"shared\"" => Fails,
+            }
+        );
+    }
 
     #[test]
     fn parse_ib_fabric() {

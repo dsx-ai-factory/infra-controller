@@ -65,7 +65,8 @@ impl PowerHandlingOutcome {
 /// If power manager tried to power on the host, wait until DPUs are up or wait_expiry_time is
 /// expired (which is around 15 mins). If DPUs come up by this time, reboot the host, else ignore
 /// the handling and move to the state handler.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, carbide_macros::DbTable)]
+#[db_table(name = "power_options")]
 pub struct PowerOptions {
     pub host_id: HostMachineId,
     pub last_fetched_updated_at: DateTime<Utc>,
@@ -190,14 +191,14 @@ impl<'r> FromRow<'r, PgRow> for PowerOptions {
             desired_state_version
                 .parse()
                 .map_err(|e| sqlx::error::Error::ColumnDecode {
-                    index: "version".to_string(),
+                    index: "desired_power_state_version".to_string(),
                     source: Box::new(e),
                 })?;
         let desired_power_state = row.try_get("desired_power_state")?;
         let wait_until_time_before_performing_next_power_action =
             row.try_get("wait_until_time_before_performing_next_power_action")?;
         let tried_triggering_on_at: Option<DateTime<Utc>> =
-            row.try_get("tried_triggering_on_at").ok();
+            row.try_get("tried_triggering_on_at")?;
         let tried_triggering_on_counter = row.try_get("tried_triggering_on_counter")?;
 
         Ok(Self {
@@ -212,5 +213,86 @@ impl<'r> FromRow<'r, PgRow> for PowerOptions {
             tried_triggering_on_at,
             tried_triggering_on_counter,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[crate::sqlx_test]
+    async fn power_options_decoding_preserves_errors(pool: sqlx::PgPool) {
+        struct Case {
+            version: &'static str,
+            timestamp_projection: &'static str,
+            check: fn(Result<PowerOptions, sqlx::Error>),
+        }
+
+        let cases = [
+            Case {
+                version: "V1-T0",
+                timestamp_projection: "NULL::timestamptz AS another_column",
+                check: |result| {
+                    assert!(
+                        matches!(&result, Err(sqlx::Error::ColumnNotFound(name))
+                            if name == "tried_triggering_on_at"),
+                        "{result:?}"
+                    );
+                },
+            },
+            Case {
+                version: "V1-T0",
+                timestamp_projection: "'not a timestamp'::text AS tried_triggering_on_at",
+                check: |result| {
+                    assert!(
+                        matches!(&result, Err(sqlx::Error::ColumnDecode { index, .. })
+                        if index == "\"tried_triggering_on_at\""),
+                        "{result:?}"
+                    );
+                },
+            },
+            Case {
+                version: "not a version",
+                timestamp_projection: "NULL::timestamptz AS tried_triggering_on_at",
+                check: |result| {
+                    let error = result.expect_err("malformed power state version must fail");
+                    let sqlx::Error::ColumnDecode { index, source } = error else {
+                        panic!("expected ColumnDecode, got {error:?}");
+                    };
+                    assert_eq!(index, "desired_power_state_version");
+                    assert!(
+                        matches!(
+                            source.downcast_ref::<config_version::ConfigVersionParseError>(),
+                            Some(config_version::ConfigVersionParseError::VersionFormat(value))
+                                if value == "not a version"
+                        ),
+                        "{source:?}"
+                    );
+                },
+            },
+        ];
+
+        for case in cases {
+            let query = format!(
+                "SELECT
+                    'fm100ht038bg3qsho433vkg684heguv282qaggmrsh2ugn1qk096n2c6hcg'::text AS host_id,
+                    now() AS last_fetched_updated_at,
+                    now() AS last_fetched_next_try_at,
+                    'off'::host_power_state_t AS last_fetched_power_state,
+                    0::integer AS last_fetched_off_counter,
+                    $1::text AS desired_power_state_version,
+                    'on'::host_power_state_t AS desired_power_state,
+                    now() AS wait_until_time_before_performing_next_power_action,
+                    0::integer AS tried_triggering_on_counter,
+                    {}",
+                case.timestamp_projection
+            );
+            let row = sqlx::query(sqlx::AssertSqlSafe(query))
+                .bind(case.version)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            (case.check)(PowerOptions::from_row(&row));
+        }
     }
 }

@@ -17,7 +17,10 @@
 
 use std::collections::HashMap;
 
-use carbide_uuid::network::NetworkSegmentId;
+use carbide_machine_controller::io::MachineStateControllerIO;
+use carbide_machine_controller::metrics::MachineMetrics;
+use carbide_uuid::extension_service::ExtensionServiceId;
+use carbide_uuid::network::{NetworkPrefixId, NetworkSegmentId};
 use carbide_uuid::site_prefix::SitePrefixId;
 use carbide_uuid::vpc::{VpcId, VpcPrefixId};
 use common::api_fixtures::instance::{
@@ -30,10 +33,19 @@ use common::api_fixtures::{
     create_test_env_with_overrides,
 };
 use config_version::ConfigVersion;
+use mac_address::MacAddress;
+use model::instance::config::extension_services::{
+    InstanceExtensionServiceConfig, InstanceExtensionServicesConfig,
+};
+use model::instance::config::network::InstanceServiceInterfaceConfig;
+use model::machine::{InstanceState, ManagedHostState, NetworkConfigUpdateState};
 use model::test_support::ManagedHostConfig;
 use rpc::forge::forge_server::Forge;
 use rpc::forge::instance_interface_config::NetworkDetails;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
+use state_controller::db_write_batch::DbWriteBatch;
+use state_controller::io::StateControllerIO;
+use state_controller::state_handler::{StateHandler, StateHandlerContext, StateHandlerOutcome};
 use tonic::Request;
 
 use crate::cfg::file::{FnnConfig, FnnRoutingProfileConfig, PrefixFilterPolicyEntry};
@@ -47,6 +59,9 @@ use crate::tests::common::rpc_builder::{
     VpcCreationRequest,
 };
 use crate::tests::common::{self};
+use crate::tests::instance_allocate::{
+    TENANT_FIRMWARE_DPA_MAC, create_spx_allocation_request, set_tenant_nic_firmware_profile,
+};
 
 /// Returns tenant config matching the shared VPC fixture so update tests reach
 /// prefix behavior rather than fail ownership validation.
@@ -1636,6 +1651,612 @@ fn assert_metadata_equals(actual: &rpc::forge::Metadata, expected: &rpc::forge::
     assert_eq!(actual, expected);
 }
 
+/// Legacy allocations without a snapshot retain the live tenant preparation
+/// guard, including its unchanged-intent and clear-all exceptions.
+#[crate::sqlx_test]
+async fn tenant_nic_firmware_selection_guards_legacy_spx_config_updates(pool: sqlx::PgPool) {
+    let env = create_test_env(pool).await;
+    let segment_id = env.create_vpc_and_tenant_segment().await;
+    let host = create_managed_host(&env).await;
+    let profile_id = "spx-config-update-profile";
+
+    // Reach Ready before discovering the DPA, then represent an allocation
+    // created before snapshot capture existed.
+    let instance = host
+        .instance_builer(&env)
+        .tenant_org(FIXTURE_TENANT_ORG_ID)
+        .single_interface_network_config(segment_id)
+        .build()
+        .await;
+    sqlx::query("UPDATE instances SET nic_firmware_snapshot = NULL WHERE id = $1")
+        .bind(instance.id)
+        .execute(&env.pool)
+        .await
+        .unwrap();
+    set_tenant_nic_firmware_profile(&env, Some(profile_id)).await;
+    let allocation = create_spx_allocation_request(&env, &host, segment_id).await;
+    let requested_spx = allocation.config.unwrap().spxconfig.unwrap();
+    let before = db::instance::find_by_id(&env.pool, instance.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(before.config.spxconfig.spx_attachments.is_empty());
+    assert!(before.nic_firmware_snapshot.is_none());
+    let initial = instance.rpc_instance().await.into_inner();
+    let mut requested_config = initial.config.unwrap();
+    requested_config.spxconfig = Some(requested_spx);
+    let add_attachment = rpc::forge::InstanceConfigUpdateRequest {
+        instance_id: Some(instance.id),
+        if_version_match: Some(before.config_version.to_string()),
+        config: Some(requested_config),
+        metadata: initial.metadata,
+    };
+
+    let error = env
+        .api
+        .update_instance_config(Request::new(add_attachment.clone()))
+        .await
+        .expect_err("tenant firmware selection blocks attachment addition");
+    assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+    assert!(error.message().contains("NIC firmware preparation"));
+    assert!(!error.message().contains(profile_id));
+    let rejected = db::instance::find_by_id(&env.pool, instance.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(rejected.config.spxconfig, before.config.spxconfig);
+    assert_eq!(rejected.spx_config_version, before.spx_config_version);
+    assert_eq!(rejected.config_version, before.config_version);
+
+    // The same request must bind successfully once the requirement is cleared;
+    // an invalid partition or device must not account for the rejection above.
+    set_tenant_nic_firmware_profile(&env, None).await;
+    let attached = env
+        .api
+        .update_instance_config(Request::new(add_attachment))
+        .await
+        .expect("attach SPX after clearing the tenant selection")
+        .into_inner();
+    let bound = db::instance::find_by_id(&env.pool, instance.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(bound.config.spxconfig.spx_attachments.len(), 1);
+    assert_eq!(
+        bound.config.spxconfig.spx_attachments[0]
+            .mac_address
+            .as_deref(),
+        Some(TENANT_FIRMWARE_DPA_MAC)
+    );
+    assert_eq!(
+        bound.spx_config_version.version_nr(),
+        before.spx_config_version.version_nr() + 1
+    );
+    assert_eq!(
+        bound.config_version.version_nr(),
+        before.config_version.version_nr() + 1
+    );
+
+    // An already attached device must not bypass preparation by selecting a
+    // different partition owned by the same tenant.
+    set_tenant_nic_firmware_profile(&env, Some(profile_id)).await;
+    let replacement_partition_id = env
+        .api
+        .create_spx_partition(Request::new(rpc::forge::SpxPartitionCreationRequest {
+            metadata: Some(rpc::forge::Metadata {
+                name: "replacement-spx-partition".to_string(),
+                ..Default::default()
+            }),
+            tenant_organization_id: FIXTURE_TENANT_ORG_ID.to_string(),
+            ..Default::default()
+        }))
+        .await
+        .expect("create another partition owned by the instance tenant")
+        .into_inner()
+        .id
+        .unwrap();
+    assert_ne!(
+        replacement_partition_id,
+        bound.config.spxconfig.spx_attachments[0].spx_partition_id
+    );
+    let mut replacement_config = attached.config.clone().unwrap();
+    replacement_config
+        .spxconfig
+        .as_mut()
+        .unwrap()
+        .spx_attachments[0]
+        .spx_partition_id = Some(replacement_partition_id);
+    let replace_attachment = rpc::forge::InstanceConfigUpdateRequest {
+        instance_id: Some(instance.id),
+        if_version_match: Some(bound.config_version.to_string()),
+        config: Some(replacement_config),
+        metadata: attached.metadata,
+    };
+    let error = env
+        .api
+        .update_instance_config(Request::new(replace_attachment.clone()))
+        .await
+        .expect_err("tenant firmware selection blocks attachment replacement");
+    assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+    assert!(error.message().contains("NIC firmware preparation"));
+    assert!(!error.message().contains(profile_id));
+    let rejected = db::instance::find_by_id(&env.pool, instance.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(rejected.config.spxconfig, bound.config.spxconfig);
+    assert_eq!(rejected.spx_config_version, bound.spx_config_version);
+    assert_eq!(rejected.config_version, bound.config_version);
+
+    // Retry the exact replacement after clearing the requirement to prove the
+    // partition change is valid and still binds the same DPA row.
+    set_tenant_nic_firmware_profile(&env, None).await;
+    let replacement_response = env
+        .api
+        .update_instance_config(Request::new(replace_attachment))
+        .await
+        .expect("replace SPX partition after clearing the tenant selection")
+        .into_inner();
+    let replaced = db::instance::find_by_id(&env.pool, instance.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(replaced.config.spxconfig.spx_attachments.len(), 1);
+    assert_eq!(
+        replaced.config.spxconfig.spx_attachments[0].spx_partition_id,
+        replacement_partition_id
+    );
+    assert_eq!(
+        replaced.config.spxconfig.spx_attachments[0]
+            .mac_address
+            .as_deref(),
+        Some(TENANT_FIRMWARE_DPA_MAC)
+    );
+    assert_eq!(
+        replaced.spx_config_version.version_nr(),
+        bound.spx_config_version.version_nr() + 1
+    );
+    assert_eq!(
+        replaced.config_version.version_nr(),
+        bound.config_version.version_nr() + 1
+    );
+
+    // A later operator selection must allow full config replacements that keep
+    // the existing attachment intent, including Core's persisted MAC binding.
+    set_tenant_nic_firmware_profile(&env, Some(profile_id)).await;
+    let mut metadata = replacement_response.metadata.unwrap();
+    metadata.description = "updated after the tenant selected firmware".to_string();
+    let updated = env
+        .api
+        .update_instance_config(Request::new(rpc::forge::InstanceConfigUpdateRequest {
+            instance_id: Some(instance.id),
+            if_version_match: Some(replaced.config_version.to_string()),
+            config: replacement_response.config,
+            metadata: Some(metadata.clone()),
+        }))
+        .await
+        .expect("unchanged SPX intent permits a full config replacement")
+        .into_inner();
+    let preserved = db::instance::find_by_id(&env.pool, instance.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(preserved.config.spxconfig, replaced.config.spxconfig);
+    assert_eq!(preserved.spx_config_version, replaced.spx_config_version);
+    assert_eq!(preserved.metadata.description, metadata.description);
+    assert_eq!(
+        preserved.nic_firmware_snapshot,
+        before.nic_firmware_snapshot
+    );
+    assert_eq!(
+        preserved.config_version.version_nr(),
+        replaced.config_version.version_nr() + 1
+    );
+
+    // Removing attachments remains available while preparation is required.
+    let mut cleared_config = updated.config.unwrap();
+    cleared_config.spxconfig = Some(rpc::forge::InstanceSpxConfig {
+        spx_attachments: vec![],
+    });
+    env.api
+        .update_instance_config(Request::new(rpc::forge::InstanceConfigUpdateRequest {
+            instance_id: Some(instance.id),
+            if_version_match: Some(preserved.config_version.to_string()),
+            config: Some(cleared_config),
+            metadata: updated.metadata,
+        }))
+        .await
+        .expect("tenant firmware selection permits clearing SPX attachments");
+    let cleared = db::instance::find_by_id(&env.pool, instance.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(cleared.config.spxconfig.spx_attachments.is_empty());
+    assert_eq!(cleared.nic_firmware_snapshot, before.nic_firmware_snapshot);
+    assert_eq!(
+        cleared.spx_config_version.version_nr(),
+        preserved.spx_config_version.version_nr() + 1
+    );
+    assert_eq!(
+        cleared.config_version.version_nr(),
+        preserved.config_version.version_nr() + 1
+    );
+}
+
+/// Clearing a live tenant selection cannot erase the requirement captured by an
+/// existing allocation, even if that allocation initially had no attachments.
+#[crate::sqlx_test]
+async fn frozen_nic_firmware_requirement_prevents_later_attachment(pool: sqlx::PgPool) {
+    let env = create_test_env(pool).await;
+    let segment_id = env.create_vpc_and_tenant_segment().await;
+    let host = create_managed_host(&env).await;
+    set_tenant_nic_firmware_profile(&env, Some("captured-before-attachment")).await;
+    let instance = host
+        .instance_builer(&env)
+        .tenant_org(FIXTURE_TENANT_ORG_ID)
+        .single_interface_network_config(segment_id)
+        .build()
+        .await;
+    let allocation = create_spx_allocation_request(&env, &host, segment_id).await;
+    let before = db::instance::find_by_id(&env.pool, instance.id)
+        .await
+        .unwrap()
+        .unwrap();
+    let frozen = before.nic_firmware_snapshot.as_ref().unwrap();
+    assert!(frozen.targets.is_empty());
+    assert_eq!(
+        frozen
+            .tenant
+            .as_ref()
+            .unwrap()
+            .profile_id
+            .as_ref()
+            .unwrap()
+            .to_string(),
+        "captured-before-attachment"
+    );
+
+    // This removes the existing live-selection guard from the rejection path.
+    // Only the allocation's saved requirement can prevent the new attachment.
+    set_tenant_nic_firmware_profile(&env, None).await;
+    let current = instance.rpc_instance().await.into_inner();
+    let mut requested = current.config.unwrap();
+    requested.spxconfig = allocation.config.unwrap().spxconfig;
+    let error = env
+        .api
+        .update_instance_config(Request::new(rpc::forge::InstanceConfigUpdateRequest {
+            instance_id: Some(instance.id),
+            if_version_match: Some(before.config_version.to_string()),
+            config: Some(requested),
+            metadata: current.metadata,
+        }))
+        .await
+        .expect_err("captured requirement still applies after the live setting is cleared");
+    assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+    assert!(error.message().contains("frozen NIC firmware requirement"));
+    let after = db::instance::find_by_id(&env.pool, instance.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(after.config.spxconfig, before.config.spxconfig);
+    assert_eq!(after.spx_config_version, before.spx_config_version);
+    assert_eq!(after.config_version, before.config_version);
+    assert_eq!(after.nic_firmware_snapshot, before.nic_firmware_snapshot);
+
+    let current = instance.rpc_instance().await.into_inner();
+    let mut metadata = current.metadata.unwrap();
+    metadata.description = "metadata-only update with a frozen requirement".to_string();
+    env.api
+        .update_instance_config(Request::new(rpc::forge::InstanceConfigUpdateRequest {
+            instance_id: Some(instance.id),
+            if_version_match: Some(after.config_version.to_string()),
+            config: current.config,
+            metadata: Some(metadata.clone()),
+        }))
+        .await
+        .expect("captured requirement permits a metadata-only update");
+    let updated = db::instance::find_by_id(&env.pool, instance.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(&updated.config).unwrap(),
+        serde_json::to_value(&before.config).unwrap()
+    );
+    assert_eq!(updated.spx_config_version, before.spx_config_version);
+    assert_eq!(updated.nic_firmware_snapshot, before.nic_firmware_snapshot);
+    assert_eq!(updated.metadata.description, metadata.description);
+    assert_eq!(
+        updated.config_version.version_nr(),
+        after.config_version.version_nr() + 1
+    );
+}
+
+/// Frozen absence governs later SPX edits despite a live tenant selection, and
+/// retained binding evidence still rejects drift after partial or full removal.
+#[crate::sqlx_test]
+async fn frozen_nic_firmware_binding_survives_spx_clear_and_inventory_drift(pool: sqlx::PgPool) {
+    let env = create_test_env(pool).await;
+    let segment_id = env.create_vpc_and_tenant_segment().await;
+    let host = create_managed_host(&env).await;
+    let request = create_spx_allocation_request(&env, &host, segment_id).await;
+    let added_mac = "02:11:22:33:44:66";
+    env.api
+        .create_dpa_interface(Request::new(rpc::forge::DpaInterfaceCreationRequest {
+            mac_addr: added_mac.to_string(),
+            machine_id: Some(*host.host().id),
+            device_type: "ConnectX7".to_string(),
+            pci_name: "0000:dd:00.0".to_string(),
+            device_description: Some("NVIDIA ConnectX-7".to_string()),
+            interface_type: rpc::forge::DpaInterfaceType::Svpc.into(),
+        }))
+        .await
+        .unwrap();
+    let pci_name = "0000:cc:00.0";
+    let observed = rpc::protos::mlx_device::MlxDeviceInfo {
+        pci_name: pci_name.to_string(),
+        device_type: "ConnectX7".to_string(),
+        psid: "MT_0000000838".to_string(),
+        device_description: "NVIDIA ConnectX-7".to_string(),
+        part_number: "MCX75310AAS-NEAT".to_string(),
+        fw_version_current: "28.43.1014".to_string(),
+        base_mac: TENANT_FIRMWARE_DPA_MAC.to_string(),
+        base_guid: Some("0011223344556677".to_string()),
+        ..Default::default()
+    }
+    .try_into()
+    .expect("valid DPA device report");
+    let mut txn = env.db_txn().await;
+    db::dpa_interface::update_device_info(txn.as_mut(), *host.host().id, pci_name, &observed)
+        .await
+        .unwrap();
+    let observed_at: chrono::DateTime<chrono::Utc> = sqlx::query_scalar(
+        "SELECT device_info_ts FROM dpa_interfaces WHERE machine_id = $1 AND pci_name = $2",
+    )
+    .bind(host.host().id)
+    .bind(pci_name)
+    .fetch_one(txn.as_mut())
+    .await
+    .unwrap();
+    txn.commit().await.unwrap();
+    let allocated = env
+        .api
+        .allocate_instance(Request::new(request))
+        .await
+        .unwrap()
+        .into_inner();
+    let instance_id = allocated.id.unwrap();
+
+    // Exercise the public configuration writer in its supported state.
+    let mut txn = env.db_txn().await;
+    db::machine::update_state(
+        txn.as_mut(),
+        &host.host().id,
+        &ManagedHostState::Assigned {
+            instance_state: InstanceState::Ready,
+        },
+    )
+    .await
+    .unwrap();
+    txn.commit().await.unwrap();
+    let before = db::instance::find_by_id(&env.pool, instance_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let frozen = before.nic_firmware_snapshot.as_ref().unwrap();
+    assert!(frozen.tenant.is_none());
+    assert_eq!(frozen.targets.len(), 1);
+    assert_eq!(
+        frozen.targets[0].mac_address.to_string(),
+        TENANT_FIRMWARE_DPA_MAC
+    );
+    assert!(!frozen.targets[0].blocked_reason.is_empty());
+    assert_eq!(frozen.targets[0].observed_device.as_ref(), Some(&observed));
+    assert_eq!(frozen.targets[0].observed_at, Some(observed_at));
+
+    // The live selection cannot replace captured absence. The additional target
+    // keeps its baseline; neither it nor a new firmware requirement is frozen.
+    set_tenant_nic_firmware_profile(&env, Some("selected-after-allocation")).await;
+    let partition = env
+        .api
+        .create_spx_partition(Request::new(rpc::forge::SpxPartitionCreationRequest {
+            metadata: Some(rpc::forge::Metadata {
+                name: "same-binding-partition".to_string(),
+                ..Default::default()
+            }),
+            tenant_organization_id: FIXTURE_TENANT_ORG_ID.to_string(),
+            ..Default::default()
+        }))
+        .await
+        .unwrap()
+        .into_inner()
+        .id
+        .unwrap();
+    let mut addition = allocated.config.clone().unwrap();
+    let attachments = &mut addition.spxconfig.as_mut().unwrap().spx_attachments;
+    let mut additional_attachment = attachments[0].clone();
+    additional_attachment.device_instance = 1;
+    attachments.push(additional_attachment);
+    let mut partition_change = addition.clone();
+    partition_change.spxconfig.as_mut().unwrap().spx_attachments[0].spx_partition_id =
+        Some(partition);
+    let mut partial_removal = partition_change.clone();
+    partial_removal
+        .spxconfig
+        .as_mut()
+        .unwrap()
+        .spx_attachments
+        .retain(|attachment| attachment.device_instance == 0);
+
+    let mut expected_addition = before.config.spxconfig.clone();
+    let mut additional_attachment = expected_addition.spx_attachments[0].clone();
+    additional_attachment.device_instance = 1;
+    additional_attachment.mac_address = Some(added_mac.to_string());
+    expected_addition
+        .spx_attachments
+        .insert(0, additional_attachment);
+    let mut expected_partition_change = expected_addition.clone();
+    expected_partition_change.spx_attachments[1].spx_partition_id = partition;
+    let mut expected_partial_removal = expected_partition_change.clone();
+    expected_partial_removal.spx_attachments.remove(0);
+
+    let mut current = before.clone();
+    for (name, config, expected) in [
+        // Captured absence, not the later live selection, governs new selectors.
+        ("baseline-only addition", addition, expected_addition),
+        // A partition change retains the original target's DPA binding.
+        (
+            "same-binding partition change",
+            partition_change,
+            expected_partition_change,
+        ),
+        // Removal stays valid even when another attachment remains requested.
+        ("partial removal", partial_removal, expected_partial_removal),
+    ] {
+        env.api
+            .update_instance_config(Request::new(rpc::forge::InstanceConfigUpdateRequest {
+                instance_id: Some(instance_id),
+                if_version_match: Some(current.config_version.to_string()),
+                config: Some(config),
+                metadata: allocated.metadata.clone(),
+            }))
+            .await
+            .unwrap_or_else(|error| panic!("{name}: {error}"));
+        let updated = db::instance::find_by_id(&env.pool, instance_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(updated.config.spxconfig, expected, "{name}");
+        assert_eq!(
+            updated.nic_firmware_snapshot, before.nic_firmware_snapshot,
+            "{name}"
+        );
+        assert_eq!(
+            updated.config_version.version_nr(),
+            current.config_version.version_nr() + 1,
+            "{name}"
+        );
+        assert_eq!(
+            updated.spx_config_version.version_nr(),
+            current.spx_config_version.version_nr() + 1,
+            "{name}"
+        );
+        current = updated;
+    }
+
+    // Sorting now puts a different DPA at device_instance 0. The ordinary mapper
+    // can bind it, so the frozen-binding guard must distinguish the two rows.
+    env.api
+        .create_dpa_interface(Request::new(rpc::forge::DpaInterfaceCreationRequest {
+            mac_addr: "02:11:22:33:44:77".to_string(),
+            machine_id: Some(*host.host().id),
+            device_type: "ConnectX7".to_string(),
+            pci_name: "0000:aa:00.0".to_string(),
+            device_description: Some("NVIDIA ConnectX-7".to_string()),
+            interface_type: rpc::forge::DpaInterfaceType::Svpc.into(),
+        }))
+        .await
+        .unwrap();
+    let partition = env
+        .api
+        .create_spx_partition(Request::new(rpc::forge::SpxPartitionCreationRequest {
+            metadata: Some(rpc::forge::Metadata {
+                name: "binding-drift-partition".to_string(),
+                ..Default::default()
+            }),
+            tenant_organization_id: FIXTURE_TENANT_ORG_ID.to_string(),
+            ..Default::default()
+        }))
+        .await
+        .unwrap()
+        .into_inner()
+        .id
+        .unwrap();
+    let mut replacement = allocated.config.unwrap();
+    replacement.spxconfig.as_mut().unwrap().spx_attachments[0].spx_partition_id = Some(partition);
+    let error = env
+        .api
+        .update_instance_config(Request::new(rpc::forge::InstanceConfigUpdateRequest {
+            instance_id: Some(instance_id),
+            if_version_match: Some(current.config_version.to_string()),
+            config: Some(replacement.clone()),
+            metadata: allocated.metadata.clone(),
+        }))
+        .await
+        .expect_err("partition edit must not silently choose a different DPA row");
+    assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+    assert!(
+        error
+            .message()
+            .contains("frozen NIC firmware target binding")
+    );
+    let rejected = db::instance::find_by_id(&env.pool, instance_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(rejected.config.spxconfig, current.config.spxconfig);
+    assert_eq!(rejected.config_version, current.config_version);
+    assert_eq!(rejected.spx_config_version, current.spx_config_version);
+    assert_eq!(rejected.nic_firmware_snapshot, before.nic_firmware_snapshot);
+
+    // Removal is still possible, but it does not discard the evidence needed
+    // to detect the same remapping on a later reattachment.
+    let mut empty = replacement.clone();
+    empty.spxconfig.as_mut().unwrap().spx_attachments.clear();
+    env.api
+        .update_instance_config(Request::new(rpc::forge::InstanceConfigUpdateRequest {
+            instance_id: Some(instance_id),
+            if_version_match: Some(current.config_version.to_string()),
+            config: Some(empty),
+            metadata: allocated.metadata.clone(),
+        }))
+        .await
+        .unwrap();
+    let cleared = db::instance::find_by_id(&env.pool, instance_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(cleared.config.spxconfig.spx_attachments.is_empty());
+    assert_eq!(cleared.nic_firmware_snapshot, before.nic_firmware_snapshot);
+    assert_eq!(
+        cleared.config_version.version_nr(),
+        current.config_version.version_nr() + 1
+    );
+    assert_eq!(
+        cleared.spx_config_version.version_nr(),
+        current.spx_config_version.version_nr() + 1
+    );
+    let error = env
+        .api
+        .update_instance_config(Request::new(rpc::forge::InstanceConfigUpdateRequest {
+            instance_id: Some(instance_id),
+            if_version_match: Some(cleared.config_version.to_string()),
+            config: Some(replacement),
+            metadata: allocated.metadata,
+        }))
+        .await
+        .expect_err("clearing attachments must not permit changed frozen binding on reattachment");
+    assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+    assert_eq!(
+        error.message(),
+        "invalid value: SPX attachment for device NVIDIA ConnectX-7 instance 0 would change its frozen NIC firmware target binding"
+    );
+    let final_instance = db::instance::find_by_id(&env.pool, instance_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(final_instance.config.spxconfig.spx_attachments.is_empty());
+    assert_eq!(final_instance.config_version, cleared.config_version);
+    assert_eq!(
+        final_instance.spx_config_version,
+        cleared.spx_config_version
+    );
+    assert_eq!(
+        final_instance.nic_firmware_snapshot,
+        before.nic_firmware_snapshot
+    );
+}
+
 #[crate::sqlx_test]
 async fn test_update_instance_config(_: PgPoolOptions, options: PgConnectOptions) {
     let pool = PgPoolOptions::new().connect_with(options).await.unwrap();
@@ -1921,6 +2542,458 @@ async fn test_update_instance_config(_: PgPoolOptions, options: PgConnectOptions
         "Message is {}",
         status.message()
     );
+}
+
+/// Verifies release finishes an already staged host edit before termination,
+/// because rejecting a deleted instance during promotion would strand its resources.
+#[crate::sqlx_test]
+async fn test_pending_host_network_update_finishes_after_instance_release(pool: sqlx::PgPool) {
+    use model::machine::{
+        FactoryResetBmcState, HostPlatformConfigurationState, InstanceState, ManagedHostState,
+        NetworkConfigUpdateState,
+    };
+
+    // A ready instance and two ready segments isolate release during pending promotion.
+    let env = create_test_env(pool).await;
+    let (old_segment, new_segment) = env.create_vpc_and_dual_tenant_segment().await;
+    let managed_host = create_managed_host(&env).await;
+    let host_id = managed_host.host().id;
+    let instance = managed_host
+        .instance_builer(&env)
+        .single_interface_network_config(old_segment)
+        .build()
+        .await;
+    let original = instance.rpc_instance().await;
+    let original_network_version = original.network_config_version();
+
+    // Stage through the public API without driving the controller before release.
+    let mut requested_config = original.config().inner().clone();
+    requested_config.network = Some(single_interface_network_config(new_segment));
+    let response = env
+        .api
+        .update_instance_config(Request::new(rpc::forge::InstanceConfigUpdateRequest {
+            instance_id: Some(instance.id),
+            if_version_match: Some(original.config_version().to_string()),
+            config: Some(requested_config),
+            metadata: Some(original.metadata().clone()),
+        }))
+        .await
+        .expect("stage host network update")
+        .into_inner();
+    assert_eq!(
+        response.network_config_version,
+        original_network_version.to_string(),
+    );
+    let staged = instance.rpc_instance().await;
+    assert_eq!(
+        staged.status().network().configs_synced(),
+        rpc::SyncState::Pending,
+    );
+
+    // Release leaves the pending host work intact, so promotion must accept its deletion mark.
+    env.api
+        .release_instance(Request::new(rpc::forge::InstanceReleaseRequest {
+            id: Some(instance.id),
+            issue: None,
+            is_repair_tenant: None,
+            delete_attribution: None,
+        }))
+        .await
+        .expect("release instance with pending host update");
+    let released = instance.rpc_instance().await;
+    assert_eq!(released.status().tenant(), rpc::TenantState::Terminating);
+    let released = db::instance::find_by_id(&env.pool, instance.id)
+        .await
+        .expect("read released instance")
+        .expect("released instance exists");
+    let deletion_requested = released.deleted.expect("release persists deletion mark");
+    assert!(released.update_network_config_request.is_some());
+
+    // Persisting the promoted fields proves the controller did not reject the deleted row.
+    env.run_machine_state_controller_iteration_until_state_matches(
+        &host_id,
+        10,
+        ManagedHostState::Assigned {
+            instance_state: InstanceState::NetworkConfigUpdate {
+                network_config_update_state: NetworkConfigUpdateState::WaitingForConfigSynced,
+            },
+        },
+    )
+    .await;
+    let promoted = instance.rpc_instance().await;
+    assert_eq!(
+        promoted.config().network().interfaces[0].network_segment_id,
+        Some(new_segment),
+    );
+    let persisted = db::instance::find_by_id(&env.pool, instance.id)
+        .await
+        .expect("read promoted instance")
+        .expect("promoted instance exists");
+    assert_eq!(
+        persisted.network_config_version.version_nr(),
+        original_network_version.version_nr() + 1,
+    );
+    assert_eq!(persisted.deleted, Some(deletion_requested));
+
+    // Acknowledge the promoted generation so cleanup can retire the old host resources.
+    managed_host.network_configured(&env).await;
+    env.run_machine_state_controller_iteration_until_state_matches(
+        &host_id,
+        10,
+        ManagedHostState::Assigned {
+            instance_state: InstanceState::Ready,
+        },
+    )
+    .await;
+    let completed = db::instance::find_by_id(&env.pool, instance.id)
+        .await
+        .expect("read completed host update")
+        .expect("instance remains until termination cleanup");
+    assert!(completed.update_network_config_request.is_none());
+    assert_eq!(
+        completed.network_config_version,
+        persisted.network_config_version
+    );
+    assert_eq!(completed.deleted, Some(deletion_requested));
+
+    // The next Ready pass must enter deletion, rather than restart a pending host update.
+    env.run_machine_state_controller_iteration_until_state_matches(
+        &host_id,
+        10,
+        ManagedHostState::Assigned {
+            instance_state: InstanceState::HostPlatformConfiguration {
+                platform_config_state: HostPlatformConfigurationState::FactoryResetBmc {
+                    reset_state: FactoryResetBmcState::CheckPreconditions,
+                },
+            },
+        },
+    )
+    .await;
+}
+
+/// Verifies host promotion preserves newer active and terminating endpoints,
+/// because pending host snapshots must neither erase service state nor resurrect
+/// obsolete endpoints retained by an older writer. The first scenario captures
+/// an iteration before the service mutation to catch promotion using stale endpoints.
+///
+/// The legacy pending-request fixture creates this situation:
+///
+/// 1. The live instance has two service endpoints, belonging to active and terminating attachments.
+/// 2. The pending host edit contains a different endpoint whose attachment ID is absent from the live attachments.
+/// 3. The full controller promotes the host edit.
+/// 4. The test asserts that the two live endpoints survive unchanged and the obsolete endpoint is excluded.
+#[crate::sqlx_test]
+async fn test_pending_host_network_promotion_preserves_live_service_interfaces(pool: sqlx::PgPool) {
+    // Both rows stage a public host edit; each exercises a different stale snapshot boundary.
+    let env = create_test_env(pool).await;
+    let (old_segment, new_segment) = env.create_vpc_and_dual_tenant_segment().await;
+    let controller_io = MachineStateControllerIO {
+        host_health: env.config.host_health,
+        sla_config: model::machine::slas::MachineSlaConfig::new(
+            env.config.machine_state_controller.failure_retry_time,
+        ),
+    };
+    /// Names the stale source so each case selects an explicit promotion flow.
+    enum PromotionCase {
+        StaleIterationSnapshot,
+        LegacyPendingRequest,
+    }
+    let cases = [
+        // New host and iteration snapshots predate attachment creation and have no endpoint authority.
+        (
+            "request and iteration predate service change",
+            PromotionCase::StaleIterationSnapshot,
+        ),
+        // Older whole-JSON writers can leave endpoints whose attachment IDs are absent
+        // from live state.
+        (
+            "legacy request contains obsolete endpoints",
+            PromotionCase::LegacyPendingRequest,
+        ),
+    ];
+    for (scenario, promotion_case) in cases {
+        // Capture a caller-owned host replacement while no service endpoint exists.
+        let managed_host = create_managed_host(&env).await;
+        let host_id = managed_host.host().id;
+        let instance = managed_host
+            .instance_builer(&env)
+            .single_interface_network_config(old_segment)
+            .build()
+            .await;
+        let original = instance.rpc_instance().await;
+        let original_network_version = original.network_config_version();
+        let mut requested_config = original.config().inner().clone();
+        requested_config.network = Some(single_interface_network_config(new_segment));
+        let response = env
+            .api
+            .update_instance_config(Request::new(rpc::forge::InstanceConfigUpdateRequest {
+                instance_id: Some(instance.id),
+                if_version_match: Some(original.config_version().to_string()),
+                config: Some(requested_config),
+                metadata: Some(original.metadata().clone()),
+            }))
+            .await
+            .expect(scenario)
+            .into_inner();
+        assert_eq!(
+            response.network_config_version,
+            original_network_version.to_string()
+        );
+
+        // Re-read staged work to establish empty endpoint snapshots before the later service mutation.
+        let staged = db::instance::find_by_id(&env.pool, instance.id)
+            .await
+            .expect("read staged instance")
+            .expect("staged instance exists");
+        let pending = staged
+            .update_network_config_request
+            .as_ref()
+            .expect("pending host request");
+        assert!(
+            pending.old_config.service_interfaces.is_empty(),
+            "{scenario}"
+        );
+        assert!(
+            pending.new_config.service_interfaces.is_empty(),
+            "{scenario}"
+        );
+
+        // Keep the legacy case on the full controller; capture the other case's promotion snapshot.
+        let promotion_snapshot = if matches!(promotion_case, PromotionCase::LegacyPendingRequest) {
+            None
+        } else {
+            env.run_machine_state_controller_iteration_until_state_matches(
+                &host_id,
+                10,
+                ManagedHostState::Assigned {
+                    instance_state: InstanceState::NetworkConfigUpdate {
+                        network_config_update_state:
+                            NetworkConfigUpdateState::WaitingForNetworkSegmentToBeReady,
+                    },
+                },
+            )
+            .await;
+            let mut txn = env.db_txn().await;
+            let snapshot = controller_io
+                .load_object_state(txn.as_mut(), &host_id)
+                .await
+                .expect("load promotion snapshot")
+                .expect("managed host exists");
+            let captured_instance = snapshot.instance.as_ref().expect("assigned instance");
+            assert_eq!(captured_instance.id, instance.id);
+            assert!(
+                captured_instance
+                    .config
+                    .network
+                    .service_interfaces
+                    .is_empty()
+            );
+            assert_eq!(
+                captured_instance.network_config_version,
+                staged.network_config_version,
+            );
+            // The processor also commits its read transaction before invoking the handler.
+            // Finish this read before persisting the later service mutation.
+            txn.commit().await.expect("commit promotion snapshot read");
+            Some(snapshot)
+        };
+
+        // Activation is gated until #6125. Seed both lifecycles atomically to isolate host ownership.
+        let services = InstanceExtensionServicesConfig {
+            service_configs: vec![
+                // Active endpoints must survive even though the host request predates their creation.
+                InstanceExtensionServiceConfig {
+                    id: Some(uuid::Uuid::new_v4()),
+                    dpu_target: None,
+                    service_id: ExtensionServiceId::new(),
+                    version: ConfigVersion::initial(),
+                    removed: None, // Active endpoint ownership.
+                },
+                // Termination retains its endpoints until service cleanup has observed removal.
+                InstanceExtensionServiceConfig {
+                    id: Some(uuid::Uuid::new_v4()),
+                    dpu_target: None,
+                    service_id: ExtensionServiceId::new(),
+                    version: ConfigVersion::initial(),
+                    removed: Some(chrono::Utc::now()), // Terminating endpoint ownership.
+                },
+            ],
+        };
+        // Endpoint identities and both link families must survive verbatim; other fields
+        // provide well-formed allocation records without exercising service allocation.
+        let live_interfaces = services
+            .service_configs
+            .iter()
+            .zip(["192.0.2.0/31", "2001:db8::/127"])
+            .enumerate()
+            .map(
+                |(slot, (attachment, prefix))| InstanceServiceInterfaceConfig {
+                    attachment_id: attachment.id.expect("identified attachment"),
+                    interface_ordinal: 0,
+                    dpu_id: managed_host.dpu_ids[0],
+                    slot_index: slot as u32,
+                    vpc_id: VpcId::new(),
+                    vpc_prefix_id: VpcPrefixId::new(),
+                    network_segment_id: NetworkSegmentId::new(),
+                    network_prefix_id: NetworkPrefixId::new(),
+                    link_prefix: prefix.parse().expect("canonical service prefix"),
+                    mac_address: MacAddress::new([0x02, 0, 0, 0, 0, slot as u8 + 1]),
+                    internal_uuid: uuid::Uuid::new_v4(),
+                },
+            )
+            .collect::<Vec<_>>();
+        let mut live_network = staged.config.network.clone();
+        live_network.service_interfaces = live_interfaces.clone();
+        let mut txn = env.db_txn().await;
+        assert_eq!(
+            db::instance::update_extension_services_config(
+                txn.as_mut(),
+                instance.id,
+                staged.extension_services_config_version,
+                &staged.config.extension_services,
+                &services,
+                true,
+            )
+            .await
+            .expect("persist later attachments"),
+            db::ConditionalWrite::Applied(()),
+        );
+        db::instance::update_network_config(
+            txn.as_mut(),
+            instance.id,
+            staged.network_config_version,
+            &live_network,
+            true,
+        )
+        .await
+        .expect("persist later service endpoints");
+
+        // A legacy pending replacement can still reference an attachment absent from live state.
+        if matches!(promotion_case, PromotionCase::LegacyPendingRequest) {
+            let mut obsolete = live_interfaces[0].clone();
+            obsolete.attachment_id = uuid::Uuid::new_v4();
+            obsolete.internal_uuid = uuid::Uuid::new_v4();
+            obsolete.vpc_id = VpcId::new();
+            let mut pending = pending.clone();
+            pending.new_config.service_interfaces = vec![obsolete];
+            sqlx::query("UPDATE instances SET update_network_config_request = $1 WHERE id = $2")
+                .bind(sqlx::types::Json(pending))
+                .bind(instance.id)
+                .execute(txn.as_mut())
+                .await
+                .expect("persist legacy pending snapshot");
+        }
+        txn.commit().await.expect("commit later service state");
+
+        // Stop after promotion so synchronization and cleanup cannot hide endpoint loss.
+        let promoted_state = ManagedHostState::Assigned {
+            instance_state: InstanceState::NetworkConfigUpdate {
+                network_config_update_state: NetworkConfigUpdateState::WaitingForConfigSynced,
+            },
+        };
+        if let Some(mut snapshot) = promotion_snapshot {
+            // Find the committed service state before resuming the deliberately stale snapshot.
+            let live = db::instance::find_by_id(&env.pool, instance.id)
+                .await
+                .expect("read service mutation")
+                .expect("instance exists after service mutation");
+            assert_eq!(live.config.network.service_interfaces, live_interfaces);
+            assert_eq!(
+                live.network_config_version.version_nr(),
+                staged.network_config_version.version_nr() + 1,
+            );
+
+            // Resume the production handler so promotion must reread the instance under lock.
+            let controller_state = snapshot.host_snapshot.state.clone();
+            let mut handler_services = env.machine_state_handler_services();
+            let mut metrics = MachineMetrics::default();
+            let mut pending_db_writes = DbWriteBatch::new();
+            let mut ctx = StateHandlerContext {
+                services: &mut handler_services,
+                metrics: &mut metrics,
+                pending_db_writes: &mut pending_db_writes,
+            };
+            let mut outcome = env
+                .machine_state_handler
+                .handle_object_state(&host_id, &mut snapshot, &controller_state.value, &mut ctx)
+                .await
+                .expect("promote captured controller snapshot");
+            assert!(
+                matches!(&outcome, StateHandlerOutcome::Transition { next_state, .. }
+                    if next_state == &promoted_state),
+                "{scenario}: promotion must return the synchronization transition",
+            );
+
+            // Commit the handler's writes and returned transition together, as the processor does.
+            let mut txn = outcome.take_transaction().expect("promotion transaction");
+            pending_db_writes
+                .apply_all(&mut txn)
+                .await
+                .expect("apply promotion writes");
+            assert_eq!(
+                controller_io
+                    .persist_controller_state(
+                        txn.as_mut(),
+                        &host_id,
+                        controller_state.version,
+                        controller_state.version.increment(),
+                        &promoted_state,
+                    )
+                    .await
+                    .expect("persist promotion transition"),
+                db::ConditionalWrite::Applied(()),
+            );
+            txn.commit().await.expect("commit resumed promotion");
+
+            // Reload the machine to prove the transition persisted with its network write.
+            let mut txn = env.db_txn().await;
+            let host = managed_host.host().db_machine(&mut txn).await;
+            assert_eq!(host.current_state(), &promoted_state);
+            txn.commit().await.expect("commit promotion state read");
+        } else {
+            // The legacy request still exercises the full controller's promotion wiring.
+            env.run_machine_state_controller_iteration_until_state_matches(
+                &host_id,
+                10,
+                promoted_state,
+            )
+            .await;
+        }
+
+        // A find call and persisted fields prove promotion used live endpoints and generations.
+        let promoted = instance.rpc_instance().await;
+        assert_eq!(
+            promoted.config().network().interfaces[0].network_segment_id,
+            Some(new_segment),
+            "{scenario}",
+        );
+        let persisted = db::instance::find_by_id(&env.pool, instance.id)
+            .await
+            .expect("read promoted instance")
+            .expect("promoted instance exists");
+        assert_eq!(
+            persisted.config.network.service_interfaces, live_interfaces,
+            "{scenario}"
+        );
+        assert_eq!(
+            persisted.network_config_version.version_nr(),
+            original_network_version.version_nr() + 2,
+            "{scenario}",
+        );
+        assert_eq!(
+            persisted.extension_services_config_version.version_nr(),
+            staged.extension_services_config_version.version_nr() + 1,
+            "{scenario}",
+        );
+        assert_eq!(
+            persisted.config.extension_services.service_configs, services.service_configs,
+            "{scenario}"
+        );
+        assert!(
+            persisted.update_network_config_request.is_some(),
+            "{scenario}"
+        );
+    }
 }
 
 #[crate::sqlx_test]
@@ -3417,8 +4490,8 @@ async fn test_update_slaac_vpc_rejects_explicit_ipv6_before_resource_reuse(
         );
     }
 
-    // Ownership validation must precede the SLAAC policy error so an update
-    // cannot disclose another tenant's VPC mode.
+    // A foreign Prefix is eligible for attachment, but its SLAAC policy must
+    // still reject an explicit IPv6 address before any update is persisted.
     let foreign_tenant_organization_id = "slaac-update-foreign-tenant";
     create_fixture_tenant(&env, foreign_tenant_organization_id)
         .await
@@ -3434,7 +4507,7 @@ async fn test_update_slaac_vpc_rejects_explicit_ipv6_before_resource_reuse(
     .await;
     let managed_host = create_managed_host(&env).await;
     let metadata = rpc::Metadata {
-        name: "SLAAC update ownership validation".to_string(),
+        name: "Foreign SLAAC update validation".to_string(),
         ..Default::default()
     };
     let initial_config = rpc::InstanceConfig {
@@ -3457,6 +4530,11 @@ async fn test_update_slaac_vpc_rejects_explicit_ipv6_before_resource_reuse(
         .build()
         .await;
 
+    // Capture active state so the rejected foreign request cannot silently mutate it.
+    let mut txn = env.db_txn().await;
+    let before = instance.db_instance(&mut txn).await;
+    txn.rollback().await.unwrap();
+
     let mut requested_config = initial_config;
     let mut requested_network =
         single_vpc_interface_network(NetworkDetails::VpcPrefixId(foreign_fixture.vpc_prefix_id));
@@ -3472,18 +4550,200 @@ async fn test_update_slaac_vpc_rejects_explicit_ipv6_before_resource_reuse(
                 .tonic_request(),
         )
         .await
-        .expect_err("foreign VPC prefix must fail ownership validation");
-    assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+        .expect_err("foreign SLAAC VPC must reject an explicit IPv6 address");
+    assert_eq!(error.code(), tonic::Code::InvalidArgument);
     assert!(
-        error.message().contains("which is not owned by tenant")
-            && !error.message().contains("has SLAAC enabled"),
-        "unexpected ownership error: {error}",
+        error.message().contains("has SLAAC enabled"),
+        "unexpected SLAAC error: {error}",
     );
 
+    // Rejection must preserve both active configuration and the absence of staged work.
     let mut txn = env.db_txn().await;
     let after = instance.db_instance(&mut txn).await;
     txn.rollback().await.unwrap();
+    assert_eq!(
+        serde_json::to_value(&after.config).unwrap(),
+        serde_json::to_value(&before.config).unwrap()
+    );
+    assert_eq!(after.config_version, before.config_version);
+    assert_eq!(after.network_config_version, before.network_config_version);
     assert!(after.update_network_config_request.is_none());
+}
+
+/// Verifies adding and removing a foreign Prefix VF preserves Instance ownership
+/// and frees its generated resources after reconciliation, avoiding cross-tenant leaks.
+#[crate::sqlx_test]
+async fn test_cross_tenant_vpc_prefix_update_releases_resources(pool: sqlx::PgPool) {
+    const VPC_OWNER: &str = "foreign-prefix-owner";
+
+    // Allocate the provider's primary interface separately from the customer's VPC.
+    let env =
+        create_test_env_with_overrides(pool, TestEnvOverrides::default().with_fnn_config(None))
+            .await;
+    let tenant = default_tenant_config();
+    for tenant_id in [tenant.tenant_organization_id.as_str(), VPC_OWNER] {
+        create_fixture_tenant(&env, tenant_id).await.unwrap();
+    }
+    let own = create_fnn_vpc_prefix_fixture(
+        &env,
+        &tenant.tenant_organization_id,
+        "provider-vpc",
+        "provider-prefix",
+        "192.1.4.0/25",
+        false,
+    )
+    .await;
+    let foreign = create_fnn_vpc_prefix_fixture(
+        &env,
+        VPC_OWNER,
+        "customer-vpc",
+        "customer-prefix",
+        "192.1.4.128/25",
+        false,
+    )
+    .await;
+    let mh = create_managed_host(&env).await;
+    let metadata = rpc::Metadata {
+        name: "cross-tenant-prefix-update".to_string(),
+        ..Default::default()
+    };
+    let initial_config = rpc::InstanceConfig {
+        tenant: Some(tenant.clone()),
+        os: Some(default_os_config()),
+        network: Some(single_vpc_interface_network(NetworkDetails::VpcPrefixId(
+            own.vpc_prefix_id,
+        ))),
+        ..Default::default()
+    };
+    let instance = mh
+        .instance_builer(&env)
+        .config(initial_config.clone())
+        .metadata(metadata.clone())
+        .build()
+        .await;
+    let primary_segment = instance.rpc_instance().await.config().network().interfaces[0]
+        .network_segment_id
+        .unwrap();
+
+    // Include a requested address to exercise the update validator as well as allocation.
+    let mut attached_config = initial_config.clone();
+    let mut vf = single_vpc_interface_network(NetworkDetails::VpcPrefixId(foreign.vpc_prefix_id))
+        .interfaces
+        .remove(0);
+    vf.function_type = rpc::InterfaceFunctionType::Virtual as i32;
+    vf.virtual_function_id = Some(1);
+    vf.ip_address = Some("192.1.4.129".to_string());
+    attached_config
+        .network
+        .as_mut()
+        .unwrap()
+        .interfaces
+        .push(vf);
+    env.api
+        .update_instance_config(
+            InstanceConfigUpdateRequest::builder()
+                .instance_id(instance.id)
+                .config(attached_config)
+                .metadata(metadata.clone())
+                .tonic_request(),
+        )
+        .await
+        .unwrap();
+    env.run_machine_state_controller_iteration_network_config_return_to_ready(&mh, true)
+        .await;
+
+    // Re-read active state to prove the foreign attachment reached the selected VPC.
+    let active = instance.rpc_instance().await;
+    assert_eq!(
+        active.config().tenant().tenant_organization_id,
+        tenant.tenant_organization_id
+    );
+    assert_eq!(
+        active.config().network().interfaces[0].network_segment_id,
+        Some(primary_segment)
+    );
+    let foreign_segment = active.config().network().interfaces[1]
+        .network_segment_id
+        .unwrap();
+    assert_eq!(
+        active.status().network().interfaces[1].addresses,
+        vec!["192.1.4.129".to_string()]
+    );
+    let mut txn = env.db_txn().await;
+    let segment = db::network_segment::find_by(
+        txn.as_mut(),
+        db::ObjectColumnFilter::One(db::network_segment::IdColumn, &foreign_segment),
+        model::network_segment::NetworkSegmentSearchConfig::default(),
+    )
+    .await
+    .unwrap()
+    .pop()
+    .unwrap();
+    assert_eq!(segment.config.vpc_id, Some(foreign.vpc_id));
+    assert_eq!(
+        segment.prefixes[0].vpc_prefix_id,
+        Some(foreign.vpc_prefix_id)
+    );
+    assert_eq!(
+        db::instance_address::count_by_segment_id(&mut txn, &foreign_segment)
+            .await
+            .unwrap(),
+        1
+    );
+    txn.rollback().await.unwrap();
+
+    // Remove only the foreign VF through the public update and synchronize cleanup.
+    env.api
+        .update_instance_config(
+            InstanceConfigUpdateRequest::builder()
+                .instance_id(instance.id)
+                .config(initial_config)
+                .metadata(metadata)
+                .tonic_request(),
+        )
+        .await
+        .unwrap();
+    env.run_machine_state_controller_iteration_network_config_return_to_ready(&mh, false)
+        .await;
+
+    // The primary allocation survives while the foreign segment is retired and its address freed.
+    let remaining = instance.rpc_instance().await;
+    assert_eq!(remaining.config().network().interfaces.len(), 1);
+    assert_eq!(
+        remaining.config().network().interfaces[0].network_segment_id,
+        Some(primary_segment)
+    );
+    let mut txn = env.db_txn().await;
+    let retired = db::network_segment::find_by(
+        txn.as_mut(),
+        db::ObjectColumnFilter::One(db::network_segment::IdColumn, &foreign_segment),
+        model::network_segment::NetworkSegmentSearchConfig::default(),
+    )
+    .await
+    .unwrap()
+    .pop()
+    .unwrap();
+    assert!(retired.is_marked_as_deleted());
+    assert_eq!(
+        db::instance_address::count_by_segment_id(&mut txn, &foreign_segment)
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        db::instance_address::count_by_segment_id(&mut txn, &primary_segment)
+            .await
+            .unwrap(),
+        1
+    );
+    assert!(
+        instance
+            .db_instance(&mut txn)
+            .await
+            .update_network_config_request
+            .is_none()
+    );
+    txn.rollback().await.unwrap();
 }
 
 /// Verifies VPC replacement, VF removal, and instance deletion release generated

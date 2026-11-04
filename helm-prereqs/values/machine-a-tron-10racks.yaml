@@ -22,6 +22,13 @@
 # The site BMC root password comes from the site credentials Secret, not this
 # file. Expect in NICo: 10 racks, 180 hosts, 360 DPUs, 90 switches and 80
 # power shelves (710 BMCs), each BMC reachable on its simulated-oob address.
+#
+# Each pod declares an expected rack group (protocol NVLINK_V5, topology
+# gb200_nvl72r1_c2g4) for a rack no group declares yet, before its expected
+# rack, and nico-api derives the rack profile GB200_NVL72R1_C2G4_WIWYNN from
+# that declaration. An existing group is used as is. rack_profile_id must
+# name the profile derived from the rack's group, which machine-a-tron checks
+# at startup. The nico-api chart ships that profile.
 
 # REQUIRED: the machine-a-tron image. Set it here or on the command line with
 # --set image.repository=<registry>/machine-a-tron --set image.tag=<tag>.
@@ -122,98 +129,98 @@ pods:
     racks:
       gb200:
         type: wiwynn_gb200_nvl72
-        rack_profile_id: NVL72
+        rack_profile_id: GB200_NVL72R1_C2G4_WIWYNN
         ids:
           - rack-001
         bmc_dhcp_relay_address: "10.200.0.1"
-        underlay_dhcp_relay_address: "10.104.0.1"
+        underlay_dhcp_relay_address: "10.201.0.1"
   mat-1:
     machines: {}
     racks:
       gb200:
         type: wiwynn_gb200_nvl72
-        rack_profile_id: NVL72
+        rack_profile_id: GB200_NVL72R1_C2G4_WIWYNN
         ids:
           - rack-002
         bmc_dhcp_relay_address: "10.200.0.1"
-        underlay_dhcp_relay_address: "10.104.0.1"
+        underlay_dhcp_relay_address: "10.201.0.1"
   mat-2:
     machines: {}
     racks:
       gb200:
         type: wiwynn_gb200_nvl72
-        rack_profile_id: NVL72
+        rack_profile_id: GB200_NVL72R1_C2G4_WIWYNN
         ids:
           - rack-003
         bmc_dhcp_relay_address: "10.200.0.1"
-        underlay_dhcp_relay_address: "10.104.0.1"
+        underlay_dhcp_relay_address: "10.201.0.1"
   mat-3:
     machines: {}
     racks:
       gb200:
         type: wiwynn_gb200_nvl72
-        rack_profile_id: NVL72
+        rack_profile_id: GB200_NVL72R1_C2G4_WIWYNN
         ids:
           - rack-004
         bmc_dhcp_relay_address: "10.200.0.1"
-        underlay_dhcp_relay_address: "10.104.0.1"
+        underlay_dhcp_relay_address: "10.201.0.1"
   mat-4:
     machines: {}
     racks:
       gb200:
         type: wiwynn_gb200_nvl72
-        rack_profile_id: NVL72
+        rack_profile_id: GB200_NVL72R1_C2G4_WIWYNN
         ids:
           - rack-005
         bmc_dhcp_relay_address: "10.200.0.1"
-        underlay_dhcp_relay_address: "10.104.0.1"
+        underlay_dhcp_relay_address: "10.201.0.1"
   mat-5:
     machines: {}
     racks:
       gb200:
         type: wiwynn_gb200_nvl72
-        rack_profile_id: NVL72
+        rack_profile_id: GB200_NVL72R1_C2G4_WIWYNN
         ids:
           - rack-006
         bmc_dhcp_relay_address: "10.200.0.1"
-        underlay_dhcp_relay_address: "10.104.0.1"
+        underlay_dhcp_relay_address: "10.201.0.1"
   mat-6:
     machines: {}
     racks:
       gb200:
         type: wiwynn_gb200_nvl72
-        rack_profile_id: NVL72
+        rack_profile_id: GB200_NVL72R1_C2G4_WIWYNN
         ids:
           - rack-007
         bmc_dhcp_relay_address: "10.200.0.1"
-        underlay_dhcp_relay_address: "10.104.0.1"
+        underlay_dhcp_relay_address: "10.201.0.1"
   mat-7:
     machines: {}
     racks:
       gb200:
         type: wiwynn_gb200_nvl72
-        rack_profile_id: NVL72
+        rack_profile_id: GB200_NVL72R1_C2G4_WIWYNN
         ids:
           - rack-008
         bmc_dhcp_relay_address: "10.200.0.1"
-        underlay_dhcp_relay_address: "10.104.0.1"
+        underlay_dhcp_relay_address: "10.201.0.1"
   mat-8:
     machines: {}
     racks:
       gb200:
         type: wiwynn_gb200_nvl72
-        rack_profile_id: NVL72
+        rack_profile_id: GB200_NVL72R1_C2G4_WIWYNN
         ids:
           - rack-009
         bmc_dhcp_relay_address: "10.200.0.1"
-        underlay_dhcp_relay_address: "10.104.0.1"
+        underlay_dhcp_relay_address: "10.201.0.1"
   mat-9:
     machines: {}
     racks:
       gb200:
         type: wiwynn_gb200_nvl72
-        rack_profile_id: NVL72
+        rack_profile_id: GB200_NVL72R1_C2G4_WIWYNN
         ids:
           - rack-010
         bmc_dhcp_relay_address: "10.200.0.1"
-        underlay_dhcp_relay_address: "10.104.0.1"
+        underlay_dhcp_relay_address: "10.201.0.1"

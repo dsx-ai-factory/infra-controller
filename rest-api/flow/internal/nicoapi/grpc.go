@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/certs"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/common/grpclog"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/common/utils"
@@ -21,7 +22,6 @@ import (
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 	"github.com/rs/zerolog/log"
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
-	"go.opentelemetry.io/otel"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/protobuf/proto"
@@ -53,6 +53,7 @@ const (
 	// HealthAlertClassification::prevent_allocations() in
 	// crates/health-report/src/lib.rs.
 	classificationPreventAllocations = "PreventAllocations"
+	classificationRackLeak           = "RackLeak"
 
 	// flowFindByIDsBatchSize bounds the number of full protobuf resources Flow
 	// retains in one detail-lookup batch. Core's max_find_by_ids remains the
@@ -260,12 +261,15 @@ func (c *batchingForgeClient) visitRackBatchesAllowPartial(
 var testingMsgOnce sync.Once
 
 func coreGRPCDialOptions(transportCredentials credentials.TransportCredentials) []grpc.DialOption {
-	return []grpc.DialOption{
+	options := []grpc.DialOption{
 		grpc.WithTransportCredentials(transportCredentials),
 		grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(coreGRPCMaxRecvMsgSize)),
-		grpc.WithStatsHandler(otelgrpc.NewClientHandler(otelgrpc.WithPropagators(otel.GetTextMapPropagator()))),
 		grpc.WithChainUnaryInterceptor(grpclog.UnaryClientInterceptor("nico-core-api")),
 	}
+	if cotel.TransportEnabled() {
+		options = append(options, grpc.WithStatsHandler(otelgrpc.NewClientHandler()))
+	}
+	return options
 }
 
 // NewClient creates a GRPC connection pool to nico-core-api.  Returning success does not mean that we have yet made an actual connection;
@@ -286,7 +290,7 @@ func NewClient(grpcTimeout time.Duration) (Client, error) {
 	tlsConfig, _, dynamicConfig, err := certs.DynamicTLSConfig()
 	if err != nil {
 		if err == certs.ErrNotPresent {
-			return nil, errors.New("Certificates not present, unable to authenticate with nico-core-api")
+			return nil, errors.New("certificates not present, unable to authenticate with nico-core-api")
 		}
 		return nil, err
 	}
@@ -294,7 +298,7 @@ func NewClient(grpcTimeout time.Duration) (Client, error) {
 	conn, err := grpc.NewClient(nicoURL, coreGRPCDialOptions(credentials.NewTLS(tlsConfig))...)
 	if err != nil {
 		dynamicConfig.Close()
-		return nil, fmt.Errorf("Unable to connect to nico-core-api: %w", err)
+		return nil, fmt.Errorf("unable to connect to nico-core-api: %w", err)
 	}
 
 	return &grpcClient{
@@ -316,9 +320,7 @@ func (c *grpcClient) GetMachines(ctx context.Context) ([]MachineDetail, error) {
 	}
 
 	req := &corev1.MachinesByIdsRequest{}
-	for _, machineID := range machineIDs.MachineIds {
-		req.MachineIds = append(req.MachineIds, machineID)
-	}
+	req.MachineIds = append(req.MachineIds, machineIDs.GetMachineIds()...)
 
 	if len(req.MachineIds) == 0 {
 		return nil, nil
@@ -410,6 +412,46 @@ func (c *grpcClient) GetPowerShelves(ctx context.Context) ([]ObservedControllerD
 	return result, nil
 }
 
+// GetLeakingRackIds retrieves IDs of racks whose aggregate health contains an
+// active RackLeak classification. The ID and detail RPCs receive independent
+// timeout budgets so a slow ID lookup cannot starve the batched health lookup.
+func (c *grpcClient) GetLeakingRackIds(ctx context.Context) ([]string, error) {
+	idsCtx, idsCancel := context.WithTimeout(ctx, c.grpcTimeout)
+	idsResponse, err := c.gclient.FindRackIds(idsCtx, &corev1.RackSearchFilter{})
+	idsCancel()
+	if err != nil {
+		return nil, fmt.Errorf("FindRackIds for leak detection: %w", err)
+	}
+
+	rackIDs := idsResponse.GetRackIds()
+	if len(rackIDs) == 0 {
+		return []string{}, nil
+	}
+
+	detailsCtx, detailsCancel := context.WithTimeout(ctx, c.grpcTimeout)
+	defer detailsCancel()
+	request := &corev1.RacksByIdsRequest{RackIds: rackIDs}
+	leakingRackIDs := make([]string, 0, len(rackIDs))
+	err = c.gclient.visitRackBatchesAllowPartial(detailsCtx, request, func(batch []*corev1.Rack) error {
+		for _, rack := range batch {
+			health := rack.GetStatus().GetHealth()
+			for _, alert := range health.GetAlerts() {
+				if slices.Contains(alert.GetClassifications(), classificationRackLeak) {
+					leakingRackIDs = append(leakingRackIDs, rack.GetId().GetId())
+					break
+				}
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("FindRacksByIds for leak detection: %w", err)
+	}
+
+	slices.Sort(leakingRackIDs)
+	return leakingRackIDs, nil
+}
+
 // GetLeakingMachineIds retrieves IDs of all machines which are leaking and are powered on.
 // The search filter passed in to FindMachineIds limits the results to these two conditions.
 func (c *grpcClient) GetLeakingMachineIds(ctx context.Context) ([]string, error) {
@@ -483,7 +525,7 @@ func (c *batchingForgeClient) loadMaxFindByIDs(ctx context.Context) (uint32, err
 		return c.maxFindByIDs, nil
 	}
 
-	response, err := c.ForgeClient.Version(ctx, &corev1.VersionRequest{DisplayConfig: true})
+	response, err := c.Version(ctx, &corev1.VersionRequest{DisplayConfig: true})
 	if err != nil {
 		return 0, fmt.Errorf("get Core runtime config: %w", err)
 	}
@@ -994,7 +1036,7 @@ func (c *grpcClient) FindSwitchNvosIPs(ctx context.Context, switchIds []string) 
 			if sid == "" {
 				continue
 			}
-			if ip := sw.GetNvosInfo().GetIp(); ip != "" {
+			if ip := sw.GetNvosInfo().GetIp(); ip != "" { //nolint:staticcheck // Older Core servers return the NVOS address in this field.
 				result[sid] = ip
 			}
 		}
@@ -1211,6 +1253,31 @@ func (c *grpcClient) FindRackHealthReports(ctx context.Context, rackIds []string
 		return nil, fmt.Errorf("FindRacksByIds: %w", err)
 	}
 	return result, nil
+}
+
+// FindRackGroupIDs reads the identity chosen at expected-rack creation from actual racks.
+// The timeout covers the complete batch sequence, not each individual batch.
+func (c *grpcClient) FindRackGroupIDs(ctx context.Context, rackIDs []string) (map[string]string, error) {
+	if len(rackIDs) == 0 {
+		return nil, nil
+	}
+	ctx, cancel := context.WithTimeout(ctx, c.grpcTimeout)
+	defer cancel()
+	req := &corev1.RacksByIdsRequest{}
+	for _, id := range rackIDs {
+		req.RackIds = append(req.RackIds, &corev1.RackId{Id: id})
+	}
+	groups := make(map[string]string, len(rackIDs))
+	err := c.gclient.visitRackBatchesAllowPartial(ctx, req, func(batch []*corev1.Rack) error {
+		for _, rack := range batch {
+			groups[rack.GetId().GetId()] = rack.GetRackGroupId().GetId()
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("read rack groups: %w", err)
+	}
+	return groups, nil
 }
 
 // GetMachinePositionInfo returns position information for the given machine IDs
@@ -1487,7 +1554,7 @@ func (c *grpcClient) InsertHealthReportOverride(ctx context.Context, machineID s
 		},
 	}
 
-	_, err := c.gclient.InsertHealthReportOverride(ctx, req)
+	_, err := c.gclient.InsertHealthReportOverride(ctx, req) //nolint:staticcheck // Retain the existing maintenance RPC for older Core servers.
 	if err != nil {
 		return fmt.Errorf("failed to insert health report override for machine %s: %w", machineID, err)
 	}
@@ -1503,7 +1570,7 @@ func (c *grpcClient) RemoveHealthReportOverride(ctx context.Context, machineID s
 		Source:    source,
 	}
 
-	_, err := c.gclient.RemoveHealthReportOverride(ctx, req)
+	_, err := c.gclient.RemoveHealthReportOverride(ctx, req) //nolint:staticcheck // Pair cleanup with the legacy maintenance RPC used above.
 	if err != nil {
 		return fmt.Errorf("failed to remove health report override for machine %s: %w", machineID, err)
 	}
@@ -1971,6 +2038,10 @@ func (c *grpcClient) AddExpectedSwitchInfo(info ExpectedSwitchInfo) {
 }
 
 func (c *grpcClient) SetLeakingMachineIds(ids []string) {
+	panic("Not a unit test")
+}
+
+func (c *grpcClient) SetLeakingRackIds(ids []string) {
 	panic("Not a unit test")
 }
 

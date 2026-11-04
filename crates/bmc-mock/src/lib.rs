@@ -65,11 +65,11 @@ use std::fmt;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
-use tokio::time::Instant;
 pub mod actor;
 mod ipmi;
 pub mod ipmi_sim;
 pub mod libvirt;
+pub mod persistence;
 pub mod simulated;
 
 mod auth_router;
@@ -85,6 +85,8 @@ pub mod mac_address_pool;
 mod machine_info;
 mod middleware_router;
 mod mock_machine_router;
+mod nvue;
+mod power_state;
 mod rack_info;
 mod redfish;
 mod sse;
@@ -93,7 +95,15 @@ pub mod test_support;
 pub mod tls;
 
 pub use bmc_state::{BmcEvent, BmcState};
-pub use carbide_axum_utils::authority_router::authority_router as combined_router;
+/// Builds the authority-based router from shared device routes.
+/// Registry wrappers can retain ownership metadata while exposing these routes.
+pub fn combined_router(
+    routes: impl Into<
+        std::sync::Arc<tokio::sync::RwLock<std::collections::HashMap<String, axum::Router>>>,
+    >,
+) -> axum::Router {
+    carbide_axum_utils::authority_router::authority_router(routes.into())
+}
 pub use carbide_axum_utils::injection;
 pub use combined_server::{CombinedServer, ListenerOrAddress};
 pub use http::redfish_error_envelope;
@@ -106,18 +116,32 @@ pub use mock_machine_router::{
     EventServiceOverride, MachineRouterOptions, machine_router, machine_router_with_injection_store,
 };
 pub use nv_redfish::schema::resource::ResetType as ResourceResetType;
+/// A switch's NVUE REST API, served at its NVOS address, and the simulation
+/// controls over what it reports.
+pub use nvue::{
+    LeakState, NvueState, SystemHealthStatus, UnknownLeakSensor, UnknownUser, nvue_router,
+};
+pub use power_state::validate_power_reset;
 pub use rack_info::RackInfo;
 /// BMC account state and the credential snapshot type used to persist and
 /// restore rotated passwords across a mock rebuild.
-pub use redfish::account_service::{AccountServiceState, BmcAccountCredential};
+pub use redfish::account_service::AccountServiceState;
 pub use redfish::event_service::{
     EventServiceConfig, EventServiceError, EventServiceLimits, EventServiceState, EventServiceStats,
 };
-pub use redfish::virtual_media::DeviceConfig as VirtualMediaDeviceConfig;
+pub use redfish::update_service::{
+    BmcTaskState, DpuOsImage, DpuOsStatus, DpuOsStatusSource, UnknownBmcTaskState,
+};
+pub use redfish::virtual_media::{
+    DeviceConfig as VirtualMediaDeviceConfig, VirtualMediaContents, VirtualMediaUpdate,
+};
 pub use sse::StreamStep;
 
 pub const DUMMY_FACTORY_USERNAME: &str = "root";
 pub const DUMMY_FACTORY_PASSWORD: &str = "factory_password";
+/// The NVOS administrator of a simulated switch, with
+/// [`DUMMY_FACTORY_PASSWORD`] until a rotation changes it.
+pub const DUMMY_NVOS_USERNAME: &str = "admin";
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, Eq, PartialEq)]
 pub enum RackType {
@@ -239,84 +263,91 @@ pub enum ActionError {
     Internal(eyre::Error),
 }
 
-#[derive(Debug, Copy, Clone, Default)]
-pub enum MockPowerState {
-    #[default]
-    On,
-    Off,
-    /// Power could not be observed; Redfish reports a null `PowerState`.
-    Unknown,
-    /// Power-on accepted; the host is not yet `On` (POST has not begun).
-    PoweringOn,
-    /// Graceful shutdown accepted; the OS is going down but power is still applied.
-    PoweringOff,
-    PowerCycling {
-        since: Instant,
-    },
-}
-
-impl MockPowerState {
-    /// Checks whether the current power state permits a reset request.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`ActionError::Internal`] for every request when the state is
-    /// [`Self::Unknown`], because power state is unavailable. Returns
-    /// [`ActionError::BadRequest`] when a known state prevents the request.
-    pub fn validate_reset_type(&self, reset_type: ResourceResetType) -> Result<(), ActionError> {
-        type C = ResourceResetType;
-        match (reset_type, self) {
-            (_, MockPowerState::Unknown) => Err(ActionError::Internal(eyre::eyre!(
-                "bmc-mock: power state is unavailable",
-            ))),
-            (
-                C::GracefulShutdown | C::ForceOff | C::GracefulRestart | C::ForceRestart,
-                MockPowerState::Off,
-            ) => Err(ActionError::BadRequest(eyre::eyre!(
-                "bmc-mock: cannot power off machine, it is already off",
-            ))),
-            (C::On | C::ForceOn, MockPowerState::On | MockPowerState::PoweringOn) => {
-                Err(ActionError::BadRequest(eyre::eyre!(
-                    "bmc-mock: cannot power on machine, it is already on"
-                )))
-            }
-            (C::On | C::ForceOn, MockPowerState::PoweringOff) => Err(ActionError::BadRequest(
-                eyre::eyre!("bmc-mock: cannot power on machine, it is shutting down"),
-            )),
-            (_, MockPowerState::PowerCycling { since }) if since.elapsed() < POWER_CYCLE_DELAY => {
-                Err(ActionError::BadRequest(eyre::eyre!(
-                    "bmc-mock: cannot reset machine, it is in the middle of power cycling since {:?} ago",
-                    since.elapsed()
-                )))
-            }
-            _ => Ok(()),
-        }
-    }
-}
-
-impl fmt::Display for MockPowerState {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match self {
-            Self::On => "On".fmt(f),
-            Self::Off => "Off".fmt(f),
-            Self::Unknown => "Unknown".fmt(f),
-            Self::PoweringOn => "PoweringOn".fmt(f),
-            Self::PoweringOff => "PoweringOff".fmt(f),
-            Self::PowerCycling { since } => write!(f, "PowerCycling {:?}", since.elapsed()),
-        }
-    }
-}
-
 // Simulate a 5-second power cycle
 pub const POWER_CYCLE_DELAY: Duration = Duration::from_secs(5);
 
+/// A physical effect that a BMC action has on the device behind the BMC, beyond the
+/// Redfish state the BMC itself serves.
+///
+/// This is the contract between bmc-mock and the backend that owns the simulated
+/// device (for example machine-a-tron's power actors). bmc-mock validates the
+/// request and reports the effect through [`Callbacks::device_effect`]. The backend
+/// applies it to everything the real action would reach, and the BMC then serves
+/// the observed result back through its usual state, such as the system `PowerState`.
+///
+/// Add a variant for each action whose effect leaves the BMC. The enum is not
+/// `non_exhaustive`: a new variant must fail to compile in every backend until it
+/// decides what the effect means for its device.
+#[derive(Debug)]
+pub enum DeviceEffect {
+    /// Chassis AC power cycle (`NvidiaChassis.AuxPowerReset` with `ResetType`
+    /// `AuxPowerCycle`). It drops all power to the compute tray, so the host and
+    /// every DPU in it lose power together. The backend applies it whatever the
+    /// current power state is, and it leaves the device `Off`: the BMC has no power
+    /// restore policy of its own, and the controller powers the host on again.
+    AuxPowerCycle,
+    /// Restore BMC factory accounts and restart BMC DHCP without changing system power.
+    /// The backend owns the update and admits DHCP recovery before reporting success.
+    ResetBmcToDefaults(BmcResetUpdate),
+}
+
+/// An owned, serialized BMC factory reset. Dropping it before commit changes no state.
+/// Transfer it to the device actor so an HTTP cancellation cannot interrupt publication.
+pub struct BmcResetUpdate {
+    apply: futures::future::BoxFuture<'static, Result<Duration, ActionError>>,
+}
+
+impl fmt::Debug for BmcResetUpdate {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("BmcResetUpdate").finish_non_exhaustive()
+    }
+}
+
+impl BmcResetUpdate {
+    /// Synchronizes attached password backends, restores accounts, invalidates sessions
+    /// and starts the BMC outage. Returns the delay before BMC DHCP should resume.
+    pub async fn commit(self) -> Result<Duration, ActionError> {
+        self.apply.await
+    }
+}
+
 /// Backend operations for one BMC, selected by the router's concrete callback type.
 pub trait Callbacks: Send + Sync + 'static {
-    fn get_power_state(&self) -> MockPowerState;
     fn computer_system_reset(
         &self,
         reset_type: ResourceResetType,
     ) -> impl Future<Output = Result<(), ActionError>> + Send;
+
+    /// Accepts a [`DeviceEffect`] into the owning device's execution path.
+    /// Chassis power may complete asynchronously after acceptance. Factory reset
+    /// must publish BMC state and admit actor-owned DHCP recovery before reporting
+    /// success. Callers observe the result through the state the BMC serves.
+    ///
+    /// The default rejects every effect, so a backend that does not model the
+    /// device fails the action instead of answering success without an effect.
+    fn device_effect(
+        &self,
+        effect: DeviceEffect,
+    ) -> impl Future<Output = Result<(), ActionError>> + Send {
+        std::future::ready(Err(ActionError::BadRequest(eyre::eyre!(
+            "bmc-mock: backend does not support device effect {effect:?}"
+        ))))
+    }
+
+    /// Applies one virtual-media operation before reporting success.
+    ///
+    /// External backends must complete their I/O, then commit the update before
+    /// returning `Ok(())`. On failure, drop it without committing and return an
+    /// error. Actor implementations must transfer the whole update to retain
+    /// serialization and state publication if the requesting future is cancelled.
+    /// Backends without external media effects publish the requested state directly.
+    fn set_virtual_media(
+        &self,
+        update: VirtualMediaUpdate,
+    ) -> impl Future<Output = Result<(), ActionError>> + Send {
+        update.commit();
+        std::future::ready(Ok(()))
+    }
 
     fn state_refresh_indication(&self);
 }

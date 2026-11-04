@@ -309,6 +309,7 @@ async fn terminate_active_rack_maintenance(
     );
 
     Ok(StateHandlerOutcome::transition(RackState::Error {
+        certificate_failure: None,
         cause,
         recovery_policy: RackErrorRecoveryPolicy::MaintenanceRequestRequired,
     })
@@ -799,7 +800,24 @@ async fn transition_to_rack_error(
     let cause = cause.into();
     tracing::warn!(rack_id = %rack_id, %cause, "Rack maintenance failed, transitioning to Error");
     let outcome = StateHandlerOutcome::transition(RackState::Error {
+        certificate_failure: None,
         cause,
+        recovery_policy: RackErrorRecoveryPolicy::MaintenanceRequestRequired,
+    });
+    clear_maintenance_requested_on_error(rack_id, state, outcome, ctx).await
+}
+
+async fn transition_rack_to_switch_certificate_error(
+    rack_id: &RackId,
+    state: &mut Rack,
+    cause: String,
+    failure: Option<model::component_manager::SwitchCertificateFailure>,
+    ctx: &mut StateHandlerContext<'_, RackStateHandlerContextObjects>,
+) -> Result<StateHandlerOutcome<RackState>, StateHandlerError> {
+    tracing::warn!(rack_id = %rack_id, %cause, "Rack certificate configuration failed");
+    let outcome = StateHandlerOutcome::transition(RackState::Error {
+        cause,
+        certificate_failure: failure,
         recovery_policy: RackErrorRecoveryPolicy::MaintenanceRequestRequired,
     });
     clear_maintenance_requested_on_error(rack_id, state, outcome, ctx).await
@@ -831,6 +849,7 @@ async fn transition_to_rack_error_with_firmware_job(
     db_rack::update(txn.as_mut(), rack_id, &state.config).await?;
 
     Ok(StateHandlerOutcome::transition(RackState::Error {
+        certificate_failure: None,
         cause,
         recovery_policy: RackErrorRecoveryPolicy::MaintenanceRequestRequired,
     })
@@ -1215,7 +1234,8 @@ enum CertificateEndpointLoadError {
 ///
 /// BMC MAC addresses identify persisted switches, but the certificate request
 /// does not read or submit BMC endpoint credentials. RMS accepts one host
-/// endpoint per switch, so zero or multiple usable NVOS endpoints are invalid.
+/// endpoint per switch. The database selects the same NVOS endpoint used by
+/// ingestion and V2 fabric configuration; a switch without a usable endpoint is invalid.
 /// An optional target limits validation and credential loading to one switch.
 async fn load_nmx_certificate_endpoints(
     db_pool: &sqlx::PgPool,
@@ -1255,13 +1275,6 @@ async fn load_nmx_certificate_endpoints(
                 first_row.switch_id
             )));
         };
-
-        if candidates.next().is_some() {
-            return Err(CertificateEndpointLoadError::Invalid(format!(
-                "switch {} has multiple usable NVOS endpoints for ConfigureSwitchCertificate",
-                first_row.switch_id
-            )));
-        }
 
         let nvos_credentials = credential_manager
             .get_credentials(&CredentialKey::SwitchNvosAdmin {
@@ -1390,6 +1403,19 @@ async fn start_configure_nmx_cluster(
                 "unable to prepare rack switch certificate configuration: {error}"
             )));
         }
+        Err(ComponentManagerError::SwitchCertificateSubmission { summary, failure }) => {
+            return transition_rack_to_switch_certificate_error(
+                id,
+                state,
+                format!(
+                    "switch certificate submission failed: {summary}; RMS job ID: {}",
+                    failure.job_id.as_deref().unwrap_or("unavailable")
+                ),
+                Some(*failure),
+                ctx,
+            )
+            .await;
+        }
         Err(error) => {
             return transition_to_rack_error(
                 id,
@@ -1475,7 +1501,7 @@ async fn wait_for_switch_certificate_job(
                 |error| format!("Switch certificate job {job_id} failed: {error}"),
             );
 
-            transition_to_rack_error(id, state, cause, ctx).await
+            transition_rack_to_switch_certificate_error(id, state, cause, status.failure, ctx).await
         }
     }
 }
@@ -1524,6 +1550,19 @@ async fn start_primary_switch_certificate_configuration(
             return Err(StateHandlerError::GenericError(eyre::eyre!(
                 "unable to prepare primary switch certificate configuration: {error}"
             )));
+        }
+        Err(ComponentManagerError::SwitchCertificateSubmission { summary, failure }) => {
+            return transition_rack_to_switch_certificate_error(
+                id,
+                state,
+                format!(
+                    "switch certificate submission failed: {summary}; RMS job ID: {}",
+                    failure.job_id.as_deref().unwrap_or("unavailable")
+                ),
+                Some(*failure),
+                ctx,
+            )
+            .await;
         }
         Err(error) => {
             return transition_to_rack_error(
@@ -2310,6 +2349,7 @@ pub async fn handle_maintenance(
                         db_rack::update(recovery_txn.as_mut(), id, &state.config).await?;
                     }
                     return Ok(StateHandlerOutcome::transition(RackState::Error {
+                        certificate_failure: None,
                         cause,
                         recovery_policy: RackErrorRecoveryPolicy::MaintenanceRequestRequired,
                     })
@@ -2509,6 +2549,7 @@ pub async fn handle_maintenance(
                             db_rack::update(recovery_txn.as_mut(), id, &state.config).await?;
                         }
                         Ok(StateHandlerOutcome::transition(RackState::Error {
+                            certificate_failure: None,
                             cause,
                             recovery_policy: RackErrorRecoveryPolicy::MaintenanceRequestRequired,
                         })
@@ -2836,6 +2877,7 @@ pub async fn handle_maintenance(
                         db_rack::update(txn.as_mut(), id, &state.config).await?;
 
                         return Ok(StateHandlerOutcome::transition(RackState::Error {
+                            certificate_failure: None,
                             cause: cause.to_string(),
                             recovery_policy: RackErrorRecoveryPolicy::MaintenanceRequestRequired,
                         })
@@ -3049,6 +3091,7 @@ pub async fn handle_maintenance(
                         db_rack::update(txn.as_mut(), id, &state.config).await?;
                     }
                     return Ok(StateHandlerOutcome::transition(RackState::Error {
+                        certificate_failure: None,
                         cause: format!("NVOS update failed: {}/{} switches failed", failed, total),
                         recovery_policy: RackErrorRecoveryPolicy::MaintenanceRequestRequired,
                     })

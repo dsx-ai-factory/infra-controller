@@ -25,6 +25,7 @@ import (
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"go.opentelemetry.io/otel"
 
+	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
 	flowv1 "github.com/NVIDIA/infra-controller/rest-api/proto/flow/gen/v1"
 )
 
@@ -81,6 +82,9 @@ type FlowGrpcClientConfig struct {
 	ClientKeyPath string
 	// client metrics interface
 	ClientMetrics Metrics
+	// OnRPCFinish observes each completed RPC once, including stream termination.
+	// It must be safe for concurrent calls; nil disables the callback.
+	OnRPCFinish func(error) `json:"-"`
 }
 
 // NewFlowGrpcClient creates a new Flow gRPC client, this is called by Site Agent startup code and cert reload routine
@@ -182,6 +186,10 @@ func NewFlowGrpcClient(config *FlowGrpcClientConfig) (client *FlowGrpcClient, er
 		return nil, ErrFlowGrpcClientInvalidSecureOpts
 	}
 
+	if config.OnRPCFinish != nil {
+		client.dialOpts = append(client.dialOpts, grpc.WithDefaultCallOptions(grpc.OnFinish(config.OnRPCFinish)))
+	}
+
 	// Configure interceptors
 	var unaryInterceptors []grpc.UnaryClientInterceptor
 	if config.ClientMetrics != nil {
@@ -191,9 +199,10 @@ func NewFlowGrpcClient(config *FlowGrpcClientConfig) (client *FlowGrpcClient, er
 	if config.ClientMetrics != nil {
 		streamInterceptors = append(streamInterceptors, newGrpcStreamMetricsInterceptor(config.ClientMetrics))
 	}
-	// Unconditional: was gated on LS_SERVICE_NAME, which no chart sets.
-	handler := otelgrpc.NewClientHandler(otelgrpc.WithPropagators(otel.GetTextMapPropagator()))
-	client.dialOpts = append(client.dialOpts, grpc.WithStatsHandler(handler))
+	if cotel.TransportEnabled() {
+		handler := otelgrpc.NewClientHandler(otelgrpc.WithPropagators(otel.GetTextMapPropagator()))
+		client.dialOpts = append(client.dialOpts, grpc.WithStatsHandler(handler))
+	}
 	if len(unaryInterceptors) > 0 {
 		client.dialOpts = append(client.dialOpts, grpc.WithUnaryInterceptor(grpcmw.ChainUnaryClient(unaryInterceptors...)))
 	}
@@ -350,14 +359,14 @@ func (fgac *FlowGrpcAtomicClient) CheckAndReloadCerts(initialClientCertMD5, init
 			reloadStarted = time.Now()
 			reloadBackoff = FlowGrpcConnectionBackoffInitial
 		} else if time.Since(reloadStarted) >= FlowGrpcConnectionRetryTimeout {
-			panic(fmt.Errorf("Flow gRPC: failed to reinitialize gRPC client with new certificates within %s",
+			panic(fmt.Errorf("flow gRPC: failed to reinitialize gRPC client with new certificates within %s",
 				FlowGrpcConnectionRetryTimeout))
 		}
 
 		newClient, err := NewFlowGrpcClient(fgac.Config)
 		if err != nil {
 			if time.Since(reloadStarted) >= FlowGrpcConnectionRetryTimeout {
-				panic(fmt.Errorf("Flow gRPC: failed to reinitialize gRPC client with new certificates within %s: %w",
+				panic(fmt.Errorf("flow gRPC: failed to reinitialize gRPC client with new certificates within %s: %w",
 					FlowGrpcConnectionRetryTimeout, err))
 			}
 			logger.Error().Err(err).Dur("RetryIn", reloadBackoff).Msg("Failed to reinitialize gRPC client with new certificates, retrying")

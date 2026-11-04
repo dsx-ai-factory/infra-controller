@@ -1,4 +1,4 @@
-# Lenovo SR675 V3 Stuck Polling BIOS Setup
+# Lenovo SR675 V3 Stuck Polling BIOS Setup <Badge intent="info">v2.2</Badge> <Badge intent="launch" minimal>New</Badge>
 
 Use this playbook when a Lenovo ThinkSystem SR675 V3 OVX remains in
 `Assigned/HostPlatformConfiguration/PollingBiosSetup` and an instance cannot
@@ -125,7 +125,7 @@ settings and confirm the maintenance window before continuing.
 
    ```bash
    MAC_ADDRESS=$(nico-admin-cli -f json machine show <machine-id> \
-     | jq -r '.interfaces[] | select(.primary_interface == true) | .mac_address')
+     | jq -r '.status.interfaces[] | select(.primary_interface == true) | .mac_address')
    ```
 
 1. Run machine setup after the server begins booting:

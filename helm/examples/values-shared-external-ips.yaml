@@ -1,0 +1,97 @@
+## =============================================================================
+## Shared External IPs - NICo Bare Metal Manager
+## =============================================================================
+## Overlay that places the external LoadBalancer Services on eight IPs by
+## letting compatible Services share one IP, differentiated by protocol and
+## port. Apply it on top of your site values, for example values-full.yaml.
+##
+## The overlay sets the LoadBalancer IP of every external Service (nico-api,
+## nico-pxe, nico-ssh-console-rs, nico-dhcp, unbound, each nico-dns replica,
+## and each nico-ntp replica) and the three DHCP hook parameters that
+## advertise them: nameservers, ntpServer, and provisioningServer. Replace the
+## EXAMPLE addresses with addresses from your pool and keep the hook
+## parameters in step with the Services they point at. Ports stay at their
+## defaults. Clients that already use these addresses need no changes, but a
+## changed address or resolver changes what DHCP hands out.
+##
+## nameservers advertises the unbound IP, not a nico-dns IP: nico-dns is
+## authoritative only and does not recurse, so managed machines use unbound
+## for all lookups (docs/provisioning/ip-and-network-configuration.md,
+## section 3.2).
+##
+## Install from the repository root with:
+##   helm install nico ./helm -n nico-system --create-namespace \
+##     -f helm/examples/values-full.yaml -f helm/examples/values-shared-external-ips.yaml
+##
+## The IP plan, the sharing rules behind it, what the count excludes, and the
+## controller assumptions are documented in README.md under "Sharing External
+## IPs". In short: nico-api, nico-pxe, and each NTP replica keep their own IPs
+## because they use externalTrafficPolicy Local, each DNS replica keeps its own
+## IP, and nico-ssh-console-rs, nico-dhcp, and unbound share one IP.
+## =============================================================================
+
+nico-api:
+  externalService:
+    enabled: true
+    externalTrafficPolicy: Local
+    annotations:
+      metallb.universe.tf/loadBalancerIPs: "10.0.0.10"   # EXAMPLE
+
+nico-pxe:
+  externalService:
+    enabled: true
+    externalTrafficPolicy: Local
+    annotations:
+      metallb.universe.tf/loadBalancerIPs: "10.0.0.11"   # EXAMPLE
+
+## nico-ssh-console-rs, nico-dhcp, and unbound share one IP. Each keeps the
+## Kubernetes default traffic policy (Cluster), which MetalLB requires for
+## sharing between Services that select different pods.
+nico-ssh-console-rs:
+  externalService:
+    enabled: true
+    annotations:
+      metallb.universe.tf/loadBalancerIPs: "10.0.0.12"   # EXAMPLE
+      metallb.universe.tf/allow-shared-ip: "nico-shared"
+
+nico-dhcp:
+  externalService:
+    enabled: true
+    annotations:
+      metallb.universe.tf/loadBalancerIPs: "10.0.0.12"   # EXAMPLE
+      metallb.universe.tf/allow-shared-ip: "nico-shared"
+  config:
+    kea:
+      hookParameters:
+        nameservers: "10.0.0.12"                      # unbound (shared IP), see header
+        ntpServer: "10.0.0.30,10.0.0.31,10.0.0.32"    # nico-ntp replicas
+        provisioningServer: "10.0.0.11"               # nico-pxe
+
+unbound:
+  enabled: true
+  externalService:
+    enabled: true
+    annotations:
+      metallb.universe.tf/loadBalancerIPs: "10.0.0.12"   # EXAMPLE
+      # Overrides the built-in per-chart sharing value.
+      metallb.universe.tf/allow-shared-ip: "nico-shared"
+
+## Per-replica endpoints are preserved: one IP per DNS replica and one per
+## NTP replica. The lists match the default replica counts; add an entry for
+## each extra replica your site runs.
+nico-dns:
+  externalService:
+    enabled: true
+    perPodAnnotations:
+      - metallb.universe.tf/loadBalancerIPs: "10.0.0.20"   # EXAMPLE, pod-0
+      - metallb.universe.tf/loadBalancerIPs: "10.0.0.21"   # EXAMPLE, pod-1
+
+nico-ntp:
+  enabled: true
+  externalService:
+    enabled: true
+    externalTrafficPolicy: Local
+    perPodAnnotations:
+      - metallb.universe.tf/loadBalancerIPs: "10.0.0.30"   # EXAMPLE, pod-0
+      - metallb.universe.tf/loadBalancerIPs: "10.0.0.31"   # EXAMPLE, pod-1
+      - metallb.universe.tf/loadBalancerIPs: "10.0.0.32"   # EXAMPLE, pod-2

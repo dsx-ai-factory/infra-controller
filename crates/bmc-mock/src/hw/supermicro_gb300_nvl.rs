@@ -64,15 +64,15 @@ impl SupermicroGB300Nvl<'_> {
                     id: bmc_manager_id,
                     eth_interfaces: Some(vec![
                         bmc_eth_builder("eth0")
-                            .mac_address(self.bmc_mac_address_eth0)
+                            .mac_address((self.bmc_mac_address_eth0).to_string())
                             .interface_enabled(true)
                             .build(),
                         bmc_eth_builder("eth1")
-                            .mac_address(self.bmc_mac_address_eth1)
+                            .mac_address((self.bmc_mac_address_eth1).to_string())
                             .interface_enabled(true)
                             .build(),
                         bmc_eth_builder("usb0")
-                            .mac_address(self.bmc_mac_address_usb0)
+                            .mac_address((self.bmc_mac_address_usb0).to_string())
                             .interface_enabled(true)
                             .build(),
                     ]),
@@ -89,14 +89,14 @@ impl SupermicroGB300Nvl<'_> {
                         )
                         .description("Serial over LAN")
                         .interface_enabled(true)
-                        .signal_type("Rs232")
+                        .signal_type(redfish::schema::serial_interface::SignalType::Rs232)
                         .bit_rate("115200")
-                        .parity("None")
+                        .parity(redfish::schema::serial_interface::Parity::None)
                         .data_bits("8")
                         .stop_bits("1")
-                        .flow_control("None")
+                        .flow_control(redfish::schema::serial_interface::FlowControl::None)
                         .connector_type("RJ45")
-                        .pin_out("Cyclades")
+                        .pin_out(redfish::schema::serial_interface::PinOut::Cyclades)
                         .build(),
                     ]),
                     // Supermicro OpenBMC host BMC firmware, per the SMC GB300 scrape.
@@ -109,7 +109,7 @@ impl SupermicroGB300Nvl<'_> {
                         redfish::ethernet_interface::builder(
                             &redfish::ethernet_interface::manager_resource("HGX_BMC_0", "usb0"),
                         )
-                        .mac_address(self.hgx_bmc_mac_address_usb0)
+                        .mac_address((self.hgx_bmc_mac_address_usb0).to_string())
                         .interface_enabled(true)
                         .build(),
                     ]),
@@ -129,13 +129,10 @@ impl SupermicroGB300Nvl<'_> {
     ) -> redfish::computer_system::Config<C> {
         let system_id = "System_0";
         let boot_options = std::iter::once(
-            redfish::boot_option::builder(
-                &redfish::boot_option::resource(system_id, "Boot0002"),
-                BootOptionKind::Disk,
-            )
-            .boot_option_reference("Boot0002")
-            .display_name("ubuntu")
-            .build(),
+            redfish::boot_option::builder(&redfish::boot_option::resource(system_id, "Boot0002"))
+                .boot_option_reference("Boot0002")
+                .display_name("ubuntu")
+                .build(BootOptionKind::Disk),
         )
         .chain(
             [&self.embedded_1g_nic.ethernet_nic(), &self.dpu.host_nic()]
@@ -144,21 +141,18 @@ impl SupermicroGB300Nvl<'_> {
                 .map(|(n, nic)| {
                     let id = format!("Boot{:04X}", n + 3); // Starting with Boot0003
                     let pci_path = "PciRoot(0x0)/Pci(0x10,0x0)/Pci(0x0,0x0)";
-                    redfish::boot_option::builder(
-                        &redfish::boot_option::resource(system_id, &id),
-                        BootOptionKind::Network,
-                    )
-                    .boot_option_reference(&id)
-                    .display_name(&format!(
-                        "UEFI HTTPv4 (MAC:{})",
-                        nic.mac_address.to_string().replace(":", "")
-                    ))
-                    .uefi_device_path(&format!(
-                        "{pci_path}/MAC({},0x1)\
+                    redfish::boot_option::builder(&redfish::boot_option::resource(system_id, &id))
+                        .boot_option_reference(&id)
+                        .display_name(format!(
+                            "UEFI HTTPv4 (MAC:{})",
+                            nic.mac_address.to_string().replace(":", "")
+                        ))
+                        .uefi_device_path(format!(
+                            "{pci_path}/MAC({},0x1)\
                          /IPv4(0.0.0.0,0x0,DHCP,0.0.0.0,0.0.0.0,0.0.0.0)/Uri()",
-                        nic.mac_address.to_string().replace(":", "")
-                    ))
-                    .build()
+                            nic.mac_address.to_string().replace(":", "")
+                        ))
+                        .build(BootOptionKind::Network)
                 }),
         )
         .collect::<Vec<_>>();
@@ -219,7 +213,7 @@ impl SupermicroGB300Nvl<'_> {
             let nic = bf3.host_nic();
             redfish::chassis::SingleChassisConfig {
                 id: chassis_id.into(),
-                chassis_type: "Component".into(),
+                chassis_type: redfish::schema::chassis::ChassisType::Component,
                 manufacturer: Some("Nvidia".into()),
                 part_number: nic.part_number.map(|v| format!("{v}           ",).into()),
                 model: Some("BlueField-3 DPU".into()),
@@ -242,7 +236,7 @@ impl SupermicroGB300Nvl<'_> {
                 .chain(std::iter::once(redfish::chassis::SingleChassisConfig {
                     id: "Chassis_0".into(),
                     // SMC GB300 scrape: Chassis_0 is a Shelf with PDB part number AOM-PDB-B3.
-                    chassis_type: "Shelf".into(),
+                    chassis_type: redfish::schema::chassis::ChassisType::Shelf,
                     manufacturer: Some("Supermicro".into()),
                     part_number: Some("AOM-PDB-B3".into()),
                     model: Some("GB NVL".into()),
@@ -293,11 +287,9 @@ impl SupermicroGB300Nvl<'_> {
 fn base_bios(system_id: &str) -> serde_json::Value {
     // Security device support is already enabled; the DPU-facing option ROMs
     // still need to be enabled by clearing their DisableOptionROM controls.
-    redfish::bios::builder(&redfish::bios::resource(system_id))
-        .attributes(json!({
-            "SecurityDeviceSupport": "Enabled",
-            "Socket0Pcie6DisableOptionROM": true,
-            "Socket1Pcie6DisableOptionROM": true,
-        }))
-        .build()
+    redfish::bios::builder(&redfish::bios::resource(system_id)).with_attributes(json!({
+        "SecurityDeviceSupport": "Enabled",
+        "Socket0Pcie6DisableOptionROM": true,
+        "Socket1Pcie6DisableOptionROM": true,
+    }))
 }

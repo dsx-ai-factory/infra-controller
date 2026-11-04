@@ -237,12 +237,15 @@ per-host fields and compatibility controls. It reads a snake_case
 - **`dpf_enabled`** (bool, default `true`): Enable or disable DPF provisioning for this host. When omitted or `true`, DPF is the provisioning path (requires `[dpf].enabled = true` in the site config — see [DPF setup](../manuals/dpf.md)). Set to `false` to keep a host on the deprecated iPXE path.
 - **`bmc_retain_credentials`** (bool): Skip BMC password rotation.
 - **`default_pause_ingestion_and_poweron`** (bool): Pause ingestion and power-on for this host.
+- **`sku_id`** (string, optional): SKU ID that NICo assigns to the host when it creates the machine. Refer to
+  [Assign a SKU through the expected machine](sku-validation.md#assign-a-sku-through-the-expected-machine).
 - **`interfaces`** (array): Configure Host, DPU OS, DPU BMC, and Host BMC
   interface roles and their Dynamic, Fixed, or Retained IP allocation policies.
   See [Configure Expected Machine Interfaces](expected-machine-interfaces.md).
 - **`bmc_ip_address`** (string, optional): Compatibility top-level Host BMC
   address. With the top-level `Auto` policy, its presence infers Fixed
-  allocation.
+  allocation. NICo rejects an unspecified, multicast, or IPv4
+  limited-broadcast address, including the IPv4-mapped IPv6 form of each.
 - **`bmc_ip_allocation`** (`"Unspecified"` | `"Auto"` | `"Dynamic"` |
   `"Fixed"` | `"Retained"`, default `"Auto"`): Compatibility Host BMC policy
   in the whole-table JSON consumed by `em replace-all`. For the top-level

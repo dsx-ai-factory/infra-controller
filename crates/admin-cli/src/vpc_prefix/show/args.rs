@@ -15,6 +15,8 @@
  * limitations under the License.
  */
 
+use std::net::IpAddr;
+
 use carbide_uuid::vpc::VpcId;
 use clap::Parser;
 use ipnet::IpNet;
@@ -66,6 +68,7 @@ pub(crate) struct Args {
         name = "contains",
         value_name = "address-or-prefix",
         help = "Search by an address or prefix the VPC prefix contains",
+        value_parser = parse_address_or_prefix,
         conflicts_with_all = ["VpcPrefixSelector", "contained-by"],
     )]
     pub(super) contains: Option<IpNet>,
@@ -82,4 +85,13 @@ pub(crate) struct Args {
     /// Include soft-deleted VPC prefixes
     #[clap(long, value_enum, default_value = "exclude")]
     pub(super) deleted: DeletedFilter,
+}
+
+fn parse_address_or_prefix(value: &str) -> Result<IpNet, ipnet::AddrParseError> {
+    value.parse::<IpNet>().or_else(|prefix_error| {
+        value
+            .parse::<IpAddr>()
+            .map(IpNet::from)
+            .map_err(|_| prefix_error)
+    })
 }

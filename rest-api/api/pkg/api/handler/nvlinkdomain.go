@@ -22,6 +22,7 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/pagination"
 	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
 	auth "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
+	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
@@ -30,21 +31,19 @@ import (
 
 // GetNVLinkDomainHandler is the API Handler for getting an NVLink Domain by ID
 type GetNVLinkDomainHandler struct {
-	dbSession  *cdb.Session
-	tc         tClient.Client
-	scp        *sc.ClientPool
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        tClient.Client
+	scp       *sc.ClientPool
+	cfg       *config.Config
 }
 
 // NewGetNVLinkDomainHandler initializes and returns a new handler for getting an NVLink Domain
 func NewGetNVLinkDomainHandler(dbSession *cdb.Session, tc tClient.Client, scp *sc.ClientPool, cfg *config.Config) GetNVLinkDomainHandler {
 	return GetNVLinkDomainHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		scp:        scp,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		scp:       scp,
+		cfg:       cfg,
 	}
 }
 
@@ -62,7 +61,7 @@ func NewGetNVLinkDomainHandler(dbSession *cdb.Session, tc tClient.Client, scp *s
 // @Success 200 {object} model.APINVLinkDomain
 // @Router /v2/org/{org}/nico/domain/nvlink/{id} [get]
 func (gndh GetNVLinkDomainHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("NVLinkDomain", "Get", c, gndh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("NVLinkDomain", "Get", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -109,7 +108,7 @@ func (gndh GetNVLinkDomainHandler) Handle(c echo.Context) error {
 	}
 
 	domainID := c.Param("id")
-	gndh.tracerSpan.SetAttribute(handlerSpan, attribute.String("domain_id", domainID), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("domain_id", domainID))
 
 	site, err := common.GetSiteFromIDString(ctx, nil, apiRequest.SiteID, gndh.dbSession)
 	if err != nil {
@@ -172,21 +171,19 @@ func (gndh GetNVLinkDomainHandler) Handle(c echo.Context) error {
 
 // GetAllNVLinkDomainHandler is the API Handler for getting all NVLink Domains
 type GetAllNVLinkDomainHandler struct {
-	dbSession  *cdb.Session
-	tc         tClient.Client
-	scp        *sc.ClientPool
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        tClient.Client
+	scp       *sc.ClientPool
+	cfg       *config.Config
 }
 
 // NewGetAllNVLinkDomainHandler initializes and returns a new handler for getting all NVLink Domains
 func NewGetAllNVLinkDomainHandler(dbSession *cdb.Session, tc tClient.Client, scp *sc.ClientPool, cfg *config.Config) GetAllNVLinkDomainHandler {
 	return GetAllNVLinkDomainHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		scp:        scp,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		scp:       scp,
+		cfg:       cfg,
 	}
 }
 
@@ -207,7 +204,7 @@ func NewGetAllNVLinkDomainHandler(dbSession *cdb.Session, tc tClient.Client, scp
 // @Success 200 {array} model.APINVLinkDomain
 // @Router /v2/org/{org}/nico/domain/nvlink [get]
 func (gandh GetAllNVLinkDomainHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("NVLinkDomain", "GetAll", c, gandh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("NVLinkDomain", "GetAll", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -421,9 +418,8 @@ func (identity nvLinkDomainOperationWorkflowIdentity) firmwareWorkflowID(
 
 // UpdateNVLinkDomainPowerStateHandler power controls one NVLink Domain identified by ID.
 type UpdateNVLinkDomainPowerStateHandler struct {
-	dbSession  *cdb.Session
-	scp        *sc.ClientPool
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	scp       *sc.ClientPool
 }
 
 // NewUpdateNVLinkDomainPowerStateHandler initializes an NVLink Domain power-control handler.
@@ -432,9 +428,8 @@ func NewUpdateNVLinkDomainPowerStateHandler(
 	scp *sc.ClientPool,
 ) UpdateNVLinkDomainPowerStateHandler {
 	return UpdateNVLinkDomainPowerStateHandler{
-		dbSession:  dbSession,
-		scp:        scp,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		scp:       scp,
 	}
 }
 
@@ -451,7 +446,7 @@ func NewUpdateNVLinkDomainPowerStateHandler(
 // @Success 200 {object} model.APIUpdatePowerStateResponse
 // @Router /v2/org/{org}/nico/domain/nvlink/{id}/power [patch]
 func (h UpdateNVLinkDomainPowerStateHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("NVLinkDomain", "PowerControl", c, h.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("NVLinkDomain", "PowerControl", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -500,7 +495,7 @@ func (h UpdateNVLinkDomainPowerStateHandler) Handle(c echo.Context) error {
 	if err != nil {
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, err.Error(), nil)
 	}
-	h.tracerSpan.SetAttribute(handlerSpan, attribute.String("nvlink_domain_id", identity.NVLinkDomainIDs[0]), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("nvlink_domain_id", identity.NVLinkDomainIDs[0]))
 
 	site, err := common.GetSiteFromIDString(ctx, nil, identity.SiteID, h.dbSession)
 	if err != nil {
@@ -549,9 +544,8 @@ func (h UpdateNVLinkDomainPowerStateHandler) Handle(c echo.Context) error {
 
 // BatchUpdateNVLinkDomainPowerStateHandler power controls one or more NVLink Domains.
 type BatchUpdateNVLinkDomainPowerStateHandler struct {
-	dbSession  *cdb.Session
-	scp        *sc.ClientPool
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	scp       *sc.ClientPool
 }
 
 // NewBatchUpdateNVLinkDomainPowerStateHandler initializes a batch NVLink Domain
@@ -561,9 +555,8 @@ func NewBatchUpdateNVLinkDomainPowerStateHandler(
 	scp *sc.ClientPool,
 ) BatchUpdateNVLinkDomainPowerStateHandler {
 	return BatchUpdateNVLinkDomainPowerStateHandler{
-		dbSession:  dbSession,
-		scp:        scp,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		scp:       scp,
 	}
 }
 
@@ -579,7 +572,7 @@ func NewBatchUpdateNVLinkDomainPowerStateHandler(
 // @Success 200 {object} model.APIUpdatePowerStateResponse
 // @Router /v2/org/{org}/nico/domain/nvlink/power [patch]
 func (h BatchUpdateNVLinkDomainPowerStateHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("NVLinkDomain", "PowerControlBatch", c, h.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("NVLinkDomain", "PowerControlBatch", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -622,7 +615,7 @@ func (h BatchUpdateNVLinkDomainPowerStateHandler) Handle(c echo.Context) error {
 	if err != nil {
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, err.Error(), nil)
 	}
-	h.tracerSpan.SetAttribute(handlerSpan, attribute.StringSlice("nvlink_domain_ids", identity.NVLinkDomainIDs), logger)
+	cotel.SetAttribute(handlerSpan, attribute.StringSlice("nvlink_domain_ids", identity.NVLinkDomainIDs))
 
 	site, err := common.GetSiteFromIDString(ctx, nil, identity.SiteID, h.dbSession)
 	if err != nil {
@@ -672,9 +665,8 @@ func (h BatchUpdateNVLinkDomainPowerStateHandler) Handle(c echo.Context) error {
 // UpdateNVLinkDomainFirmwareHandler updates firmware on one NVLink Domain identified by
 // UUID.
 type UpdateNVLinkDomainFirmwareHandler struct {
-	dbSession  *cdb.Session
-	scp        *sc.ClientPool
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	scp       *sc.ClientPool
 }
 
 // NewUpdateNVLinkDomainFirmwareHandler initializes an NVLink Domain firmware-update handler.
@@ -683,9 +675,8 @@ func NewUpdateNVLinkDomainFirmwareHandler(
 	scp *sc.ClientPool,
 ) UpdateNVLinkDomainFirmwareHandler {
 	return UpdateNVLinkDomainFirmwareHandler{
-		dbSession:  dbSession,
-		scp:        scp,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		scp:       scp,
 	}
 }
 
@@ -702,7 +693,7 @@ func NewUpdateNVLinkDomainFirmwareHandler(
 // @Success 200 {object} model.APIUpdateFirmwareResponse
 // @Router /v2/org/{org}/nico/domain/nvlink/{id}/firmware [patch]
 func (h UpdateNVLinkDomainFirmwareHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("NVLinkDomain", "FirmwareUpdate", c, h.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("NVLinkDomain", "FirmwareUpdate", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -754,7 +745,7 @@ func (h UpdateNVLinkDomainFirmwareHandler) Handle(c echo.Context) error {
 	if err != nil {
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, err.Error(), nil)
 	}
-	h.tracerSpan.SetAttribute(handlerSpan, attribute.String("nvlink_domain_id", identity.NVLinkDomainIDs[0]), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("nvlink_domain_id", identity.NVLinkDomainIDs[0]))
 
 	site, err := common.GetSiteFromIDString(ctx, nil, identity.SiteID, h.dbSession)
 	if err != nil {
@@ -807,9 +798,8 @@ func (h UpdateNVLinkDomainFirmwareHandler) Handle(c echo.Context) error {
 
 // BatchUpdateNVLinkDomainFirmwareHandler updates firmware on one or more NVLink Domains.
 type BatchUpdateNVLinkDomainFirmwareHandler struct {
-	dbSession  *cdb.Session
-	scp        *sc.ClientPool
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	scp       *sc.ClientPool
 }
 
 // NewBatchUpdateNVLinkDomainFirmwareHandler initializes a batch NVLink Domain
@@ -819,9 +809,8 @@ func NewBatchUpdateNVLinkDomainFirmwareHandler(
 	scp *sc.ClientPool,
 ) BatchUpdateNVLinkDomainFirmwareHandler {
 	return BatchUpdateNVLinkDomainFirmwareHandler{
-		dbSession:  dbSession,
-		scp:        scp,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		scp:       scp,
 	}
 }
 
@@ -837,7 +826,7 @@ func NewBatchUpdateNVLinkDomainFirmwareHandler(
 // @Success 200 {object} model.APIUpdateFirmwareResponse
 // @Router /v2/org/{org}/nico/domain/nvlink/firmware [patch]
 func (h BatchUpdateNVLinkDomainFirmwareHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("NVLinkDomain", "FirmwareUpdateBatch", c, h.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("NVLinkDomain", "FirmwareUpdateBatch", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -883,7 +872,7 @@ func (h BatchUpdateNVLinkDomainFirmwareHandler) Handle(c echo.Context) error {
 	if err != nil {
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, err.Error(), nil)
 	}
-	h.tracerSpan.SetAttribute(handlerSpan, attribute.StringSlice("nvlink_domain_ids", identity.NVLinkDomainIDs), logger)
+	cotel.SetAttribute(handlerSpan, attribute.StringSlice("nvlink_domain_ids", identity.NVLinkDomainIDs))
 
 	site, err := common.GetSiteFromIDString(ctx, nil, identity.SiteID, h.dbSession)
 	if err != nil {

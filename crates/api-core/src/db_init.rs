@@ -31,8 +31,6 @@ use model::machine::upgrade_policy::AgentUpgradePolicy;
 use model::metadata::Metadata;
 use model::network_prefix::NewNetworkPrefix;
 use model::network_segment::{NetworkDefinition, NetworkSegmentType, NewNetworkSegment};
-use model::resource_pool;
-use model::resource_pool::ResourcePool;
 use model::vpc::{NewVpc, VpcDefinition, VpcStatus, VpcVirtualizationTypeCapabilities};
 use sqlx::{Pool, Postgres};
 
@@ -42,8 +40,10 @@ use crate::api::Api;
 const STATIC_ASSIGNMENTS_IPV4_PREFIX: &str = "169.254.254.254/32";
 const STATIC_ASSIGNMENTS_IPV6_PREFIX: &str = "100::/128";
 
-/// Create a Domain if we don't already have one.
-/// Returns true if we created an entry in the db (we had no domains yet), false otherwise.
+/// Creates the configured initial domain when the `domains` table is empty.
+///
+/// Returns `true` only if this call inserts the domain. Existing rows, even
+/// deleted ones, return `false`.
 pub(crate) async fn create_initial_domain(
     db_pool: sqlx::pool::Pool<Postgres>,
     domain_name: &str,
@@ -52,9 +52,11 @@ pub(crate) async fn create_initial_domain(
     let domains = domain::find_by(&mut txn, ObjectColumnFilter::<domain::IdColumn>::All).await?;
     if domains.is_empty() {
         let domain = NewDomain::new(domain_name);
-        db::dns::domain::persist_first(&domain, &mut txn).await?;
+        let created = db::dns::domain::persist_first(&domain, &mut txn)
+            .await?
+            .is_some();
         txn.commit().await?;
-        Ok(true)
+        Ok(created)
     } else {
         let names: Vec<String> = domains.into_iter().map(|d| d.name).collect();
         if !names.iter().any(|n| n == domain_name) {
@@ -75,10 +77,11 @@ enum InitialNetworkDomainSelection {
     Ambiguous(Vec<String>),
 }
 
-/// Select the forward domain used by configured initial network segments.
+/// Select the infrastructure forward domain used by configured initial network segments.
 ///
-/// Reverse-DNS zones share the domains table and must not make a sole forward
-/// domain appear ambiguous.
+/// Reverse-DNS and VPC-owned domains cannot be used for these segments.
+/// Exclude them before checking for multiple candidates so adding one cannot
+/// make the infrastructure domain selection ambiguous.
 fn select_initial_network_domain(
     domains: &[Domain],
     configured_domain_name: Option<&str>,
@@ -87,7 +90,8 @@ fn select_initial_network_domain(
         .iter()
         .filter(|domain| {
             let name = domain.name.trim_end_matches('.');
-            !matches!(name, "in-addr.arpa" | "ip6.arpa")
+            domain.vpc_id.is_none()
+                && !matches!(name, "in-addr.arpa" | "ip6.arpa")
                 && db::dns::normalize_reverse_zone_name(name).is_none()
         })
         .collect_vec();
@@ -236,56 +240,35 @@ pub(crate) fn validate_initial_vpcs(
     Ok(())
 }
 
+/// Creates each configured VPC independently and skips names already present.
+/// Earlier commits survive a later failure, so startup can resume next time.
 pub(crate) async fn create_initial_vpcs(
-    db_pool: &Pool<Postgres>,
+    api: &Api,
     vpcs: &HashMap<String, VpcDefinition>,
-    vni_pool: &ResourcePool<i32>,
 ) -> Result<(), CarbideError> {
-    // Retain validation at the mutation boundary as defense in depth. Startup
-    // also validates during SeedData resolution, before any reconciliation.
+    // Validate here as well as during SeedData resolution, before any
+    // existing-name shortcut or creation through this entry point.
     validate_initial_vpcs(vpcs).map_err(CarbideError::InvalidConfiguration)?;
 
-    let mut txn = Transaction::begin(db_pool).await?;
-    for (name, def) in vpcs {
-        if db::vpc::find_by_name(&mut txn, name)
-            .await
-            .is_ok_and(|v| !v.is_empty())
+    for (name, def) in vpcs.iter().sorted_by_key(|(name, _)| *name) {
+        if !db::vpc::find_by_name(&api.database_connection, name)
+            .await?
+            .is_empty()
         {
-            tracing::debug!(
-                vpc_name = %name,
-                "VPC exists",
-            );
+            tracing::debug!(vpc_name = %name, "VPC exists");
             continue;
         }
-
-        let vpc_id = VpcId::new();
-        let tenant_organization_id = def
-            .organization_id
-            .clone()
-            .unwrap_or(uuid::Uuid::new_v4().into());
-        let owner_id = vpc_id.to_string();
-
-        let vni = db::resource_pool::allocate(
-            vni_pool,
-            &mut txn,
-            resource_pool::OwnerType::Vpc,
-            &owner_id,
-            def.vni,
-        )
-        .await
-        .inspect_err(|error| {
-            db::resource_pool::emit_allocation_failure(
-                vni_pool.value_type,
-                &owner_id,
-                def.vni.is_some(),
-                vni_pool.name(),
-                error,
-            );
-        })?;
-
-        let vpc = NewVpc {
-            id: vpc_id,
-            tenant_organization_id,
+        if def.routing_profile_type.is_some() || def.routing_profile_overrides.is_some() {
+            def.network_virtualization_type
+                .ensure_supports_routing_profiles()
+                .map_err(CarbideError::from)?;
+        }
+        let new_vpc = NewVpc {
+            id: VpcId::new(),
+            tenant_organization_id: def
+                .organization_id
+                .clone()
+                .unwrap_or_else(|| uuid::Uuid::new_v4().into()),
             network_virtualization_type: def.network_virtualization_type,
             metadata: Metadata {
                 name: name.to_owned(),
@@ -295,25 +278,13 @@ pub(crate) async fn create_initial_vpcs(
             routing_profile_type: def.routing_profile_type.clone(),
             routing_profile_overrides: def.routing_profile_overrides.clone(),
             power_resource_group: None,
-            vni: Some(vni),
+            vni: def.vni,
             slaac_enabled: false,
         };
-
-        // Validation
-        if def.routing_profile_type.is_some() || def.routing_profile_overrides.is_some() {
-            def.network_virtualization_type
-                .ensure_supports_routing_profiles()
-                .map_err(CarbideError::from)?;
+        if crate::handlers::vpc::create_configured(api, new_vpc).await? {
+            tracing::info!(vpc_name = %name, "Created VPC");
         }
-
-        db::vpc::persist(vpc, VpcStatus { vni: Some(vni) }, &mut txn).await?;
-        tracing::info!(
-            vpc_name = %name,
-            "Created VPC",
-        );
     }
-
-    txn.commit().await?;
     Ok(())
 }
 
@@ -328,11 +299,10 @@ pub(crate) async fn ensure_static_assignments_segment(
     subdomain_id: Option<carbide_uuid::domain::DomainId>,
 ) -> Result<(), CarbideError> {
     let segment_name = network_segment::STATIC_ASSIGNMENTS_SEGMENT_NAME;
-    if db::network_segment::find_by_name(txn, segment_name)
-        .await
-        .is_ok()
-    {
-        return Ok(());
+    match db::network_segment::find_by_name(txn, segment_name).await {
+        Ok(_) => return Ok(()),
+        Err(error) if error.is_not_found() => {}
+        Err(error) => return Err(error.into()),
     }
 
     let ns = NewNetworkSegment {
@@ -647,6 +617,7 @@ mod tests {
             id: domain_id(id),
             name: name.to_string(),
             default_ttl: None,
+            vpc_id: None,
             created: timestamp,
             updated: timestamp,
             deleted: None,
@@ -668,6 +639,20 @@ mod tests {
                         configured_domain_name: None,
                     },
                     expect: InitialNetworkDomainSelection::NoForwardDomain,
+                },
+                Check {
+                    scenario: "a configured VPC domain cannot replace infrastructure scope",
+                    input: DomainSelectionCase {
+                        domains: vec![
+                            domain(1, "site.example"),
+                            Domain {
+                                vpc_id: Some(uuid::Uuid::from_u128(10).into()),
+                                ..domain(2, "vpc.example")
+                            },
+                        ],
+                        configured_domain_name: Some("vpc.example"),
+                    },
+                    expect: InitialNetworkDomainSelection::Selected(domain_id(1)),
                 },
                 Check {
                     scenario: "the configured domain wins among multiple forward domains",

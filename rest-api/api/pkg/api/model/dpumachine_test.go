@@ -35,6 +35,33 @@ func TestAPIDpuMachine_FromProto(t *testing.T) {
 				Id: "test-machine-id",
 			},
 			Status: &corev1.MachineStatus{
+				LldpNeighbors: []*corev1.InterfaceLldp{
+					{
+						MacAddress: "02:00:00:00:01:b0",
+						Lldp: &corev1.LldpSwitchData{
+							Name:            "leaf-switch-01",
+							LocalPort:       "p0",
+							IpAddress:       []string{"10.0.2.194"},
+							IdType:          "mac",
+							IdValue:         "02:00:00:00:01:d4",
+							RemotePortType:  "ifname",
+							RemotePortValue: "swp1",
+						},
+					},
+					nil,
+					{
+						MacAddress: "02:00:00:00:01:b1",
+						Lldp: &corev1.LldpSwitchData{
+							Name:      "peer-dpu-01",
+							LocalPort: "p1",
+							MedInventory: &corev1.LldpMedInventory{
+								Serial:       cutil.GetPtr("SN0000000003"),
+								Manufacturer: cutil.GetPtr("https://www.mellanox.com"),
+								Model:        cutil.GetPtr("BlueField-3 DPU"),
+							},
+						},
+					},
+				},
 				DpuAgentVersion: cutil.GetPtr("1.0.0"),
 				DiscoveryInfo: &corev1.DiscoveryInfo{
 					DmiData: &corev1.DmiData{
@@ -158,6 +185,26 @@ func TestAPIDpuMachine_FromProto(t *testing.T) {
 	assert.Equal(t, []uint32{maxUint32}, dpuMachine.DpuNetworkConfig.AdminInterface.VpcPeerVnis)
 	assert.Equal(t, maxUint32, *dpuMachine.DpuNetworkConfig.AdminInterface.Mtu)
 
+	// LLDP neighbors come from MachineStatus; a nil entry is skipped.
+	require.Len(t, dpuMachine.LldpNeighbors, 2)
+	assert.Equal(t, "02:00:00:00:01:b0", dpuMachine.LldpNeighbors[0].MacAddress)
+	assert.Equal(t, "leaf-switch-01", dpuMachine.LldpNeighbors[0].Name)
+	assert.Equal(t, "p0", dpuMachine.LldpNeighbors[0].LocalPort)
+	assert.Equal(t, []string{"10.0.2.194"}, dpuMachine.LldpNeighbors[0].IpAddresses)
+	assert.Equal(t, "mac", dpuMachine.LldpNeighbors[0].ChassisIdType)
+	assert.Equal(t, "02:00:00:00:01:d4", dpuMachine.LldpNeighbors[0].ChassisIdValue)
+	assert.Equal(t, "ifname", dpuMachine.LldpNeighbors[0].RemotePortType)
+	assert.Equal(t, "swp1", dpuMachine.LldpNeighbors[0].RemotePortValue)
+	assert.Nil(t, dpuMachine.LldpNeighbors[0].MedInventory)
+	// LLDP-MED inventory is carried through when the neighbor advertises it.
+	medNeighbor := dpuMachine.LldpNeighbors[1]
+	assert.Equal(t, "peer-dpu-01", medNeighbor.Name)
+	assert.Equal(t, []string{}, medNeighbor.IpAddresses)
+	require.NotNil(t, medNeighbor.MedInventory)
+	assert.Equal(t, cutil.GetPtr("SN0000000003"), medNeighbor.MedInventory.Serial)
+	assert.Equal(t, cutil.GetPtr("https://www.mellanox.com"), medNeighbor.MedInventory.Manufacturer)
+	assert.Equal(t, cutil.GetPtr("BlueField-3 DPU"), medNeighbor.MedInventory.Model)
+
 	populatedNetworkConfig := proto.Clone(protoDpuMachine.DpuNetworkConfig).(*corev1.ManagedHostNetworkConfigResponse)
 	populatedNetworkConfig.DhcpServers = []string{"10.0.0.2"}
 	populatedNetworkConfig.TenantInterfaces = []*corev1.FlatInterfaceConfig{
@@ -225,6 +272,115 @@ func TestAPIDpuMachine_FromProto(t *testing.T) {
 			test.check(t, dpuMachine.DpuNetworkConfig)
 		})
 	}
+
+	t.Run("BMC field compatibility", func(t *testing.T) {
+		endpoint := &corev1.BmcEndpoint{
+			Ip:  cutil.GetPtr("192.0.2.10"),
+			Mac: cutil.GetPtr("02:00:00:00:00:10"),
+		}
+		status := &corev1.MachineStatus{
+			BmcStatus: &corev1.BmcStatus{
+				Version:         cutil.GetPtr("new-version"),
+				FirmwareVersion: cutil.GetPtr("new-firmware"),
+			},
+		}
+		legacy := &corev1.BmcInfo{
+			Ip:              cutil.GetPtr("192.0.2.20"),
+			Mac:             cutil.GetPtr("02:00:00:00:00:20"),
+			Version:         cutil.GetPtr("legacy-version"),
+			FirmwareVersion: cutil.GetPtr("legacy-firmware"),
+		}
+		wantNew := &APIBMCInfo{
+			IP:               cutil.GetPtr("192.0.2.10"),
+			Mac:              cutil.GetPtr("02:00:00:00:00:10"),
+			Version:          cutil.GetPtr("new-version"),
+			FirmwareRevision: cutil.GetPtr("new-firmware"),
+		}
+		wantLegacy := &APIBMCInfo{
+			IP:               cutil.GetPtr("192.0.2.20"),
+			Mac:              cutil.GetPtr("02:00:00:00:00:20"),
+			Version:          cutil.GetPtr("legacy-version"),
+			FirmwareRevision: cutil.GetPtr("legacy-firmware"),
+		}
+		cases := []struct {
+			name     string
+			endpoint *corev1.BmcEndpoint
+			status   *corev1.MachineStatus
+			legacy   *corev1.BmcInfo
+			want     *APIBMCInfo
+		}{
+			{
+				name:     "split fields without legacy data",
+				endpoint: endpoint,
+				status:   status,
+				want:     wantNew,
+			},
+			{
+				name:     "split fields take precedence over legacy data",
+				endpoint: endpoint,
+				status:   status,
+				legacy:   legacy,
+				want:     wantNew,
+			},
+			{
+				name:   "older Core without structured status",
+				legacy: legacy,
+				want:   wantLegacy,
+			},
+			{
+				name:     "split endpoint with legacy status",
+				endpoint: endpoint,
+				legacy:   legacy,
+				want: &APIBMCInfo{
+					IP:               cutil.GetPtr("192.0.2.10"),
+					Mac:              cutil.GetPtr("02:00:00:00:00:10"),
+					Version:          cutil.GetPtr("legacy-version"),
+					FirmwareRevision: cutil.GetPtr("legacy-firmware"),
+				},
+			},
+			{
+				name:   "split status with legacy endpoint",
+				status: status,
+				legacy: legacy,
+				want: &APIBMCInfo{
+					IP:               cutil.GetPtr("192.0.2.20"),
+					Mac:              cutil.GetPtr("02:00:00:00:00:20"),
+					Version:          cutil.GetPtr("new-version"),
+					FirmwareRevision: cutil.GetPtr("new-firmware"),
+				},
+			},
+			{
+				name:     "empty split messages do not revive legacy values",
+				endpoint: &corev1.BmcEndpoint{},
+				status: &corev1.MachineStatus{
+					BmcStatus: &corev1.BmcStatus{},
+				},
+				legacy: legacy,
+				want:   &APIBMCInfo{},
+			},
+			{
+				name: "missing BMC data clears a reused receiver",
+			},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				input := &corev1.DpuMachine{
+					Machine: &corev1.Machine{
+						Bmc:     tc.endpoint,
+						Status:  tc.status,
+						BmcInfo: tc.legacy, //nolint:staticcheck // Exercise compatibility with Core responses before the BMC split.
+					},
+				}
+				dpu := APIDpuMachine{
+					BMCInfo: &APIBMCInfo{
+						IP: cutil.GetPtr("192.0.2.99"),
+					},
+				}
+				dpu.FromProto(input, protoContext)
+				assert.Equal(t, tc.want, dpu.BMCInfo)
+			})
+		}
+	})
 }
 
 func TestAPIDpuMachineFromProtoClearsMissingHealth(t *testing.T) {
@@ -378,5 +534,6 @@ func TestAPIDpuMachine_ZeroValueJSON(t *testing.T) {
 		"dpuNetworkConfig":         nil,
 		"lastRebooted":             nil,
 		"placementInRack":          nil,
+		"lldpNeighbors":            nil,
 	}, response)
 }

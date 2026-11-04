@@ -38,7 +38,8 @@ fnn:
   # KEEP THIS KEY INSIDE THE fnn BLOCK, indented like the keys above. At the top
   # level of the file the build rejects it ("Unsupported field in site config
   # (top level)") and it would not be rendered into startup.yaml.
-  # Write each key as the full numeric target <asn>:<n>; nothing is substituted.
+  # A map, one '<asn>:<n>: {}' entry per target, NOT a list: the build rejects a
+  # list or a non-numeric key. Keys are full numeric targets; nothing is substituted.
   #routeTargetsToImport:
   #  65034:101: {}    # Jumphosts
   #  65034:1003: {}   # Power shelves

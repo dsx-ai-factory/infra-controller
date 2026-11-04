@@ -17,18 +17,180 @@
 
 use std::collections::HashMap;
 
+use carbide_uuid::DbTable;
 use carbide_uuid::extension_service::ExtensionServiceId;
 use config_version::{ConfigVersion, ConfigVersionChange};
 use model::controller_outcome::PersistentStateHandlerOutcome;
 use model::extension_service::{
-    ExtensionService, ExtensionServiceLifecycleState, ExtensionServiceObservability,
-    ExtensionServiceSnapshot, ExtensionServiceType, ExtensionServiceVersionInfo,
+    ExtensionService, ExtensionServiceDeploymentType, ExtensionServiceInterfaceMac,
+    ExtensionServiceLifecycleState, ExtensionServiceObservability, ExtensionServiceSnapshot,
+    ExtensionServiceType, ExtensionServiceVersionInfo, ServiceVpcInterfaceRequirement,
 };
 use model::tenant::TenantOrganizationId;
 use sqlx::PgConnection;
 
 use crate::db_read::DbReader;
-use crate::{ConditionalWrite, ControllerStateNotCurrent, DatabaseError, DatabaseResult};
+use crate::{
+    ConditionalWrite, ControllerStateNotCurrent, DatabaseError, DatabaseResult, Transaction,
+};
+
+const SQL_VIOLATION_INTERFACE_MAC_ALREADY_ASSIGNED: &str = "extension_service_interface_macs_pkey";
+const SQL_VIOLATION_INTERFACE_MAC_ADDRESS_COLLISION: &str =
+    "extension_service_interface_macs_mac_address_key";
+const SQL_VIOLATION_INTERFACE_MAC_SERVICE_NOT_FOUND: &str =
+    "extension_service_interface_macs_service_id_fkey";
+
+/// Reports MAC assignment outcomes that registration must handle differently.
+#[derive(Debug, thiserror::Error)]
+pub enum InsertExtensionServiceInterfaceMacError {
+    /// The service already owns a MAC at this interface position.
+    #[error("extension service {service_id} already has a MAC for interface {interface_ordinal}")]
+    ExistingAssignment {
+        /// Service that owns the existing assignment.
+        service_id: ExtensionServiceId,
+        /// Zero-based interface position that is already assigned.
+        interface_ordinal: u32,
+    },
+    /// Another service interface already owns this MAC.
+    #[error("extension service interface MAC {mac_address} is already assigned")]
+    MacAddressCollision {
+        /// MAC that collided with an existing assignment.
+        mac_address: mac_address::MacAddress,
+    },
+    /// The assignment refers to a service that does not exist.
+    #[error("extension service {service_id} does not exist")]
+    ServiceNotFound {
+        /// Missing service referenced by the assignment.
+        service_id: ExtensionServiceId,
+    },
+    /// The interface position cannot fit in the database integer column.
+    #[error("interface ordinal {0} exceeds the database representation")]
+    InvalidInterfaceOrdinal(u32),
+    /// The database operation failed for another reason.
+    #[error(transparent)]
+    Database(#[from] DatabaseError),
+}
+
+/// Reads a service's stable interface MAC assignments in ordinal order.
+pub async fn find_interface_macs(
+    txn: &mut PgConnection,
+    service_id: ExtensionServiceId,
+) -> DatabaseResult<Vec<ExtensionServiceInterfaceMac>> {
+    let query = "SELECT service_id, interface_ordinal, mac_address
+                 FROM extension_service_interface_macs
+                 WHERE service_id = $1
+                 ORDER BY interface_ordinal";
+    let rows = sqlx::query_as::<_, (ExtensionServiceId, i32, mac_address::MacAddress)>(query)
+        .bind(service_id)
+        .fetch_all(txn)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))?;
+
+    rows.into_iter()
+        .map(|(service_id, interface_ordinal, mac_address)| {
+            Ok(ExtensionServiceInterfaceMac {
+                service_id,
+                interface_ordinal: interface_ordinal.try_into().map_err(|_| {
+                    DatabaseError::InvalidArgument(format!(
+                        "stored extension-service interface ordinal {interface_ordinal} is negative"
+                    ))
+                })?,
+                mac_address,
+            })
+        })
+        .collect()
+}
+
+/// Inserts one stable service-interface MAC without replacing existing identity.
+///
+/// The insert runs in a savepoint so an expected identity conflict does not
+/// abort the caller's transaction before it can reuse or retry the assignment.
+pub async fn insert_interface_mac(
+    txn: &mut PgConnection,
+    assignment: ExtensionServiceInterfaceMac,
+) -> Result<(), InsertExtensionServiceInterfaceMacError> {
+    let interface_ordinal = i32::try_from(assignment.interface_ordinal).map_err(|_| {
+        InsertExtensionServiceInterfaceMacError::InvalidInterfaceOrdinal(
+            assignment.interface_ordinal,
+        )
+    })?;
+    let query = "INSERT INTO extension_service_interface_macs
+                 (service_id, interface_ordinal, mac_address)
+                 VALUES ($1, $2, $3)";
+    let mut attempt = Transaction::begin_inner(txn).await?;
+    let result = sqlx::query(query)
+        .bind(assignment.service_id)
+        .bind(interface_ordinal)
+        .bind(assignment.mac_address)
+        .execute(attempt.as_pgconn())
+        .await;
+
+    if let Err(error) = result {
+        // Classify the failed statement before rolling back its savepoint. The
+        // rollback restores the outer transaction for the caller's next step.
+        let classified = {
+            // Named constraints tell registration whether to reuse an assignment,
+            // retry a MAC collision, or report a missing service.
+            let constraint = error
+                .as_database_error()
+                .and_then(|database_error| database_error.constraint())
+                .map(str::to_owned);
+            match constraint.as_deref() {
+                Some(SQL_VIOLATION_INTERFACE_MAC_ALREADY_ASSIGNED) => {
+                    InsertExtensionServiceInterfaceMacError::ExistingAssignment {
+                        service_id: assignment.service_id,
+                        interface_ordinal: assignment.interface_ordinal,
+                    }
+                }
+                Some(SQL_VIOLATION_INTERFACE_MAC_ADDRESS_COLLISION) => {
+                    InsertExtensionServiceInterfaceMacError::MacAddressCollision {
+                        mac_address: assignment.mac_address,
+                    }
+                }
+                Some(SQL_VIOLATION_INTERFACE_MAC_SERVICE_NOT_FOUND) => {
+                    InsertExtensionServiceInterfaceMacError::ServiceNotFound {
+                        service_id: assignment.service_id,
+                    }
+                }
+                _ => DatabaseError::query(query, error).into(),
+            }
+        };
+        attempt.rollback().await?;
+        return Err(classified);
+    }
+
+    attempt.commit().await?;
+    Ok(())
+}
+
+/// Deletes and returns every stable interface MAC owned by a service.
+pub async fn delete_interface_macs(
+    txn: &mut PgConnection,
+    service_id: ExtensionServiceId,
+) -> DatabaseResult<Vec<ExtensionServiceInterfaceMac>> {
+    let query = "DELETE FROM extension_service_interface_macs
+                 WHERE service_id = $1
+                 RETURNING service_id, interface_ordinal, mac_address";
+    let rows = sqlx::query_as::<_, (ExtensionServiceId, i32, mac_address::MacAddress)>(query)
+        .bind(service_id)
+        .fetch_all(txn)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))?;
+
+    rows.into_iter()
+        .map(|(service_id, interface_ordinal, mac_address)| {
+            Ok(ExtensionServiceInterfaceMac {
+                service_id,
+                interface_ordinal: interface_ordinal.try_into().map_err(|_| {
+                    DatabaseError::InvalidArgument(format!(
+                        "stored extension-service interface ordinal {interface_ordinal} is negative"
+                    ))
+                })?,
+                mac_address,
+            })
+        })
+        .collect()
+}
 
 /// Creates a new extension service and creates its initial extension service version.
 /// It enforces a unique `(tenant_organization_id, name)` combination.
@@ -36,9 +198,12 @@ use crate::{ConditionalWrite, ControllerStateNotCurrent, DatabaseError, Database
 /// # Parameters
 /// * `txn`                    - A reference to an active DB transaction
 /// * `service_type`           - The type of the extension service
+/// * `deployment_type`        - Deployment at creation or through instance attachment; cannot be changed
 /// * `service_name`           - The name of the extension service
 /// * `description`            - The description of the extension service
+/// * `service_vpc_interfaces` - Service-facing interface requirements
 /// * `data`                   - Data of the initial version of the extension service
+/// * `dpf_service_id`         - DPUService service ID, only for DPF Helm services
 /// * `observability`          - Observability config for the extension service
 /// * `has_credential`         - Whether the initial extension service version has a credential
 ///   stored in the vault
@@ -48,11 +213,14 @@ pub async fn create(
     version: ConfigVersion,
     service_id: &ExtensionServiceId,
     service_type: &ExtensionServiceType,
+    deployment_type: ExtensionServiceDeploymentType,
     dpu_target: Option<model::extension_service::DpuTarget>,
     service_name: &str,
     tenant_organization_id: &TenantOrganizationId,
     description: Option<&str>,
+    service_vpc_interfaces: &[ServiceVpcInterfaceRequirement],
     data: &str,
+    dpf_service_id: Option<&str>,
     observability: Option<ExtensionServiceObservability>,
     has_credential: bool,
 ) -> Result<(ExtensionService, ExtensionServiceVersionInfo), DatabaseError> {
@@ -65,19 +233,27 @@ pub async fn create(
     // not be derived from the API-visible service version counter.
     let initial_controller_state_version = ConfigVersion::initial();
 
+    // Reserve the chart-provided DPF identity before inserting its owner.
+    if matches!(service_type, ExtensionServiceType::DpfHelmChart)
+        && let Some(dpf_service_id) = dpf_service_id
+    {
+        ensure_dpf_service_id_unique(txn, dpf_service_id).await?;
+    }
+
     // First create the extension service record
     let service_query = "INSERT INTO extension_services
-            (id, type, name, description, tenant_organization_id, version_ctr,
-             controller_state, controller_state_version, dpu_target)
-            VALUES ($1, $2::varchar, $3::varchar, $4::varchar, $5::varchar, $6::integer,
-                    $7::jsonb, $8::varchar, $9)
-            RETURNING id, type, dpu_target, name, description, tenant_organization_id, version_ctr,
+            (id, type, deployment_type, name, description, tenant_organization_id, version_ctr,
+             controller_state, controller_state_version, dpu_target, service_vpc_interfaces)
+            VALUES ($1, $2::varchar, $3::varchar, $4::varchar, $5::varchar, $6::varchar,
+                    $7::integer, $8::jsonb, $9::varchar, $10, $11::jsonb)
+            RETURNING id, type, deployment_type, dpu_target, name, description, tenant_organization_id, version_ctr,
                       controller_state, controller_state_version, controller_state_outcome,
-                      created, updated, deleted";
+                      service_vpc_interfaces, created, updated, deleted";
 
     let service = match sqlx::query_as::<_, ExtensionService>(service_query)
         .bind(service_id)
         .bind(service_type.to_string())
+        .bind(deployment_type)
         .bind(service_name)
         .bind(description.unwrap_or(""))
         .bind(tenant_organization_id.to_string())
@@ -85,6 +261,7 @@ pub async fn create(
         .bind(sqlx::types::Json(initial_controller_state))
         .bind(initial_controller_state_version)
         .bind(dpu_target)
+        .bind(sqlx::types::Json(service_vpc_interfaces))
         .fetch_one(&mut *txn)
         .await
     {
@@ -108,20 +285,26 @@ pub async fn create(
     // Insert the initial version using the service id
     let service_id = service.id;
 
-    let version_query = "INSERT INTO extension_service_versions 
-            (service_id, version, data, observability, has_credential)
-            VALUES ($1, $2, $3, $4, $5)
-            RETURNING service_id, version, data, observability, has_credential, created, deleted";
+    let version_query = format!(
+        "INSERT INTO extension_service_versions
+            (service_id, version, data, dpf_service_id, observability, has_credential)
+            VALUES ($1, $2, $3, $4, $5, $6)
+            RETURNING {}",
+        ExtensionServiceVersionInfo::db_table_columns(),
+    );
 
-    let version = sqlx::query_as::<_, ExtensionServiceVersionInfo>(version_query)
-        .bind(service_id)
-        .bind(version.to_string())
-        .bind(data)
-        .bind(observability.map(sqlx::types::Json))
-        .bind(has_credential)
-        .fetch_one(&mut *txn)
-        .await
-        .map_err(|e| DatabaseError::query(version_query, e))?;
+    let version = sqlx::query_as::<_, ExtensionServiceVersionInfo>(sqlx::AssertSqlSafe(
+        version_query.as_str(),
+    ))
+    .bind(service_id)
+    .bind(version.to_string())
+    .bind(data)
+    .bind(dpf_service_id)
+    .bind(observability.map(sqlx::types::Json))
+    .bind(has_credential)
+    .fetch_one(&mut *txn)
+    .await
+    .map_err(|e| DatabaseError::query(&version_query, e))?;
 
     // Kubernetes Pod services do not participate in this controller.  DPF
     // Helm services do, so record their initial Creating state in the same
@@ -157,6 +340,7 @@ pub async fn create(
 /// * `service_id`             - The id of the extension service to insert new version for
 /// * `service_name`           - Optional new name of the extension service, must be unique within the tenant organization
 /// * `description`            - Optional new description of the extension service
+/// * `service_vpc_interfaces` - Complete service-facing interface requirements
 /// * `data`                   - Data of the new version of the extension service
 /// * `observability`          - Observability config for the extension service
 /// * `has_credential`         - Whether the new extension service version has a credential stored
@@ -167,6 +351,7 @@ pub async fn update(
     service_id: ExtensionServiceId,
     service_name: Option<&str>,
     description: Option<&str>,
+    service_vpc_interfaces: &[ServiceVpcInterfaceRequirement],
     data: &str,
     observability: Option<ExtensionServiceObservability>,
     has_credential: bool,
@@ -185,6 +370,8 @@ pub async fn update(
         builder.push(", description = ");
         builder.push_bind(desc);
     }
+    builder.push(", service_vpc_interfaces = ");
+    builder.push_bind(sqlx::types::Json(service_vpc_interfaces));
     builder
         .push(", version_ctr = ")
         .push_bind(config_version_change.new.version_nr().cast_signed());
@@ -194,7 +381,7 @@ pub async fn update(
         .push(" AND version_ctr = ")
         .push_bind(config_version_change.current.version_nr().cast_signed());
     builder.push(" AND deleted IS NULL");
-    builder.push(" RETURNING id, type, dpu_target, name, description, tenant_organization_id, version_ctr, controller_state, controller_state_version, controller_state_outcome, created, updated, deleted");
+    builder.push(" RETURNING id, type, deployment_type, dpu_target, name, description, tenant_organization_id, version_ctr, controller_state, controller_state_version, controller_state_outcome, service_vpc_interfaces, created, updated, deleted");
 
     let updated_service = match builder
         .build_query_as::<ExtensionService>()
@@ -237,20 +424,24 @@ pub async fn update(
     // Insert the new version with the next version number.
     // Since all updates will first take the extension service row for update, we do not need to worry
     // about concurrent update issue here.
-    let version_query =
+    let version_query = format!(
         "INSERT INTO extension_service_versions (service_id, version, data, observability, has_credential)
          VALUES ($1, $2, $3, $4, $5)
-         RETURNING service_id, version, data, observability, has_credential, created, deleted";
+         RETURNING {}",
+        ExtensionServiceVersionInfo::db_table_columns(),
+    );
 
-    let new_version = sqlx::query_as::<_, ExtensionServiceVersionInfo>(version_query)
-        .bind(service_id)
-        .bind(config_version_change.new)
-        .bind(data)
-        .bind(observability.map(sqlx::types::Json))
-        .bind(has_credential)
-        .fetch_one(&mut *txn)
-        .await
-        .map_err(|e| DatabaseError::query(version_query, e))?;
+    let new_version = sqlx::query_as::<_, ExtensionServiceVersionInfo>(sqlx::AssertSqlSafe(
+        version_query.as_str(),
+    ))
+    .bind(service_id)
+    .bind(config_version_change.new)
+    .bind(data)
+    .bind(observability.map(sqlx::types::Json))
+    .bind(has_credential)
+    .fetch_one(&mut *txn)
+    .await
+    .map_err(|e| DatabaseError::query(&version_query, e))?;
 
     Ok((updated_service, new_version))
 }
@@ -277,7 +468,7 @@ pub async fn update_metadata(
     builder.push(" WHERE id = ");
     builder.push_bind(service_id);
     builder.push(" AND deleted IS NULL");
-    builder.push(" RETURNING id, type, dpu_target, name, description, tenant_organization_id, version_ctr, controller_state, controller_state_version, controller_state_outcome, created, updated, deleted");
+    builder.push(" RETURNING id, type, deployment_type, dpu_target, name, description, tenant_organization_id, version_ctr, controller_state, controller_state_version, controller_state_outcome, service_vpc_interfaces, created, updated, deleted");
 
     let updated_service = match builder
         .build_query_as::<ExtensionService>()
@@ -324,7 +515,9 @@ pub async fn update_dpf_helm_chart_in_place(
     service_id: ExtensionServiceId,
     service_name: Option<&str>,
     description: Option<&str>,
+    service_vpc_interfaces: &[ServiceVpcInterfaceRequirement],
     normalized_data: &str,
+    dpf_service_id: &str,
     stable_version: ConfigVersion,
     expected_version_ctr: i32,
     controller_state_version_change: ConfigVersionChange,
@@ -348,6 +541,8 @@ pub async fn update_dpf_helm_chart_in_place(
         builder.push(", description = ");
         builder.push_bind(desc);
     }
+    builder.push(", service_vpc_interfaces = ");
+    builder.push_bind(sqlx::types::Json(service_vpc_interfaces));
     builder.push(" WHERE id = ");
     builder.push_bind(service_id);
     builder.push(" AND type = ");
@@ -359,8 +554,8 @@ pub async fn update_dpf_helm_chart_in_place(
     builder.push(" AND controller_state = ");
     builder.push_bind(sqlx::types::Json(ExtensionServiceLifecycleState::Ready));
     builder.push(
-        " RETURNING id, type, dpu_target, name, description, tenant_organization_id, version_ctr, \
-          controller_state, controller_state_version, controller_state_outcome, created, updated, deleted",
+        " RETURNING id, type, deployment_type, dpu_target, name, description, tenant_organization_id, version_ctr, \
+          controller_state, controller_state_version, controller_state_outcome, service_vpc_interfaces, created, updated, deleted",
     );
 
     let updated_service = match builder
@@ -392,17 +587,23 @@ pub async fn update_dpf_helm_chart_in_place(
         Err(error) => return Err(DatabaseError::query(builder.sql(), error)),
     };
 
-    let version_query = "UPDATE extension_service_versions
-                         SET data = $1
-                         WHERE service_id = $2 AND version = $3 AND deleted IS NULL
-                         RETURNING service_id, version, data, observability, has_credential, created, deleted";
-    let version = sqlx::query_as::<_, ExtensionServiceVersionInfo>(version_query)
-        .bind(normalized_data)
-        .bind(service_id)
-        .bind(stable_version)
-        .fetch_one(&mut *txn)
-        .await
-        .map_err(|error| DatabaseError::query(version_query, error))?;
+    let version_query = format!(
+        "UPDATE extension_service_versions
+         SET data = $1, dpf_service_id = $2
+         WHERE service_id = $3 AND version = $4 AND deleted IS NULL
+         RETURNING {}",
+        ExtensionServiceVersionInfo::db_table_columns(),
+    );
+    let version = sqlx::query_as::<_, ExtensionServiceVersionInfo>(sqlx::AssertSqlSafe(
+        version_query.as_str(),
+    ))
+    .bind(normalized_data)
+    .bind(dpf_service_id)
+    .bind(service_id)
+    .bind(stable_version)
+    .fetch_one(&mut *txn)
+    .await
+    .map_err(|error| DatabaseError::query(&version_query, error))?;
 
     crate::state_history::persist(
         txn,
@@ -613,8 +814,8 @@ pub async fn find_by_ids(
     }
 
     let mut builder = sqlx::QueryBuilder::new(
-        "SELECT id, type, dpu_target, name, description, tenant_organization_id, version_ctr,
-         controller_state, controller_state_version, controller_state_outcome, created, updated, deleted FROM
+        "SELECT id, type, deployment_type, dpu_target, name, description, tenant_organization_id, version_ctr,
+         controller_state, controller_state_version, controller_state_outcome, service_vpc_interfaces, created, updated, deleted FROM
          extension_services WHERE id = ANY(",
     );
     builder.push_bind(ids);
@@ -659,9 +860,11 @@ pub async fn find_snapshots_by_ids(
         s.id AS service_id,
         s.name AS service_name,
         s.type AS service_type,
+        s.deployment_type,
         s.dpu_target,
         s.version_ctr AS version_ctr,
         s.description AS description,
+        s.service_vpc_interfaces AS service_vpc_interfaces,
         s.tenant_organization_id AS tenant_organization_id,
         s.created AS created,
         s.updated AS updated,
@@ -743,11 +946,12 @@ pub async fn find_version_info_of_known_service(
     version: Option<ConfigVersion>,
 ) -> DatabaseResult<ExtensionServiceVersionInfo> {
     // Build the version lookup query.
-    let mut builder = sqlx::QueryBuilder::new(
-        "SELECT service_id, version, data, observability, has_credential, created, deleted \
+    let mut builder = sqlx::QueryBuilder::new(format!(
+        "SELECT {} \
          FROM extension_service_versions \
          WHERE deleted IS NULL AND service_id = ",
-    );
+        ExtensionServiceVersionInfo::db_table_columns(),
+    ));
     builder.push_bind(service_id);
 
     if let Some(v) = version {
@@ -789,11 +993,12 @@ pub async fn find_versions_info(
     versions: Option<&[ConfigVersion]>,
 ) -> DatabaseResult<Vec<ExtensionServiceVersionInfo>> {
     // Build the version lookup query.
-    let mut builder = sqlx::QueryBuilder::new(
-        "SELECT service_id, version, data, observability, has_credential, created, deleted \
-     FROM extension_service_versions \
-     WHERE deleted IS NULL AND service_id = ",
-    );
+    let mut builder = sqlx::QueryBuilder::new(format!(
+        "SELECT {} \
+         FROM extension_service_versions \
+         WHERE deleted IS NULL AND service_id = ",
+        ExtensionServiceVersionInfo::db_table_columns(),
+    ));
     builder.push_bind(service_id);
 
     if let Some(versions) = versions {
@@ -1087,20 +1292,351 @@ pub async fn set_updated_timestamp(
     Ok(())
 }
 
+/// Reserves an explicit DPF service ID until the caller's transaction ends so
+/// concurrent creates cannot claim case variants of the same identity.
+/// The caller must use an active READ COMMITTED transaction for the check and write.
+async fn ensure_dpf_service_id_unique(
+    txn: &mut PgConnection,
+    dpf_service_id: &str,
+) -> Result<(), DatabaseError> {
+    // Lock the dpf_service_id so concurrent creates cannot both
+    // claim the same dpf_service_id. This avoids the case where two concurrent
+    // create requests both check the same dpf_service_id, find no existing
+    // record, then insert at the same time.
+    let lock_query = "SELECT pg_advisory_xact_lock(hashtextextended('extension_services:dpf_service_id:' || lower($1), 0))";
+    sqlx::query(lock_query)
+        .bind(dpf_service_id)
+        .execute(&mut *txn)
+        .await
+        .map_err(|error| DatabaseError::query(lock_query, error))?;
+
+    let lookup_query = r#"SELECT 1
+        FROM extension_services AS service
+        JOIN extension_service_versions AS version ON version.service_id = service.id
+        WHERE (service.deleted IS NULL
+               OR service.controller_state->>'state' <> 'deleted')
+          AND service.type = 'dpf_helm_chart'
+          AND lower(version.dpf_service_id) = lower($1)
+        LIMIT 1"#;
+
+    let found = sqlx::query_scalar::<_, i32>(lookup_query)
+        .bind(dpf_service_id)
+        .fetch_optional(&mut *txn)
+        .await
+        .map_err(|error| DatabaseError::query(lookup_query, error))?
+        .is_some();
+    if found {
+        return Err(DatabaseError::AlreadyFoundError {
+            kind: "dpf_service_id",
+            id: dpf_service_id.to_string(),
+        });
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod test_batched_lookups {
     use carbide_test_support::query_counter::count_queries;
     use config_version::ConfigVersion;
+    use mac_address::MacAddress;
     use model::controller_outcome::PersistentStateHandlerOutcome;
     use model::extension_service::{
-        DpuTarget, ExtensionServiceLifecycleState, ExtensionServiceType,
+        DpuTarget, ExtensionServiceInterfaceMac, ExtensionServiceLifecycleState,
+        ExtensionServiceObservabilityConfig, ExtensionServiceObservabilityConfigType,
+        ExtensionServiceObservabilityConfigTypeLogging, ExtensionServiceType,
+        ServiceVpcInterfaceRequirement,
     };
     use model::metadata::Metadata;
     use model::tenant::TenantOrganizationId;
+    use sqlx::Acquire as _;
 
     use super::*;
 
     const TENANT_ORG: &str = "test-org";
+    const SQL_VIOLATION_INTERFACE_MAC_ORDINAL_NEGATIVE: &str =
+        "extension_service_interface_macs_interface_ordinal_nonnegative";
+
+    /// Verifies existing registrations retain attachment-based placement while the
+    /// shipped migration permits selector-free baseline Helm services, so upgrades
+    /// preserve old intent and reject inconsistent placement at the database boundary.
+    #[crate::sqlx_test]
+    async fn deployment_type_migration_preserves_existing_placement(pool: sqlx::PgPool) {
+        // Seed both service types, including a deleted Helm registration that must retain policy.
+        let [(pod_id, _), (helm_id, _)] = seed_services(&pool, 2).await.try_into().unwrap();
+        let mut txn = pool.begin().await.expect("begin migration contract test");
+        sqlx::query(
+            "UPDATE extension_services SET type = 'dpf_helm_chart', dpu_target = 'primary',
+             deleted = NOW() WHERE id = $1",
+        )
+        .bind(helm_id)
+        .execute(txn.as_mut())
+        .await
+        .expect("seed historical Helm registration");
+
+        // Restore the predecessor schema so the migration exercises an upgrade with existing data.
+        sqlx::raw_sql(
+            "ALTER TABLE extension_services DROP COLUMN deployment_type;
+             ALTER TABLE extension_services ADD CONSTRAINT extension_services_dpu_target_check CHECK (
+                (type = 'dpf_helm_chart' AND dpu_target IS NOT NULL
+                    AND dpu_target IN ('primary', 'all_active', 'all'))
+                OR (type = 'kubernetes_pod' AND dpu_target IS NULL)
+             );",
+        )
+        .execute(txn.as_mut())
+        .await
+        .expect("restore predecessor placement schema");
+
+        // Apply the shipped SQL directly so this upgrade proof cannot drift from the migration.
+        sqlx::raw_sql(include_str!(
+            "../migrations/20261007233104_extension_service_deployment_type.sql"
+        ))
+        .execute(txn.as_mut())
+        .await
+        .expect("apply shipped deployment-type migration");
+
+        // Decode migrated rows through the production reader, including soft-deleted services.
+        let services = find_by_ids(txn.as_mut(), &[pod_id, helm_id], true, false)
+            .await
+            .expect("read migrated registrations");
+        assert_eq!(services.len(), 2);
+        for service in services {
+            assert_eq!(
+                service.deployment_type,
+                ExtensionServiceDeploymentType::DemandDriven
+            );
+            assert_eq!(
+                service.dpu_target,
+                (service.id == helm_id).then_some(DpuTarget::Primary)
+            );
+        }
+
+        // Baseline must allow no target, but reject placement and unknown policy strings.
+        sqlx::query(
+            "UPDATE extension_services SET deployment_type = 'baseline', dpu_target = NULL WHERE id = $1",
+        )
+        .bind(helm_id)
+        .execute(txn.as_mut())
+        .await
+        .expect("baseline Helm registration is valid without a target");
+        let cases = [
+            // A host-scoped target would contradict baseline's independent placement.
+            ("baseline", Some("all")),
+            // A required target cannot be removed from an attachment-based Helm service.
+            ("demand_driven", None),
+            // Unknown policies must not bypass the combined placement constraint.
+            ("unknown", None),
+        ];
+        for (deployment_type, target) in cases {
+            let mut attempt = txn.begin().await.expect("begin invalid-policy savepoint");
+            let error = sqlx::query(
+                "UPDATE extension_services SET deployment_type = $1, dpu_target = $2 WHERE id = $3",
+            )
+            .bind(deployment_type)
+            .bind(target)
+            .bind(helm_id)
+            .execute(attempt.as_mut())
+            .await
+            .expect_err("inconsistent placement must be rejected");
+            assert_eq!(
+                error
+                    .as_database_error()
+                    .and_then(|error| error.constraint()),
+                Some("extension_services_dpu_target_check"),
+            );
+            attempt.rollback().await.expect("rollback rejected policy");
+        }
+        txn.rollback()
+            .await
+            .expect("discard predecessor-schema test");
+    }
+
+    /// Verifies the migration preserves predecessor registrations as unnetworked
+    /// and the MAC registry contains and distinguishes identity conflicts, so
+    /// later assignment can safely reuse or retry in the same transaction.
+    #[crate::sqlx_test]
+    async fn service_vpc_migration_and_mac_accessor_contract(pool: sqlx::PgPool) {
+        let [(service_id, _), (other_service_id, _)] =
+            seed_services(&pool, 2).await.try_into().unwrap();
+        let mut txn = pool.begin().await.expect("begin migration contract test");
+
+        // Restore the actual predecessor schema around a realistic service row, then
+        // apply exactly what ships under the migration runner's transaction boundary.
+        sqlx::query("DROP TABLE extension_service_interface_macs")
+            .execute(txn.as_mut())
+            .await
+            .expect("remove migrated interface MAC registry");
+        sqlx::query("ALTER TABLE extension_services DROP COLUMN service_vpc_interfaces")
+            .execute(txn.as_mut())
+            .await
+            .expect("remove migrated service VPC requirements");
+        sqlx::raw_sql(include_str!(
+            "../migrations/20260915114932_service_vpc_contracts.sql"
+        ))
+        .execute(txn.as_mut())
+        .await
+        .expect("apply shipped service-VPC migration");
+
+        // Existing services must get an empty requirement list, not a missing value
+        // that different readers could interpret inconsistently.
+        let requirements =
+            sqlx::query_scalar::<_, sqlx::types::Json<Vec<ServiceVpcInterfaceRequirement>>>(
+                "SELECT service_vpc_interfaces FROM extension_services WHERE id = $1",
+            )
+            .bind(service_id)
+            .fetch_one(txn.as_mut())
+            .await
+            .expect("read migrated requirement default");
+        assert!(requirements.0.is_empty());
+
+        // The database rejects negative ordinals even when a caller bypasses
+        // the typed accessor, preserving the zero-based interface contract.
+        let mut attempt = txn.begin().await.expect("begin negative-ordinal savepoint");
+        let error = sqlx::query(
+            "INSERT INTO extension_service_interface_macs
+             (service_id, interface_ordinal, mac_address)
+             VALUES ($1, -1, $2)",
+        )
+        .bind(service_id)
+        .bind(MacAddress::new([0x02, 0, 0, 0, 0, 5]))
+        .execute(attempt.as_mut())
+        .await
+        .expect_err("negative interface ordinal must violate the database contract");
+        assert_eq!(
+            error
+                .as_database_error()
+                .and_then(|error| error.constraint()),
+            Some(SQL_VIOLATION_INTERFACE_MAC_ORDINAL_NEGATIVE)
+        );
+        attempt
+            .rollback()
+            .await
+            .expect("rollback negative-ordinal savepoint");
+
+        // The accessor rejects ordinals that cannot fit the database column
+        // before starting a statement or disturbing the caller's transaction.
+        let invalid_ordinal = insert_interface_mac(
+            txn.as_mut(),
+            ExtensionServiceInterfaceMac {
+                service_id,
+                interface_ordinal: u32::MAX,
+                mac_address: MacAddress::new([0x02, 0, 0, 0, 0, 6]),
+            },
+        )
+        .await
+        .expect_err("oversized interface ordinal must fail before insertion");
+        assert!(matches!(
+            invalid_ordinal,
+            InsertExtensionServiceInterfaceMacError::InvalidInterfaceOrdinal(u32::MAX)
+        ));
+
+        // Insert ordinals out of order so reads cannot pass by following insertion order.
+        let first = ExtensionServiceInterfaceMac {
+            service_id,
+            interface_ordinal: 0,
+            mac_address: MacAddress::new([0x02, 0, 0, 0, 0, 1]),
+        };
+        let second = ExtensionServiceInterfaceMac {
+            service_id,
+            interface_ordinal: 1,
+            mac_address: MacAddress::new([0x02, 0, 0, 0, 0, 2]),
+        };
+        insert_interface_mac(txn.as_mut(), second)
+            .await
+            .expect("insert second ordinal first");
+        insert_interface_mac(txn.as_mut(), first)
+            .await
+            .expect("insert first ordinal second");
+
+        // Reads are deterministic because requirement order defines interface ordinals.
+        let assignments = find_interface_macs(txn.as_mut(), service_id)
+            .await
+            .expect("read assignments");
+        assert_eq!(assignments, vec![first, second]);
+
+        // The helper contains each expected constraint failure so registration
+        // can inspect it and continue using the surrounding transaction.
+        let existing = insert_interface_mac(
+            txn.as_mut(),
+            ExtensionServiceInterfaceMac {
+                mac_address: MacAddress::new([0x02, 0, 0, 0, 0, 4]),
+                ..first
+            },
+        )
+        .await
+        .expect_err("duplicate ordinal must not overwrite identity");
+        assert!(matches!(
+            existing,
+            InsertExtensionServiceInterfaceMacError::ExistingAssignment { .. }
+        ));
+
+        let collision = insert_interface_mac(
+            txn.as_mut(),
+            ExtensionServiceInterfaceMac {
+                service_id: other_service_id,
+                interface_ordinal: 0,
+                ..first
+            },
+        )
+        .await
+        .expect_err("a MAC cannot identify interfaces belonging to different services");
+        assert!(matches!(
+            collision,
+            InsertExtensionServiceInterfaceMacError::MacAddressCollision { .. }
+        ));
+
+        // A registry row must never outlive or exist without its owning service.
+        let missing_parent = insert_interface_mac(
+            txn.as_mut(),
+            ExtensionServiceInterfaceMac {
+                service_id: ExtensionServiceId::new(),
+                interface_ordinal: 0,
+                mac_address: MacAddress::new([0x02, 0, 0, 0, 0, 3]),
+            },
+        )
+        .await
+        .expect_err("assignment requires its parent service");
+        assert!(matches!(
+            missing_parent,
+            InsertExtensionServiceInterfaceMacError::ServiceNotFound { .. }
+        ));
+
+        // The registry must also prevent its existing parent service from being
+        // deleted, rather than silently cascading stable identities away.
+        sqlx::query("DELETE FROM extension_service_versions WHERE service_id = $1")
+            .bind(service_id)
+            .execute(txn.as_mut())
+            .await
+            .expect("remove the predecessor version dependency");
+        let mut attempt = txn.begin().await.expect("begin parent-delete savepoint");
+        let error = sqlx::query("DELETE FROM extension_services WHERE id = $1")
+            .bind(service_id)
+            .execute(attempt.as_mut())
+            .await
+            .expect_err("service deletion must wait for registry cleanup");
+        assert_eq!(
+            error
+                .as_database_error()
+                .and_then(|error| error.constraint()),
+            Some(SQL_VIOLATION_INTERFACE_MAC_SERVICE_NOT_FOUND)
+        );
+        attempt
+            .rollback()
+            .await
+            .expect("rollback parent-delete savepoint");
+
+        // Explicit cleanup returns and removes every identity before parent deletion can proceed.
+        let deleted = delete_interface_macs(txn.as_mut(), service_id)
+            .await
+            .expect("delete assignments");
+        assert_eq!(deleted.len(), 2);
+        assert!(
+            find_interface_macs(txn.as_mut(), service_id)
+                .await
+                .expect("read deleted assignments")
+                .is_empty()
+        );
+    }
 
     /// Seed N extension services (each with an initial version), returning their ids and the
     /// exact `ConfigVersion` stored for each so tests can look versions up by exact match.
@@ -1134,11 +1670,14 @@ mod test_batched_lookups {
                 version,
                 &service_id,
                 &ExtensionServiceType::KubernetesPod,
+                ExtensionServiceDeploymentType::DemandDriven,
                 None,
                 &format!("svc-{i}"),
                 &tenant,
                 Some("test service"),
+                &[],
                 "some-data",
+                None,
                 None,
                 false,
             )
@@ -1148,6 +1687,121 @@ mod test_batched_lookups {
         }
         txn.commit().await.expect("commit");
         seeded
+    }
+
+    /// Concurrent creates using case variants must serialize on one advisory lock,
+    /// so only one active service can own the case-insensitive DPF identity.
+    #[crate::sqlx_test]
+    async fn concurrent_creates_reserve_case_insensitive_dpf_service_id(pool: sqlx::PgPool) {
+        // Seed the shared tenant used by both otherwise-independent create transactions.
+        seed_services(&pool, 0).await;
+        let tenant: TenantOrganizationId = TENANT_ORG.parse().expect("valid tenant");
+        let version = ConfigVersion::initial();
+        let first_service_id = ExtensionServiceId::new();
+        let claimed_id = "contended-dpf-id";
+        let claimed_data = r#"{"serviceID":"contended-dpf-id","values":{"payload":"\u0000"}}"#;
+        let mut first = pool.begin().await.expect("begin first create");
+        let first_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *first)
+            .await
+            .expect("get first backend");
+        create(
+            &mut first,
+            version,
+            &first_service_id,
+            &ExtensionServiceType::DpfHelmChart,
+            ExtensionServiceDeploymentType::DemandDriven,
+            Some(DpuTarget::AllActive),
+            "first-service",
+            &tenant,
+            None,
+            &[],
+            claimed_data,
+            Some(claimed_id),
+            None,
+            false,
+        )
+        .await
+        .expect("first create reserves the identity");
+
+        // Start a case-variant create and verify it waits on the normalized
+        // lock key.
+        let upper_id = "CONTENDED-DPF-ID";
+        let upper_data = r#"{"serviceID":"CONTENDED-DPF-ID"}"#;
+        let second_service_id = ExtensionServiceId::new();
+        let mut second = pool.begin().await.expect("begin second create");
+        let second_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *second)
+            .await
+            .expect("get second backend");
+        {
+            let create_second = create(
+                &mut second,
+                version,
+                &second_service_id,
+                &ExtensionServiceType::DpfHelmChart,
+                ExtensionServiceDeploymentType::DemandDriven,
+                Some(DpuTarget::AllActive),
+                "second-service",
+                &tenant,
+                None,
+                &[],
+                upper_data,
+                Some(upper_id),
+                None,
+                false,
+            );
+            tokio::pin!(create_second);
+            let blocked = async {
+                loop {
+                    let blocked: bool = sqlx::query_scalar(
+                        "SELECT $1::integer = ANY(pg_blocking_pids($2::integer))",
+                    )
+                    .bind(first_pid)
+                    .bind(second_pid)
+                    .fetch_one(&pool)
+                    .await
+                    .expect("inspect competing transaction");
+                    if blocked {
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            };
+            tokio::select! {
+                result = &mut create_second => panic!("second create completed before first committed: {result:?}"),
+                result = tokio::time::timeout(std::time::Duration::from_secs(10), blocked) => {
+                    result.expect("case variants must use the same advisory lock");
+                }
+            }
+
+            // Commit the winner; the waiter must then observe the
+            // case-insensitive collision.
+            first.commit().await.expect("commit first create");
+            let error =
+                tokio::time::timeout(std::time::Duration::from_secs(10), &mut create_second)
+                    .await
+                    .expect("second create resumes after commit")
+                    .expect_err("case-variant identity must be rejected");
+            assert!(matches!(
+                error,
+                DatabaseError::AlreadyFoundError { kind: "dpf_service_id", id } if id == upper_id
+            ));
+        }
+
+        // A rejected transaction must not persist a second owner.
+        second
+            .commit()
+            .await
+            .expect("commit rejected create transaction");
+        let owners: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM extension_service_versions WHERE lower(dpf_service_id) = lower($1)",
+        )
+        .bind(claimed_id)
+        .fetch_one(&pool)
+        .await
+        .expect("count persisted owners");
+        assert_eq!(owners, 1);
     }
 
     #[crate::sqlx_test]
@@ -1163,6 +1817,7 @@ mod test_batched_lookups {
                 service_id,
                 Some(&format!("winner-{service_id}")),
                 Some("winning description"),
+                &[],
                 "winning data",
                 None,
                 false,
@@ -1235,6 +1890,7 @@ mod test_batched_lookups {
                 service_id,
                 Some("stale name"),
                 Some("stale description"),
+                &[],
                 "stale data",
                 None,
                 true,
@@ -1332,11 +1988,14 @@ mod test_batched_lookups {
             ConfigVersion::initial(),
             &service_id,
             &ExtensionServiceType::DpfHelmChart,
+            ExtensionServiceDeploymentType::DemandDriven,
             Some(DpuTarget::AllActive),
             "dpf-service",
             &tenant,
             Some("DPF Helm chart service"),
+            &[],
             "{\"chart\": \"example\"}",
+            None,
             None,
             false,
         )
@@ -1602,5 +2261,272 @@ mod test_batched_lookups {
             "extension_service version lookup: find_version_info={probed_count} \
              find_version_info_of_known_service={unprobed_count}"
         );
+    }
+
+    #[crate::sqlx_test]
+    async fn snapshot_rejects_malformed_older_active_version(pool: sqlx::PgPool) {
+        let [(service_id, initial_version)] = seed_services(&pool, 1).await.try_into().unwrap();
+        let mut txn = pool.begin().await.expect("begin snapshot decode test");
+        let version_change = initial_version.incremental_change();
+        let (_, updated) = update(
+            &mut txn,
+            service_id,
+            None,
+            None,
+            &[],
+            "updated pod definition",
+            None,
+            false,
+            version_change,
+        )
+        .await
+        .expect("create valid latest version");
+
+        let [snapshot] = find_snapshots_by_ids(&mut txn, &[service_id])
+            .await
+            .expect("read complete active version inventory")
+            .try_into()
+            .expect("one service snapshot");
+        assert_eq!(
+            snapshot.active_versions,
+            vec![updated.version, initial_version]
+        );
+
+        // `ConfigVersion` cannot represent this malformed value. Keep the numeric
+        // prefix valid so the snapshot query's integer cast succeeds and the older
+        // row is aggregated.
+        sqlx::query(
+            "UPDATE extension_service_versions SET version = 'V1-Tbad'
+             WHERE service_id = $1 AND version = $2",
+        )
+        .bind(service_id)
+        .bind(initial_version)
+        .execute(&mut *txn)
+        .await
+        .expect("corrupt only the older version's timestamp");
+
+        let latest = find_version_info_of_known_service(&mut txn, service_id, None)
+            .await
+            .expect("the latest version still decodes");
+        assert_eq!(latest.version, updated.version);
+
+        let error = find_snapshots_by_ids(&mut txn, &[service_id])
+            .await
+            .expect_err("a malformed older version must fail the complete snapshot");
+        let DatabaseError::Sqlx(annotated) = &error else {
+            panic!("expected Sqlx, got {error:?}");
+        };
+        let sqlx::Error::ColumnDecode { index, source } = &annotated.source else {
+            panic!("expected ColumnDecode, got {error:?}");
+        };
+        assert_eq!(index, "active_versions");
+        assert!(
+            matches!(
+                source.downcast_ref::<config_version::ConfigVersionParseError>(),
+                Some(config_version::ConfigVersionParseError::VersionFormat(version))
+                    if version == "V1-Tbad"
+            ),
+            "{source:?}"
+        );
+        txn.rollback().await.expect("rollback snapshot decode test");
+    }
+
+    #[crate::sqlx_test]
+    async fn version_queries_decode_complete_records(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut txn = pool.begin().await?;
+        crate::tenant::create_and_persist(
+            TENANT_ORG.to_string(),
+            Metadata {
+                name: "Test Org".to_string(),
+                description: String::new(),
+                labels: HashMap::new(),
+            },
+            None,
+            &mut txn,
+        )
+        .await?;
+        let tenant = TENANT_ORG.parse()?;
+        // `CURRENT_TIMESTAMP` is fixed for this transaction, including the `created` default.
+        let created_at = sqlx::query_scalar("SELECT CURRENT_TIMESTAMP")
+            .fetch_one(&mut *txn)
+            .await?;
+        let expected_initial = ExtensionServiceVersionInfo {
+            service_id: ExtensionServiceId::new(),
+            version: ConfigVersion::initial(),
+            created: created_at,
+            data: "initial pod definition".to_string(),
+            observability: Some(ExtensionServiceObservability {
+                configs: vec![ExtensionServiceObservabilityConfig {
+                    name: Some("service logs".to_string()),
+                    config: ExtensionServiceObservabilityConfigType::Logging(
+                        ExtensionServiceObservabilityConfigTypeLogging {
+                            path: "/var/log/service.log".to_string(),
+                        },
+                    ),
+                }],
+            }),
+            has_credential: true,
+            deleted: None,
+        };
+        let (_, created) = create(
+            &mut txn,
+            expected_initial.version,
+            &expected_initial.service_id,
+            &ExtensionServiceType::KubernetesPod,
+            ExtensionServiceDeploymentType::DemandDriven,
+            None,
+            "pod-service",
+            &tenant,
+            None,
+            &[],
+            &expected_initial.data,
+            None,
+            expected_initial.observability.clone(),
+            expected_initial.has_credential,
+        )
+        .await?;
+        let version_change = expected_initial.version.incremental_change();
+        let expected_updated = ExtensionServiceVersionInfo {
+            version: version_change.new,
+            data: "updated pod definition".to_string(),
+            ..expected_initial.clone()
+        };
+        let (_, updated) = update(
+            &mut txn,
+            expected_updated.service_id,
+            None,
+            None,
+            &[],
+            &expected_updated.data,
+            expected_updated.observability.clone(),
+            expected_updated.has_credential,
+            version_change,
+        )
+        .await?;
+        let latest =
+            find_version_info_of_known_service(&mut txn, expected_updated.service_id, None).await?;
+        let versions = find_versions_info(&mut txn, &expected_updated.service_id, None).await?;
+
+        let expected_dpf = ExtensionServiceVersionInfo {
+            service_id: ExtensionServiceId::new(),
+            version: ConfigVersion::initial(),
+            created: created_at,
+            data: r#"{"chart":"updated"}"#.to_string(),
+            observability: None,
+            has_credential: false,
+            deleted: None,
+        };
+        let (dpf_service, _) = create(
+            &mut txn,
+            expected_dpf.version,
+            &expected_dpf.service_id,
+            &ExtensionServiceType::DpfHelmChart,
+            ExtensionServiceDeploymentType::DemandDriven,
+            Some(DpuTarget::AllActive),
+            "helm-service",
+            &tenant,
+            None,
+            &[],
+            r#"{"chart":"initial"}"#,
+            Some("helm-service-v1"),
+            None,
+            false,
+        )
+        .await?;
+
+        // Put the service in `Ready` so the in-place update can retain `V1`.
+        let ready_version_change = dpf_service
+            .status
+            .controller_state
+            .version
+            .incremental_change();
+        assert_eq!(
+            try_update_controller_state(
+                &mut txn,
+                expected_dpf.service_id,
+                ready_version_change.current,
+                ready_version_change.new,
+                &ExtensionServiceLifecycleState::Ready,
+            )
+            .await?,
+            ConditionalWrite::Applied(())
+        );
+        let (_, dpf_updated) = update_dpf_helm_chart_in_place(
+            &mut txn,
+            expected_dpf.service_id,
+            None,
+            None,
+            &[],
+            &expected_dpf.data,
+            "helm-service-v1",
+            expected_dpf.version,
+            dpf_service.version_ctr,
+            ready_version_change.new.incremental_change(),
+        )
+        .await?;
+
+        for (operation, actual, expected) in [
+            ("create", &created, &expected_initial),
+            ("update", &updated, &expected_updated),
+            (
+                "find_version_info_of_known_service",
+                &latest,
+                &expected_updated,
+            ),
+            (
+                "update_dpf_helm_chart_in_place",
+                &dpf_updated,
+                &expected_dpf,
+            ),
+        ] {
+            assert_eq!(
+                serde_json::to_value(actual)?,
+                serde_json::to_value(expected)?,
+                "{operation}"
+            );
+        }
+        assert_eq!(
+            serde_json::to_value(versions)?,
+            serde_json::to_value([&expected_updated, &expected_initial])?,
+            "find_versions_info returns complete versions in descending order"
+        );
+
+        soft_delete_versions(
+            &mut txn,
+            expected_updated.service_id,
+            &[expected_updated.version],
+        )
+        .await?;
+        let latest =
+            find_version_info_of_known_service(&mut txn, expected_updated.service_id, None).await?;
+        assert_eq!(
+            serde_json::to_value(latest)?,
+            serde_json::to_value(&expected_initial)?,
+            "latest lookup falls back to the previous active version"
+        );
+        let deleted = find_version_info_of_known_service(
+            &mut txn,
+            expected_updated.service_id,
+            Some(expected_updated.version),
+        )
+        .await
+        .expect_err("an exact lookup excludes a deleted version");
+        assert!(matches!(
+            deleted,
+            DatabaseError::NotFoundError {
+                kind: "extension_service_version",
+                ..
+            }
+        ));
+        let versions = find_versions_info(&mut txn, &expected_updated.service_id, None).await?;
+        assert_eq!(
+            serde_json::to_value(versions)?,
+            serde_json::to_value([expected_initial])?,
+            "find_versions_info excludes deleted versions"
+        );
+        txn.rollback().await?;
+        Ok(())
     }
 }

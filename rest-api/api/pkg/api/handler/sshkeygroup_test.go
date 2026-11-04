@@ -17,7 +17,6 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/pagination"
 	authz "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
-	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/otelecho"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
@@ -44,7 +43,9 @@ func testSSHKeyGroupSetupSchema(t *testing.T, dbSession *cdb.Session) {
 	// create SSHKeyAssociation
 	err = dbSession.DB.ResetModel(context.Background(), (*cdbm.SSHKeyAssociation)(nil))
 	assert.Nil(t, err)
-
+	// create TenantAccount table
+	err = dbSession.DB.ResetModel(context.Background(), (*cdbm.TenantAccount)(nil))
+	assert.Nil(t, err)
 }
 
 func testBuildSSHKeyGroup(t *testing.T, dbSession *cdb.Session, name, org string, description *string, tenantID uuid.UUID, version *string, status string, createdBy uuid.UUID) *cdbm.SSHKeyGroup {
@@ -111,6 +112,7 @@ func TestSSHKeyGroupHandler_Create(t *testing.T) {
 	// Tenant 1
 	tnu1 := testVPCBuildUser(t, dbSession, "test-starfleet-id-2", tnOrg, tnOrgRoles)
 	tn1 := testVPCBuildTenant(t, dbSession, "test-tenant", tnOrg, tnu1)
+	common.TestBuildTenantAccountWithTargetedInstanceCreation(t, dbSession, ip, &tn1.ID, tnOrg, cdbm.TenantAccountStatusReady, tnu1)
 
 	tnu1Forbidden := testInstanceBuildUser(t, dbSession, uuid.New().String(), tnOrg, tnOrgRolesForbidden)
 	assert.NotNil(t, tnu1Forbidden)
@@ -138,8 +140,18 @@ func TestSSHKeyGroupHandler_Create(t *testing.T) {
 	ts2 := testBuildTenantSiteAssociation(t, dbSession, tnOrg, tn1.ID, st2.ID, tnu1.ID)
 	assert.NotNil(t, ts2)
 
+	blockedSite := testVPCBuildSite(t, dbSession, ip, "test-blocked-site", false, false, cdbm.SiteStatusRegistered, ipu)
+	cdbm.TestBuildTenantSite(t, dbSession, tn1, blockedSite, &cdbm.TenantSiteConfig{TargetedInstanceCreation: cutil.GetPtr(false)}, tnu1)
+
 	okBody, err := json.Marshal(model.APISSHKeyGroupCreateRequest{Name: "ok1", Description: cutil.GetPtr("test"),
 		SiteIDs: []string{st1.ID.String(), st2.ID.String()}, SSHKeyIDs: []string{sk1.ID.String()}})
+	assert.Nil(t, err)
+
+	errBodyBlockedSite, err := json.Marshal(model.APISSHKeyGroupCreateRequest{Name: "blocked", SiteIDs: []string{blockedSite.ID.String()}})
+	assert.Nil(t, err)
+
+	privilegedSite := testVPCBuildSite(t, dbSession, ip, "test-privileged-site", false, false, cdbm.SiteStatusRegistered, ipu)
+	okBodyPrivilegedSite, err := json.Marshal(model.APISSHKeyGroupCreateRequest{Name: "privileged", SiteIDs: []string{privilegedSite.ID.String()}})
 	assert.Nil(t, err)
 
 	okBody2, err := json.Marshal(model.APISSHKeyGroupCreateRequest{Name: "ok2", Description: cutil.GetPtr("test"), SiteIDs: []string{}, SSHKeyIDs: []string{sk1.ID.String()}})
@@ -163,7 +175,7 @@ func TestSSHKeyGroupHandler_Create(t *testing.T) {
 		mock.AnythingOfType("uuid.UUID"), mock.AnythingOfType("string")).Return(wrun, nil)
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	tests := []struct {
 		name                     string
@@ -237,6 +249,23 @@ func TestSSHKeyGroupHandler_Create(t *testing.T) {
 			expectedStatus: http.StatusBadRequest,
 		},
 		{
+			name:           "error when Site is blocked for Tenant without Allocations",
+			reqOrgName:     tnOrg,
+			reqBody:        string(errBodyBlockedSite),
+			user:           tnu1,
+			expectedErr:    true,
+			expectedStatus: http.StatusBadRequest,
+		},
+		{
+			name:                     "success case creating SSH Key Group for privileged Tenant without TenantSite",
+			reqOrgName:               tnOrg,
+			reqBody:                  string(okBodyPrivilegedSite),
+			user:                     tnu1,
+			expectedStatus:           http.StatusCreated,
+			expectedSiteAssociations: true,
+			countSiteAssociations:    1,
+		},
+		{
 			name:                     "success case creating SSH Key Group with Site associations",
 			reqOrgName:               tnOrg,
 			reqBody:                  string(okBody),
@@ -289,7 +318,6 @@ func TestSSHKeyGroupHandler_Create(t *testing.T) {
 				ec.Set("user", tc.user)
 			}
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			csgh := CreateSSHKeyGroupHandler{
@@ -347,11 +375,13 @@ func TestSSHKeyGroupHandler_Update(t *testing.T) {
 	// Tenant 1
 	tnu1 := testVPCBuildUser(t, dbSession, "test-starfleet-id-2", tnOrg, tnOrgRoles)
 	tn1 := testVPCBuildTenant(t, dbSession, "test-tenant-1", tnOrg, tnu1)
+	common.TestBuildTenantAccountWithTargetedInstanceCreation(t, dbSession, ip, &tn1.ID, tnOrg, cdbm.TenantAccountStatusReady, tnu1)
 
 	// Tenant 2
 	tnu2 := testInstanceBuildUser(t, dbSession, "test-starfleet-id-3", tnOrg2, tnOrgRoles)
 	tn2 := testVPCBuildTenant(t, dbSession, "test-tenant-2", tnOrg2, tnu2)
 	assert.NotNil(t, tn2)
+	common.TestBuildTenantAccountWithTargetedInstanceCreation(t, dbSession, ip, &tn2.ID, tnOrg2, cdbm.TenantAccountStatusReady, tnu2)
 
 	tnu1Forbidden := testInstanceBuildUser(t, dbSession, uuid.New().String(), tnOrg, tnOrgRolesForbidden)
 	assert.NotNil(t, tnu1Forbidden)
@@ -398,6 +428,9 @@ func TestSSHKeyGroupHandler_Update(t *testing.T) {
 
 	ts51 := testBuildTenantSiteAssociation(t, dbSession, tnOrg2, tn2.ID, st5.ID, tnu2.ID)
 	assert.NotNil(t, ts51)
+
+	blockedSite := testInstanceBuildSite(t, dbSession, ip, "test-blocked-site", cdbm.SiteStatusRegistered, true, ipu)
+	cdbm.TestBuildTenantSite(t, dbSession, tn1, blockedSite, &cdbm.TenantSiteConfig{TargetedInstanceCreation: cutil.GetPtr(false)}, tnu1)
 
 	// SSHKeys
 	sk1 := testBuildSSHKey(t, dbSession, "test-ssh-key-1", tnOrg, tn1.ID, "testpublickey", cutil.GetPtr("test"), nil, tnu1.ID)
@@ -560,6 +593,9 @@ func TestSSHKeyGroupHandler_Update(t *testing.T) {
 	okSiteKeyUpdateBody11, _ := json.Marshal(model.APISSHKeyGroupUpdateRequest{Version: skg11.Version, SiteIDs: []string{}, SSHKeyIDs: []string{}})
 	assert.NotNil(t, okSiteKeyUpdateBody11)
 
+	errBodyBlockedSite, _ := json.Marshal(model.APISSHKeyGroupUpdateRequest{Version: skg3.Version, SiteIDs: []string{blockedSite.ID.String()}})
+	assert.NotNil(t, errBodyBlockedSite)
+
 	cfg := common.GetTestConfig()
 
 	tmc := &tmocks.Client{}
@@ -578,7 +614,7 @@ func TestSSHKeyGroupHandler_Update(t *testing.T) {
 		mock.AnythingOfType("uuid.UUID")).Return(wrun, nil)
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	tests := []struct {
 		name                                       string
@@ -687,6 +723,15 @@ func TestSSHKeyGroupHandler_Update(t *testing.T) {
 			reqOrgName:     tnOrg,
 			user:           tnu1,
 			skgID:          skg6.ID.String(),
+			expectedErr:    true,
+			expectedStatus: http.StatusBadRequest,
+		},
+		{
+			name:           "error when adding Site blocked for Tenant without Allocations",
+			reqOrgName:     tnOrg,
+			reqBody:        string(errBodyBlockedSite),
+			user:           tnu1,
+			skgID:          skg3.ID.String(),
 			expectedErr:    true,
 			expectedStatus: http.StatusBadRequest,
 		},
@@ -849,7 +894,6 @@ func TestSSHKeyGroupHandler_Update(t *testing.T) {
 				ec.Set("user", tc.user)
 			}
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			uskgh := UpdateSSHKeyGroupHandler{
@@ -972,7 +1016,7 @@ func TestSSHKeyGroupHandler_GetByID(t *testing.T) {
 	cfg := common.GetTestConfig()
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	tests := []struct {
 		name                     string
@@ -1092,7 +1136,6 @@ func TestSSHKeyGroupHandler_GetByID(t *testing.T) {
 				ec.Set("user", tc.user)
 			}
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			dskgh := GetSSHKeyGroupHandler{
@@ -1172,6 +1215,7 @@ func TestSSHKeyGroupHandler_GetAll(t *testing.T) {
 	assert.NotNil(t, tnu1Forbidden)
 
 	tn1 := testInstanceBuildTenant(t, dbSession, "test-tenant1", tnOrg, tnu1)
+	common.TestBuildTenantAccountWithTargetedInstanceCreation(t, dbSession, ip, &tn1.ID, tnOrg, cdbm.TenantAccountStatusReady, tnu1)
 	tn2 := testInstanceBuildTenant(t, dbSession, "test-tenant2", tnOrg2, tnu2)
 	assert.NotNil(t, tn2)
 
@@ -1243,7 +1287,7 @@ func TestSSHKeyGroupHandler_GetAll(t *testing.T) {
 	cfg := common.GetTestConfig()
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	tests := []struct {
 		name                     string
@@ -1573,7 +1617,6 @@ func TestSSHKeyGroupHandler_GetAll(t *testing.T) {
 				ec.Set("user", tc.user)
 			}
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			gsgh := GetAllSSHKeyGroupHandler{
@@ -1706,7 +1749,7 @@ func TestSSHKeyGroupHandler_Delete(t *testing.T) {
 		mock.AnythingOfType("uuid.UUID")).Return(wrun, nil)
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	tests := []struct {
 		name                    string
@@ -1802,7 +1845,6 @@ func TestSSHKeyGroupHandler_Delete(t *testing.T) {
 				ec.Set("user", tc.user)
 			}
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			dskgh := DeleteSSHKeyGroupHandler{

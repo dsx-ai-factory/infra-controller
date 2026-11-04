@@ -31,8 +31,10 @@ use serde::{Deserialize, Deserializer, Serialize};
 use tokio::sync::Semaphore;
 use url::Url;
 
+use crate::collectors::CANCELLED_CONNECT_GRACE;
 use crate::metrics::BmcLatencyAttribute;
 
+const MAX_GNMI_RECONCILE_INTERVAL: Duration = Duration::from_secs(366 * 24 * 60 * 60);
 const DEFAULT_BMC_REQUEST_CONCURRENCY: NonZeroUsize = NonZeroUsize::MIN.saturating_add(3);
 const ENDPOINT_SOURCES_CONFIG_KEY: &str = "endpoint_sources";
 const NICO_API_CONFIG_KEY: &str = "nico_api";
@@ -111,6 +113,12 @@ pub struct Config {
     #[serde(with = "humantime_serde")]
     pub endpoint_discovery_interval: Duration,
 
+    /// Budget for draining started collectors on SIGTERM or SIGINT; collectors
+    /// still running when it passes are abandoned. Defaults to 20 seconds and
+    /// must be greater than zero.
+    #[serde(with = "humantime_serde")]
+    pub shutdown_timeout: Duration,
+
     /// BMC proxy URL
     pub bmc_proxy_url: Option<Url>,
 }
@@ -131,6 +139,7 @@ impl Default for Config {
             cache_size: 100,
             bmc_request_concurrency: DEFAULT_BMC_REQUEST_CONCURRENCY,
             endpoint_discovery_interval: Duration::from_secs(300),
+            shutdown_timeout: Duration::from_secs(20),
             bmc_proxy_url: None,
         }
     }
@@ -166,6 +175,17 @@ pub struct EndpointSourcesConfig {
     #[serde(rename = "nico_api", alias = "carbide_api")]
     pub carbide_api: Configurable<CarbideApiConnectionConfig>,
 
+    /// JSON credentials file, required when either static endpoint list is nonempty.
+    /// Relative paths use the process working directory; no file is loaded by default.
+    /// Per-MAC overrides take precedence over the explicitly selected profile for each field.
+    /// Omitted/null fields inherit; empty strings do not. Usernames are required;
+    /// passwords are optional. Unknown profiles or missing usernames fail startup.
+    /// One cached reader reloads on file events, with polling every 60 seconds;
+    /// failed updates retain the last valid snapshot. Replace files atomically.
+    /// Consumers refresh after authentication failures. Target MACs must be unique.
+    /// File updates do not change the configured target inventory.
+    pub static_credentials_file: Option<PathBuf>,
+
     /// Static BMC endpoints, including switch host endpoints.
     pub static_bmc_endpoints: Vec<StaticBmcEndpoint>,
 
@@ -181,6 +201,7 @@ impl Default for EndpointSourcesConfig {
     fn default() -> Self {
         Self {
             carbide_api: Configurable::Enabled(CarbideApiConnectionConfig::default()),
+            static_credentials_file: None,
             static_bmc_endpoints: Vec::new(),
             static_switch_host_endpoints: Vec::new(),
             cluster: Configurable::Disabled,
@@ -281,8 +302,9 @@ pub struct StaticBmcEndpoint {
     #[serde(default)]
     pub port: Option<u16>,
     pub mac: String,
-    pub username: String,
-    pub password: Option<String>,
+    /// Optional named profile in `static_credentials_file`. No profile is selected
+    /// by default; unknown names fail lookup. Requires a configured credentials file.
+    pub credentials_profile: Option<String>,
     pub machine: Option<StaticMachineEndpoint>,
     pub power_shelf: Option<StaticPowerShelfEndpoint>,
     pub switch: Option<StaticSwitchEndpoint>,
@@ -445,6 +467,26 @@ impl EndpointSourcesConfig {
         const BMC_ENDPOINTS_PATH: &str = "endpoint_sources.static_bmc_endpoints";
         const SWITCH_HOST_ENDPOINTS_PATH: &str = "endpoint_sources.static_switch_host_endpoints";
 
+        if self
+            .static_credentials_file
+            .as_ref()
+            .is_some_and(|p| p.as_os_str().is_empty())
+        {
+            return Err("endpoint_sources.static_credentials_file must not be empty".into());
+        }
+        for (path, endpoints) in [
+            (BMC_ENDPOINTS_PATH, &self.static_bmc_endpoints),
+            (
+                SWITCH_HOST_ENDPOINTS_PATH,
+                &self.static_switch_host_endpoints,
+            ),
+        ] {
+            if !endpoints.is_empty() && self.static_credentials_file.is_none() {
+                return Err(format!(
+                    "{path}[0] requires endpoint_sources.static_credentials_file"
+                ));
+            }
+        }
         let mut static_macs = HashMap::new();
 
         for (index, endpoint) in self.static_bmc_endpoints.iter().enumerate() {
@@ -454,6 +496,11 @@ impl EndpointSourcesConfig {
                 format!("{BMC_ENDPOINTS_PATH}[{index}].mac must be a valid MAC address")
             })?;
 
+            if let Some((existing_path, existing_index)) = static_macs.get(&mac) {
+                return Err(format!(
+                    "{BMC_ENDPOINTS_PATH}[{index}].mac duplicates {existing_path}[{existing_index}].mac"
+                ));
+            }
             static_macs
                 .entry(mac)
                 .or_insert((BMC_ENDPOINTS_PATH, index));
@@ -676,7 +723,7 @@ pub struct OtlpTargetConfig {
     ///
     /// A batch whose request would be larger is split and sent in parts, as is
     /// a batch the target rejects with `RESOURCE_EXHAUSTED`. A single log
-    /// record or metric point is always sent on its own, so the target still
+    /// record or metric sample is always sent on its own, so the target still
     /// decides whether to accept it. Defaults to 4 MiB, the default gRPC
     /// receive limit of the OpenTelemetry Collector, and must be greater than
     /// zero.
@@ -1014,6 +1061,7 @@ impl Default for PowerShelfHealthReportSinkConfig {
 #[serde(default)]
 pub struct RateLimitConfig {
     /// Burst value for explorations, optimal to set to max rate limit.
+    /// Must be greater than zero when rate limiting is enabled.
     pub bucket_burst: usize,
 
     /// Interval between bucket replenishment.
@@ -1493,6 +1541,24 @@ pub struct SseLogConfig {
     /// Maximum retry backoff after repeated streaming connection failures.
     #[serde(with = "humantime_serde")]
     pub max_backoff: Duration,
+
+    /// Deadline for deleting the BMC subscription a closed stream opened, and for
+    /// each cap diagnosis: listing the BMC's subscriptions plus any `reap_on_cap`
+    /// sweep. In `sse` and `auto` log modes, validation requires it plus 5 s for a
+    /// cancelled connect to finish to be less than `shutdown_timeout`. Defaults
+    /// to 5 seconds and must be greater than zero.
+    #[serde(with = "humantime_serde")]
+    pub close_timeout: Duration,
+
+    /// Delete every SSE destination on a BMC at its cap. Enable only where
+    /// hw-health is the BMC's sole SSE consumer. Has no effect on BMCs that drop
+    /// a capped SSE open without an HTTP response (LiteOn). Disabled by default.
+    ///
+    /// Each BMC is swept at most once per 30 minutes, and recovery does not
+    /// reset that interval. The DELETEs run one at a time within `close_timeout`,
+    /// so a sweep can stop before reaching every destination; the rest wait for
+    /// the next sweep.
+    pub reap_on_cap: bool,
 }
 
 impl Default for SseLogConfig {
@@ -1500,6 +1566,8 @@ impl Default for SseLogConfig {
         Self {
             initial_backoff: Duration::from_secs(1),
             max_backoff: Duration::from_secs(30),
+            close_timeout: Duration::from_secs(5),
+            reap_on_cap: false,
         }
     }
 }
@@ -1521,18 +1589,35 @@ impl SseLogConfig {
             );
         }
 
+        if self.close_timeout.is_zero() {
+            return Err("[collectors.logs.sse].close_timeout must be greater than 0".to_string());
+        }
+
         Ok(())
     }
 }
 
+/// Periodic log collection settings.
+///
+/// Numeric entry IDs must increase between resets; existing entries must
+/// remain unchanged. Each poll validates the highest saved entry. A missing entry
+/// or changed mapped record triggers replay of retained history. Changes below an
+/// unchanged anchor are not detected.
+/// Nonnumeric entries are emitted when collecting or replaying retained history.
+/// Incremental scans and completed history-skipping baselines ignore them.
+///
+/// Paginated collections must report a stable `Members@odata.count` and return
+/// that many members. Numeric IDs must be distinct. Incomplete scans retry without advancing
+/// progress; records accepted by a sink before a failure can replay on retry.
+/// An unpaginated collection may omit the count.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PeriodicLogConfig {
-    /// Interval between log collection.
+    /// Interval between log collection polls. Defaults to 5 minutes.
     #[serde(with = "humantime_serde")]
     pub logs_collection_interval: Duration,
 
-    /// Interval between log service state refresh.
+    /// Interval between log service discovery refreshes. Defaults to 30 minutes.
     #[serde(with = "humantime_serde")]
     pub state_refresh_interval: Duration,
 
@@ -1547,11 +1632,11 @@ pub struct PeriodicLogConfig {
     #[serde(default = "default_excluded_log_services")]
     pub exclude_services: Vec<String>,
 
-    /// When true, on the first encounter of a LogService with no saved state,
-    /// anchor at the current highest entry ID without emitting existing entries.
-    /// Subsequent polls collect only new entries, matching SSE real-time
-    /// behaviour. Defaults to false (existing entries are collected on first
-    /// run). Also applies when auto-mode downgrades to periodic collection.
+    /// Skip retained history only on the first successful baseline without a checkpoint.
+    /// Failed baselines and saved numeric/SSE checkpoints replay retained records.
+    /// Defaults to false. Also applies after auto mode downgrades from SSE.
+    /// Old fingerprint checkpoints replay once. Numeric-only checkpoint readers
+    /// require this option disabled to replay history after rollback.
     #[serde(default)]
     pub skip_initial_history: bool,
 }
@@ -1929,7 +2014,8 @@ pub struct NvueGnmiConfig {
     ///
     /// One attempt may take nearly three times this duration before reconnect
     /// backoff. Updates before `sync_response=true` do not extend the
-    /// synchronization timeout.
+    /// synchronization timeout. gNMI reconciliation uses this duration as one
+    /// overall deadline, including credentials, connection, and the complete snapshot.
     #[serde(with = "humantime_serde")]
     pub request_timeout: Duration,
 
@@ -1941,6 +2027,16 @@ pub struct NvueGnmiConfig {
     /// Enable gNMI ON_CHANGE subscription for live system-event messages.
     #[serde(alias = "system_events_subscription_enabled", alias = "events_enabled")]
     pub system_events_enabled: bool,
+
+    /// Interval between complete snapshots used to remove stale metrics from each gNMI stream.
+    /// Omission or zero disables reconciliation. Positive intervals up to 366 days enable it.
+    /// A complete empty snapshot removes cached metrics unless live updates protect them.
+    /// The `system_events_reconcile_interval` alias also applies to every stream.
+    #[serde(
+        with = "humantime_serde::option",
+        alias = "system_events_reconcile_interval"
+    )]
+    pub reconcile_interval: Option<Duration>,
 
     /// gNMI SAMPLE subscription paths.
     pub paths: NvueGnmiPaths,
@@ -1960,6 +2056,7 @@ impl Default for NvueGnmiConfig {
             request_timeout: Duration::from_secs(30),
             dangerously_skip_tls_verification: false,
             system_events_enabled: true,
+            reconcile_interval: None,
             paths: NvueGnmiPaths::default(),
             additional_subscriptions: Vec::new(),
         }
@@ -1967,7 +2064,25 @@ impl Default for NvueGnmiConfig {
 }
 
 impl NvueGnmiConfig {
-    fn validate(&self) -> Result<(), String> {
+    /// Checks subscription configuration before collector activation.
+    pub(crate) fn validate(&self) -> Result<(), String> {
+        if self
+            .reconcile_interval
+            .is_some_and(|interval| interval > MAX_GNMI_RECONCILE_INTERVAL)
+        {
+            return Err(
+                "collectors.nvue.gnmi.reconcile_interval must not exceed 366 days".to_string(),
+            );
+        }
+
+        if self
+            .reconcile_interval
+            .is_some_and(|interval| !interval.is_zero())
+            && self.request_timeout.is_zero()
+        {
+            return Err("collectors.nvue.gnmi.request_timeout must be positive when gNMI reconciliation is enabled".to_string());
+        }
+
         if let Some(interface_paths) = &self.paths.interface_paths {
             let config_path = "collectors.nvue.gnmi.paths.interface_paths";
 
@@ -2693,7 +2808,9 @@ impl<P: Provider> Provider for CanonicalNicoApiProvider<P> {
 }
 
 impl Config {
-    /// Load configuration from optional path
+    /// Loads defaults, an optional TOML file, and `CARBIDE_HEALTH__` environment
+    /// overrides, in that order, then validates the resulting configuration.
+    /// Malformed enabled sections return an error instead of falling back to defaults.
     pub fn load(config_path: Option<&Path>) -> Result<Self, String> {
         let mut figment = Figment::new().merge(Serialized::defaults(Config::default()));
 
@@ -2705,9 +2822,29 @@ impl Config {
             Env::prefixed("CARBIDE_HEALTH__").split("__"),
         ));
 
-        let config: Config = figment
-            .extract()
-            .map_err(|e| format!("Failed to load configuration: {}", e))?;
+        let config: Config = figment.extract().map_err(|error| {
+            let sources = match config_path {
+                Some(path) => format!(
+                    "{} and CARBIDE_HEALTH__ environment variables",
+                    path.display()
+                ),
+                None => "defaults and CARBIDE_HEALTH__ environment variables".to_string(),
+            };
+
+            let location = if error.path.is_empty() {
+                String::new()
+            } else {
+                format!("{}: ", error.path.join("."))
+            };
+
+            // Buffered sections retain relative field paths in their error
+            // messages, but the enclosing tag does not identify the leaf's
+            // provider. Report the inputs without attributing a leaf origin.
+            format!(
+                "failed to load configuration from {sources}: {location}{}",
+                error.kind
+            )
+        })?;
 
         config.validate()?;
         Ok(config)
@@ -2734,6 +2871,10 @@ impl Config {
             return Err("endpoint_discovery_interval must be greater than 0".to_string());
         }
 
+        if self.shutdown_timeout.is_zero() {
+            return Err("shutdown_timeout must be greater than 0".to_string());
+        }
+
         if self.bmc_request_concurrency.get() > Semaphore::MAX_PERMITS {
             return Err(format!(
                 "bmc_request_concurrency must not exceed {}",
@@ -2748,6 +2889,14 @@ impl Config {
         {
             return Err(
                 "bucket_replenish must be greater than 0 when rate limiting is enabled".to_string(),
+            );
+        }
+
+        if let Configurable::Enabled(rate_limit) = &self.rate_limit
+            && rate_limit.bucket_burst == 0
+        {
+            return Err(
+                "bucket_burst must be greater than 0 when rate limiting is enabled".to_string(),
             );
         }
 
@@ -2791,6 +2940,18 @@ impl Config {
 
         if let Configurable::Enabled(logs) = &self.collectors.logs {
             logs.validate()?;
+
+            // A cancelled connect may run for the grace before the DELETE starts.
+            if logs.mode != LogCollectionMode::Periodic
+                && CANCELLED_CONNECT_GRACE
+                    .checked_add(logs.sse_or_default().close_timeout)
+                    .is_none_or(|close| close >= self.shutdown_timeout)
+            {
+                return Err(format!(
+                    "[collectors.logs.sse].close_timeout plus the {}s cancelled-connect grace must be less than shutdown_timeout",
+                    CANCELLED_CONNECT_GRACE.as_secs()
+                ));
+            }
         }
 
         if let Configurable::Enabled(nvue) = &self.collectors.nvue
@@ -2890,6 +3051,11 @@ impl Config {
     }
 }
 
+/// A configuration table that is enabled unless `enabled = false` is specified.
+///
+/// Null disables the section. An empty enabled table uses `T::default()`;
+/// populated enabled tables follow `T`'s defaults and unknown-field policy.
+/// Disabled payloads are ignored, while malformed enabled payloads return errors.
 #[derive(Debug, Clone, Serialize)]
 #[serde(untagged)]
 pub enum Configurable<T> {
@@ -2918,32 +3084,44 @@ where
     where
         D: Deserializer<'de>,
     {
-        #[derive(Deserialize)]
-        struct Helper<T> {
-            #[serde(default = "default_true")]
-            enabled: bool,
-            #[serde(flatten)]
-            config: Option<T>,
-        }
+        // Buffer before decoding so `enabled = false` wins regardless of key
+        // order. A payload decoding error must not be interpreted as absence.
+        let Some(value) = Option::<Value>::deserialize(deserializer)? else {
+            return Ok(Self::Disabled);
+        };
 
-        fn default_true() -> bool {
-            true
-        }
+        let Value::Dict(tag, mut fields) = value else {
+            return Err(serde::de::Error::custom("expected a configuration table"));
+        };
 
-        let helper_opt = Option::<Helper<T>>::deserialize(deserializer)?;
+        if let Some(enabled) = fields.remove("enabled") {
+            let enabled: bool = enabled
+                .deserialize()
+                .map_err(|error| serde::de::Error::custom(format!("enabled: {}", error.kind)))?;
 
-        match helper_opt {
-            None => Ok(Configurable::Disabled),
-            Some(helper) => {
-                if !helper.enabled {
-                    Ok(Configurable::Disabled)
-                } else if let Some(cfg) = helper.config {
-                    Ok(Configurable::Enabled(cfg))
-                } else {
-                    Ok(Configurable::Enabled(T::default()))
-                }
+            if !enabled {
+                return Ok(Self::Disabled);
             }
         }
+
+        if fields.is_empty() {
+            return Ok(Self::Enabled(T::default()));
+        }
+
+        // Generic Serde errors do not carry Figment's relative key/index path.
+        // Include it explicitly before crossing another Configurable wrapper.
+        Value::Dict(tag, fields)
+            .deserialize()
+            .map(Self::Enabled)
+            .map_err(|error| {
+                if error.path.is_empty() {
+                    return serde::de::Error::custom(error.kind);
+                }
+
+                let location = error.path.join(".");
+
+                serde::de::Error::custom(format!("{location}: {}", error.kind))
+            })
     }
 }
 
@@ -2954,8 +3132,52 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn gnmi_reconciliation_config_contract() {
+        for (input, seconds, valid) in [
+            ("", None, true),
+            ("reconcile_interval = '0s'", Some(0), true),
+            ("reconcile_interval = '2m'", Some(120), true),
+            ("reconcile_interval = '366d'", Some(31622400), true),
+            ("reconcile_interval = '31622401s'", Some(31622401), false),
+            ("system_events_reconcile_interval = '30m'", Some(1800), true),
+            ("request_timeout = '0s'", None, true),
+            (
+                "request_timeout = '0s'\nreconcile_interval = '30m'",
+                Some(1800),
+                false,
+            ),
+            (
+                "request_timeout = '0s'\nreconcile_interval = '30m'\nsystem_events_enabled = false",
+                Some(1800),
+                false,
+            ),
+            (
+                "request_timeout = '0s'\nreconcile_interval = '0s'",
+                Some(0),
+                true,
+            ),
+        ] {
+            let config: super::NvueGnmiConfig =
+                Figment::new().merge(Toml::string(input)).extract().unwrap();
+
+            assert_eq!(
+                config.reconcile_interval.map(|interval| interval.as_secs()),
+                seconds
+            );
+
+            assert_eq!(config.validate().is_ok(), valid, "{input}");
+
+            let round_trip: super::NvueGnmiConfig =
+                serde_json::from_str(&serde_json::to_string(&config).unwrap()).unwrap();
+
+            assert_eq!(round_trip.reconcile_interval, config.reconcile_interval);
+        }
+    }
+
     fn config_with(configure: impl FnOnce(&mut Config)) -> Box<Config> {
         let mut config = Config::default();
+        config.endpoint_sources.static_credentials_file = Some("credentials.json".into());
         configure(&mut config);
         Box::new(config)
     }
@@ -2965,8 +3187,7 @@ mod tests {
             ip: "192.0.2.1".parse().unwrap(),
             port: None,
             mac: "00:11:22:33:44:55".to_string(),
-            username: "admin".to_string(),
-            password: None,
+            credentials_profile: None,
             machine: None,
             power_shelf: None,
             switch: None,
@@ -3248,11 +3469,12 @@ mod tests {
 endpoint_discovery_interval = "1m"
 bmc_request_concurrency = 2
 
+[endpoint_sources]
+static_credentials_file = "credentials.json"
+
 [[endpoint_sources.static_bmc_endpoints]]
 ip = "192.168.1.100"
 mac = "00:11:22:33:44:55"
-username = "root"
-password = "pass"
 
 [endpoint_sources.nico_api]
 enabled = false
@@ -3323,10 +3545,12 @@ cache_size = 50
     #[test]
     fn test_static_endpoint_config_rejects_invalid_ip() {
         let toml_content = r#"
+[endpoint_sources]
+static_credentials_file = "credentials.json"
+
 [[endpoint_sources.static_bmc_endpoints]]
 ip = "not-an-ip"
 mac = "00:11:22:33:44:55"
-username = "root"
 "#;
 
         let result = Figment::new()
@@ -3335,6 +3559,45 @@ username = "root"
             .extract::<Config>();
 
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn static_credential_source_validation() {
+        scenarios!(run = |(global, target): (&str, &str)| -> Result<(), ()> {
+            let input = format!("[endpoint_sources]\n{global}\n[[endpoint_sources.static_bmc_endpoints]]\nip = \"192.0.2.1\"\nmac = \"00:11:22:33:44:55\"\n{target}");
+            let config: Config = Figment::new().merge(Toml::string(&input)).extract().map_err(|_| ())?;
+            config.endpoint_sources.validate().map_err(|_| ())
+        };
+            "file credentials" {
+                ("static_credentials_file = \"credentials.json\"", "") => Yields(()),
+                ("static_credentials_file = \"credentials.json\"", "credentials_profile = \"bmc\"") => Yields(()),
+            }
+            "invalid sources" {
+                ("", "") => Fails,
+                ("static_credentials_file = \"\"", "") => Fails,
+                ("static_credentials_file = \"credentials.json\"", "username = \"admin\"") => Fails,
+                ("static_credentials_file = \"credentials.json\"", "password = \"obsolete\"") => Fails,
+            }
+        );
+    }
+
+    #[test]
+    fn missing_static_credential_file_identifies_the_list() {
+        for list in ["static_bmc_endpoints", "static_switch_host_endpoints"] {
+            let input = format!(
+                "[[endpoint_sources.{list}]]\nip = \"192.0.2.1\"\nmac = \"00:11:22:33:44:55\""
+            );
+            let config: Config = Figment::new()
+                .merge(Toml::string(&input))
+                .extract()
+                .unwrap();
+            assert_eq!(
+                config.endpoint_sources.validate().unwrap_err(),
+                format!(
+                    "endpoint_sources.{list}[0] requires endpoint_sources.static_credentials_file"
+                )
+            );
+        }
     }
 
     #[test]
@@ -3456,6 +3719,13 @@ username = "root"
                 Box::new(Config::default()) => Yields(()),
 
                 config_with(|config| {
+                    config.rate_limit = Configurable::Enabled(RateLimitConfig {
+                        bucket_burst: 1,
+                        ..RateLimitConfig::default()
+                    });
+                }) => Yields(()),
+
+                config_with(|config| {
                     config.bmc_request_concurrency =
                         NonZeroUsize::new(Semaphore::MAX_PERMITS)
                             .expect("Tokio supports at least one semaphore permit");
@@ -3507,6 +3777,32 @@ username = "root"
                 ),
 
                 config_with(|config| {
+                    config.collectors.logs = Configurable::Enabled(LogsCollectorConfig {
+                        sse: Some(SseLogConfig {
+                            close_timeout: config.shutdown_timeout - CANCELLED_CONNECT_GRACE,
+                            ..SseLogConfig::default()
+                        }),
+                        ..LogsCollectorConfig::default()
+                    });
+                }) => FailsWith(
+                    "[collectors.logs.sse].close_timeout plus the 5s cancelled-connect grace must be less than shutdown_timeout"
+                        .to_string()
+                ),
+
+                // Periodic mode opens no SSE stream, so it has nothing to delete on shutdown.
+                config_with(|config| {
+                    config.collectors.logs = Configurable::Enabled(LogsCollectorConfig {
+                        mode: LogCollectionMode::Periodic,
+                        sse: Some(SseLogConfig {
+                            close_timeout: config.shutdown_timeout,
+                            ..SseLogConfig::default()
+                        }),
+                        periodic: Some(PeriodicLogConfig::default()),
+                        ..LogsCollectorConfig::default()
+                    });
+                }) => Yields(()),
+
+                config_with(|config| {
                     config.bmc_request_concurrency =
                         NonZeroUsize::new(Semaphore::MAX_PERMITS + 1)
                             .expect("the value above Tokio's maximum remains nonzero");
@@ -3530,6 +3826,15 @@ username = "root"
                 }) => FailsWith(
                     "bucket_replenish must be greater than 0 when rate limiting is enabled"
                         .to_string()
+                ),
+
+                config_with(|config| {
+                    config.rate_limit = Configurable::Enabled(RateLimitConfig {
+                        bucket_burst: 0,
+                        ..RateLimitConfig::default()
+                    });
+                }) => FailsWith(
+                    "bucket_burst must be greater than 0 when rate limiting is enabled".to_string()
                 ),
 
                 config_with(|config| {
@@ -5078,12 +5383,182 @@ interface_paths = [["state", "oper-status"], ["phy-diag", "state", "raw-ber"]]
     }
 
     #[test]
+    #[allow(clippy::result_large_err)] // Figment controls the error representation.
+    fn malformed_enabled_sections_fail_configuration_loading() {
+        figment::Jail::expect_with(|jail| {
+            jail.clear_env();
+
+            let valid = r#"
+[collectors.nvue.gnmi]
+gnmi_port = 19339
+system_events_enabled = false
+
+[[collectors.nvue.gnmi.additional_subscriptions]]
+name = "first"
+paths = [["interfaces"]]
+metrics = [{path = ["interfaces", "state", "counter"], metric_type = "interface_counter", output = {kind = "gauge", unit = "bytes"}}]
+
+[[collectors.nvue.gnmi.additional_subscriptions]]
+name = "second"
+encoding = "json_ietf"
+mode = "sample"
+sample_interval = "10s"
+paths = [["interfaces"]]
+metrics = [{path = ["interfaces", "state", "counter"], metric_type = "interface_counter", output = {kind = "gauge", unit = "count"}}]
+"#;
+
+            // Only the second entry is malformed, so diagnostics must identify
+            // its index rather than blaming or discarding the valid first entry.
+            for (field, from, to, reason) in [
+                (
+                    "encoding",
+                    "encoding = \"json_ietf\"",
+                    "encoding = \"proto\"",
+                    "proto",
+                ),
+                ("mode", "mode = \"sample\"", "mode = \"sampl\"", "sampl"),
+                (
+                    "metrics.0.output",
+                    "kind = \"gauge\", unit = \"count\"",
+                    "kind = \"gaugeh\", unit = \"count\"",
+                    "gaugeh",
+                ),
+                (
+                    "sample_interval",
+                    "sample_interval = \"10s\"",
+                    "sample_interval = \"not-a-duration\"",
+                    "duration",
+                ),
+                (
+                    "unknown",
+                    "encoding = \"json_ietf\"",
+                    "encodign = \"json_ietf\"",
+                    "encodign",
+                ),
+            ] {
+                jail.create_file("health.toml", &valid.replace(from, to))?;
+
+                let error = Config::load(Some(Path::new("health.toml")))
+                    .expect_err("malformed enabled subscription must fail startup");
+
+                for expected in [
+                    "collectors.nvue",
+                    "gnmi",
+                    "additional_subscriptions.1",
+                    "health.toml",
+                    reason,
+                ] {
+                    assert!(
+                        error.contains(expected),
+                        "{field}: missing {expected}: {error}"
+                    );
+                }
+
+                if field != "unknown" {
+                    assert!(error.contains(field), "{field}: {error}");
+                }
+            }
+
+            for (contents, section, field) in [
+                (
+                    "[collectors.nmxt]\nscrape_interval = \"not-a-duration\"",
+                    "collectors.nmxt",
+                    "scrape_interval",
+                ),
+                (
+                    "[collectors.nvue.gnmi]\nenabled = \"sometimes\"",
+                    "collectors.nvue",
+                    "enabled",
+                ),
+            ] {
+                jail.create_file("health.toml", contents)?;
+
+                let error = Config::load(Some(Path::new("health.toml")))
+                    .expect_err("malformed enabled section must fail startup");
+
+                assert!(error.contains(section), "{error}");
+                assert!(error.contains(field), "{error}");
+            }
+
+            jail.create_file("health.toml", valid)?;
+            jail.set_env("CARBIDE_HEALTH__COLLECTORS__NVUE__GNMI__GNMI_PORT", "20339");
+
+            let config = Config::load(Some(Path::new("health.toml")))
+                .expect("valid environment override should preserve the configured payload");
+
+            let gnmi = config
+                .collectors
+                .nvue
+                .as_option()
+                .unwrap()
+                .gnmi
+                .as_option()
+                .unwrap();
+
+            assert_eq!(gnmi.gnmi_port, 20339);
+            assert!(!gnmi.system_events_enabled);
+            assert_eq!(gnmi.additional_subscriptions.len(), 2);
+
+            jail.set_env(
+                "CARBIDE_HEALTH__COLLECTORS__NVUE__GNMI__SAMPLE_INTERVAL",
+                "invalid",
+            );
+
+            let error = Config::load(Some(Path::new("health.toml")))
+                .expect_err("malformed environment override must fail loading");
+
+            for expected in [
+                "health.toml",
+                "CARBIDE_HEALTH__",
+                "sample_interval",
+                "duration",
+            ] {
+                assert!(error.contains(expected), "missing {expected}: {error}");
+            }
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn configurable_preserves_defaults_and_explicit_disabling() {
+        value_scenarios!(run = |input: serde_json::Value| {
+            serde_json::from_value::<Configurable<NvueCollectorConfig>>(input)
+                .expect("valid wrapper representation should parse")
+                .is_enabled()
+        };
+            "disabled representations" {
+                serde_json::Value::Null => false,
+                serde_json::json!({"enabled": false, "gnmi": {"sample_interval": "invalid"}}) => false,
+                serde_json::json!({"enabled": false, "rest": {"poll_interval": "invalid"}}) => false,
+            }
+
+            "empty enabled sections" {
+                serde_json::json!({}) => true,
+                serde_json::json!({"enabled": true}) => true,
+            }
+
+            "disabled child under enabled parent" {
+                serde_json::json!({"gnmi": {"enabled": false, "sample_interval": "invalid"}}) => true,
+            }
+        );
+
+        assert!(
+            serde_json::from_value::<Configurable<NvueCollectorConfig>>(serde_json::json!(false))
+                .is_err(),
+            "only null or a configuration table is supported"
+        );
+    }
+
+    #[test]
     fn nvue_gnmi_additional_subscription_parses_complete_contract() {
         let config: Config = Figment::new()
             .merge(Serialized::defaults(Config::default()))
             .merge(Toml::string(
                 r#"
 [collectors.nvue.gnmi]
+gnmi_port = 19339
+system_events_enabled = false
 
 [[collectors.nvue.gnmi.additional_subscriptions]]
 name = "external_metrics"
@@ -5126,6 +5601,8 @@ metrics = [
             .first()
             .expect("one additional subscription should be configured");
 
+        assert_eq!(gnmi.gnmi_port, 19339);
+        assert!(!gnmi.system_events_enabled);
         assert_eq!(subscription.name, "external_metrics");
         assert_eq!(subscription.target, "switch");
         assert_eq!(subscription.origin, "openconfig");
@@ -5587,31 +6064,26 @@ enabled = false
 [sinks.health_report]
 enabled = false
 
+[endpoint_sources]
+static_credentials_file = "credentials.json"
+
 [[endpoint_sources.static_bmc_endpoints]]
 ip = "10.0.0.1"
 mac = "aa:bb:cc:dd:ee:ff"
-username = "admin"
-password = "pass"
 
 [[endpoint_sources.static_bmc_endpoints]]
 ip = "10.0.1.2"
 mac = "11:22:33:44:55:11"
-username = "cumulus"
-password = "pass"
 machine = { id = "fm100htjtiaehv1n5vh67tbmqq4eabcjdng40f7jupsadbedhruh6rag1l0", serial = "MN-001" }
 
 [[endpoint_sources.static_bmc_endpoints]]
 ip = "10.0.1.1"
 mac = "11:22:33:44:55:66"
-username = "cumulus"
-password = "pass"
 switch = { id = "fsw100htjtiaehv1n5vh67tbmqq4eabcjdng40f7jupsadbedhruh6rag1l0", serial = "SN-SW-001", slot_number = 7, tray_index = 3 }
 
 [[endpoint_sources.static_bmc_endpoints]]
 ip = "10.0.2.1"
 mac = "22:33:44:55:66:77"
-username = "admin"
-password = "pass"
 power_shelf = { id = "fps100htjtiaehv1n5vh67tbmqq4eabcjdng40f7jupsadbedhruh6rag1l0", serial = "SN-PS-001" }
 "#;
 
@@ -5707,11 +6179,12 @@ enabled = false
 [sinks.health_report]
 enabled = false
 
+[endpoint_sources]
+static_credentials_file = "credentials.json"
+
 [[endpoint_sources.static_bmc_endpoints]]
 ip = "10.0.1.2"
 mac = "11:22:33:44:55:11"
-username = "admin"
-password = "pass"
 machine = { serial = "MN-001" }
 "#;
 
@@ -5736,11 +6209,12 @@ machine = { serial = "MN-001" }
 [endpoint_sources.nico_api]
 enabled = false
 
+[endpoint_sources]
+static_credentials_file = "credentials.json"
+
 [[endpoint_sources.static_bmc_endpoints]]
 ip = "10.0.1.1"
 mac = "11:22:33:44:55:66"
-username = "admin"
-password = "pass"
 switch = { id = "fsw100htjtiaehv1n5vh67tbmqq4eabcjdng40f7jupsadbedhruh6rag1l0", serial = "SN-SW-001", endpoint_role = "host", is_primary = true }
 "#;
 
@@ -5767,11 +6241,12 @@ switch = { id = "fsw100htjtiaehv1n5vh67tbmqq4eabcjdng40f7jupsadbedhruh6rag1l0", 
 [endpoint_sources.nico_api]
 enabled = false
 
+[endpoint_sources]
+static_credentials_file = "credentials.json"
+
 [[endpoint_sources.static_bmc_endpoints]]
 ip = "10.0.1.2"
 mac = "11:22:33:44:55:77"
-username = "admin"
-password = "pass"
 switch = { id = "fsw100htjtiaehv1n5vh67tbmqq4eabcjdng40f7jupsadbedhruh6rag1l0", serial = "SN-SW-002", endpoint_role = "host", is_primary = false, nmxc_enabled = true, nmxt_enabled = true, nvlink_domain_uuid = "9f4b45ec-705a-4af4-89f7-a112bc9c8f4e" }
 "#;
 
@@ -5841,6 +6316,7 @@ switch = { id = "fsw100htjtiaehv1n5vh67tbmqq4eabcjdng40f7jupsadbedhruh6rag1l0", 
                     config.endpoint_sources.static_bmc_endpoints =
                         vec![StaticBmcEndpoint {
                             mac: "not-a-mac".to_string(),
+            credentials_profile: None,
                             ..static_endpoint()
                         }];
                 }) => FailsWith(
@@ -5854,6 +6330,7 @@ switch = { id = "fsw100htjtiaehv1n5vh67tbmqq4eabcjdng40f7jupsadbedhruh6rag1l0", 
                     config.endpoint_sources.static_switch_host_endpoints =
                         vec![StaticBmcEndpoint {
                             mac: "not-a-mac".to_string(),
+            credentials_profile: None,
                             switch: Some(static_switch()),
                             ..static_endpoint()
                         }];
@@ -5863,10 +6340,11 @@ switch = { id = "fsw100htjtiaehv1n5vh67tbmqq4eabcjdng40f7jupsadbedhruh6rag1l0", 
                 ),
             }
 
-            "duplicate within BMC endpoint list is accepted" {
+            "duplicate within BMC endpoint list" {
                 config_with(|config| {
                     let endpoint = StaticBmcEndpoint {
                         mac: "aa:bb:cc:dd:ee:ff".to_string(),
+            credentials_profile: None,
                         ..static_endpoint()
                     };
 
@@ -5874,10 +6352,13 @@ switch = { id = "fsw100htjtiaehv1n5vh67tbmqq4eabcjdng40f7jupsadbedhruh6rag1l0", 
                         endpoint,
                         StaticBmcEndpoint {
                             mac: "AA:BB:CC:DD:EE:FF".to_string(),
+            credentials_profile: None,
                             ..static_endpoint()
                         },
                     ];
-                }) => Yields(()),
+                }) => FailsWith(
+                    "endpoint_sources.static_bmc_endpoints[1].mac duplicates endpoint_sources.static_bmc_endpoints[0].mac".to_string()
+                ),
             }
 
             "duplicate within host list" {
@@ -5885,6 +6366,7 @@ switch = { id = "fsw100htjtiaehv1n5vh67tbmqq4eabcjdng40f7jupsadbedhruh6rag1l0", 
                     let endpoint = StaticBmcEndpoint {
                         switch: Some(static_switch()),
                         mac: "aa:bb:cc:dd:ee:ff".to_string(),
+            credentials_profile: None,
                         ..static_endpoint()
                     };
 
@@ -5901,12 +6383,14 @@ switch = { id = "fsw100htjtiaehv1n5vh67tbmqq4eabcjdng40f7jupsadbedhruh6rag1l0", 
                     config.endpoint_sources.static_bmc_endpoints =
                         vec![StaticBmcEndpoint {
                             mac: "AA:BB:CC:DD:EE:FF".to_string(),
+            credentials_profile: None,
                             ..static_endpoint()
                         }];
 
                     config.endpoint_sources.static_switch_host_endpoints =
                         vec![StaticBmcEndpoint {
                             mac: "aa:bb:cc:dd:ee:ff".to_string(),
+            credentials_profile: None,
                             switch: Some(static_switch()),
                             ..static_endpoint()
                         }];
@@ -5924,11 +6408,12 @@ switch = { id = "fsw100htjtiaehv1n5vh67tbmqq4eabcjdng40f7jupsadbedhruh6rag1l0", 
 [endpoint_sources.nico_api]
 enabled = false
 
+[endpoint_sources]
+static_credentials_file = "credentials.json"
+
 [[endpoint_sources.static_bmc_endpoints]]
 ip = "10.0.1.2"
 mac = "11:22:33:44:55:11"
-username = "admin"
-password = "pass"
 labels = { site = "rno-dev7", environment = "development" }
 machine = { id = "fm100htjtiaehv1n5vh67tbmqq4eabcjdng40f7jupsadbedhruh6rag1l0", serial = "MN-001", driver_version = "570.82", slot_number = 15, tray_index = 5, nvlink_domain_uuid = "00000000-0000-0000-0000-000000000000" }
 "#;
@@ -5974,11 +6459,12 @@ machine = { id = "fm100htjtiaehv1n5vh67tbmqq4eabcjdng40f7jupsadbedhruh6rag1l0", 
 [endpoint_sources.nico_api]
 enabled = false
 
+[endpoint_sources]
+static_credentials_file = "credentials.json"
+
 [[endpoint_sources.static_bmc_endpoints]]
 ip = "10.0.1.2"
 mac = "11:22:33:44:55:11"
-username = "admin"
-password = "pass"
 labels = {{ {name} = "value" }}
 machine = {{ id = "fm100htjtiaehv1n5vh67tbmqq4eabcjdng40f7jupsadbedhruh6rag1l0" }}
 "#
@@ -6000,18 +6486,17 @@ machine = {{ id = "fm100htjtiaehv1n5vh67tbmqq4eabcjdng40f7jupsadbedhruh6rag1l0" 
 [endpoint_sources.nico_api]
 enabled = false
 
+[endpoint_sources]
+static_credentials_file = "credentials.json"
+
 [[endpoint_sources.static_bmc_endpoints]]
 ip = "10.0.1.2"
 mac = "11:22:33:44:55:11"
-username = "admin"
-password = "pass"
 machine = { id = "fm100htjtiaehv1n5vh67tbmqq4eabcjdng40f7jupsadbedhruh6rag1l0", physical_slot_number = 15, compute_tray_index = 5 }
 
 [[endpoint_sources.static_bmc_endpoints]]
 ip = "10.0.1.1"
 mac = "11:22:33:44:55:66"
-username = "cumulus"
-password = "pass"
 switch = { serial = "SN-SW-001", physical_slot_number = 7, compute_tray_index = 3 }
 "#;
 
@@ -6150,9 +6635,19 @@ switch = { serial = "SN-SW-001", physical_slot_number = 7, compute_tray_index = 
                 SseLogConfig {
                     initial_backoff: Duration::from_secs(30),
                     max_backoff: Duration::from_secs(1),
+                    ..SseLogConfig::default()
                 } => FailsWith(
                     "[collectors.logs.sse].max_backoff must be greater than or equal to initial_backoff"
                         .to_string()
+                ),
+            }
+
+            "zero close timeout" {
+                SseLogConfig {
+                    close_timeout: Duration::ZERO,
+                    ..SseLogConfig::default()
+                } => FailsWith(
+                    "[collectors.logs.sse].close_timeout must be greater than 0".to_string()
                 ),
             }
         );
@@ -6285,6 +6780,7 @@ switch = { serial = "SN-SW-001", physical_slot_number = 7, compute_tray_index = 
                     sse: Some(SseLogConfig {
                         initial_backoff: Duration::from_secs(30),
                         max_backoff: Duration::from_secs(1),
+                        ..SseLogConfig::default()
                     }),
                     ..LogsCollectorConfig::default()
                 } => FailsWith(
@@ -6298,53 +6794,27 @@ switch = { serial = "SN-SW-001", physical_slot_number = 7, compute_tray_index = 
     /// Capture tracing WARN events emitted during a closure.
     /// Uses a per-call dispatcher so parallel tests don't interfere.
     fn capture_warnings(f: impl FnOnce()) -> Vec<String> {
-        use std::sync::{Arc, Mutex};
+        carbide_instrument::testing::capture_logs(f)
+            .into_iter()
+            .filter(|log| log.level == tracing::Level::WARN)
+            .map(|log| log.message)
+            .collect()
+    }
 
-        use tracing::Level;
-        use tracing_subscriber::layer::SubscriberExt;
+    #[test]
+    fn capture_warnings_allows_retained_dispatch() {
+        let mut dispatch = None;
+        let warnings = capture_warnings(|| {
+            // Tracing can keep our `Dispatch` alive while another test rebuilds
+            // the callsite cache. Hold it past capture to verify that reading
+            // the warnings doesn't require exclusive ownership of the buffer.
+            dispatch = Some(tracing::dispatcher::get_default(Clone::clone));
+            tracing::info!("not a warning");
+            tracing::warn!("captured warning");
+        });
 
-        let captured: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
-        let captured_clone = Arc::clone(&captured);
-
-        struct WarnCapture(Arc<Mutex<Vec<String>>>);
-
-        impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for WarnCapture {
-            fn on_event(
-                &self,
-                event: &tracing::Event<'_>,
-                _ctx: tracing_subscriber::layer::Context<'_, S>,
-            ) {
-                if *event.metadata().level() != Level::WARN {
-                    return;
-                }
-                struct Visitor(String);
-                impl tracing::field::Visit for Visitor {
-                    fn record_debug(
-                        &mut self,
-                        field: &tracing::field::Field,
-                        value: &dyn std::fmt::Debug,
-                    ) {
-                        if field.name() == "message" {
-                            self.0 = format!("{value:?}").trim_matches('"').to_string();
-                        }
-                    }
-                    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
-                        if field.name() == "message" {
-                            self.0 = value.to_string();
-                        }
-                    }
-                }
-                let mut v = Visitor(String::new());
-                event.record(&mut v);
-                self.0.lock().unwrap().push(v.0);
-            }
-        }
-
-        tracing::subscriber::with_default(
-            tracing_subscriber::registry().with(WarnCapture(captured_clone)),
-            f,
-        );
-        Arc::try_unwrap(captured).unwrap().into_inner().unwrap()
+        assert_eq!(warnings, ["captured warning"]);
+        drop(dispatch);
     }
 
     #[test]
@@ -6588,12 +7058,14 @@ max_backoff = "1m"
                     configured_sse: Some(SseLogConfig {
                         initial_backoff: Duration::from_secs(2),
                         max_backoff: Duration::from_secs(60),
+                        ..SseLogConfig::default()
                     }),
                     configured_periodic: None,
                     configured_auto: None,
                     effective_sse: SseLogConfig {
                         initial_backoff: Duration::from_secs(2),
                         max_backoff: Duration::from_secs(60),
+                        ..SseLogConfig::default()
                     },
                     effective_periodic: PeriodicLogConfig::default(),
                     effective_auto_periodic: PeriodicLogConfig::default(),
@@ -6676,12 +7148,14 @@ max_backoff = "45s"
                     configured_sse: Some(SseLogConfig {
                         initial_backoff: Duration::from_secs(3),
                         max_backoff: Duration::from_secs(45),
+                        ..SseLogConfig::default()
                     }),
                     configured_periodic: None,
                     configured_auto: None,
                     effective_sse: SseLogConfig {
                         initial_backoff: Duration::from_secs(3),
                         max_backoff: Duration::from_secs(45),
+                        ..SseLogConfig::default()
                     },
                     effective_periodic: PeriodicLogConfig::default(),
                     effective_auto_periodic: PeriodicLogConfig::default(),

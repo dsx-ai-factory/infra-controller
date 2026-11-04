@@ -173,7 +173,7 @@ pub(crate) async fn seed_switch(
             bmc_password: "pass".into(),
             nvos_username: None,
             nvos_password: None,
-            nvos_mac_addresses: vec![],
+            nvos_interfaces: vec![],
             metadata: Metadata::default(),
             rack_id: Some(rack_id.clone()),
             bmc_retain_credentials: None,

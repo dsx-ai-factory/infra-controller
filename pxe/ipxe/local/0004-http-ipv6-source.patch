@@ -1,0 +1,874 @@
+HTTP IPv6 source binding for NICo boot
+
+Core identifies HTTP clients by their registered address, such as a DHCPv6
+lease or an inferred EUI-64 SLAAC address.  Automatic source selection can
+otherwise use an address Core does not recognize.  The optional `http-source6`
+setting binds HTTP and HTTPS connections to an address and interface; the
+embedded script decides when to set or clear it.
+
+Configured payload URLs may use hostnames, so resolution must return IPv6
+destinations even when the DNS server is IPv4.  Each connection keeps its
+binding, including when it is reused from the HTTP connection pool.
+
+Manual self-test: apply the repository's iPXE patches to an isolated iPXE
+tree and copy `pxe/ipxe/local/*.h` into its `src/config/local/` directory.
+From that tree's `src/` directory, run:
+
+    make -j8 bin-x86_64-linux/tests.linux DEBUG=http_source_test
+    ./bin-x86_64-linux/tests.linux
+
+--- a/src/include/ipxe/http.h
++++ b/src/include/ipxe/http.h
+@@ -18,6 +18,7 @@
+ #include <ipxe/retry.h>
+ #include <ipxe/linebuf.h>
+ #include <ipxe/pool.h>
++#include <ipxe/tcpip.h>
+ #include <ipxe/tables.h>
+ #include <ipxe/ntlm.h>
+ 
+@@ -81,6 +82,8 @@
+ 	struct uri *uri;
+ 	/** HTTP scheme */
+ 	struct http_scheme *scheme;
++	/** Local address and interface used by this connection */
++	struct sockaddr_tcpip local;
+ 	/** Transport layer interface */
+ 	struct interface socket;
+ 	/** Data transfer interface */
+--- a/src/net/tcp/httpconn.c
++++ b/src/net/tcp/httpconn.c
+@@ -36,7 +36,10 @@
+ #include <strings.h>
+ #include <errno.h>
+ #include <byteswap.h>
++#include <config/general.h>
+ #include <ipxe/tcpip.h>
++#include <ipxe/settings.h>
++#include <ipxe/ipv6.h>
+ #include <ipxe/uri.h>
+ #include <ipxe/timer.h>
+ #include <ipxe/xfer.h>
+@@ -51,6 +54,61 @@
+ static LIST_HEAD ( http_connection_pool );
+ 
+ /**
++ * Optional HTTP IPv6 source, in address%interface form.
++ *
++ * The address must belong to the interface.  When set, HTTP and HTTPS
++ * connections require an IPv6 destination; clearing it restores automatic
++ * source selection.  Existing connections retain their original binding.
++ */
++static const struct setting http_source6_setting
++	__setting ( SETTING_MISC, http_source6 ) = {
++	.name = "http-source6",
++	.description = "HTTP IPv6 source address%interface",
++	.type = &setting_type_string,
++};
++
++/**
++ * Read the HTTP source binding before opening or reusing a connection.
++ *
++ * @v local		Local socket address to fill in
++ * @ret rc		Return status code
++ */
++static int http_source6 ( struct sockaddr_tcpip *local ) {
++#ifdef NET_PROTO_IPV6
++	struct sockaddr_in6 *sin6 = ( ( struct sockaddr_in6 * ) local );
++	struct net_device *netdev;
++#endif
++	char *source;
++	int rc;
++
++	memset ( local, 0, sizeof ( *local ) );
++	rc = fetch_string_setting_copy ( NULL, &http_source6_setting, &source );
++	/* Ignore the originating file and per-file error disambiguator. */
++	if ( ( -rc & 0x7f0000ff ) == ( ENOENT & 0x7f0000ff ) )
++		return 0;
++	if ( rc < 0 )
++		return rc;
++	rc = sock_aton ( source, ( ( struct sockaddr * ) local ) );
++	free ( source );
++	if ( rc != 0 )
++		return rc;
++
++#ifdef NET_PROTO_IPV6
++	if ( ( local->st_family != AF_INET6 ) || ! local->st_scope_id ||
++	     IN6_IS_ADDR_UNSPECIFIED ( &sin6->sin6_addr ) ||
++	     IN6_IS_ADDR_MULTICAST ( &sin6->sin6_addr ) )
++		return -EINVAL;
++	netdev = find_netdev_by_scope_id ( local->st_scope_id );
++	if ( ! netdev || ! netdev_is_open ( netdev ) ||
++	     ! ipv6_has_addr ( netdev, &sin6->sin6_addr ) )
++		return -EADDRNOTAVAIL;
++	return 0;
++#else
++	return -ENOTSUP;
++#endif
++}
++
++/**
+  * Identify HTTP scheme
+  *
+  * @v uri		URI
+@@ -238,6 +296,7 @@
+ 	struct http_connection *conn;
+ 	struct http_scheme *scheme;
+ 	struct sockaddr_tcpip server;
++	struct sockaddr_tcpip local;
+ 	unsigned int port;
+ 	int rc;
+ 
+@@ -253,6 +312,9 @@
+ 	/* Identify port */
+ 	port = uri_port ( uri, scheme->port );
+ 
++	if ( ( rc = http_source6 ( &local ) ) != 0 )
++		return rc;
++
+ 	/* Look for a reusable connection in the pool.  Reuse the most
+ 	 * recent connection in order to accommodate authentication
+ 	 * schemes that break the stateless nature of HTTP and rely on
+@@ -268,7 +330,8 @@
+ 		/* Reuse connection, if possible */
+ 		if ( ( scheme == conn->scheme ) &&
+ 		     ( strcmp ( uri->host, conn->uri->host ) == 0 ) &&
+-		     ( port == uri_port ( conn->uri, scheme->port ) ) ) {
++		     ( port == uri_port ( conn->uri, scheme->port ) ) &&
++		     ( memcmp ( &local, &conn->local, sizeof ( local ) ) == 0 ) ) {
+ 
+ 			/* Remove from connection pool, stop timer,
+ 			 * attach to parent interface, and return.
+@@ -290,16 +353,21 @@
+ 	ref_init ( &conn->refcnt, http_conn_free );
+ 	conn->uri = uri_get ( uri );
+ 	conn->scheme = scheme;
++	memcpy ( &conn->local, &local, sizeof ( conn->local ) );
+ 	intf_init ( &conn->socket, &http_conn_socket_desc, &conn->refcnt );
+ 	intf_init ( &conn->xfer, &http_conn_xfer_desc, &conn->refcnt );
+ 	pool_init ( &conn->pool, http_conn_expired, &conn->refcnt );
+ 
+ 	/* Open socket */
+ 	memset ( &server, 0, sizeof ( server ) );
++	server.st_family = local.st_family;
+ 	server.st_port = htons ( port );
+ 	if ( ( rc = xfer_open_named_socket ( &conn->socket, SOCK_STREAM,
+ 					     ( struct sockaddr * ) &server,
+-					     uri->host, NULL ) ) != 0 )
++					     uri->host,
++					     ( local.st_family ?
++					       ( ( struct sockaddr * ) &local ) :
++					       NULL ) ) ) != 0 )
+ 		goto err_open;
+ 
+ 	/* Add filter, if any */
+--- a/src/net/tcp.c
++++ b/src/net/tcp.c
+@@ -45,6 +45,8 @@
+ 
+ 	/** Remote socket address */
+ 	struct sockaddr_tcpip peer;
++	/** Local source binding, or zero for automatic source selection */
++	struct sockaddr_tcpip local;
+ 	/** Local port */
+ 	unsigned int local_port;
+ 	/** Maximum segment size */
+@@ -301,6 +303,26 @@
+ 	INIT_LIST_HEAD ( &tcp->tx_queue );
+ 	INIT_LIST_HEAD ( &tcp->rx_queue );
+ 	memcpy ( &tcp->peer, st_peer, sizeof ( tcp->peer ) );
++	if ( st_local )
++		memcpy ( &tcp->local, st_local, sizeof ( tcp->local ) );
++
++	/* A source binding must use the same address family and interface as
++	 * the destination.  Apply its scope before route and MSS selection.
++	 */
++	if ( tcp->local.st_family ) {
++		if ( tcp->local.st_family != tcp->peer.st_family ) {
++			rc = -EAFNOSUPPORT;
++			goto err;
++		}
++		if ( tcp->local.st_scope_id ) {
++			if ( tcp->peer.st_scope_id &&
++			     ( tcp->peer.st_scope_id != tcp->local.st_scope_id ) ) {
++				rc = -EINVAL;
++				goto err;
++			}
++			tcp->peer.st_scope_id = tcp->local.st_scope_id;
++		}
++	}
+ 
+ 	/* Calculate MSS */
+ 	mtu = tcpip_mtu ( &tcp->peer );
+@@ -751,7 +773,9 @@
+ 	DBGC2 ( tcp, "\n" );
+ 
+ 	/* Transmit packet */
+-	if ( ( rc = tcpip_tx ( iobuf, &tcp_protocol, NULL, &tcp->peer, NULL,
++	if ( ( rc = tcpip_tx ( iobuf, &tcp_protocol,
++			       ( tcp->local.st_family ? &tcp->local : NULL ),
++			       &tcp->peer, NULL,
+ 			       &tcphdr->csum ) ) != 0 ) {
+ 		DBGC ( tcp, "TCP %p could not transmit %08x..%08x %08x: %s\n",
+ 		       tcp, tcp->snd_seq, ( tcp->snd_seq + tcp->snd_sent ),
+@@ -874,6 +898,11 @@
+ 	struct tcp_header *tcphdr;
+ 	int rc;
+ 
++	/* Reset destinations come from the received packet, not tcp->peer. */
++	if ( tcp->local.st_family &&
++	     ( tcp->local.st_family != st_dest->st_family ) )
++		return -EAFNOSUPPORT;
++
+ 	/* Allocate space for dataless TX buffer */
+ 	iobuf = alloc_iob ( TCP_MAX_HEADER_LEN );
+ 	if ( ! iobuf ) {
+@@ -905,7 +934,8 @@
+ 	DBGC2 ( tcp, "\n" );
+ 
+ 	/* Transmit packet */
+-	if ( ( rc = tcpip_tx ( iobuf, &tcp_protocol, NULL, st_dest,
++	if ( ( rc = tcpip_tx ( iobuf, &tcp_protocol,
++			       ( tcp->local.st_family ? &tcp->local : NULL ), st_dest,
+ 			       NULL, &tcphdr->csum ) ) != 0 ) {
+ 		DBGC ( tcp, "TCP %p could not transmit RST %08x..%08x %08x: "
+ 		       "%s\n", tcp, ntohl ( in_tcphdr->ack ),
+--- a/src/net/ipv6.c
++++ b/src/net/ipv6.c
+@@ -567,8 +567,19 @@
+ 		rc = -ENETUNREACH;
+ 		goto err;
+ 	}
+-	if ( sin6_src && ! IN6_IS_ADDR_UNSPECIFIED ( &sin6_src->sin6_addr ) )
++	if ( sin6_src && ! IN6_IS_ADDR_UNSPECIFIED ( &sin6_src->sin6_addr ) ) {
++		/* Reject a bound TCP source after address removal or if routing
++		 * selects a different device.  Do not fall back to another address.
++		 */
++		if ( ( tcpip_protocol->tcpip_proto == IP_TCP ) &&
++		     ( ( sin6_src->sin6_scope_id &&
++			 ( sin6_src->sin6_scope_id != netdev->scope_id ) ) ||
++		       ! ipv6_has_addr ( netdev, &sin6_src->sin6_addr ) ) ) {
++			rc = -EADDRNOTAVAIL;
++			goto err;
++		}
+ 		src = &sin6_src->sin6_addr;
++	}
+ 	if ( src )
+ 		memcpy ( &iphdr->src, src, sizeof ( iphdr->src ) );
+ 
+--- a/src/net/udp/dns.c
++++ b/src/net/udp/dns.c
+@@ -678,6 +678,7 @@
+ 	size_t next_offset;
+ 	size_t rdlength;
+ 	size_t name_len;
++	int renamed = 0;
+ 	int rc;
+ 
+ 	/* Sanity check */
+@@ -784,6 +785,10 @@
+ 
+ 		case htons ( DNS_TYPE_A ):
+ 
++			/* An explicitly IPv6 socket cannot use an A answer. */
++			if ( dns->address.sa.sa_family == AF_INET6 )
++				continue;
++
+ 			/* Found the target A record */
+ 			if ( rdlength < sizeof ( dns->address.sin.sin_addr ) ) {
+ 				DBGC ( dns, "DNS %p received response with "
+@@ -820,6 +825,7 @@
+ 				dns_done ( dns, rc );
+ 				goto done;
+ 			}
++			renamed = 1;
+ 			next_offset = answer_offset;
+ 			break;
+ 
+@@ -837,17 +843,27 @@
+ 	 */
+ 	stop_timer ( &dns->timer );
+ 
++	/* Follow IPv6 aliases with another AAAA query, not an A fallback. */
++	if ( renamed && ( dns->address.sa.sa_family == AF_INET6 ) ) {
++		dns_send_packet ( dns );
++		rc = 0;
++		goto done;
++	}
++
+ 	/* Determine what to do next based on the type of query we
+ 	 * issued and the response we received
+ 	 */
+ 	switch ( qtype ) {
+ 
+ 	case htons ( DNS_TYPE_AAAA ):
+-		/* We asked for an AAAA record and got nothing; try
+-		 * the A.
++		/* Keep CNAME and search-list handling for IPv6-only requests,
++		 * without falling back to an unusable A record.
+ 		 */
+-		DBGC ( dns, "DNS %p found no AAAA record; trying A\n", dns );
+-		dns->question->qtype = htons ( DNS_TYPE_A );
++		dns->question->qtype =
++			( ( dns->address.sa.sa_family == AF_INET6 ) ?
++			  htons ( DNS_TYPE_CNAME ) : htons ( DNS_TYPE_A ) );
++		DBGC ( dns, "DNS %p found no AAAA record; trying %s\n", dns,
++		       dns_type ( dns->question->qtype ) );
+ 		dns_send_packet ( dns );
+ 		rc = 0;
+ 		goto done;
+@@ -1008,7 +1024,7 @@
+ 	memcpy ( dns->search.data, dns_search.data, search_len );
+ 
+ 	/* Determine initial query type */
+-	dns->qtype = ( ( dns6.count != 0 ) ?
++	dns->qtype = ( ( ( sa->sa_family == AF_INET6 ) || ( dns6.count != 0 ) ) ?
+ 		       htons ( DNS_TYPE_AAAA ) : htons ( DNS_TYPE_A ) );
+ 
+ 	/* Construct query */
+--- a/src/include/ipxe/errfile.h
++++ b/src/include/ipxe/errfile.h
+@@ -449,6 +449,8 @@
+ #define ERRFILE_efi_cacert	      ( ERRFILE_OTHER | 0x00670000 )
+ #define ERRFILE_elliptic	      ( ERRFILE_OTHER | 0x00680000 )
+ #define ERRFILE_ecdsa		      ( ERRFILE_OTHER | 0x00690000 )
++/* Avoid the measured-boot hunk after `ERRFILE_cbc`, which uses 0x006d0000. */
++#define ERRFILE_http_source_test       ( ERRFILE_OTHER | 0x006e0000 )
+ #define ERRFILE_crypto_null	      ( ERRFILE_OTHER | 0x006a0000 )
+ #define ERRFILE_ffdhe		      ( ERRFILE_OTHER | 0x006b0000 )
+ #define ERRFILE_cbc		      ( ERRFILE_OTHER | 0x006c0000 )
+--- /dev/null
++++ b/src/tests/http_source_test.c
+@@ -0,0 +1,511 @@
++/*
++ * Copyright (C) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
++ *
++ * This program is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU General Public License as
++ * published by the Free Software Foundation; either version 2 of the
++ * License, or any later version.
++ *
++ * This program is distributed in the hope that it will be useful, but
++ * WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program; if not, write to the Free Software
++ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA
++ * 02110-1301, USA.
++ *
++ * You can also choose to distribute this program under the terms of
++ * the Unmodified Binary Distribution Licence (as given in the file
++ * COPYING.UBDL), provided that you have satisfied its requirements.
++ */
++
++FILE_LICENCE ( GPL2_OR_LATER_OR_UBDL );
++
++/** @file
++ *
++ * HTTP IPv6 source selection self-test
++ *
++ */
++
++/* Forcibly enable assertions */
++#undef NDEBUG
++
++#include <stdlib.h>
++#include <string.h>
++#include <errno.h>
++#include <byteswap.h>
++#include <ipxe/dns.h>
++#include <ipxe/http.h>
++#include <ipxe/if_ether.h>
++#include <ipxe/ip.h>
++#include <ipxe/ipv6.h>
++#include <ipxe/neighbour.h>
++#include <ipxe/process.h>
++#include <ipxe/settings.h>
++#include <ipxe/tcp.h>
++#include <ipxe/test.h>
++#include <ipxe/udp.h>
++#include <ipxe/uri.h>
++#include "netdev_test.h"
++
++/* Keep both addresses in settings: changing http-source6 rebuilds routes. */
++TESTNET ( httptest, "02:00:00:00:71:72",
++	  { "ip", "192.0.2.10" },
++	  { "netmask", "255.255.255.0" },
++	  { "dhcpv6/ip6", "2001:db8:7172:1::10" },
++	  { "dhcpv6/len6", "128" },
++	  { "slaac/ip6", "2001:db8:7172:2::10" },
++	  { "slaac/len6", "64" } );
++
++/** First SYN captured by the test NIC */
++static struct {
++	struct in6_addr dest;
++	struct in6_addr source;
++	unsigned int count;
++} http_syn;
++
++/* Only the active DNS case receives replies.  Its HTTP connection is stopped
++ * at the first SYN, or when resolution reports failure.
++ */
++static struct http_dns_test {
++	struct interface xfer;
++	const char *name;
++	const char *target;
++	struct in_addr server;
++	unsigned int queries;
++	int closed;
++	int status;
++	int failed;
++} http_dns;
++
++/* Cleanup cancellation must not stand in for an observed lookup failure. */
++static void http_dns_close ( struct http_dns_test *test, int rc ) {
++	test->closed = 1;
++	test->status = rc;
++	intf_shutdown ( &test->xfer, rc );
++}
++
++static struct interface_operation http_dns_operations[] = {
++	INTF_OP ( intf_close, struct http_dns_test *, http_dns_close ),
++};
++
++static struct interface_descriptor http_dns_desc =
++	INTF_DESC ( struct http_dns_test, xfer, http_dns_operations );
++
++/** Match an absent setting independently of the file returning the error. */
++static int http_source_missing ( int rc ) {
++	return ( ( -rc & 0x7f0000ff ) == ( ENOENT & 0x7f0000ff ) );
++}
++
++/* Each answer names the copied question, using its DNS compression offset. */
++static void http_dns_answer ( struct io_buffer *reply, struct dns_header *dns,
++			      unsigned int type, const void *data, size_t len ) {
++	uint16_t owner = htons ( 0xc000 | sizeof ( *dns ) );
++	struct dns_rr_common *rr;
++
++	memcpy ( iob_put ( reply, sizeof ( owner ) ), &owner, sizeof ( owner ) );
++	rr = iob_put ( reply, sizeof ( *rr ) );
++	memset ( rr, 0, sizeof ( *rr ) );
++	rr->type = htons ( type );
++	rr->class = htons ( DNS_CLASS_IN );
++	rr->rdlength = htons ( len );
++	memcpy ( iob_put ( reply, len ), data, len );
++	dns->ancount = htons ( ntohs ( dns->ancount ) + 1 );
++}
++
++/* Answer two fixed DNS exchanges over IPv4.  Queue replies through the real
++ * receive path so a reply cannot reenter the resolver while it sends a query.
++ */
++static void http_dns_reply ( struct net_device *netdev,
++			     struct io_buffer *iobuf ) {
++	struct ethhdr *eth = iobuf->data;
++	struct iphdr *ip = ( ( void * ) ( eth + 1 ) );
++	struct udp_header *udp = ( ( void * ) ( ip + 1 ) );
++	struct dns_header *dns = ( ( void * ) ( udp + 1 ) );
++	struct dns_question *question;
++	struct dns_name name;
++	struct io_buffer *reply = NULL;
++	struct ethhdr *reply_eth;
++	struct iphdr *reply_ip;
++	struct udp_header *reply_udp;
++	struct dns_header *reply_dns;
++	struct in_addr ipv4;
++	char decoded[DNS_MAX_NAME_LEN + 1];
++	const char *expected;
++	size_t prefix = ( sizeof ( *eth ) + sizeof ( *ip ) + sizeof ( *udp ) );
++	size_t udp_len;
++	unsigned int query = http_dns.queries;
++	unsigned int type;
++	int offset;
++	int len;
++	int valid;
++
++	if ( ! http_dns.name || ( iob_len ( iobuf ) < prefix + sizeof ( *dns ) ) ||
++	     ( eth->h_protocol != htons ( ETH_P_IP ) ) ||
++	     ( ip->protocol != IP_UDP ) || ( udp->dest != htons ( DNS_PORT ) ) )
++		return;
++	udp_len = ntohs ( udp->len );
++	valid = ( ( query < 2 ) &&
++		  ( ip->verhdrlen == ( IP_VER | ( sizeof ( *ip ) / 4 ) ) ) &&
++		  ( ip->dest.s_addr == http_dns.server.s_addr ) &&
++		  ( udp_len >= sizeof ( *udp ) + sizeof ( *dns ) ) &&
++		  ( prefix + udp_len - sizeof ( *udp ) <= iob_len ( iobuf ) ) &&
++		  ( dns->qdcount == htons ( 1 ) ) );
++	ok ( valid );
++	if ( ! valid )
++		goto fail;
++	name.data = dns;
++	name.offset = sizeof ( *dns );
++	name.len = ( udp_len - sizeof ( *udp ) );
++	offset = dns_skip ( &name );
++	valid = ( ( offset >= 0 ) &&
++		  ( offset + sizeof ( *question ) <= name.len ) );
++	ok ( valid );
++	if ( ! valid )
++		goto fail;
++	question = ( ( ( void * ) dns ) + offset );
++	len = dns_decode ( &name, decoded, sizeof ( decoded ) );
++	expected = ( ( http_dns.target && query ) ?
++		     http_dns.target : http_dns.name );
++	type = ( ( ! http_dns.target && query ) ? DNS_TYPE_CNAME : DNS_TYPE_AAAA );
++	valid = ( ( len >= 0 ) && ( ( size_t ) len < sizeof ( decoded ) ) &&
++		  ( strcmp ( decoded, expected ) == 0 ) &&
++		  ( question->qtype == htons ( type ) ) &&
++		  ( question->qclass == htons ( DNS_CLASS_IN ) ) );
++	ok ( valid );
++	if ( ! valid )
++		goto fail;
++	http_dns.queries++;
++	DBG ( "HTTP DNS query %d: %s type %d\n", ( int ) query, decoded, ( int ) type );
++
++	/* The fixed names and at most two answers fit in one Ethernet frame. */
++	reply = alloc_iob ( ETH_FRAME_LEN );
++	ok ( reply != NULL );
++	if ( ! reply )
++		goto fail;
++	memcpy ( iob_put ( reply, prefix + offset + sizeof ( *question ) ),
++		 iobuf->data, prefix + offset + sizeof ( *question ) );
++	reply_eth = reply->data;
++	reply_ip = ( ( void * ) ( reply_eth + 1 ) );
++	reply_udp = ( ( void * ) ( reply_ip + 1 ) );
++	reply_dns = ( ( void * ) ( reply_udp + 1 ) );
++	reply_dns->flags = htons ( 0x8180 ); /* Response, recursion, NOERROR */
++	reply_dns->ancount = reply_dns->nscount = reply_dns->arcount = 0;
++	if ( http_dns.target && ! query ) {
++		name.data = decoded;
++		name.offset = 0;
++		name.len = sizeof ( decoded );
++		len = dns_encode ( http_dns.target, &name );
++		valid = ( ( len > 0 ) && ( ( size_t ) len <= sizeof ( decoded ) ) );
++		ok ( valid );
++		if ( ! valid )
++			goto fail;
++		http_dns_answer ( reply, reply_dns, DNS_TYPE_CNAME, decoded, len );
++	} else if ( http_dns.target ) {
++		/* An A answer before AAAA must not override the IPv6 binding. */
++		ok ( inet_aton ( "192.0.2.80", &ipv4 ) != 0 );
++		http_dns_answer ( reply, reply_dns, DNS_TYPE_A,
++				  &ipv4, sizeof ( ipv4 ) );
++		http_dns_answer ( reply, reply_dns, DNS_TYPE_AAAA,
++				  &http_syn.dest, sizeof ( http_syn.dest ) );
++	}
++	memcpy ( reply_eth->h_dest, eth->h_source, ETH_ALEN );
++	memcpy ( reply_eth->h_source, eth->h_dest, ETH_ALEN );
++	reply_ip->src = ip->dest;
++	reply_ip->dest = ip->src;
++	reply_ip->len = htons ( iob_len ( reply ) - sizeof ( *eth ) );
++	reply_ip->chksum = 0;
++	reply_ip->chksum = tcpip_chksum ( reply_ip, sizeof ( *reply_ip ) );
++	reply_udp->src = udp->dest;
++	reply_udp->dest = udp->src;
++	reply_udp->len = htons ( iob_len ( reply ) - prefix + sizeof ( *udp ) );
++	reply_udp->chksum = 0; /* Valid for this IPv4 response. */
++	netdev_rx ( netdev, iob_disown ( reply ) );
++	return;
++ fail:
++	http_dns.failed = 1;
++	free_iob ( reply );
++}
++
++/**
++ * Capture the source selected by HTTP, TCP, and IPv6 together.
++ *
++ * Only DNS replies are simulated: stop at the first TCP SYN and abort the
++ * connection before it can enter the HTTP connection pool.
++ */
++static int http_source_transmit ( struct net_device *netdev,
++				  struct io_buffer *iobuf ) {
++	struct ethhdr *eth = iobuf->data;
++	struct ipv6_header *ip = ( ( void * ) ( eth + 1 ) );
++	struct tcp_header *tcp = ( ( void * ) ( ip + 1 ) );
++
++	if ( ( iob_len ( iobuf ) >=
++	       ( sizeof ( *eth ) + sizeof ( *ip ) + sizeof ( *tcp ) ) ) &&
++	     ( eth->h_protocol == htons ( ETH_P_IPV6 ) ) &&
++	     ( ip->next_header == IP_TCP ) &&
++	     ( memcmp ( &ip->dest, &http_syn.dest,
++			sizeof ( ip->dest ) ) == 0 ) &&
++	     ( tcp->dest == htons ( HTTP_PORT ) ) &&
++	     ( tcp->flags & TCP_SYN ) && ! http_syn.count ) {
++		memcpy ( &http_syn.source, &ip->src, sizeof ( ip->src ) );
++		http_syn.count++;
++	}
++	http_dns_reply ( netdev, iobuf );
++	netdev_tx_complete ( netdev, iobuf );
++	return 0;
++}
++
++/* IPv4 DNS transport must still resolve an IPv6-bound HTTP connection using
++ * AAAA.  The second case has no AAAA or CNAME: it must fail without querying A.
++ */
++static void http_dns_test_exec ( const struct setting *source6,
++				 const uint8_t *peer_mac ) {
++	static const struct {
++		const char *uri;
++		const char *target;
++	} cases[] = {
++		{ "http://alias.example.test/", "target.example.test" },
++		{ "http://v4only.example.test/", NULL },
++	};
++	const struct setting *settings[] = { &dns_setting, &dns6_setting };
++	struct {
++		struct settings *origin;
++		struct setting setting;
++		void *value;
++		int len;
++	} saved[2] = { { 0 } };
++	struct settings *local = netdev_settings ( httptest.netdev );
++	struct in_addr server;
++	struct in6_addr expected;
++	struct uri *uri;
++	unsigned int saved_count = 0;
++	unsigned int i;
++	unsigned int steps;
++	int rc;
++
++	/* Remove only the effective DNS values and restore them below.  A second
++	 * inherited value would make the fixture's DNS transport ambiguous.
++	 */
++	for ( i = 0 ; i < 2 ; i++ ) {
++		saved[i].len = fetch_setting_copy ( NULL, settings[i], &saved[i].origin,
++						   &saved[i].setting, &saved[i].value );
++		saved_count++;
++		ok ( ( saved[i].len >= 0 ) || http_source_missing ( saved[i].len ) );
++		if ( ( saved[i].len < 0 ) && ! http_source_missing ( saved[i].len ) )
++			goto restore;
++		if ( saved[i].len >= 0 ) {
++			rc = delete_setting ( saved[i].origin, &saved[i].setting );
++			ok ( rc == 0 );
++			if ( rc != 0 )
++				goto restore;
++		}
++		rc = fetch_raw_setting ( NULL, settings[i], NULL, 0 );
++		ok ( http_source_missing ( rc ) );
++		if ( ! http_source_missing ( rc ) )
++			goto restore;
++	}
++	rc = storef_setting ( local, &dns_setting, "192.0.2.53" );
++	ok ( rc == 0 );
++	if ( rc != 0 )
++		goto restore;
++	rc = storef_setting ( local, source6, "2001:db8:7172:1::10%httptest" );
++	ok ( rc == 0 );
++	if ( rc != 0 )
++		goto restore;
++	ok ( inet_aton ( "192.0.2.53", &server ) != 0 );
++	ok ( inet6_aton ( "2001:db8:7172:1::10", &expected ) == 0 );
++	rc = neighbour_define ( httptest.netdev, &ipv4_protocol, &server, peer_mac );
++	ok ( rc == 0 );
++	if ( rc != 0 )
++		goto restore;
++	rc = neighbour_define ( httptest.netdev, &ipv6_protocol,
++				&http_syn.dest, peer_mac );
++	ok ( rc == 0 );
++	if ( rc != 0 )
++		goto restore;
++
++	for ( i = 0 ; i < ( sizeof ( cases ) / sizeof ( cases[0] ) ) ; i++ ) {
++		DBG ( "HTTP DNS resolving %s\n", cases[i].uri );
++		uri = parse_uri ( cases[i].uri );
++		ok ( uri != NULL );
++		if ( ! uri )
++			break;
++		memset ( &http_dns, 0, sizeof ( http_dns ) );
++		http_dns.name = uri->host;
++		http_dns.target = cases[i].target;
++		http_dns.server = server;
++		http_syn.count = 0;
++		intf_init ( &http_dns.xfer, &http_dns_desc, NULL );
++		rc = http_connect ( &http_dns.xfer, uri );
++		ok ( rc == 0 );
++		if ( rc == 0 ) {
++			for ( steps = 0 ; ( steps < 1024 ) && ! http_syn.count &&
++			      ! http_dns.closed && ! http_dns.failed ; steps++ )
++				step();
++			ok ( ! http_dns.failed );
++			ok ( http_dns.queries == 2 );
++			if ( cases[i].target ) {
++				ok ( ! http_dns.closed );
++				ok ( http_syn.count == 1 );
++				ok ( memcmp ( &http_syn.source, &expected,
++					      sizeof ( expected ) ) == 0 );
++			} else {
++				ok ( http_dns.closed && ( http_dns.status < 0 ) );
++				ok ( http_syn.count == 0 );
++			}
++		}
++		intf_shutdown ( &http_dns.xfer, -ECANCELED );
++		http_dns.name = NULL;
++		uri_put ( uri );
++	}
++ restore:
++	ok ( delete_setting ( local, &dns_setting ) == 0 );
++	for ( i = 0 ; i < saved_count ; i++ ) {
++		if ( saved[i].len >= 0 ) {
++			ok ( store_setting ( saved[i].origin, &saved[i].setting,
++					     saved[i].value, saved[i].len ) == 0 );
++		}
++		free ( saved[i].value );
++	}
++}
++
++/**
++ * A stateful lease must remain the HTTP source when another local prefix
++ * contains the server.  Without the opt-in, normal source selection must
++ * still choose that on-link prefix's address.
++ * Invalid bindings must fail before opening a connection.
++ */
++static void http_source_test_exec ( void ) {
++	static const struct {
++		const char *binding;
++		/* Expected source, or `NULL` if opening must fail. */
++		const char *source;
++	} cases[] = {
++		/* Keep the recorded lease even though the route supplies SLAAC. */
++		{ "2001:db8:7172:1::10%httptest", "2001:db8:7172:1::10" },
++		/* Clearing the opt-in restores the route's normal source. */
++		{ NULL, "2001:db8:7172:2::10" },
++		/* An unspecified source must not request automatic selection. */
++		{ "::%httptest", NULL },
++		/* A parsed source must still belong to the selected interface. */
++		{ "2001:db8:7172:1::99%httptest", NULL },
++	};
++	static const uint8_t peer_mac[ETH_ALEN] = { 2, 0, 0, 0, 0, 0x80 };
++	const struct setting *source6 = find_setting ( "http-source6" );
++	struct settings *saved_origin;
++	struct setting saved_setting;
++	void *saved_value;
++	int saved_len;
++	struct net_device_operations operations;
++	struct net_device_operations *saved_operations;
++	struct interface xfer;
++	struct uri *uri;
++	struct in6_addr expected;
++	unsigned int i;
++	unsigned int steps;
++	int rc;
++
++	ok ( source6 != NULL );
++	if ( ! source6 )
++		return;
++
++	/* Restore an existing binding to its original settings block.  A
++	 * second inherited binding would invalidate the unbound control, so
++	 * report it as a failed precondition rather than changing it too.
++	 */
++	saved_len = fetch_setting_copy ( NULL, source6, &saved_origin,
++					 &saved_setting, &saved_value );
++	ok ( ( saved_len >= 0 ) || http_source_missing ( saved_len ) );
++	if ( ( saved_len < 0 ) && ! http_source_missing ( saved_len ) )
++		return;
++	if ( saved_len >= 0 ) {
++		rc = delete_setting ( saved_origin, &saved_setting );
++		ok ( rc == 0 );
++		if ( rc != 0 )
++			goto restore;
++	}
++	rc = fetch_raw_setting ( NULL, source6, NULL, 0 );
++	ok ( http_source_missing ( rc ) );
++	if ( ! http_source_missing ( rc ) )
++		goto restore;
++
++	testnet_ok ( &httptest );
++	saved_operations = httptest.netdev->op;
++	memcpy ( &operations, saved_operations, sizeof ( operations ) );
++	operations.transmit = http_source_transmit;
++	httptest.netdev->op = &operations;
++	ok ( inet6_aton ( "2001:db8:7172:2::80", &http_syn.dest ) == 0 );
++	uri = parse_uri ( "http://[2001:db8:7172:2::80]/" );
++	ok ( uri != NULL );
++	if ( ! uri )
++		goto remove;
++
++	for ( i = 0 ; i < ( sizeof ( cases ) / sizeof ( cases[0] ) ) ; i++ ) {
++		DBG ( "HTTP source binding %s expects %s\n",
++		      ( cases[i].binding ? cases[i].binding : "<unset>" ),
++		      ( cases[i].source ? cases[i].source : "<rejected>" ) );
++		if ( cases[i].binding ) {
++			rc = storef_setting ( netdev_settings ( httptest.netdev ),
++					      source6, cases[i].binding );
++		} else {
++			rc = delete_setting ( netdev_settings ( httptest.netdev ),
++					      source6 );
++		}
++		ok ( rc == 0 );
++		if ( rc != 0 )
++			break;
++		if ( cases[i].source )
++			ok ( inet6_aton ( cases[i].source, &expected ) == 0 );
++
++		/* Resolve only the link-layer neighbour, leaving source and
++		 * route selection to the production stack.
++		 */
++		rc = neighbour_define ( httptest.netdev, &ipv6_protocol,
++					&http_syn.dest, peer_mac );
++		ok ( rc == 0 );
++		if ( rc != 0 )
++			break;
++		http_syn.count = 0;
++		intf_init ( &xfer, &null_intf_desc, NULL );
++		rc = http_connect ( &xfer, uri );
++		if ( ! cases[i].source ) {
++			ok ( rc < 0 );
++			ok ( http_syn.count == 0 );
++		} else {
++			ok ( rc == 0 );
++		}
++		if ( ( rc == 0 ) && cases[i].source ) {
++			/* Numeric resolution and the first SYN are scheduled work.
++			 * A missing packet must fail, not hang or skip the assertion.
++			 */
++			for ( steps = 0 ; ( steps < 1024 ) && ! http_syn.count ;
++			      steps++ )
++				step();
++			ok ( http_syn.count == 1 );
++			if ( http_syn.count ) {
++				ok ( memcmp ( &http_syn.source, &expected,
++					      sizeof ( expected ) ) == 0 );
++			}
++		}
++		intf_shutdown ( &xfer, -ECANCELED );
++	}
++	http_dns_test_exec ( source6, peer_mac );
++	uri_put ( uri );
++ remove:
++	httptest.netdev->op = saved_operations;
++	testnet_remove_ok ( &httptest );
++ restore:
++	if ( saved_len >= 0 ) {
++		ok ( store_setting ( saved_origin, &saved_setting, saved_value,
++				     saved_len ) == 0 );
++	}
++	free ( saved_value );
++}
++
++/** HTTP IPv6 source selection self-test */
++struct self_test http_source_test __self_test = {
++	.name = "http_source",
++	.exec = http_source_test_exec,
++};
+--- a/src/tests/tests.c
++++ b/src/tests/tests.c
+@@ -29,6 +29,8 @@
+  *
+  */
+ 
++#include <config/general.h>
++
+ /* Drag in all applicable self-tests */
+ PROVIDE_REQUIRING_SYMBOL();
+ REQUIRE_OBJECT ( memset_test );
+@@ -63,6 +65,9 @@
+ REQUIRE_OBJECT ( deflate_test );
+ REQUIRE_OBJECT ( png_test );
+ REQUIRE_OBJECT ( dns_test );
++#if defined ( NET_PROTO_IPV6 ) && defined ( DOWNLOAD_PROTO_HTTP )
++REQUIRE_OBJECT ( http_source_test );
++#endif
+ REQUIRE_OBJECT ( uri_test );
+ REQUIRE_OBJECT ( profile_test );
+ REQUIRE_OBJECT ( setjmp_test );

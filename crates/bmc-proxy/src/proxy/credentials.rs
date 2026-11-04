@@ -15,33 +15,97 @@
  * limitations under the License.
  */
 
-//! The credentials the proxy applies for a BMC, fetched from nico-api and
-//! cached by the BMC's IP.
+//! The credentials the proxy applies for a proxied address, fetched from
+//! nico-api and cached by the address: a BMC's, or the NVOS admin's for a
+//! switch's NVOS management interface.
 
 use std::net::IpAddr;
+use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
 
+use carbide_instrument::emit;
 use carbide_utils::redfish::redfish_basic_authorization_context;
+use carbide_uuid::switch::SwitchId;
+use mac_address::MacAddress;
 use moka::future::Cache as MokaCache;
 use rpc::forge;
 use rpc::forge_api_client::ForgeApiClient;
 
+use crate::metrics::SwitchProbeDenied;
 use crate::proxy::BmcProxyError;
 
 /// Redfish's session token header, per DMTF. Applied on egress and stripped
 /// on ingress by `copy_request_headers` in [`upstream`](super::upstream).
 pub(super) const REDFISH_AUTH_TOKEN_HEADER: &str = "X-Auth-Token";
 
-/// Cached BMC credentials by IP. Correctness comes from the 401/403 eviction
+/// Cached credentials by IP. Correctness comes from the 401/403 eviction
 /// in [`proxy_request_inner`](super::proxy_request_inner). Expiry is idle-based, not lifetime-based: an entry
 /// a caller keeps using stays served even through a long nico-api outage
 /// (the availability the pre-cache-bound proxy provided), while an entry for
 /// a machine that stopped existing falls out once nothing asks for it. The
 /// capacity bounds memory.
-pub(super) type CredentialCache = MokaCache<IpAddr, BmcCredentials>;
+pub(super) type CredentialCache = MokaCache<IpAddr, TargetCredentials>;
 
 /// How long unused cached credentials linger before falling out.
 pub(super) const CREDENTIAL_CACHE_IDLE_TTL: Duration = Duration::from_secs(60 * 60);
+
+/// What a proxied address is, which decides where its credentials come from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum TargetKind {
+    /// The Redfish BMC of a machine, switch, or power shelf.
+    Bmc,
+    /// A switch's NVOS management interface, serving its NVUE REST API.
+    SwitchNvos,
+}
+
+impl TargetKind {
+    /// The kind's name on the request's trace span, as `bmc_proxy.target`.
+    pub(super) fn as_str(self) -> &'static str {
+        match self {
+            Self::Bmc => "bmc",
+            Self::SwitchNvos => "switch_nvos",
+        }
+    }
+}
+
+/// The credentials resolved for a proxied address, and what the address is.
+#[derive(Clone, PartialEq, Eq)]
+pub(super) struct TargetCredentials {
+    pub(super) target: TargetKind,
+    pub(super) credentials: BmcCredentials,
+}
+
+/// How long the proxy takes every address for a BMC's after nico-api denies
+/// the switch probe, before it probes again.
+pub(super) const SWITCH_PROBE_RETRY_AFTER: Duration = Duration::from_secs(5 * 60);
+
+/// Whether nico-api lets the proxy probe for the switch at an address. A
+/// nico-api that denies the probe predates the proxy's switch support, or
+/// lost the proxy's grant for `FindSwitchIds`; either way it can serve only
+/// BMCs, so the proxy takes every address for a BMC's and probes again after
+/// [`SWITCH_PROBE_RETRY_AFTER`], rather than asking once per cache miss.
+#[derive(Default)]
+pub(super) struct SwitchProbe {
+    denied_until: Mutex<Option<tokio::time::Instant>>,
+}
+
+impl SwitchProbe {
+    /// Whether a denial still stands at `now`.
+    fn is_denied_at(&self, now: tokio::time::Instant) -> bool {
+        lock(&self.denied_until).is_some_and(|until| now < until)
+    }
+
+    /// Remembers a denial at `now`.
+    fn denied_at(&self, now: tokio::time::Instant) {
+        *lock(&self.denied_until) = Some(now + SWITCH_PROBE_RETRY_AFTER);
+    }
+}
+
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .expect("the switch probe mutex must not be poisoned")
+}
 
 #[derive(Clone, PartialEq, Eq)]
 pub(super) enum BmcCredentials {
@@ -112,42 +176,130 @@ impl TryFrom<forge::BmcCredentials> for BmcCredentials {
     }
 }
 
-pub(super) async fn get_bmc_credentials(
+/// The credentials for the address `ip`, cached or resolved through nico-api:
+/// the MAC at the address, then the switch whose NVOS management interface
+/// has that MAC, if any, whose NVOS admin credentials the address takes;
+/// otherwise the BMC credentials for the MAC.
+pub(super) async fn resolve_credentials(
     ip: IpAddr,
     api_client: &ForgeApiClient,
     credential_cache: &CredentialCache,
-) -> Result<BmcCredentials, BmcProxyError> {
-    if let Some(credentials) = credential_cache.get(&ip).await {
-        tracing::debug!(bmc_ip_address = %ip, "Using cached BMC credentials");
-        return Ok(credentials);
+    switch_probe: &SwitchProbe,
+) -> Result<TargetCredentials, BmcProxyError> {
+    if let Some(resolved) = credential_cache.get(&ip).await {
+        tracing::debug!(
+            bmc_ip_address = %ip,
+            target = resolved.target.as_str(),
+            "Using cached credentials",
+        );
+        return Ok(resolved);
     }
 
-    tracing::debug!(bmc_ip_address = %ip, "Fetching BMC credentials from Carbide API");
-    let bmc_mac_address = api_client
+    tracing::debug!(bmc_ip_address = %ip, "Fetching credentials from Carbide API");
+    // Parsed, so the probe's filter is a MAC nico-api can parse too: an
+    // unparsable filter would match every switch, not none.
+    let mac_address: MacAddress = api_client
         .find_mac_address_by_bmc_ip(forge::BmcIp {
             bmc_ip: ip.to_string(),
         })
         .await
         .map_err(|e| BmcProxyError::Api(e.to_string()))?
-        .mac_address;
+        .mac_address
+        .parse()
+        .map_err(|e| BmcProxyError::Api(format!("invalid MAC address for {ip}: {e}")))?;
 
-    let credentials: BmcCredentials = api_client
-        .get_bmc_credentials(forge::GetBmcCredentialsRequest {
-            mac_addr: bmc_mac_address,
+    let resolved = match switch_with_nvos_mac(ip, mac_address, api_client, switch_probe).await? {
+        Some(switch_id) => TargetCredentials {
+            target: TargetKind::SwitchNvos,
+            credentials: nvos_credentials(ip, switch_id, api_client).await?,
+        },
+        None => TargetCredentials {
+            target: TargetKind::Bmc,
+            credentials: bmc_credentials(ip, mac_address, api_client).await?,
+        },
+    };
+
+    credential_cache.insert(ip, resolved.clone()).await;
+    Ok(resolved)
+}
+
+/// The switch whose NVOS management interface has `mac_address`, if one
+/// does: the probe that tells an NVOS address from a BMC's. While nico-api
+/// denies the probe, as `switch_probe` remembers, the address is taken for
+/// a BMC's.
+async fn switch_with_nvos_mac(
+    ip: IpAddr,
+    mac_address: MacAddress,
+    api_client: &ForgeApiClient,
+    switch_probe: &SwitchProbe,
+) -> Result<Option<SwitchId>, BmcProxyError> {
+    if switch_probe.is_denied_at(tokio::time::Instant::now()) {
+        tracing::debug!(
+            bmc_ip_address = %ip,
+            "Switch lookup denied earlier; taking the address for a BMC's",
+        );
+        return Ok(None);
+    }
+    let ids = match api_client
+        .find_switch_ids(forge::SwitchSearchFilter {
+            nvos_mac: Some(mac_address.to_string()),
+            ..Default::default()
+        })
+        .await
+    {
+        Ok(list) => list.ids,
+        Err(status) if status.code() == tonic::Code::PermissionDenied => {
+            switch_probe.denied_at(tokio::time::Instant::now());
+            emit(SwitchProbeDenied {
+                bmc_ip_address: ip.to_string(),
+                error: status.to_string(),
+            });
+            return Ok(None);
+        }
+        Err(status) => return Err(BmcProxyError::Api(status.to_string())),
+    };
+    match ids.as_slice() {
+        [] => Ok(None),
+        [switch_id] => Ok(Some(*switch_id)),
+        _ => Err(BmcProxyError::AmbiguousNvosAddress(ip)),
+    }
+}
+
+async fn nvos_credentials(
+    ip: IpAddr,
+    switch_id: SwitchId,
+    api_client: &ForgeApiClient,
+) -> Result<BmcCredentials, BmcProxyError> {
+    api_client
+        .get_switch_nvos_credentials(forge::GetSwitchNvosCredentialsRequest {
+            switch_id: Some(switch_id),
         })
         .await
         .map_err(|e| BmcProxyError::Api(e.to_string()))?
         .credentials
         .ok_or(BmcProxyError::NoCredentials(ip))?
-        .try_into()?;
+        .try_into()
+}
 
-    credential_cache.insert(ip, credentials.clone()).await;
-    Ok(credentials)
+async fn bmc_credentials(
+    ip: IpAddr,
+    mac_address: MacAddress,
+    api_client: &ForgeApiClient,
+) -> Result<BmcCredentials, BmcProxyError> {
+    api_client
+        .get_bmc_credentials(forge::GetBmcCredentialsRequest {
+            mac_addr: mac_address.to_string(),
+        })
+        .await
+        .map_err(|e| BmcProxyError::Api(e.to_string()))?
+        .credentials
+        .ok_or(BmcProxyError::NoCredentials(ip))?
+        .try_into()
 }
 
 pub(super) async fn evict_cached_credentials(ip: IpAddr, credential_cache: &CredentialCache) {
     if credential_cache.remove(&ip).await.is_some() {
-        tracing::info!(bmc_ip_address = %ip, "Evicted cached BMC credentials after upstream auth failure");
+        tracing::info!(bmc_ip_address = %ip, "Evicted cached credentials after upstream auth failure");
     }
 }
 
@@ -160,10 +312,24 @@ mod tests {
     use rpc::forge;
 
     use super::{
-        BmcCredentials, CREDENTIAL_CACHE_IDLE_TTL, CredentialCache, evict_cached_credentials,
+        BmcCredentials, CREDENTIAL_CACHE_IDLE_TTL, CredentialCache, SWITCH_PROBE_RETRY_AFTER,
+        SwitchProbe, evict_cached_credentials,
     };
     use crate::proxy::idle_bounded_cache;
     use crate::proxy::test_support::*;
+
+    /// A denied probe stands for [`SWITCH_PROBE_RETRY_AFTER`] and no longer.
+    #[test]
+    fn a_denied_probe_stands_until_its_retry_time() {
+        let probe = SwitchProbe::default();
+        let denied = tokio::time::Instant::now();
+        assert!(!probe.is_denied_at(denied));
+
+        probe.denied_at(denied);
+        assert!(probe.is_denied_at(denied));
+        assert!(probe.is_denied_at(denied + SWITCH_PROBE_RETRY_AFTER / 2));
+        assert!(!probe.is_denied_at(denied + SWITCH_PROBE_RETRY_AFTER));
+    }
 
     #[test]
     fn bmc_credentials_convert_from_api_response() {
@@ -310,10 +476,10 @@ mod tests {
         credential_cache
             .insert(
                 ip,
-                BmcCredentials::UsernamePassword {
+                for_bmc(BmcCredentials::UsernamePassword {
                     username: "admin".to_string(),
                     password: "secret".to_string(),
-                },
+                }),
             )
             .await;
 

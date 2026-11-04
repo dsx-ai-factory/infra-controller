@@ -135,6 +135,7 @@ impl TryFrom<Args> for ::rpc::forge::CreateDpuExtensionServiceRequest {
             };
 
         Ok(Self {
+            deployment_type: ::rpc::forge::DpuExtensionServiceDeploymentType::DemandDriven as i32,
             dpu_target: args.dpu_target.map(|target| match target {
                 DpuTarget::Primary => ::rpc::forge::DpuExtensionServiceDpuTarget::Primary as i32,
                 DpuTarget::AllActive => {
@@ -154,6 +155,7 @@ impl TryFrom<Args> for ::rpc::forge::CreateDpuExtensionServiceRequest {
                     configs: observability,
                 },
             ),
+            service_vpc_interfaces: vec![],
         })
     }
 }

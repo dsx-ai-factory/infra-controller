@@ -43,7 +43,7 @@ import traceback
 import requests
 import urllib3
 
-from lib import admin_cli, nico_rest
+from lib import admin_cli, network, nico_rest
 from lib.config import load_config
 from lib.credentials import CredentialError, resolve_client_credential
 from lib.site_vault import SiteVaultClient, SiteVaultError
@@ -242,7 +242,7 @@ def check_bmc(config, machine):
 def _redfish(ip: str, path: str, auth: tuple[str, str] | None):
     """One Redfish GET. Unverified TLS, as the test does."""
     return requests.get(
-        f"https://{ip}{path}", auth=auth, verify=False, timeout=REDFISH_TIMEOUT
+        network.redfish_url(ip, path), auth=auth, verify=False, timeout=REDFISH_TIMEOUT
     )
 
 

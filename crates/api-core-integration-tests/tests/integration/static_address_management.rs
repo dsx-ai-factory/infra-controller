@@ -22,6 +22,8 @@ use carbide_api_core::test_support::network_segment::create_static_assignments_s
 use carbide_test_harness::TestNetworkSegment;
 use carbide_test_harness::prelude::*;
 use mac_address::MacAddress;
+use model::allocation_type::AllocationType;
+use model::bmc_suppression::{BmcSuppressionSource, BmcSuppressionSubsystem, NewBmcSuppression};
 use rpc::forge::{
     AssignStaticAddressRequest, AssignStaticAddressStatus, DhcpDiscovery,
     FindInterfaceAddressesRequest, RemoveStaticAddressRequest, RemoveStaticAddressStatus,
@@ -413,7 +415,7 @@ async fn test_assign_remove_then_dhcp_reallocates(
             bmc_mac_address: "aa:bb:cc:dd:ef:16".into(),
             chassis_serial_number: "EXPLICIT-REMOVE-RETURNS-TO-DHCP".into(),
             host_nics: vec![rpc::forge::ExpectedInterface {
-                mac_address: mac.to_string(),
+                mac_address: Some(mac.to_string()),
                 ip_allocation: Some(rpc::forge::ExpectedInterfaceIpAllocation::Retained as i32),
                 ..Default::default()
             }],
@@ -809,6 +811,92 @@ async fn test_assign_external_ipv6_matching_link_address_moves_to_dual_stack_sta
     Ok(())
 }
 
+#[sqlx_test]
+async fn test_managed_static_address_requires_dhcp_ack_after_external_assignment(
+    pool: PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let StaticAddressTestEnv {
+        env, admin_segment, ..
+    } = init(pool).await;
+    let mac = MacAddress::from_str("aa:bb:cc:dd:ee:2b").unwrap();
+    let managed_ipv4: IpAddr = "192.0.2.215".parse().unwrap();
+    let external_ipv6: IpAddr = "2001:db8:ffff::215".parse().unwrap();
+
+    let mut txn = env.db_txn().await;
+    let interface = db::machine_interface::validate_existing_mac_and_create(
+        &mut txn,
+        mac,
+        std::slice::from_ref(&admin_segment.relay_address),
+        None,
+        None,
+    )
+    .await?;
+    txn.commit().await?;
+
+    // The IPv6 assignment moves the interface to `static-assignments`,
+    // even though its IPv4 reservation still belongs to the admin prefix.
+    for (ip_address, status) in [
+        (managed_ipv4, AssignStaticAddressStatus::ReplacedDhcp),
+        (external_ipv6, AssignStaticAddressStatus::Assigned),
+    ] {
+        let response = env
+            .api()
+            .assign_static_address(Request::new(AssignStaticAddressRequest {
+                interface_id: Some(interface.id),
+                ip_address: ip_address.to_string(),
+            }))
+            .await?
+            .into_inner();
+        assert_eq!(response.status(), status);
+    }
+
+    let mut txn = env.db_txn().await;
+    db::bmc_suppression::upsert(
+        &mut txn,
+        &NewBmcSuppression {
+            bmc_mac_address: mac,
+            subsystem: BmcSuppressionSubsystem::Dhcp,
+            source: BmcSuppressionSource::Decommissioning,
+            reason: "decommissioning".to_string(),
+        },
+    )
+    .await?;
+    assert!(
+        db::bmc_suppression::is_dhcp_acknowledgement_pending(&mut *txn, mac).await?,
+        "the managed IPv4 reservation still requires acknowledgement with external IPv6 present"
+    );
+    txn.commit().await?;
+
+    // Removing IPv6 leaves the interface on `static-assignments` with
+    // only the managed IPv4 reservation, which still requires the wait.
+    let response = env
+        .api()
+        .remove_static_address(Request::new(RemoveStaticAddressRequest {
+            interface_id: Some(interface.id),
+            ip_address: external_ipv6.to_string(),
+        }))
+        .await?
+        .into_inner();
+    assert_eq!(response.status(), RemoveStaticAddressStatus::Removed);
+
+    let mut txn = env.db_txn().await;
+    let updated = db::machine_interface::find_one(&mut *txn, interface.id).await?;
+    let static_segment = db::network_segment::static_assignments(&mut txn).await?;
+    assert_eq!(updated.segment_id, static_segment.id);
+    let addresses =
+        db::machine_interface_address::find_for_interface(&mut txn, interface.id).await?;
+    assert_eq!(addresses.len(), 1);
+    assert_eq!(addresses[0].address, managed_ipv4);
+    assert_eq!(addresses[0].allocation_type, AllocationType::Static);
+    assert!(
+        db::bmc_suppression::is_dhcp_acknowledgement_pending(&mut *txn, mac).await?,
+        "removing external IPv6 must not exempt the remaining managed IPv4 reservation"
+    );
+    txn.rollback().await?;
+
+    Ok(())
+}
+
 /// When assigning a static IP within the interface's current segment,
 /// the segment_id should not change.
 #[sqlx_test]
@@ -998,9 +1086,14 @@ async fn test_dhcp_does_not_move_interface_with_static_address(
 
     // The discover fails (external IP can't be in the DHCP records view),
     // but the important thing is the interface was NOT moved.
-    assert!(
-        result.is_err(),
-        "DHCP discover should fail for external static IP"
+    let status = result.expect_err("external static IP should not produce a DHCP record");
+    assert_eq!(status.code(), tonic::Code::NotFound);
+    assert_eq!(
+        status.message(),
+        format!(
+            "DHCP record not found: {mac} (segment {}, Ipv4)",
+            static_seg.id
+        )
     );
 
     // Verify the interface is still on static-assignments, untouched.

@@ -23,9 +23,6 @@ import (
 	"github.com/sirupsen/logrus"
 
 	"go.opentelemetry.io/contrib/instrumentation/github.com/gorilla/mux/otelmux"
-	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/codes"
-	semconv "go.opentelemetry.io/otel/semconv/v1.11.0"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -73,7 +70,20 @@ type HTTPService struct {
 
 	// for internal use
 	isTLS bool
+
+	done chan struct{}
 }
+
+// Done returns a channel closed once the service has stopped serving, either
+// drained by Shutdown or closed after ShutDownGracePeriod. It is nil until
+// Start is called.
+func (s *HTTPService) Done() <-chan struct{} { return s.done }
+
+// DefaultShutDownGracePeriod bounds `http.Server.Shutdown` for the services
+// the constructors below create. The command that owns their lifecycle waits
+// this long for them to drain before it flushes traces, and the deployments
+// give the pod five seconds in total, so both budgets must stay inside that.
+const DefaultShutDownGracePeriod = 3 * time.Second
 
 // NewHTTPService creates a new service
 func NewHTTPService(addr string) *HTTPService {
@@ -84,7 +94,7 @@ func NewHTTPService(addr string) *HTTPService {
 		ReadTimeout:         5 * time.Second,
 		WriteTimeout:        10 * time.Second,
 		IdleTimeout:         120 * time.Second,
-		ShutDownGracePeriod: 3 * time.Second,
+		ShutDownGracePeriod: DefaultShutDownGracePeriod,
 	}
 }
 
@@ -97,7 +107,7 @@ func NewTLSService(addr, certFile, keyFile string) *HTTPService {
 		ReadTimeout:         5 * time.Second,
 		WriteTimeout:        10 * time.Second,
 		IdleTimeout:         120 * time.Second,
-		ShutDownGracePeriod: 3 * time.Second,
+		ShutDownGracePeriod: DefaultShutDownGracePeriod,
 		KeyFile:             keyFile,
 		CertFile:            certFile,
 		isTLS:               true,
@@ -146,6 +156,7 @@ func (s *HTTPService) initListener(ctx context.Context) (net.Listener, error) {
 // Start starts the service
 func (s *HTTPService) Start(ctx context.Context) (net.Listener, error) {
 	log := GetLogger(ctx)
+	s.done = make(chan struct{})
 
 	server := &http.Server{
 		Handler:      s.Router,
@@ -155,6 +166,7 @@ func (s *HTTPService) Start(ctx context.Context) (net.Listener, error) {
 	}
 	listener, err := s.initListener(ctx)
 	if err != nil {
+		close(s.done)
 		return nil, err
 	}
 
@@ -175,15 +187,19 @@ func (s *HTTPService) Start(ctx context.Context) (net.Listener, error) {
 	}
 
 	go func() {
+		defer close(s.done)
 		<-ctx.Done()
 
 		newCtx, cancel := context.WithTimeout(context.Background(), s.ShutDownGracePeriod)
 		defer cancel()
 
 		log.Infof("Shutting down HTTPService at %v", listener.Addr())
-		err = server.Shutdown(newCtx)
-		if err != nil {
-			log.Infof("failed to terminate HTTPService at %v, err: %v", listener.Addr(), err)
+		if shutdownErr := server.Shutdown(newCtx); shutdownErr != nil {
+			// Shutdown leaves the connections that missed the deadline open.
+			log.Infof("failed to terminate HTTPService at %v, err: %v", listener.Addr(), shutdownErr)
+			if closeErr := server.Close(); closeErr != nil {
+				log.Infof("failed to close HTTPService at %v, err: %v", listener.Addr(), closeErr)
+			}
 			return
 		}
 		log.Infof("Terminated HTTPService at %v", listener.Addr())
@@ -218,12 +234,16 @@ func HTTPAddVersionRoute(ctx context.Context, r *mux.Router) {
 	r.Path("/version").Handler(HTTPVersionHandler(ctx)).Methods("GET")
 }
 
+// Version is the service release version, set by the build system. Builds without
+// version metadata report dev.
+var Version = "dev"
+
 // HTTPVersionHandler handles the version ep
 func HTTPVersionHandler(_ context.Context) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		log := GetLogger(r.Context())
 		w.WriteHeader(http.StatusOK)
-		_, err := w.Write([]byte("0.1.0" + "\n"))
+		_, err := w.Write([]byte(Version + "\n"))
 		if err != nil {
 			log.Error(err)
 			http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -356,6 +376,10 @@ func WithTelemetry(serverName string) HTTPMiddlewareOption {
 //
 //   - Collects <latencyMetricsName>_http_duration_seconds metrics with
 //     {path,method} dimensions, if latencyMetricsName is specified
+//
+//   - Counts requests in both <latencyMetricsName>_http_request_counts and
+//     <latencyMetricsName>_http_requests_total, with {path,method,status_code}
+//     dimensions, if latencyMetricsName is specified
 //
 // - Wraps handler with http.TimeoutHandler with `handlerTimeout`.
 //
@@ -509,16 +533,20 @@ func loggingMiddleware(rootCtx context.Context) mux.MiddlewareFunc {
 
 func metricsMiddleware(latencyMetricsName string) mux.MiddlewareFunc {
 	var latency *prometheus.HistogramVec
-	var count *prometheus.CounterVec
+	var counts []*prometheus.CounterVec
 	if latencyMetricsName != "" {
 		latency = promauto.NewHistogramVec(prometheus.HistogramOpts{
 			Name: fmt.Sprintf("%s_http_duration_seconds", latencyMetricsName),
 			Help: "Duration of HTTP requests.",
 		}, []string{"path", "method"})
-		count = promauto.NewCounterVec(prometheus.CounterOpts{
-			Name: fmt.Sprintf("%s_http_request_counts", latencyMetricsName),
-			Help: "Counter of HTTP requests.",
-		}, []string{"path", "method", "status_code"})
+		// `http_requests_total` is canonical; keep `http_request_counts` for
+		// existing dashboards and alerts.
+		for _, name := range []string{"http_request_counts", "http_requests_total"} {
+			counts = append(counts, promauto.NewCounterVec(prometheus.CounterOpts{
+				Name: fmt.Sprintf("%s_%s", latencyMetricsName, name),
+				Help: "Counter of HTTP requests.",
+			}, []string{"path", "method", "status_code"}))
+		}
 	}
 
 	return func(next http.Handler) http.Handler {
@@ -527,14 +555,8 @@ func metricsMiddleware(latencyMetricsName string) mux.MiddlewareFunc {
 			w := getRRW(rw)
 			defer func() {
 				log.WithField("status_code", w.statusCode).Debugf("Handler finished")
-				if count != nil {
+				for _, count := range counts {
 					count.WithLabelValues(r.URL.Path, r.Method, fmt.Sprintf("%d", w.statusCode)).Inc()
-				}
-				// TODO(mcamp) this is a hack to get lightstep to recognize the span
-				// as an error. Either lightstep launcher or otelmux (probably the latter) should give us
-				// a hook to set this attribute. Until then we'll just set it here.
-				if v, _ := semconv.SpanStatusFromHTTPStatusCode(w.statusCode); v == codes.Error {
-					trace.SpanFromContext(r.Context()).SetAttributes(attribute.Bool("error", true))
 				}
 				// Return the writer back to the pool
 				putRRW(w)

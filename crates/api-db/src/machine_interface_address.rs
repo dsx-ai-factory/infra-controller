@@ -30,6 +30,8 @@ use super::DatabaseError;
 use crate::db_read::DbReader;
 
 #[cfg(test)]
+mod test_explicit_columns;
+#[cfg(test)]
 mod test_find_by_address;
 
 /// Returned when an address is already held by another owner.
@@ -95,8 +97,7 @@ pub async fn find_ipv4_for_interface(
     txn: &mut PgConnection,
     interface_id: MachineInterfaceId,
 ) -> Result<MachineInterfaceAddress, DatabaseError> {
-    let query =
-        "SELECT * FROM machine_interface_addresses WHERE interface_id = $1 AND family(address) = 4";
+    let query = "SELECT address FROM machine_interface_addresses WHERE interface_id = $1 AND family(address) = 4";
     sqlx::query_as(query)
         .bind(interface_id)
         .fetch_one(txn)

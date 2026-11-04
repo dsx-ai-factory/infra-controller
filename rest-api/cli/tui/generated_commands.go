@@ -116,17 +116,26 @@ func runGeneratedTUICommand(s *Session, info appcli.GeneratedCommandInfo, args [
 			return err
 		}
 	}
-	positionalArgs, err = resolveGeneratedPathParameters(s, info, positionalArgs)
+	positionalArgs, bodyContext, err := resolveGeneratedPathParameters(s, info, positionalArgs)
 	if err != nil {
 		return err
 	}
+	var proceed bool
+	flagArgs, proceed, err = addMachineDeleteForceFlag(info, flagArgs, positionalArgs)
+	if err != nil || !proceed {
+		return err
+	}
 
-	flagArgs, err = addGeneratedBodyForm(s, info, flagArgs)
+	flagArgs, err = addGeneratedBodyForm(s, info, flagArgs, bodyContext)
 	if err != nil {
 		return err
 	}
 
 	flagArgs, err = addGeneratedScopeFlags(s, info, flagArgs)
+	if err != nil {
+		return err
+	}
+	flagArgs, err = validateGeneratedSiteSelections(s, info, flagArgs)
 	if err != nil {
 		return err
 	}
@@ -151,6 +160,40 @@ func runGeneratedTUICommand(s *Session, info appcli.GeneratedCommandInfo, args [
 		s.Cache.InvalidateAll()
 	}
 	return nil
+}
+
+func addMachineDeleteForceFlag(
+	info appcli.GeneratedCommandInfo,
+	args []string,
+	positionalArgs []string,
+) ([]string, bool, error) {
+	if info.OperationID != "delete-machine" {
+		return args, true, nil
+	}
+
+	forceProvided := hasGeneratedOption(info, args, "force")
+	if forceProvided && !generatedBoolOptionEnabled(info, args, "force") {
+		return args, true, nil
+	}
+
+	machineID := "the selected Machine"
+	if len(positionalArgs) > 0 {
+		machineID = positionalArgs[0]
+	}
+	force, err := PromptConfirm(fmt.Sprintf(
+		"Force delete Machine %s? This deletes the Machine and its host, DPU, and BMC interfaces on the Site. Machines marked missing on Site can be force deleted without waiting 24 hours. Attached Instances require --allow-delete-with-instance, assigned Instance Types require --allow-delete-with-instance-type, and insufficient Allocation capacity requires --allow-delete-with-allocation. The Instance override also permits Instance Type removal and removes the Instance on the Site without a graceful workload shutdown; cleanup may forcibly restart the host. REST records are retained when Instance deletion is requested, Allocation capacity would be insufficient, or Site cleanup is incomplete. Retained missing Machines and Instances move to Error for deliberate cleanup by their owners. Incomplete Site cleanup returns HTTP 409; wait 5 seconds and repeat the same command with the same options until HTTP 202. Cleanup is not automatically retried.",
+		machineID,
+	))
+	if err != nil {
+		return args, false, err
+	}
+	if !force {
+		return args, !forceProvided, nil
+	}
+	if forceProvided {
+		return args, true, nil
+	}
+	return append(args, "--force=true"), true, nil
 }
 
 func splitGeneratedArguments(info appcli.GeneratedCommandInfo, args []string) ([]string, []string, error) {
@@ -203,8 +246,13 @@ func generatedFlagName(token string) (string, bool) {
 	return name, false
 }
 
-func resolveGeneratedPathParameters(s *Session, info appcli.GeneratedCommandInfo, args []string) ([]string, error) {
+func resolveGeneratedPathParameters(
+	s *Session,
+	info appcli.GeneratedCommandInfo,
+	args []string,
+) ([]string, map[string]string, error) {
 	resolved := append([]string(nil), args...)
+	bodyContext := make(map[string]string)
 	resolvedValues := map[string]string{
 		"siteId": strings.TrimSpace(s.Scope.SiteID),
 		"vpcId":  strings.TrimSpace(s.Scope.VpcID),
@@ -215,6 +263,7 @@ func resolveGeneratedPathParameters(s *Session, info appcli.GeneratedCommandInfo
 			value = resolved[i]
 		}
 		descriptor := GeneratedPathResourceDescriptor(info.Name, parameter)
+		descriptor.RegisteredSiteOnly = descriptor.ResourceType == "site" && generatedCommandRequiresRegisteredSite(info)
 
 		if value == "" {
 			switch descriptor.ResourceType {
@@ -233,12 +282,18 @@ func resolveGeneratedPathParameters(s *Session, info appcli.GeneratedCommandInfo
 			value,
 		)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		if supported {
 			value = item.ID
+			if info.Name == "expected-machine update" && strings.TrimSpace(s.Scope.SiteID) == "" {
+				// `ExpectedMachineUpdateRequest` has no `siteId`. An unscoped
+				// session still needs the selected machine's Site for the SKU
+				// query, which requires it; explicit Site scope already supplies it.
+				bodyContext["siteId"] = item.Extra["siteId"]
+			}
 		} else if value == "" && descriptor.FreeFormReason == "" && s.Resolver != nil {
-			return nil, fmt.Errorf(
+			return nil, nil, fmt.Errorf(
 				"%s has no interactive selector for path parameter %s",
 				info.Name,
 				parameter,
@@ -249,7 +304,7 @@ func resolveGeneratedPathParameters(s *Session, info appcli.GeneratedCommandInfo
 				true,
 			)
 			if err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 		}
 
@@ -260,7 +315,7 @@ func resolveGeneratedPathParameters(s *Session, info appcli.GeneratedCommandInfo
 		}
 		resolvedValues[parameter] = value
 	}
-	return resolved, nil
+	return resolved, bodyContext, nil
 }
 
 func addRequiredGeneratedQueryFlags(s *Session, info appcli.GeneratedCommandInfo, args []string) ([]string, error) {
@@ -285,11 +340,13 @@ func addRequiredGeneratedQueryFlags(s *Session, info appcli.GeneratedCommandInfo
 			value = strings.TrimSpace(s.Scope.VpcID)
 		}
 		if value == "" && s.Resolver != nil && s.Resolver.HasFetcher(resourceType) {
-			item, err := s.Resolver.Resolve(
-				context.Background(),
-				resourceType,
-				generatedParameterLabel(parameter.Name),
-			)
+			var item *NamedItem
+			var err error
+			if resourceType == "site" && generatedCommandRequiresRegisteredSite(info) {
+				item, err = promptRegisteredSite(s, context.Background())
+			} else {
+				item, err = s.Resolver.Resolve(context.Background(), resourceType, generatedParameterLabel(parameter.Name))
+			}
 			if err != nil {
 				return nil, err
 			}

@@ -79,6 +79,8 @@ type dpfHelmChartData struct {
 	RepoURL          string                        `json:"repoURL"`
 	ChartName        string                        `json:"chartName"`
 	ChartVersion     string                        `json:"chartVersion"`
+	ServiceID        *string                       `json:"serviceID,omitempty"`
+	DeployInCluster  *bool                         `json:"deployInCluster,omitempty"`
 	Security         *dpfHelmChartSecurity         `json:"security"`
 	Values           map[string]any                `json:"values,omitempty"`
 	ServiceDaemonSet *dpfHelmChartServiceDaemonSet `json:"serviceDaemonSet,omitempty"`
@@ -112,7 +114,7 @@ type dpfDaemonSetRollingUpdate struct {
 }
 
 // ValidateDpfHelmChartData checks the REST-facing shape of a DPF Helm chart
-// definition and rejects the known NICo-owned placement override. Kubernetes
+// data and rejects the known NICo-owned placement override. Kubernetes
 // and DPF semantic validation is canonical in Core before persistence.
 func ValidateDpfHelmChartData(jsonData []byte) error {
 	var chart dpfHelmChartData
@@ -134,6 +136,14 @@ func ValidateDpfHelmChartData(jsonData []byte) error {
 
 	if chart.ChartVersion == "" {
 		return errors.New("chartVersion must not be empty")
+	}
+
+	if chart.ServiceID == nil || *chart.ServiceID == "" {
+		return errors.New("serviceID must not be empty")
+	}
+
+	if chart.DeployInCluster == nil || *chart.DeployInCluster {
+		return errors.New("deployInCluster must be explicitly set to false for DpfHelmChart services")
 	}
 
 	if chart.Security == nil || chart.Security.Privileged == nil {

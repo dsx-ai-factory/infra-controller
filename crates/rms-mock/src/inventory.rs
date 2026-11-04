@@ -29,6 +29,10 @@ use librms::protos::rack_manager::PowerOperation;
 use mac_address::MacAddress;
 
 /// Hardware state, as seen by the mock's host.
+///
+/// The completion callbacks `set_switch_password` and `reset_switch` run under
+/// the job-store mutex. They must be short, nonblocking and must not call back
+/// into the mock or its job store.
 pub trait RmsInventory: Send + Sync + 'static {
     /// Every device the host currently simulates.
     ///
@@ -49,6 +53,20 @@ pub trait RmsInventory: Send + Sync + 'static {
     /// rules as a Redfish request. An `Err` carries the host's reason and
     /// becomes a per-node failure.
     fn set_power(&self, bmc_mac: MacAddress, op: PowerOperation) -> eyre::Result<()>;
+
+    /// Give the NVOS user `username` of the switch whose BMC has this MAC the
+    /// password a completed rotation set, so the host's NVOS accepts it. The
+    /// callback runs before completion is published. An `Err` fails the job.
+    fn set_switch_password(
+        &self,
+        bmc_mac: MacAddress,
+        username: &str,
+        password: &str,
+    ) -> eyre::Result<()>;
+
+    /// Restore the switch's NVOS factory credentials. Does not reset its BMC
+    /// or power cycle it; NICo requests those operations separately.
+    fn reset_switch(&self, bmc_mac: MacAddress) -> eyre::Result<()>;
 }
 
 /// A device's power as the host reports it; the proto has no intermediate

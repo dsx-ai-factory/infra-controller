@@ -30,8 +30,12 @@ The CLI needs three things to connect:
 
 ### TLS options
 
-Every setting follows the same priority: CLI flag → environment variable →
-config file key → hard-coded default (where one exists).
+Settings prefer CLI flags, then environment variables, then config-file keys,
+then defaults or file-location fallbacks. The client certificate and key resolve
+independently. When both values are present, the CLI uses that pair, even when
+one comes from a CLI flag and the other from an environment variable. When either
+is absent, it uses the complete config-file pair, then the
+[client-cert fallbacks](#client-cert-fallbacks).
 
 | Setting | CLI flag | Environment variable | Config file key | Default |
 |---------|----------|---------------------|-----------------|---------|
@@ -83,7 +87,7 @@ with a "Only SOCKS5 Proxy supported" error. This is enforced in
 
 ```sh
 export https_proxy=socks5://localhost:1080
-nico-admin-cli machine show --all
+nico-admin-cli machine show
 ```
 
 ### Client-cert fallbacks
@@ -119,21 +123,24 @@ writes logs to **stderr**, leaving stdout for command output:
 
 ## Quick verification
 
-Once credentials are in place, `version` is the cheapest end-to-end check —
-it exercises auth without mutating anything:
+Use `version` for a read-only connectivity check:
 
 ```sh
 nico-admin-cli version
 ```
 
-If it succeeds, the API URL, root CA, and client cert/key are all working.
-`nico-admin-cli machine show --all` is a good first real query.
+This command does not verify the server certificate, sends no client
+certificate, and is allowed anonymously. Success does not verify server trust,
+the client cert/key, or admin permissions. With credentials configured and
+`DISABLE_TLS_ENFORCEMENT` unset, use `nico-admin-cli machine show` to verify a
+protected, read-only operation. An empty inventory is also a valid result.
 
 ## mTLS and authorization
 
-For generating client certificates, configuring the server-side TLS and
-Casbin policy, and understanding how certificate fields map to authorization
-roles, see [NICo mTLS and authorization](./nico-api-auth.md).
+For Vault-issued or operator-managed admin certificates, API trust and
+authorization, installation, renewal, CA overlap, recovery, and the existing
+revocation support boundary, see
+[NICo mTLS and authorization](./nico-api-auth.md).
 
 ---
 

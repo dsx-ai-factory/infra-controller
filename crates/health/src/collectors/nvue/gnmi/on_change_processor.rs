@@ -16,7 +16,7 @@
  */
 
 use std::borrow::Cow;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -24,6 +24,7 @@ use prometheus::{CounterVec, Gauge, Opts};
 
 use super::client::typed_value_to_string;
 use super::proto::{self, PathElem};
+use super::reconciliation::{scalar_value, snapshot_origin_matches};
 use super::sample_processor::now_unix_secs;
 use super::subscriber::GnmiStreamMetrics;
 use crate::HealthError;
@@ -31,6 +32,7 @@ use crate::sink::{CollectorEvent, DataSink, EventContext, MetricSample};
 
 type ParsedRow = HashMap<String, String>;
 type CachedRows = HashMap<String, ParsedRow>;
+pub(super) type SharedEventRows = Arc<Mutex<CachedRows>>;
 
 enum DeleteTarget {
     All,
@@ -41,11 +43,148 @@ enum DeleteTarget {
     },
 }
 
+/// Presence is retained only for rows cached before this snapshot started.
+/// Snapshot responses do not emit events or update cached row values.
+pub(super) struct EventSnapshot {
+    candidates: HashSet<String>,
+    present: HashSet<String>,
+}
+
+impl EventSnapshot {
+    #[allow(deprecated)]
+    pub(super) fn process_response(
+        &mut self,
+        response: &proto::SubscribeResponse,
+    ) -> Result<bool, tonic::Status> {
+        let notification = match &response.response {
+            Some(proto::subscribe_response::Response::SyncResponse(complete)) => {
+                return Ok(*complete);
+            }
+            Some(proto::subscribe_response::Response::Update(notification)) => notification,
+            _ => {
+                return Err(tonic::Status::invalid_argument(
+                    "unexpected event snapshot response",
+                ));
+            }
+        };
+
+        let prefix = notification.prefix.as_ref();
+
+        let mut paths = prefix
+            .into_iter()
+            .chain(
+                notification
+                    .update
+                    .iter()
+                    .filter_map(|update| update.path.as_ref()),
+            )
+            .chain(notification.delete.iter());
+
+        if paths.any(|path| {
+            !path.element.is_empty()
+                || (!path.target.is_empty() && path.target != "nvos")
+                || !snapshot_origin_matches("", &path.origin)
+                || path.elem.iter().any(|elem| {
+                    if elem.name == "system-event" {
+                        elem.key
+                            .iter()
+                            .any(|(key, id)| key != "event-id" || id.is_empty())
+                    } else {
+                        !elem.key.is_empty()
+                    }
+                })
+        }) {
+            return Err(tonic::Status::invalid_argument(
+                "unsupported event snapshot path",
+            ));
+        }
+
+        let prefix_elems = prefix.map(|path| path.elem.as_slice()).unwrap_or_default();
+
+        if prefix_elems
+            .first()
+            .is_some_and(|root| root.name != "system-events")
+        {
+            return Err(tonic::Status::invalid_argument(
+                "unexpected event snapshot root",
+            ));
+        }
+
+        for path in &notification.delete {
+            let combined = prefix_elems
+                .iter()
+                .chain(path.elem.iter())
+                .collect::<Vec<_>>();
+
+            match delete_target_from_path(&combined) {
+                Some(DeleteTarget::All) => self.present.clear(),
+                Some(DeleteTarget::Row(id)) => {
+                    self.present.remove(&id);
+                }
+                _ => {
+                    return Err(tonic::Status::invalid_argument(
+                        "unsupported event snapshot delete path",
+                    ));
+                }
+            }
+        }
+
+        for update in &notification.update {
+            let path = update
+                .path
+                .as_ref()
+                .ok_or_else(|| tonic::Status::invalid_argument("missing event snapshot path"))?;
+
+            let combined = prefix_elems
+                .iter()
+                .chain(path.elem.iter())
+                .collect::<Vec<_>>();
+
+            let [root, event, tail @ ..] = combined.as_slice() else {
+                return Err(tonic::Status::invalid_argument(
+                    "unsupported event snapshot update path",
+                ));
+            };
+
+            let leaf_path = match tail {
+                [leaf] => leaf.name == "event-id",
+                [state, leaf] => state.name == "state" && !leaf.name.is_empty(),
+                _ => false,
+            };
+
+            if root.name != "system-events" || event.name != "system-event" || !leaf_path {
+                return Err(tonic::Status::invalid_argument(
+                    "unsupported event snapshot update path",
+                ));
+            }
+
+            let id = event
+                .key
+                .get("event-id")
+                .filter(|id| !id.is_empty())
+                .ok_or_else(|| tonic::Status::invalid_argument("missing event snapshot ID"))?;
+
+            if !scalar_value(update.val.as_ref()) {
+                return Err(tonic::Status::invalid_argument(
+                    "unsupported event snapshot value",
+                ));
+            }
+
+            if self.candidates.contains(id) {
+                self.present.insert(id.clone());
+            }
+        }
+
+        Ok(false)
+    }
+}
+
 pub(crate) const ON_CHANGE_STREAM_ID_SYSTEM_EVENTS: &str = "nvue_gnmi_events";
 
 pub(crate) struct OnChangeStreamMetrics {
     pub(crate) rows_total: CounterVec,
     pub(crate) last_row_timestamp: Gauge,
+    pub(crate) last_row_timestamp_seconds: Gauge,
 }
 
 impl OnChangeStreamMetrics {
@@ -70,13 +209,23 @@ impl OnChangeStreamMetrics {
                 format!("{prefix}_{stream_id}_last_timestamp"),
                 "Unix timestamp of most recent ON_CHANGE row",
             )
-            .const_labels(const_labels),
+            .const_labels(const_labels.clone()),
         )?;
         registry.register(Box::new(last_row_timestamp.clone()))?;
+
+        let last_row_timestamp_seconds = Gauge::with_opts(
+            Opts::new(
+                format!("{prefix}_{stream_id}_last_timestamp_seconds"),
+                "Unix timestamp in seconds of most recent ON_CHANGE row",
+            )
+            .const_labels(const_labels),
+        )?;
+        registry.register(Box::new(last_row_timestamp_seconds.clone()))?;
 
         Ok(Self {
             rows_total,
             last_row_timestamp,
+            last_row_timestamp_seconds,
         })
     }
 }
@@ -87,7 +236,8 @@ pub(crate) struct GnmiOnChangeProcessor {
     pub(crate) data_sink: Option<Arc<dyn DataSink>>,
     pub(crate) event_context: EventContext,
     pub(crate) switch_id: String,
-    cached_rows: Mutex<CachedRows>,
+    cached_rows: SharedEventRows,
+    reconciliation_candidates: Mutex<HashSet<String>>,
 }
 
 impl GnmiOnChangeProcessor {
@@ -97,6 +247,7 @@ impl GnmiOnChangeProcessor {
         data_sink: Option<Arc<dyn DataSink>>,
         event_context: EventContext,
         switch_id: String,
+        cached_rows: Option<SharedEventRows>,
     ) -> Self {
         Self {
             collector_name,
@@ -104,7 +255,97 @@ impl GnmiOnChangeProcessor {
             data_sink,
             event_context,
             switch_id,
-            cached_rows: Mutex::new(HashMap::new()),
+            cached_rows: cached_rows.unwrap_or_default(),
+            reconciliation_candidates: Mutex::new(HashSet::new()),
+        }
+    }
+
+    /// Republishes cached rows without recording a new device observation.
+    pub(super) fn republish(&self) {
+        let rows = self
+            .cached_rows
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+
+        for (instance_id, row) in rows.iter() {
+            self.emit_row_as_metric(instance_id, row, false);
+        }
+    }
+
+    /// Starts a cleanup attempt without retaining IDs outside the current cache.
+    pub(super) fn begin_reconciliation(&self) -> Option<EventSnapshot> {
+        let candidates: HashSet<_> = self
+            .cached_rows
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .keys()
+            .cloned()
+            .collect();
+
+        if candidates.is_empty() {
+            return None;
+        }
+
+        *self
+            .reconciliation_candidates
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = candidates.clone();
+
+        Some(EventSnapshot {
+            candidates,
+            present: HashSet::new(),
+        })
+    }
+
+    /// Commits a complete snapshot, or discards eligibility on failure or cancellation.
+    pub(super) fn finish_reconciliation(
+        &self,
+        snapshot: Option<EventSnapshot>,
+        stream_metrics: &GnmiStreamMetrics,
+    ) -> usize {
+        let candidates = std::mem::take(
+            &mut *self
+                .reconciliation_candidates
+                .lock()
+                .unwrap_or_else(|error| error.into_inner()),
+        );
+
+        let Some(snapshot) = snapshot else {
+            return 0;
+        };
+
+        let mut cached_rows = self
+            .cached_rows
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+
+        let removed: Vec<_> = candidates
+            .difference(&snapshot.present)
+            .filter(|id| cached_rows.remove(*id).is_some())
+            .cloned()
+            .collect();
+
+        let entity_count = cached_rows.len();
+        drop(cached_rows);
+
+        self.prune_rows(&removed);
+        stream_metrics.monitored_entities.set(entity_count as f64);
+
+        removed.len()
+    }
+
+    fn prune_rows(&self, instance_ids: &[String]) {
+        let Some(sink) = &self.data_sink else {
+            return;
+        };
+
+        for instance_id in instance_ids {
+            sink.prune_metric_key(
+                &self.event_context,
+                &format!("{}:{}", self.collector_name, instance_id),
+                "on_change_row",
+                "severity",
+            );
         }
     }
 
@@ -132,9 +373,7 @@ impl GnmiOnChangeProcessor {
         };
 
         stream_metrics.notifications_received_total.inc();
-        stream_metrics
-            .last_notification_timestamp
-            .set(now_unix_secs());
+        stream_metrics.set_last_notification_timestamp(now_unix_secs());
 
         let start = Instant::now();
         let entity_count = self.process_notification(notification);
@@ -195,17 +434,25 @@ impl GnmiOnChangeProcessor {
             Err(poisoned) => poisoned.into_inner(),
         };
 
+        let mut candidates = self
+            .reconciliation_candidates
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+
         let mut rows_to_emit = CachedRows::new();
         let mut rows_to_prune = Vec::new();
 
         for target in delete_targets {
             match target {
                 DeleteTarget::All => {
+                    candidates.clear();
                     rows_to_prune.extend(cached_rows.keys().cloned());
                     cached_rows.clear();
                     rows_to_emit.clear();
                 }
                 DeleteTarget::Row(instance_id) => {
+                    candidates.remove(&instance_id);
+
                     if cached_rows.remove(&instance_id).is_some() {
                         rows_to_emit.remove(&instance_id);
                         rows_to_prune.push(instance_id);
@@ -215,6 +462,7 @@ impl GnmiOnChangeProcessor {
                     instance_id,
                     leaf_name,
                 } => {
+                    candidates.remove(&instance_id);
                     if let Some(row) = cached_rows.get_mut(&instance_id)
                         && row.remove(&leaf_name).is_some()
                     {
@@ -231,6 +479,7 @@ impl GnmiOnChangeProcessor {
         }
 
         for (instance_id, updated_row) in updated_rows {
+            candidates.remove(&instance_id);
             let row = cached_rows.entry(instance_id.clone()).or_default();
             let mut changed = false;
 
@@ -249,46 +498,43 @@ impl GnmiOnChangeProcessor {
         }
 
         let entity_count = cached_rows.len();
+        drop(candidates);
         drop(cached_rows);
 
-        if let Some(sink) = &self.data_sink {
-            for instance_id in rows_to_prune {
-                sink.prune_metrics(
-                    &self.event_context,
-                    Some("on_change_row"),
-                    &[(Cow::Borrowed("instance_id"), instance_id)],
-                    None,
-                    None,
-                );
-            }
-        }
+        self.prune_rows(&rows_to_prune);
 
         for (instance_id, row) in rows_to_emit {
-            self.emit_row_as_metric(&instance_id, &row);
+            self.emit_row_as_metric(&instance_id, &row, true);
         }
 
         entity_count
     }
 
-    fn emit_row_as_metric(&self, instance_id: &str, row: &ParsedRow) {
+    fn emit_row_as_metric(&self, instance_id: &str, row: &ParsedRow, received: bool) {
         let severity = row.get("severity").map(String::as_str).unwrap_or("unknown");
         let text = row.get("text").map(String::as_str).unwrap_or("");
 
-        self.stream_metrics.last_row_timestamp.set(now_unix_secs());
-        self.stream_metrics
-            .rows_total
-            .with_label_values(&[severity])
-            .inc();
+        if received {
+            let timestamp = now_unix_secs();
+            self.stream_metrics.last_row_timestamp.set(timestamp);
+            self.stream_metrics
+                .last_row_timestamp_seconds
+                .set(timestamp);
+            self.stream_metrics
+                .rows_total
+                .with_label_values(&[severity])
+                .inc();
 
-        tracing::info!(
-            switch_id = %self.switch_id,
-            stream = %self.collector_name,
-            instance_id,
-            severity,
-            text,
-            rack_id = self.event_context.rack_id().map(tracing::field::display),
-            "nvue_gnmi ON_CHANGE: row received"
-        );
+            tracing::info!(
+                switch_id = %self.switch_id,
+                stream = %self.collector_name,
+                instance_id,
+                severity,
+                text,
+                rack_id = self.event_context.rack_id().map(tracing::field::display),
+                "nvue_gnmi ON_CHANGE: row received"
+            );
+        }
 
         let Some(sink) = &self.data_sink else { return };
 
@@ -306,6 +552,7 @@ impl GnmiOnChangeProcessor {
         sink.handle_event(
             &self.event_context,
             &CollectorEvent::Metric(Box::new(MetricSample {
+                semantics: crate::sink::MetricSemantics::Gauge,
                 key,
                 name: self.collector_name.clone(),
                 metric_type: "on_change_row".to_string(),
@@ -447,6 +694,7 @@ mod tests {
             data_sink,
             test_event_context(TEST_COLLECTOR_NAME),
             "SN1234".to_string(),
+            None,
         )
     }
 
@@ -544,6 +792,19 @@ mod tests {
     }
 
     #[test]
+    fn on_change_timestamp_seconds_alias_is_registered() {
+        let registry = prometheus::Registry::new();
+        OnChangeStreamMetrics::new(&registry, "test", "stream_a", test_labels()).unwrap();
+
+        assert!(
+            registry
+                .gather()
+                .iter()
+                .any(|family| family.name() == "test_stream_a_last_timestamp_seconds")
+        );
+    }
+
+    #[test]
     fn test_process_notification_severity_and_text() {
         let processor = test_processor(None);
         let notification = proto::Notification {
@@ -591,6 +852,10 @@ mod tests {
             1.0
         );
         assert!(processor.stream_metrics.last_row_timestamp.get() > 0.0);
+        assert_eq!(
+            processor.stream_metrics.last_row_timestamp.get(),
+            processor.stream_metrics.last_row_timestamp_seconds.get()
+        );
     }
 
     #[test]
@@ -833,8 +1098,9 @@ mod tests {
                 collector_type: ON_CHANGE_STREAM_ID_SYSTEM_EVENTS,
                 labels: Default::default(),
                 metadata: Some(EndpointMetadata::Switch(SwitchData {
+                    log_checkpoint_identity: None,
                     id: Some(switch_id),
-                    serial: "SN-SWITCH-001".to_string(),
+                    serial: Some("SN-SWITCH-001".to_string()),
                     slot_number: Some(7),
                     tray_index: Some(3),
                     nvlink_domain_uuid: None,
@@ -846,6 +1112,7 @@ mod tests {
                 rack_id: Some(RackId::new("RACK_2")),
             },
             "SN-SWITCH-001".to_string(),
+            None,
         );
         let notification = proto::Notification {
             prefix: Some(proto::Path {
@@ -901,6 +1168,248 @@ mod tests {
                 .iter()
                 .any(|(key, value)| key == "instance_id" && value == "42")
         );
+    }
+
+    #[test]
+    fn reconciliation_preserves_present_and_concurrently_touched_rows() {
+        let manager = Arc::new(MetricsManager::new("test").unwrap());
+        let sink = Arc::new(PrometheusSink::new(manager.clone(), "test_sink").unwrap());
+        let processor = test_processor(Some(sink));
+        let metrics = super::super::subscriber::test_gnmi_stream_metrics();
+
+        for id in ["removed", "present", "unchanged", "recreated"] {
+            processor.process_notification(&make_system_events_notification(vec![
+                make_system_event_update(id, "severity", "critical"),
+            ]));
+        }
+
+        let mut snapshot = processor.begin_reconciliation().unwrap();
+
+        let mut notification = make_system_events_notification(vec![make_system_event_update(
+            "present", "event-id", "present",
+        )]);
+
+        notification.prefix.as_mut().unwrap().origin = "openconfig".into();
+
+        // NVOS places the keyed row in the prefix and also emits a direct event-id leaf.
+        let path = notification.update[0].path.as_mut().unwrap();
+        notification
+            .prefix
+            .as_mut()
+            .unwrap()
+            .elem
+            .push(path.elem.remove(0));
+
+        path.elem.remove(0);
+
+        assert!(
+            !snapshot
+                .process_response(&proto::SubscribeResponse {
+                    response: Some(proto::subscribe_response::Response::Update(notification)),
+                    ..Default::default()
+                })
+                .unwrap()
+        );
+
+        processor.process_notification(&make_system_events_notification(vec![
+            make_system_event_update("unchanged", "severity", "critical"),
+            make_system_event_update("new", "severity", "warning"),
+        ]));
+
+        let mut replacement = make_system_events_notification(vec![make_system_event_update(
+            "recreated",
+            "severity",
+            "warning",
+        )]);
+
+        replacement.delete.push(proto::Path {
+            elem: vec![make_path_elem("system-event", &[("event-id", "recreated")])],
+            ..Default::default()
+        });
+
+        processor.process_notification(&replacement);
+
+        let received = &processor.stream_metrics.rows_total;
+        let received_before = received.with_label_values(&["critical"]).get();
+
+        assert_eq!(processor.finish_reconciliation(Some(snapshot), &metrics), 1);
+        let export = manager.export_telemetry().unwrap();
+
+        assert!(!export.contains("instance_id=\"removed\""));
+
+        for id in ["present", "unchanged", "recreated", "new"] {
+            assert!(export.contains(&format!("instance_id=\"{id}\"")));
+        }
+
+        assert_eq!(metrics.monitored_entities.get(), 4.0);
+
+        assert_eq!(
+            received.with_label_values(&["critical"]).get(),
+            received_before
+        );
+
+        assert_eq!(metrics.notifications_received_total.get(), 0.0);
+
+        processor.stream_metrics.last_row_timestamp.set(1.0);
+        processor.stream_metrics.last_row_timestamp_seconds.set(1.0);
+
+        let timestamp_before = processor.stream_metrics.last_row_timestamp.get();
+
+        processor.republish();
+
+        assert_eq!(
+            received.with_label_values(&["critical"]).get(),
+            received_before
+        );
+
+        assert_eq!(
+            processor.stream_metrics.last_row_timestamp.get(),
+            timestamp_before
+        );
+        assert_eq!(
+            processor.stream_metrics.last_row_timestamp_seconds.get(),
+            timestamp_before
+        );
+    }
+
+    #[test]
+    #[allow(deprecated)]
+    fn event_snapshot_rejects_unsupported_data() {
+        let valid = make_system_events_notification(vec![make_system_event_update(
+            "1", "severity", "critical",
+        )]);
+
+        type InvalidateNotification = fn(&mut proto::Notification);
+
+        let cases: &[(&str, InvalidateNotification)] = &[
+            ("missing path", |n| n.update[0].path = None),
+            ("missing value", |n| n.update[0].val = None),
+            ("missing ID", |n| {
+                n.update[0].path.as_mut().unwrap().elem[0].key.clear()
+            }),
+            ("wrong target", |n| {
+                n.prefix.as_mut().unwrap().target = "other".into()
+            }),
+            ("wrong origin", |n| {
+                n.prefix.as_mut().unwrap().origin = "other".into()
+            }),
+            ("wrong Delete origin after presence update", |n| {
+                n.update.clear();
+
+                n.delete.push(proto::Path {
+                    origin: "other".into(),
+                    ..Default::default()
+                });
+            }),
+            ("wrong root", |n| {
+                n.prefix.as_mut().unwrap().elem[0].name = "interfaces".into()
+            }),
+            ("container data", |n| {
+                n.update[0].val.as_mut().unwrap().value =
+                    Some(proto::typed_value::Value::JsonVal(b"{}".to_vec()));
+            }),
+            ("leaf delete", |n| {
+                n.delete.push(n.update[0].path.clone().unwrap())
+            }),
+            ("legacy delete after presence update", |n| {
+                n.update.clear();
+
+                n.delete.push(proto::Path {
+                    element: vec!["system-event[event-id=gone]".into()],
+                    ..Default::default()
+                });
+            }),
+            ("unknown Delete key after presence update", |n| {
+                n.update.clear();
+
+                n.delete.push(proto::Path {
+                    elem: vec![make_path_elem("system-event", &[("unknown-key", "other")])],
+                    ..Default::default()
+                });
+            }),
+        ];
+
+        let response = proto::SubscribeResponse {
+            response: Some(proto::subscribe_response::Response::Update(valid.clone())),
+            ..Default::default()
+        };
+
+        for (name, invalidate) in cases {
+            let processor = test_processor(None);
+            processor.process_notification(&valid);
+            let mut snapshot = processor.begin_reconciliation().unwrap();
+            snapshot.process_response(&response).unwrap();
+            let mut notification = valid.clone();
+
+            invalidate(&mut notification);
+
+            let invalid_response = proto::SubscribeResponse {
+                response: Some(proto::subscribe_response::Response::Update(notification)),
+                ..Default::default()
+            };
+
+            assert!(
+                snapshot.process_response(&invalid_response).is_err(),
+                "{name}"
+            );
+
+            processor
+                .finish_reconciliation(None, &super::super::subscriber::test_gnmi_stream_metrics());
+
+            assert_eq!(processor.cached_rows.lock().unwrap().len(), 1, "{name}");
+        }
+    }
+
+    #[test]
+    fn event_snapshot_sync_and_delete_presence() {
+        let processor = test_processor(None);
+        let metrics = super::super::subscriber::test_gnmi_stream_metrics();
+
+        assert!(processor.begin_reconciliation().is_none());
+
+        let notification = make_system_events_notification(vec![make_system_event_update(
+            "1", "severity", "critical",
+        )]);
+
+        processor.process_notification(&notification);
+        let mut response = proto::SubscribeResponse::default();
+
+        for delete in [
+            vec![make_path_elem("system-event", &[("event-id", "1")])],
+            Vec::new(),
+        ] {
+            let mut snapshot = processor.begin_reconciliation().unwrap();
+            for notification in [
+                notification.clone(),
+                proto::Notification {
+                    delete: vec![proto::Path {
+                        elem: delete,
+                        ..Default::default()
+                    }],
+                    ..make_system_events_notification(Vec::new())
+                },
+            ] {
+                response.response = Some(proto::subscribe_response::Response::Update(notification));
+                snapshot.process_response(&response).unwrap();
+            }
+
+            assert!(snapshot.present.is_empty());
+
+            for complete in [false, true] {
+                response.response =
+                    Some(proto::subscribe_response::Response::SyncResponse(complete));
+
+                assert_eq!(snapshot.process_response(&response).unwrap(), complete);
+            }
+
+            assert!(
+                snapshot
+                    .process_response(&proto::SubscribeResponse::default())
+                    .is_err()
+            );
+
+            processor.finish_reconciliation(None, &metrics);
+        }
     }
 
     #[test]

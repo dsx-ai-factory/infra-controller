@@ -20,7 +20,9 @@ use std::collections::BTreeMap;
 use carbide_uuid::extension_service::ExtensionServiceId;
 use chrono::prelude::*;
 use config_version::{ConfigVersion, Versioned};
+use mac_address::MacAddress;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use sqlx::postgres::PgRow;
 use sqlx::{FromRow, Row};
 
@@ -34,6 +36,10 @@ pub const DPF_HELM_CHART_NAME_PREFIX: &str = "extsvc-";
 pub const DPF_HELM_CHART_LABEL_PREFIX: &str = "nico/";
 /// The label placed on a DPUService to identify its owning extension service.
 pub const DPF_HELM_CHART_OWNER_LABEL: &str = "nico/extension-service-id";
+/// The interface ordinal propagated to DPF registration resources and their children.
+pub const DPF_HELM_CHART_INTERFACE_ORDINAL_LABEL: &str = "nico/extension-service-interface-ordinal";
+/// The fixed service-VPC slot propagated to slot-specific registration resources.
+pub const DPF_HELM_CHART_SERVICE_VPC_SLOT_LABEL: &str = "nico/extension-service-vpc-slot";
 /// The value used to enable a UUID-derived DPU placement label.
 pub const DPF_HELM_CHART_PLACEMENT_LABEL_VALUE: &str = "enabled";
 
@@ -41,6 +47,62 @@ pub const DPF_HELM_CHART_PLACEMENT_LABEL_VALUE: &str = "enabled";
 pub enum ExtensionServiceType {
     KubernetesPod,
     DpfHelmChart,
+}
+
+/// Address family required by one service-facing VPC interface.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum ServiceVpcAddressFamily {
+    /// The service interface uses IPv4.
+    Ipv4,
+    /// The service interface uses IPv6.
+    Ipv6,
+}
+
+/// Network requirement declared by an extension service.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ServiceVpcInterfaceRequirement {
+    /// Address family used by this interface.
+    pub address_family: ServiceVpcAddressFamily,
+}
+
+/// Stable MAC assignment shared by every attachment of one service interface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExtensionServiceInterfaceMac {
+    /// Service that owns this MAC assignment.
+    pub service_id: ExtensionServiceId,
+    /// Zero-based position in the service's interface requirements.
+    pub interface_ordinal: u32,
+    /// MAC reused for this service interface on every attached DPU.
+    pub mac_address: MacAddress,
+}
+
+impl ExtensionServiceInterfaceMac {
+    /// Derives one collision-attempt candidate while keeping MAC identity stable across retries.
+    /// Domain separation prevents another UUID-derived identifier from accidentally sharing this
+    /// space.
+    pub fn candidate(service_id: ExtensionServiceId, interface_ordinal: u32, attempt: u32) -> Self {
+        // Hash the complete identity and attempt so collision recovery remains deterministic after
+        // restart.
+        let service_uuid: uuid::Uuid = service_id.into();
+        let digest = Sha256::new()
+            .chain_update(b"nico-extension-service-interface-mac-v1")
+            .chain_update(service_uuid.as_bytes())
+            .chain_update(interface_ordinal.to_be_bytes())
+            .chain_update(attempt.to_be_bytes())
+            .finalize();
+        let mut bytes = [
+            digest[0], digest[1], digest[2], digest[3], digest[4], digest[5],
+        ];
+
+        // Ethernet bit zero is multicast and bit one marks a locally administered address.
+        bytes[0] = (bytes[0] & 0xfe) | 0x02;
+        Self {
+            service_id,
+            interface_ordinal,
+            mac_address: MacAddress::new(bytes),
+        }
+    }
 }
 
 impl std::fmt::Display for ExtensionServiceType {
@@ -81,6 +143,28 @@ pub enum DpuTarget {
     All,
 }
 
+/// Controls whether the service deploys at creation or through instance attachment.
+/// This choice cannot change after creation because it determines which DPUs run the service.
+#[derive(Debug, Default, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, sqlx::Type)]
+#[serde(rename_all = "snake_case")]
+#[sqlx(type_name = "text", rename_all = "snake_case")]
+pub enum ExtensionServiceDeploymentType {
+    /// The service deploys to selected DPUs when attached to an instance.
+    #[default]
+    DemandDriven,
+    /// Creation requests deployment to all DPUs managed by DPF, without instance attachment.
+    Baseline,
+}
+
+impl std::fmt::Display for ExtensionServiceDeploymentType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::DemandDriven => write!(f, "demand_driven"),
+            Self::Baseline => write!(f, "baseline"),
+        }
+    }
+}
+
 impl DpuTarget {
     /// Resolves a deterministic target set, rejecting incomplete primary inventory.
     pub fn resolve(
@@ -115,13 +199,23 @@ impl DpuTarget {
 fn read_dpu_target(
     row: &PgRow,
     service_type: &ExtensionServiceType,
+    deployment_type: ExtensionServiceDeploymentType,
 ) -> Result<Option<DpuTarget>, sqlx::Error> {
     let target = row.try_get("dpu_target")?;
-    match (service_type, target) {
-        (ExtensionServiceType::DpfHelmChart, Some(_))
-        | (ExtensionServiceType::KubernetesPod, None) => Ok(target),
+    match (service_type, deployment_type, target) {
+        (
+            ExtensionServiceType::DpfHelmChart,
+            ExtensionServiceDeploymentType::DemandDriven,
+            Some(_),
+        )
+        | (ExtensionServiceType::DpfHelmChart, ExtensionServiceDeploymentType::Baseline, None)
+        | (
+            ExtensionServiceType::KubernetesPod,
+            ExtensionServiceDeploymentType::DemandDriven,
+            None,
+        ) => Ok(target),
         _ => Err(sqlx::Error::Protocol(
-            "inconsistent extension service DPU target; resolve registration migration".into(),
+            "inconsistent extension service type, deployment type, or DPU target".into(),
         )),
     }
 }
@@ -130,11 +224,18 @@ fn read_dpu_target(
 pub struct ExtensionService {
     pub id: ExtensionServiceId,
     pub service_type: ExtensionServiceType,
-    /// Immutable Helm placement policy; absent only for Kubernetes Pod services.
+    /// Whether the service deploys at creation or through instance attachment; immutable
+    #[serde(default)]
+    pub deployment_type: ExtensionServiceDeploymentType,
+    /// Which DPUs on an instance's host run a demand-driven Helm service; immutable.
+    /// Absent for baseline services, which deploy to all DPUs, and Kubernetes Pod services.
     pub dpu_target: Option<DpuTarget>,
     pub name: String,
     pub tenant_organization_id: TenantOrganizationId,
     pub description: String,
+    /// Service-facing interface requirements in ordinal order.
+    #[serde(default)]
+    pub service_vpc_interfaces: Vec<ServiceVpcInterfaceRequirement>,
     pub version_ctr: i32, // Version counter for the extension service, always incremented
     /// Controller-owned registration status. Kubernetes Pod services are
     /// synchronously ready, while DPF Helm services reconcile this lifecycle
@@ -183,17 +284,24 @@ impl<'r> sqlx::FromRow<'r, PgRow> for ExtensionService {
         let controller_state_outcome: Option<sqlx::types::Json<PersistentStateHandlerOutcome>> =
             row.try_get("controller_state_outcome")?;
 
-        let dpu_target = read_dpu_target(row, &service_type)?;
+        let deployment_type: ExtensionServiceDeploymentType = row.try_get("deployment_type")?;
+        let dpu_target = read_dpu_target(row, &service_type, deployment_type)?;
 
         Ok(ExtensionService {
             id: row.try_get("id")?,
             service_type,
+            deployment_type,
             dpu_target,
             name: row.try_get("name")?,
             tenant_organization_id: tenant_organization_id
                 .parse::<TenantOrganizationId>()
                 .map_err(|e| sqlx::Error::Decode(Box::new(e)))?,
             description: row.try_get("description")?,
+            service_vpc_interfaces: row
+                .try_get::<sqlx::types::Json<Vec<ServiceVpcInterfaceRequirement>>, _>(
+                    "service_vpc_interfaces",
+                )?
+                .0,
             version_ctr: row.try_get::<i32, _>("version_ctr")?,
             status: ExtensionServiceStatus {
                 controller_state: Versioned::new(
@@ -209,7 +317,10 @@ impl<'r> sqlx::FromRow<'r, PgRow> for ExtensionService {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// A service version's definition and metadata, with fields named for `extension_service_versions` columns.
+/// The unmapped `dpf_service_id` column reserves a case-insensitive DPF identity during creation.
+#[derive(Debug, Clone, Serialize, Deserialize, carbide_macros::DbTable)]
+#[db_table(name = "extension_service_versions")]
 pub struct ExtensionServiceVersionInfo {
     pub service_id: ExtensionServiceId,
     pub version: ConfigVersion,
@@ -242,14 +353,22 @@ impl<'r> sqlx::FromRow<'r, PgRow> for ExtensionServiceVersionInfo {
 pub struct ExtensionServiceSnapshot {
     pub service_id: ExtensionServiceId,
     pub service_type: ExtensionServiceType,
-    /// Immutable Helm placement policy; absent only for Kubernetes Pod services.
+    /// Whether the service deploys at creation or through instance attachment; cannot be changed.
+    #[serde(default)]
+    pub deployment_type: ExtensionServiceDeploymentType,
+    /// Which DPUs on an instance's host run a demand-driven Helm service; cannot be changed.
+    /// Absent for baseline services, which deploy to all DPUs, and Kubernetes Pod services.
     pub dpu_target: Option<DpuTarget>,
     pub service_name: String,
     pub tenant_organization_id: TenantOrganizationId,
     pub version_ctr: i32,
     pub latest_version: Option<ExtensionServiceVersionInfo>,
+    /// Complete non-deleted inventory, ordered by version number and then
+    /// creation time, both descending.
     pub active_versions: Vec<ConfigVersion>,
     pub description: String,
+    /// Service-facing interface requirements in ordinal order.
+    pub service_vpc_interfaces: Vec<ServiceVpcInterfaceRequirement>,
     pub created: DateTime<Utc>,
     pub updated: DateTime<Utc>,
     pub deleted: Option<DateTime<Utc>>,
@@ -260,13 +379,15 @@ pub struct ExtensionServiceSnapshot {
 }
 
 impl<'r> FromRow<'r, PgRow> for ExtensionServiceSnapshot {
+    /// Returns [`sqlx::Error::ColumnDecode`] naming `active_versions` when any
+    /// entry is malformed, rather than returning a partial list.
     fn from_row(row: &PgRow) -> Result<Self, sqlx::Error> {
         let service_id: ExtensionServiceId = row.try_get("service_id")?;
         let service_type_str: String = row.try_get("service_type")?;
         let service_type = service_type_str
             .parse::<ExtensionServiceType>()
             .map_err(|e| sqlx::Error::ColumnDecode {
-                index: "type".to_string(),
+                index: "service_type".to_string(),
                 source: Box::new(e),
             })?;
         let service_name: String = row.try_get("service_name")?;
@@ -276,6 +397,11 @@ impl<'r> FromRow<'r, PgRow> for ExtensionServiceSnapshot {
             .map_err(|e| sqlx::Error::Decode(Box::new(e)))?;
         let version_ctr: i32 = row.try_get("version_ctr")?;
         let description: String = row.try_get("description")?;
+        let service_vpc_interfaces = row
+            .try_get::<sqlx::types::Json<Vec<ServiceVpcInterfaceRequirement>>, _>(
+                "service_vpc_interfaces",
+            )?
+            .0;
         let created: DateTime<Utc> = row.try_get("created")?;
         let updated: DateTime<Utc> = row.try_get("updated")?;
         let deleted: Option<DateTime<Utc>> = row.try_get("deleted")?;
@@ -288,8 +414,12 @@ impl<'r> FromRow<'r, PgRow> for ExtensionServiceSnapshot {
         let active_versions_str: Vec<String> = row.try_get("active_versions")?;
         let active_versions: Vec<ConfigVersion> = active_versions_str
             .iter()
-            .filter_map(|s| s.parse().ok())
-            .collect();
+            .map(|s| s.parse())
+            .collect::<Result<_, _>>()
+            .map_err(|e| sqlx::Error::ColumnDecode {
+                index: "active_versions".to_string(),
+                source: Box::new(e),
+            })?;
 
         let latest_version = row.try_get("latest_version")?;
         let latest_data = row.try_get("latest_data")?;
@@ -322,11 +452,13 @@ impl<'r> FromRow<'r, PgRow> for ExtensionServiceSnapshot {
             .map(|state| state.0)
             .ok_or_else(|| sqlx::Error::ColumnNotFound("controller_state".to_string()))?;
 
-        let dpu_target = read_dpu_target(row, &service_type)?;
+        let deployment_type: ExtensionServiceDeploymentType = row.try_get("deployment_type")?;
+        let dpu_target = read_dpu_target(row, &service_type, deployment_type)?;
 
         Ok(ExtensionServiceSnapshot {
             service_id,
             service_type,
+            deployment_type,
             dpu_target,
             service_name,
             tenant_organization_id,
@@ -334,6 +466,7 @@ impl<'r> FromRow<'r, PgRow> for ExtensionServiceSnapshot {
             latest_version: latest_service_version,
             active_versions,
             description,
+            service_vpc_interfaces,
             created,
             updated,
             deleted,
@@ -388,6 +521,8 @@ pub struct DpfHelmChartIdentity {
 }
 
 impl DpfHelmChartIdentity {
+    /// Derives collision-free Kubernetes and Helm identities from the complete service UUID.
+    /// Keeping one canonical derivation prevents API, controller, and activation naming drift.
     pub fn from_service_id(service_id: ExtensionServiceId) -> Self {
         let dpu_service_name = format!("{DPF_HELM_CHART_NAME_PREFIX}{service_id}");
         Self {
@@ -396,6 +531,39 @@ impl DpfHelmChartIdentity {
             dpu_service_name,
         }
     }
+
+    /// Returns the service-side DPUServiceInterface name for one declared ordinal.
+    /// The UUID-bearing parent keeps this pod-local interface identity globally unique.
+    pub fn service_interface_name(&self, interface_ordinal: u32) -> String {
+        format!("{}-if{interface_ordinal}-svc", self.dpu_service_name)
+    }
+
+    /// Returns a slot-specific patch-interface name for one service interface.
+    /// Sharing this formula with activation avoids selecting a different dormant parent.
+    pub fn slot_patch_interface_name(&self, interface_ordinal: u32, slot: u32) -> String {
+        format!(
+            "{}-if{interface_ordinal}-slot{slot}-patch",
+            self.dpu_service_name
+        )
+    }
+
+    /// Returns a slot-specific chain name for one service interface.
+    /// Its deterministic identity lets reconciliation distinguish replacement from adoption.
+    pub fn slot_chain_name(&self, interface_ordinal: u32, slot: u32) -> String {
+        format!(
+            "{}-if{interface_ordinal}-slot{slot}-chain",
+            self.dpu_service_name
+        )
+    }
+
+    /// Returns the activation label selecting one service interface and fixed slot.
+    /// Registration requires this label while leaving it absent from every DPU until activation.
+    pub fn slot_placement_label_key(&self, interface_ordinal: u32, slot: u32) -> String {
+        format!(
+            "{DPF_HELM_CHART_LABEL_PREFIX}{}-if{interface_ordinal}-slot{slot}",
+            self.dpu_service_name
+        )
+    }
 }
 
 /// Tenant-provided Helm chart data for a DPF Helm chart extension service.
@@ -403,9 +571,6 @@ impl DpfHelmChartIdentity {
 /// This is intentionally the NICo API contract rather than a representation of
 /// the DPUService CR.  NICo owns the remaining DPUService fields, including
 /// the release name and placement selector.
-///
-/// @TODO(Felicity): check whether add deny_unknown_fields to DpfHelmChartData
-/// for backward compatibility concerns
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct DpfHelmChartServiceData {
@@ -415,6 +580,14 @@ pub struct DpfHelmChartServiceData {
     pub chart_name: String,
     #[serde(rename = "chartVersion")]
     pub chart_version: String,
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "serviceID")]
+    pub service_id: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "deployInCluster"
+    )]
+    pub deploy_in_cluster: Option<bool>,
     pub security: DpfHelmChartServiceSecurity,
     /// Optional chart-specific values. When absent, no `helmChart.values`
     /// field is sent to DPF.
@@ -502,8 +675,14 @@ pub enum DpfHelmChartServiceDataError {
     Json(String),
     #[error("{0} must not be empty")]
     MissingField(&'static str),
+    #[error("serviceID must not contain NUL characters")]
+    InvalidServiceIdNul,
     #[error("repoURL must begin with oci:// or https://")]
     InvalidRepositoryUrl,
+    #[error(
+        "deployInCluster must be explicitly set to false for DPF helm chart extension services"
+    )]
+    InvalidDeployInCluster,
     #[error("tenant values may not set NICo-owned field serviceDaemonSet.nodeSelector")]
     ReservedNodeSelector,
 }
@@ -543,6 +722,18 @@ impl DpfHelmChartServiceData {
         if self.chart_version.is_empty() {
             return Err(DpfHelmChartServiceDataError::MissingField("chartVersion"));
         }
+        // serviceID is required
+        if matches!(self.service_id.as_deref(), None | Some("")) {
+            return Err(DpfHelmChartServiceDataError::MissingField("serviceID"));
+        }
+        if self.service_id.as_ref().is_some_and(|id| id.contains('\0')) {
+            return Err(DpfHelmChartServiceDataError::InvalidServiceIdNul);
+        }
+        // Currently only allow deploy_in_cluster to be false so extension service
+        // only gets deployed in DPU clusters
+        if self.deploy_in_cluster != Some(false) {
+            return Err(DpfHelmChartServiceDataError::InvalidDeployInCluster);
+        }
         if self.values.as_ref().is_some_and(|values| {
             values
                 .get("serviceDaemonSet")
@@ -581,6 +772,31 @@ mod tests {
     use carbide_test_support::scenarios;
 
     use super::*;
+
+    #[crate::sqlx_test]
+    async fn snapshot_service_type_error_identifies_column(pool: sqlx::PgPool) {
+        // Use a projected row because the table constraint rejects unknown service types.
+        let row = sqlx::query(
+            "SELECT
+                $1::uuid AS service_id,
+                'virtual_machine'::text AS service_type",
+        )
+        .bind(ExtensionServiceId::new())
+        .fetch_one(&pool)
+        .await
+        .expect("fetch snapshot row with an invalid service type");
+
+        let error = ExtensionServiceSnapshot::from_row(&row)
+            .expect_err("an unknown service type must fail decoding");
+        let sqlx::Error::ColumnDecode { index, source } = error else {
+            panic!("expected ColumnDecode, got {error:?}");
+        };
+        assert_eq!(index, "service_type");
+        assert!(
+            source.is::<InvalidExtensionServiceTypeError>(),
+            "{source:?}"
+        );
+    }
 
     // ExtensionServiceType parses case-insensitively from its wire form, and an
     // unknown string is rejected.
@@ -622,6 +838,8 @@ mod tests {
     fn dpf_helm_chart_data_accepts_omitted_values() {
         let input = r#"{
                 "chartVersion":"1.2.3",
+                "serviceID":"tenant-service-v1",
+                "deployInCluster":false,
                 "security":{"privileged":false},
                 "repoURL":"oci://registry.example.com/charts",
                 "chartName":"tenant-service"
@@ -631,12 +849,34 @@ mod tests {
         assert_eq!(data.values, None);
         assert_eq!(
             data.normalized_json().unwrap(),
-            r#"{"repoURL":"oci://registry.example.com/charts","chartName":"tenant-service","chartVersion":"1.2.3","security":{"privileged":false}}"#
+            r#"{"repoURL":"oci://registry.example.com/charts","chartName":"tenant-service","chartVersion":"1.2.3","serviceID":"tenant-service-v1","deployInCluster":false,"security":{"privileged":false}}"#
         );
         assert_eq!(
             DpfHelmChartServiceData::parse_normalized(input).unwrap(),
             data.normalized_json().unwrap()
         );
+    }
+
+    /// Ensures decoded NUL in Helm values remains valid because only the
+    /// separately stored service identity is constrained by PostgreSQL text.
+    #[test]
+    fn dpf_helm_chart_data_accepts_nul_in_values() {
+        // Parse a valid identity with an escaped NUL inside arbitrary chart values.
+        let input = r#"{
+            "repoURL":"oci://registry.example.com/charts",
+            "chartName":"tenant-service",
+            "chartVersion":"1.2.3",
+            "serviceID":"tenant-service-v1",
+            "deployInCluster":false,
+            "security":{"privileged":false},
+            "values":{"payload":"\u0000"}
+        }"#;
+        let parsed = DpfHelmChartServiceData::parse(input).expect("NUL in values is allowed");
+
+        // Preserve the decoded value through normalization without treating it as an ID.
+        let normalized = parsed.normalized_json().expect("normalize chart data");
+        let reparsed = DpfHelmChartServiceData::parse(&normalized).expect("parse normalized data");
+        assert_eq!(reparsed.values, parsed.values);
     }
 
     #[test]
@@ -645,6 +885,8 @@ mod tests {
             "repoURL":"https://charts.example.com",
             "chartName":"tenant-service",
             "chartVersion":"1.2.3",
+            "serviceID":"tenant-service-v1",
+            "deployInCluster":false,
             "security":{"privileged":true},
             "values": %VALUES%
         }"#;
@@ -653,11 +895,38 @@ mod tests {
             DpfHelmChartServiceData::parse(&required.replace("%VALUES%", "[]")),
             Err(DpfHelmChartServiceDataError::Json(_))
         ));
+
+        // A missing workload identity is invalid even when every other required field is present.
+        let missing_service_id = required
+            .replace("            \"serviceID\":\"tenant-service-v1\",\n", "")
+            .replace("%VALUES%", "{}");
+        assert_eq!(
+            DpfHelmChartServiceData::parse(&missing_service_id),
+            Err(DpfHelmChartServiceDataError::MissingField("serviceID"))
+        );
         assert_eq!(
             DpfHelmChartServiceData::parse(
                 &required.replace("%VALUES%", r#"{"serviceDaemonSet":{"nodeSelector":{}}}"#)
             ),
             Err(DpfHelmChartServiceDataError::ReservedNodeSelector)
+        );
+
+        // The deployment location must be explicit
+        let missing_deploy_in_cluster = required
+            .replace("            \"deployInCluster\":false,\n", "")
+            .replace("%VALUES%", "{}");
+        assert_eq!(
+            DpfHelmChartServiceData::parse(&missing_deploy_in_cluster),
+            Err(DpfHelmChartServiceDataError::InvalidDeployInCluster)
+        );
+
+        // For now, only support deployInCluster=false
+        let host_cluster = required
+            .replace("\"deployInCluster\":false", "\"deployInCluster\":true")
+            .replace("%VALUES%", "{}");
+        assert_eq!(
+            DpfHelmChartServiceData::parse(&host_cluster),
+            Err(DpfHelmChartServiceDataError::InvalidDeployInCluster)
         );
     }
 
@@ -667,6 +936,8 @@ mod tests {
             "repoURL":"https://charts.example.com",
             "chartName":"tenant-service",
             "chartVersion":"1.2.3",
+            "serviceID":"weka-dpu-client-v2",
+            "deployInCluster":false,
             "security":{"privileged":true,"spiffe":{}},
             "values":{"serviceDaemonSet":{"labels":{"chart-path":"preserved"}}},
             "serviceDaemonSet":{
@@ -678,6 +949,10 @@ mod tests {
         }"#;
 
         let parsed = DpfHelmChartServiceData::parse(input).unwrap();
+
+        // Preserve caller-selected DPUService service ID
+        assert_eq!(parsed.service_id.as_deref(), Some("weka-dpu-client-v2"));
+        assert_eq!(parsed.deploy_in_cluster, Some(false));
         assert_eq!(parsed.security.spiffe, Some(DpfHelmChartServiceSpiffe {}));
         let daemon_set = parsed.service_daemon_set.as_ref().unwrap();
         assert_eq!(
@@ -730,6 +1005,61 @@ mod tests {
                 .len()
                 <= 63
         );
+    }
+
+    /// Verifies every registration resource derives from the same untruncated UUID identity.
+    /// This protects deterministic reconciliation from name collisions across services and slots.
+    #[test]
+    fn dpf_helm_chart_identity_derives_service_vpc_resource_names() {
+        // A fixed UUID makes every expected Kubernetes identity reviewable and stable.
+        let service_id = ExtensionServiceId::from(
+            uuid::Uuid::parse_str("f91aaea9-c117-4d6b-b744-635702317750").unwrap(),
+        );
+
+        // Project ordinal and slot identities from the one canonical service identity.
+        let identity = DpfHelmChartIdentity::from_service_id(service_id);
+
+        // Names and the activation selector must retain both dimensions.
+        assert_eq!(
+            identity.service_interface_name(0),
+            "extsvc-f91aaea9-c117-4d6b-b744-635702317750-if0-svc"
+        );
+        assert_eq!(
+            identity.slot_patch_interface_name(0, 2),
+            "extsvc-f91aaea9-c117-4d6b-b744-635702317750-if0-slot2-patch"
+        );
+        assert_eq!(
+            identity.slot_chain_name(0, 2),
+            "extsvc-f91aaea9-c117-4d6b-b744-635702317750-if0-slot2-chain"
+        );
+        assert_eq!(
+            identity.slot_placement_label_key(0, 2),
+            "nico/extsvc-f91aaea9-c117-4d6b-b744-635702317750-if0-slot2"
+        );
+    }
+
+    /// Verifies repeated fixed inputs are stable, the next attempt differs, and every candidate is
+    /// locally administered and unicast, protecting collision recovery from candidate reuse and
+    /// invalid Ethernet bits.
+    #[test]
+    fn extension_service_interface_mac_candidates_preserve_ethernet_identity_contract() {
+        // Use a UUID whose raw digest lacks the local bit so the assertion requires normalization.
+        let service_id = ExtensionServiceId::from(
+            uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000002").unwrap(),
+        );
+
+        // Repeat one attempt to verify stable output, then increment the attempt to require a
+        // different collision candidate.
+        let first = ExtensionServiceInterfaceMac::candidate(service_id, 0, 0);
+        let repeated = ExtensionServiceInterfaceMac::candidate(service_id, 0, 0);
+        let retry = ExtensionServiceInterfaceMac::candidate(service_id, 0, 1);
+        assert_eq!(first, repeated);
+        assert_ne!(first.mac_address, retry.mac_address);
+
+        // The low bits encode unicast (zero) and locally administered (one).
+        let first_octet = first.mac_address.bytes()[0];
+        assert_eq!(first_octet & 0x01, 0);
+        assert_eq!(first_octet & 0x02, 0x02);
     }
 
     #[test]

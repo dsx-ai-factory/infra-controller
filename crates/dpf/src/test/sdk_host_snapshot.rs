@@ -337,7 +337,6 @@ async fn a_dpus_conditions_operational_conditions_and_agent_status_are_all_repor
 #[tokio::test]
 async fn absent_status_fields_are_reported_as_absent_rather_than_empty() {
     let mock = SnapshotMock::with(dpu(Some(serde_json::json!({
-        "phase": "Initializing",
         "conditions": [{
             "type": "Initialized",
             "status": "False",
@@ -353,6 +352,7 @@ async fn absent_status_fields_are_reported_as_absent_rather_than_empty() {
         panic!("expected exactly one DPU, got {}", snapshot.dpus.len());
     };
     assert!(dpu.status_conditions.is_some());
+    assert!(dpu.status_phase.is_none());
     assert!(dpu.status_operational_conditions.is_none());
     assert!(dpu.status_agent_status.is_none());
 }

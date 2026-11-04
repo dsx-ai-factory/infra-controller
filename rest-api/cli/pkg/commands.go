@@ -160,6 +160,8 @@ var reservedBodyFlagNames = map[string]bool{
 // commandPathAliases adds concise aliases for generated commands. The original
 // generated paths remain available for compatibility.
 var commandPathAliases = map[string][]string{
+	"get-machine-spectrumx-multiplane":                  {"machine", "spectrumx-multiplane", "get"},
+	"update-machine-spectrumx-multiplane":               {"machine", "spectrumx-multiplane", "update"},
 	"bringup-rack":                                      {"rack", "bringup"},
 	"bringup-racks":                                     {"rack", "bringup-all"},
 	"cancel-task":                                       {"task", "cancel"},
@@ -1198,7 +1200,7 @@ func fetchAllPages(client *Client, method, path string, pathParams, queryParams 
 	}
 	queryParams["pageSize"] = strconv.Itoa(maxPageSize)
 
-	var allItems []json.RawMessage
+	allItems := make([]json.RawMessage, 0)
 	totalFromHeader := 0
 
 	for {

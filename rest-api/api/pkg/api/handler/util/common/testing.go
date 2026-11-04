@@ -30,7 +30,6 @@ import (
 	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
 	authz "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
 	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/grpcproxy"
-	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/otelecho"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
@@ -358,6 +357,13 @@ func TestBuildTenantAccount(t *testing.T, dbSession *cdb.Session, ip *cdbm.Infra
 // so tests that exercise privileged Tenant paths must enable it on the account rather
 // than only on the legacy Tenant config.
 func TestBuildTenantAccountWithTargetedInstanceCreation(t *testing.T, dbSession *cdb.Session, ip *cdbm.InfrastructureProvider, tenantID *uuid.UUID, tenantOrg string, status string, user *cdbm.User) *cdbm.TenantAccount {
+	return TestBuildTenantAccountWithCapabilities(t, dbSession, ip, tenantID, tenantOrg, status, user, cdbm.TenantAccountConfig{
+		TargetedInstanceCreation: true,
+	})
+}
+
+// TestBuildTenantAccountWithCapabilities creates a TenantAccount with the supplied capability defaults.
+func TestBuildTenantAccountWithCapabilities(t *testing.T, dbSession *cdb.Session, ip *cdbm.InfrastructureProvider, tenantID *uuid.UUID, tenantOrg string, status string, user *cdbm.User, config cdbm.TenantAccountConfig) *cdbm.TenantAccount {
 	taDAO := cdbm.NewTenantAccountDAO(dbSession)
 
 	ta, err := taDAO.Create(context.Background(), nil, cdbm.TenantAccountCreateInput{
@@ -366,7 +372,7 @@ func TestBuildTenantAccountWithTargetedInstanceCreation(t *testing.T, dbSession 
 		TenantOrg:                tenantOrg,
 		InfrastructureProviderID: ip.ID,
 		Status:                   status,
-		Config:                   &cdbm.TenantAccountConfig{TargetedInstanceCreation: true},
+		Config:                   &config,
 		CreatedBy:                user.ID,
 	})
 	require.NoError(t, err)
@@ -743,22 +749,15 @@ func TestBuildVpcPeering(t *testing.T, dbSession *cdb.Session, vpc1ID, vpc2ID uu
 	return vp
 }
 
-// TestCommonTraceProviderSetup creates a test provider and spanner
-func TestCommonTraceProviderSetup(t *testing.T, ctx context.Context) (trace.Tracer, trace.SpanContext, context.Context) {
-	// OTEL spanner configuration
-	provider := trace.NewNoopTracerProvider()
+// TestCommonTraceProviderSetup returns ctx carrying a remote parent span context
+func TestCommonTraceProviderSetup(t *testing.T, ctx context.Context) context.Context {
 	otel.SetTextMapPropagator(propagation.TraceContext{})
 	sc := trace.NewSpanContext(trace.SpanContextConfig{
 		TraceID: trace.TraceID{0x01},
 		SpanID:  trace.SpanID{0x01},
 	})
 
-	// Start echo test parent tracer/spanner
-	ctx = trace.ContextWithRemoteSpanContext(ctx, sc)
-	tracer := provider.Tracer(otelecho.TracerName)
-	tracer.Start(ctx, "Test-Echo-Spanner")
-
-	return tracer, sc, ctx
+	return trace.ContextWithRemoteSpanContext(ctx, sc)
 }
 
 func TestBuildAuditEntry(t *testing.T, dbSession *cdb.Session, orgName string, userID *uuid.UUID, statusCode int) *cdbm.AuditEntry {

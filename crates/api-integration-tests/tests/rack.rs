@@ -48,8 +48,16 @@ fn setup() {
     api_test_helper::setup_logging()
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn test_machine_a_tron_racks_integration() -> eyre::Result<()> {
+/// Runs rack ingestion checks with the Core binary's worker stack size.
+#[test]
+fn test_machine_a_tron_racks_integration() -> eyre::Result<()> {
+    utils::api_server_runtime_builder()
+        .build()?
+        .block_on(run_machine_a_tron_racks_integration())
+}
+
+/// Starts Core and the BMC mock for rack ingestion checks.
+async fn run_machine_a_tron_racks_integration() -> eyre::Result<()> {
     let Some(mut test_env) = IntegrationTestEnvironment::try_from_environment(
         1,
         "api_server_test_machine_a_tron_rack_integration",
@@ -103,6 +111,8 @@ async fn test_machine_a_tron_racks_integration() -> eyre::Result<()> {
     Ok(())
 }
 
+/// Simulates one GB200 and one GB300 rack with machine-a-tron, waits for NICo
+/// to ingest them, and asserts the rack groups, racks and members it registered.
 async fn run_machine_a_tron_racks_test(
     test_env: &IntegrationTestEnvironment,
     bmc_mock_registry: &BmcMockRegistry,
@@ -134,6 +144,9 @@ async fn run_machine_a_tron_racks_test(
             &ExpectedRackGroup {
                 rack_group_id: RackGroupId::new(format!("group-{rack_id}")),
                 topology: RackGroupTopology::new(topology),
+                protocol: Some(model::expected_rack_group::RackGroupProtocol::new(
+                    "NVLINK_V5",
+                )),
                 racks: vec![ExpectedRackGroupRack {
                     rack_id: rack_id.clone(),
                     members,
@@ -166,6 +179,7 @@ async fn run_machine_a_tron_racks_test(
                             host_reboot_delay: 1,
                             timing_overrides: Some(LifecycleTimingOverrides {
                                 host: PartialLifecycleTimings {
+                                    power_off_force: Some(Duration::from_millis(100)),
                                     reboot: Some(Duration::from_secs(1)),
                                     // ZERO disables the BMC self-reset offline window entirely,
                                     // keeping ingestion at its pre-feature pace
@@ -173,6 +187,7 @@ async fn run_machine_a_tron_racks_test(
                                     ..Default::default()
                                 },
                                 dpu: PartialLifecycleTimings {
+                                    power_off_force: Some(Duration::from_millis(100)),
                                     reboot: Some(Duration::from_secs(1)),
                                     // ZERO disables the BMC self-reset offline window entirely,
                                     // keeping ingestion at its pre-feature pace
@@ -207,6 +222,7 @@ async fn run_machine_a_tron_racks_test(
                             host_reboot_delay: 1,
                             timing_overrides: Some(LifecycleTimingOverrides {
                                 host: PartialLifecycleTimings {
+                                    power_off_force: Some(Duration::from_millis(100)),
                                     reboot: Some(Duration::from_secs(1)),
                                     // ZERO disables the BMC self-reset offline window entirely,
                                     // keeping ingestion at its pre-feature pace
@@ -214,6 +230,7 @@ async fn run_machine_a_tron_racks_test(
                                     ..Default::default()
                                 },
                                 dpu: PartialLifecycleTimings {
+                                    power_off_force: Some(Duration::from_millis(100)),
                                     reboot: Some(Duration::from_secs(1)),
                                     // ZERO disables the BMC self-reset offline window entirely,
                                     // keeping ingestion at its pre-feature pace
@@ -241,6 +258,7 @@ async fn run_machine_a_tron_racks_test(
         machines: BTreeMap::new(),
         carbide_api_url: format!("https://{}:{}", api_addr.ip(), api_addr.port()),
         dhcp: DhcpType::Api {},
+        bmc_dhcp_renewal_interval: Duration::from_secs(900),
         log_file: None,
         log_format: LogFormat::Compact,
         bmc_mock_port: 0,
@@ -259,6 +277,7 @@ async fn run_machine_a_tron_racks_test(
         mac_address_pool: None,
         ufm_mock: Default::default(),
         rms_mock: Default::default(),
+        nmxc_mock: Default::default(),
     };
 
     let (provisionable_handles, mat_handle) = api_test_helper::machine_a_tron::run_local(
@@ -341,8 +360,9 @@ async fn run_machine_a_tron_racks_test(
 
             let switch_nvos_ips: Vec<String> = sqlx::query_scalar(
                 "SELECT host(mia.address) \
-                 FROM expected_switches es \
-                 JOIN machine_interfaces mi ON mi.mac_address = ANY(es.nvos_mac_addresses) \
+                 FROM expected_switch_nvos_interfaces esi \
+                 JOIN expected_switches es ON es.bmc_mac_address = esi.bmc_mac_address \
+                 JOIN machine_interfaces mi ON mi.mac_address = esi.mac_address \
                  JOIN machine_interface_addresses mia ON mia.interface_id = mi.id \
                  WHERE es.rack_id = $1",
             )

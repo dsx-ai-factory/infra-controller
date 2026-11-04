@@ -115,7 +115,8 @@ func machineDetailFromPb(machine *corev1.Machine) MachineDetail {
 		UpdateComplete: status.GetUpdateComplete(),
 	}
 	for _, dpuID := range status.GetAssociatedDpuMachineIds() {
-		if id := dpuID.GetId(); id != "" {
+		id := dpuID.GetId()
+		if id != "" {
 			detail.AssociatedDpuMachineIDs = append(detail.AssociatedDpuMachineIDs, id)
 		}
 	}
@@ -126,17 +127,22 @@ func machineDetailFromPb(machine *corev1.Machine) MachineDetail {
 		detail.ChassisSerial = &serial
 	}
 
-	// BMC info
-	if machine.BmcInfo != nil {
-		if machine.BmcInfo.Ip != nil {
-			detail.BmcIP = *machine.BmcInfo.Ip
-		}
-		if machine.BmcInfo.Mac != nil {
-			detail.BmcMac = *machine.BmcInfo.Mac
-		}
-		if machine.BmcInfo.FirmwareVersion != nil {
-			detail.FirmwareVersion = *machine.BmcInfo.FirmwareVersion
-		}
+	// Prefer each split message, even when its values are unknown. Older Core
+	// versions omit these messages and expose only the combined BMC info.
+	bmc := machine.GetBmc()
+	if bmc != nil {
+		detail.BmcIP = bmc.GetIp()
+		detail.BmcMac = bmc.GetMac()
+	} else {
+		legacyBmc := machine.GetBmcInfo() //nolint:staticcheck // Support Core versions before the BMC split.
+		detail.BmcIP = legacyBmc.GetIp()
+		detail.BmcMac = legacyBmc.GetMac()
+	}
+	bmcStatus := status.GetBmcStatus()
+	if bmcStatus != nil {
+		detail.FirmwareVersion = bmcStatus.GetFirmwareVersion()
+	} else {
+		detail.FirmwareVersion = machine.GetBmcInfo().GetFirmwareVersion() //nolint:staticcheck // Support Core versions before the BMC split.
 	}
 
 	// Health status - derived from alerts
@@ -200,7 +206,7 @@ func powerStateFromPb(state corev1.PowerState) (ret PowerState) {
 	case corev1.PowerState_On:
 		ret = PowerStateOn
 	case corev1.PowerState_PowerManagerDisabled:
-		ret = PowerStateDisabled
+		ret = PowerStateUnknown
 	default:
 		ret = PowerStateUnknown
 	}
@@ -450,6 +456,7 @@ func bringUpStateFromPb(
 type ExpectedRackDetail struct {
 	RackID        string
 	RackProfileID string
+	RackGroupID   string
 	Name          string
 	Description   string
 	Labels        map[string]string
@@ -537,6 +544,7 @@ func metadataToGo(md *corev1.Metadata) (name, description string, labels map[str
 func expectedRackDetailFromPb(er *corev1.ExpectedRack) ExpectedRackDetail {
 	d := ExpectedRackDetail{
 		RackProfileID: er.GetRackProfileId().GetId(),
+		RackGroupID:   er.GetRackGroupId().GetId(),
 	}
 	if er.GetRackId() != nil {
 		d.RackID = er.GetRackId().GetId()

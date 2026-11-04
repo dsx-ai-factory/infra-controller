@@ -88,14 +88,16 @@ struct DpuMachineInfo<'a> {
 }
 
 /// Generate element containing all information needed to write a Machine Host.
-#[allow(deprecated)]
 fn get_host_machine_info<'a>(
     machines: &'a [&'a ::rpc::Machine],
 ) -> HashMap<&'a str, HostMachineInfo<'a>> {
     let mut machine_element: HashMap<&'a str, HostMachineInfo> = HashMap::new();
 
     for machine in machines {
-        let primary_interface = machine.interfaces.iter().find(|x| x.primary_interface);
+        let primary_interface = machine
+            .status
+            .as_ref()
+            .and_then(|status| status.interfaces.iter().find(|x| x.primary_interface));
 
         if let Some(primary_interface) = primary_interface {
             let hostname = primary_interface.hostname.as_str();
@@ -110,8 +112,9 @@ fn get_host_machine_info<'a>(
                     dpu_machine_id: primary_dpu.map(Into::into),
                     primary_dpu_machine_id: primary_dpu.map(Into::into),
                     all_dpu_machine_ids: machine
-                        .interfaces
+                        .status
                         .iter()
+                        .flat_map(|status| status.interfaces.iter())
                         .filter_map(|x| x.attached_dpu_machine_id.map(Into::into))
                         .collect(),
                 },
@@ -128,15 +131,16 @@ fn get_host_machine_info<'a>(
 }
 
 /// Generate element containing all information needed to write a Machine Host.
-#[allow(deprecated)]
 fn get_dpu_machine_info<'a>(
     machines: &'a [&'a ::rpc::Machine],
 ) -> HashMap<&'a str, DpuMachineInfo<'a>> {
     let mut machine_element: HashMap<&'a str, DpuMachineInfo> = HashMap::new();
 
     for machine in machines {
-        let primary_interface = machine.interfaces.iter().find(|x| x.primary_interface);
-
+        let primary_interface = machine
+            .status
+            .as_ref()
+            .and_then(|status| status.interfaces.iter().find(|x| x.primary_interface));
         if let Some(primary_interface) = primary_interface {
             let hostname = primary_interface.hostname.as_str();
             let address = primary_interface.address[0].as_str();
@@ -155,7 +159,6 @@ fn get_dpu_machine_info<'a>(
 }
 
 /// Generate element containing all information needed to write a BMC Host.
-#[allow(deprecated)]
 fn get_bmc_info<'a>(
     machines: &[&'a ::rpc::Machine],
     managed_hosts: &'a [ExploredManagedHost],
@@ -171,22 +174,23 @@ fn get_bmc_info<'a>(
     }
 
     for machine in machines {
-        let Some(bmc_ip) = machine.bmc_info.as_ref().and_then(|x| x.ip.as_deref()) else {
+        let Some(bmc_ip) = crate::bmc::endpoint(machine).and_then(|endpoint| endpoint.ip) else {
             continue;
         };
 
         let hostname = machine
-            .interfaces
-            .iter()
-            .find_map(|x| {
-                if x.primary_interface {
-                    Some(x.hostname.as_str())
-                } else {
-                    None
-                }
+            .status
+            .as_ref()
+            .and_then(|status| {
+                status.interfaces.iter().find_map(|x| {
+                    if x.primary_interface {
+                        Some(x.hostname.as_str())
+                    } else {
+                        None
+                    }
+                })
             })
             .unwrap_or("Not Found");
-
         bmc_element.insert(
             format!("{hostname}-bmc"),
             BmcInfo {
@@ -371,10 +375,8 @@ fn create_inventory_for_instances<'a>(
 
         used_machines.push(machine.id);
 
-        let bmc_ip = machine
-            .bmc_info
-            .as_ref()
-            .and_then(|x| x.ip.as_deref())
+        let bmc_ip = crate::bmc::endpoint(machine)
+            .and_then(|endpoint| endpoint.ip)
             .unwrap_or_default();
 
         let details = InstanceDetails {
@@ -395,4 +397,58 @@ fn create_inventory_for_instances<'a>(
     }
 
     Ok((tenant_map, used_machines))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[allow(deprecated)] // Older Core responses only populate BmcInfo.
+    fn bmc_inventory_prefers_split_endpoint() {
+        for (scenario, endpoint, legacy_ip, expected) in [
+            (
+                "split wins",
+                Some(::rpc::forge::BmcEndpoint {
+                    ip: Some("192.0.2.10".into()),
+                    ..Default::default()
+                }),
+                Some("192.0.2.20"),
+                Some("192.0.2.10"),
+            ),
+            (
+                "legacy fallback",
+                None,
+                Some("192.0.2.20"),
+                Some("192.0.2.20"),
+            ),
+            (
+                "empty split is authoritative",
+                Some(::rpc::forge::BmcEndpoint::default()),
+                Some("192.0.2.20"),
+                None,
+            ),
+            ("no BMC data", None, None, None),
+        ] {
+            let machine = ::rpc::Machine {
+                bmc: endpoint,
+                bmc_info: legacy_ip.map(|ip| ::rpc::forge::BmcInfo {
+                    ip: Some(ip.into()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            };
+            let inventory = get_bmc_info(&[&machine], &[]);
+            assert_eq!(
+                inventory.len(),
+                usize::from(expected.is_some()),
+                "{scenario}"
+            );
+            assert_eq!(
+                inventory.get("Not Found-bmc").map(|info| info.ansible_host),
+                expected,
+                "{scenario}"
+            );
+        }
+    }
 }

@@ -223,6 +223,20 @@ impl<S: RackHealthReportSink> HealthUpdater<S> {
 
 /// Build a health report for a leak alert.
 fn build_leak_alert_report(metadata: &LeakMetadata, leak_type: LeakPointType) -> HealthReport {
+    let classifications = match leak_type {
+        LeakPointType::LeakDetectRack => vec![
+            HealthAlertClassification::rack_leak(),
+            HealthAlertClassification::hardware(),
+            HealthAlertClassification::sensor_critical(),
+            HealthAlertClassification::prevent_allocations(),
+        ],
+        LeakPointType::LeakSensorFaultRack => vec![
+            HealthAlertClassification::prevent_allocations(),
+            HealthAlertClassification::sensor_critical(),
+            HealthAlertClassification::hardware(),
+        ],
+    };
+
     let alert = HealthProbeAlert {
         id: leak_type.probe_id(),
         target: Some(metadata.rack_id.clone()),
@@ -234,11 +248,7 @@ fn build_leak_alert_report(metadata: &LeakMetadata, leak_type: LeakPointType) ->
             metadata.rack_id
         ),
         tenant_message: None,
-        classifications: vec![
-            HealthAlertClassification::prevent_allocations(),
-            HealthAlertClassification::sensor_critical(),
-            HealthAlertClassification::hardware(),
-        ],
+        classifications,
     };
 
     HealthReport {
@@ -250,14 +260,18 @@ fn build_leak_alert_report(metadata: &LeakMetadata, leak_type: LeakPointType) ->
     }
 }
 
-/// Extract the point path from a topic.
+/// Extract the key that pairs a point's metadata topic with its value topic.
 ///
-/// Topics are in the format: `{prefix}{pointPath}/Metadata` or `{prefix}{pointPath}/Value`
+/// BMS topics are `{prefix}/PUB/Metadata/{objectType}/{pointType}/{tagPath}` and
+/// `{prefix}/PUB/Value/{objectType}/{pointType}/{tagPath}`. The key is everything after
+/// `Metadata/` or `Value/`, which the schema requires to be identical on both topics.
 fn extract_point_path<'a>(topic: &'a str, prefix: &str) -> Option<&'a str> {
-    topic
-        .strip_suffix("/Metadata")
-        .or_else(|| topic.strip_suffix("/Value"))
-        .and_then(|s| s.strip_prefix(prefix))
+    let rest = topic
+        .strip_prefix(prefix)?
+        .trim_start_matches('/')
+        .strip_prefix("PUB/")?;
+    rest.strip_prefix("Metadata/")
+        .or_else(|| rest.strip_prefix("Value/"))
 }
 
 #[cfg(test)]
@@ -272,7 +286,7 @@ mod tests {
     use super::*;
     use crate::DsxConsumerError;
 
-    const TEST_PREFIX: &str = "BMS/v1/";
+    const TEST_PREFIX: &str = "BMS/v1";
 
     fn test_meter() -> Meter {
         global::meter("test")
@@ -371,26 +385,44 @@ mod tests {
 
         value_scenarios!(
             run = |Topic { topic, prefix }| extract_point_path(topic, prefix);
-            "the point path sits between the prefix and the suffix" {
-                Topic { topic: "BMS/v1/some/point/path/Metadata", prefix: TEST_PREFIX }
-                    => Some("some/point/path"),
-                Topic { topic: "BMS/v1/some/point/path/Value", prefix: TEST_PREFIX }
-                    => Some("some/point/path"),
-                Topic { topic: "custom/prefix/some/point/path/Value", prefix: "custom/prefix/" }
-                    => Some("some/point/path"),
+            "metadata and value topics of one point share a key" {
+                Topic {
+                    topic: "BMS/v1/PUB/Metadata/Rack/RackLeakDetect/site/rack02/leak",
+                    prefix: TEST_PREFIX,
+                } => Some("Rack/RackLeakDetect/site/rack02/leak"),
+                Topic {
+                    topic: "BMS/v1/PUB/Value/Rack/RackLeakDetect/site/rack02/leak",
+                    prefix: TEST_PREFIX,
+                } => Some("Rack/RackLeakDetect/site/rack02/leak"),
+                // A trailing slash on the configured prefix is tolerated.
+                Topic {
+                    topic: "custom/prefix/PUB/Value/Rack/RackLeakSensorFault/site/leak",
+                    prefix: "custom/prefix/",
+                } => Some("Rack/RackLeakSensorFault/site/leak"),
             }
-            "a topic that does not match yields nothing" {
-                // Neither a /Metadata nor a /Value suffix.
-                Topic { topic: "BMS/v1/some/point/path/Unknown", prefix: TEST_PREFIX } => None,
+            "a topic that is not BMS-published metadata or value yields nothing" {
+                // Integration-published values are not consumed.
+                Topic {
+                    topic: "BMS/v1/NICO/Value/Rack/RackLeakDetectTray/site/leak",
+                    prefix: TEST_PREFIX,
+                } => None,
+                // Neither a Metadata nor a Value segment.
+                Topic {
+                    topic: "BMS/v1/PUB/Other/Rack/RackLeakDetect/site/leak",
+                    prefix: TEST_PREFIX,
+                } => None,
                 // The prefix does not match.
-                Topic { topic: "BMS/v1/some/point/path/Value", prefix: "wrong/prefix/" } => None,
+                Topic {
+                    topic: "BMS/v1/PUB/Value/Rack/RackLeakDetect/site/leak",
+                    prefix: "wrong/prefix",
+                } => None,
             }
         );
     }
 
     #[test]
     fn test_build_leak_alert_report_structure() {
-        let metadata = test_metadata("LeakDetectRack", "rack-001");
+        let metadata = test_metadata("RackLeakDetect", "rack-001");
         let report = build_leak_alert_report(&metadata, LeakPointType::LeakDetectRack);
 
         assert_eq!(report.source, HEALTH_REPORT_SOURCE);
@@ -408,28 +440,31 @@ mod tests {
             alert.classifications.iter().map(|c| c.as_str()).collect();
         assert_eq!(
             classification_strs,
-            vec!["PreventAllocations", "SensorCritical", "Hardware"]
+            vec![
+                "RackLeak",
+                "Hardware",
+                "SensorCritical",
+                "PreventAllocations"
+            ]
         );
     }
 
     #[test]
     fn test_build_leak_alert_report_sensor_fault() {
-        let metadata = test_metadata("LeakSensorFaultRack", "rack-002");
+        let metadata = test_metadata("RackLeakSensorFault", "rack-002");
         let report = build_leak_alert_report(&metadata, LeakPointType::LeakSensorFaultRack);
 
         let alert = &report.alerts[0];
         assert_eq!(alert.id.as_str(), "BmsLeakSensorFaultRack");
         assert!(alert.message.contains("Leak sensor fault"));
-    }
-
-    #[test]
-    fn test_build_leak_alert_report_rack_tray() {
-        let metadata = test_metadata("LeakDetectRackTray", "rack-003");
-        let report = build_leak_alert_report(&metadata, LeakPointType::LeakDetectRackTray);
-
-        let alert = &report.alerts[0];
-        assert_eq!(alert.id.as_str(), "BmsLeakDetectRackTray");
-        assert!(alert.message.contains("Rack tray leak detected"));
+        assert_eq!(
+            alert
+                .classifications
+                .iter()
+                .map(HealthAlertClassification::as_str)
+                .collect::<Vec<_>>(),
+            vec!["PreventAllocations", "SensorCritical", "Hardware"]
+        );
     }
 
     #[tokio::test]
@@ -443,15 +478,21 @@ mod tests {
         );
 
         // First, cache metadata
-        let metadata = test_metadata("LeakDetectRack", "rack-001");
+        let metadata = test_metadata("RackLeakDetect", "rack-001");
         updater
-            .handle_metadata_message("BMS/v1/site/rack/point/Metadata", metadata)
+            .handle_metadata_message(
+                "BMS/v1/PUB/Metadata/Rack/RackLeakDetect/site/rack/point",
+                metadata,
+            )
             .await;
 
         // Now send a faulting value
         let value = test_value_message(FaultValue::Faulting);
         updater
-            .handle_value_message("BMS/v1/site/rack/point/Value", value)
+            .handle_value_message(
+                "BMS/v1/PUB/Value/Rack/RackLeakDetect/site/rack/point",
+                value,
+            )
             .await;
 
         let inserts = sink.take_insert_calls();
@@ -474,15 +515,21 @@ mod tests {
         );
 
         // Cache metadata
-        let metadata = test_metadata("LeakDetectRack", "rack-001");
+        let metadata = test_metadata("RackLeakDetect", "rack-001");
         updater
-            .handle_metadata_message("BMS/v1/site/rack/point/Metadata", metadata)
+            .handle_metadata_message(
+                "BMS/v1/PUB/Metadata/Rack/RackLeakDetect/site/rack/point",
+                metadata,
+            )
             .await;
 
         // Send a clear value
         let value = test_value_message(FaultValue::Clear);
         updater
-            .handle_value_message("BMS/v1/site/rack/point/Value", value)
+            .handle_value_message(
+                "BMS/v1/PUB/Value/Rack/RackLeakDetect/site/rack/point",
+                value,
+            )
             .await;
 
         let removes = sink.take_remove_calls();
@@ -506,7 +553,10 @@ mod tests {
         // Send value without caching metadata first
         let value = test_value_message(FaultValue::Faulting);
         updater
-            .handle_value_message("BMS/v1/site/rack/point/Value", value)
+            .handle_value_message(
+                "BMS/v1/PUB/Value/Rack/RackLeakDetect/site/rack/point",
+                value,
+            )
             .await;
 
         // No API calls should be made
@@ -527,13 +577,19 @@ mod tests {
         // Cache unsupported metadata
         let metadata = test_metadata("UnsupportedType", "rack-001");
         updater
-            .handle_metadata_message("BMS/v1/site/rack/point/Metadata", metadata)
+            .handle_metadata_message(
+                "BMS/v1/PUB/Metadata/Rack/RackLeakDetect/site/rack/point",
+                metadata,
+            )
             .await;
 
         // Send value - should be skipped because metadata wasn't cached
         let value = test_value_message(FaultValue::Faulting);
         updater
-            .handle_value_message("BMS/v1/site/rack/point/Value", value)
+            .handle_value_message(
+                "BMS/v1/PUB/Value/Rack/RackLeakDetect/site/rack/point",
+                value,
+            )
             .await;
 
         assert_eq!(sink.take_insert_calls().len(), 0);
@@ -550,20 +606,29 @@ mod tests {
         );
 
         // Cache metadata
-        let metadata = test_metadata("LeakDetectRack", "rack-001");
+        let metadata = test_metadata("RackLeakDetect", "rack-001");
         updater
-            .handle_metadata_message("BMS/v1/site/rack/point/Metadata", metadata)
+            .handle_metadata_message(
+                "BMS/v1/PUB/Metadata/Rack/RackLeakDetect/site/rack/point",
+                metadata,
+            )
             .await;
 
         // Send faulting value twice
         let value1 = test_value_message(FaultValue::Faulting);
         updater
-            .handle_value_message("BMS/v1/site/rack/point/Value", value1)
+            .handle_value_message(
+                "BMS/v1/PUB/Value/Rack/RackLeakDetect/site/rack/point",
+                value1,
+            )
             .await;
 
         let value2 = test_value_message(FaultValue::Faulting);
         updater
-            .handle_value_message("BMS/v1/site/rack/point/Value", value2)
+            .handle_value_message(
+                "BMS/v1/PUB/Value/Rack/RackLeakDetect/site/rack/point",
+                value2,
+            )
             .await;
 
         // Only one insert should have been made
@@ -581,27 +646,30 @@ mod tests {
         );
 
         // Cache metadata
-        let metadata = test_metadata("LeakDetectRack", "rack-001");
+        let metadata = test_metadata("RackLeakDetect", "rack-001");
         updater
-            .handle_metadata_message("BMS/v1/site/rack/point/Metadata", metadata)
+            .handle_metadata_message(
+                "BMS/v1/PUB/Metadata/Rack/RackLeakDetect/site/rack/point",
+                metadata,
+            )
             .await;
 
         // Send faulting, then clear, then faulting again
         updater
             .handle_value_message(
-                "BMS/v1/site/rack/point/Value",
+                "BMS/v1/PUB/Value/Rack/RackLeakDetect/site/rack/point",
                 test_value_message(FaultValue::Faulting),
             )
             .await;
         updater
             .handle_value_message(
-                "BMS/v1/site/rack/point/Value",
+                "BMS/v1/PUB/Value/Rack/RackLeakDetect/site/rack/point",
                 test_value_message(FaultValue::Clear),
             )
             .await;
         updater
             .handle_value_message(
-                "BMS/v1/site/rack/point/Value",
+                "BMS/v1/PUB/Value/Rack/RackLeakDetect/site/rack/point",
                 test_value_message(FaultValue::Faulting),
             )
             .await;
@@ -621,15 +689,18 @@ mod tests {
         );
 
         // Cache metadata
-        let metadata = test_metadata("LeakDetectRack", "rack-001");
+        let metadata = test_metadata("RackLeakDetect", "rack-001");
         updater
-            .handle_metadata_message("BMS/v1/site/rack/point/Metadata", metadata)
+            .handle_metadata_message(
+                "BMS/v1/PUB/Metadata/Rack/RackLeakDetect/site/rack/point",
+                metadata,
+            )
             .await;
 
         // Send value - will fail
         updater
             .handle_value_message(
-                "BMS/v1/site/rack/point/Value",
+                "BMS/v1/PUB/Value/Rack/RackLeakDetect/site/rack/point",
                 test_value_message(FaultValue::Faulting),
             )
             .await;
@@ -638,7 +709,7 @@ mod tests {
         assert!(
             updater
                 .value_state_cache
-                .get("site/rack/point")
+                .get("Rack/RackLeakDetect/site/rack/point")
                 .await
                 .is_none()
         );
@@ -657,21 +728,21 @@ mod tests {
         // Cache metadata for two racks
         updater
             .handle_metadata_message(
-                "BMS/v1/site/rack1/point/Metadata",
-                test_metadata("LeakDetectRack", "rack-001"),
+                "BMS/v1/PUB/Metadata/Rack/RackLeakDetect/site/rack1/point",
+                test_metadata("RackLeakDetect", "rack-001"),
             )
             .await;
         updater
             .handle_metadata_message(
-                "BMS/v1/site/rack2/point/Metadata",
-                test_metadata("LeakDetectRack", "rack-002"),
+                "BMS/v1/PUB/Metadata/Rack/RackLeakDetect/site/rack2/point",
+                test_metadata("RackLeakDetect", "rack-002"),
             )
             .await;
 
         // Send faulting to rack1
         updater
             .handle_value_message(
-                "BMS/v1/site/rack1/point/Value",
+                "BMS/v1/PUB/Value/Rack/RackLeakDetect/site/rack1/point",
                 test_value_message(FaultValue::Faulting),
             )
             .await;
@@ -679,7 +750,7 @@ mod tests {
         // Send faulting to rack2
         updater
             .handle_value_message(
-                "BMS/v1/site/rack2/point/Value",
+                "BMS/v1/PUB/Value/Rack/RackLeakDetect/site/rack2/point",
                 test_value_message(FaultValue::Faulting),
             )
             .await;
@@ -707,15 +778,15 @@ mod tests {
 
         // Send metadata
         tx.send(MqttMessage::Metadata {
-            topic: "BMS/v1/site/rack/point/Metadata".to_string(),
-            metadata: test_metadata("LeakDetectRack", "rack-001"),
+            topic: "BMS/v1/PUB/Metadata/Rack/RackLeakDetect/site/rack/point".to_string(),
+            metadata: test_metadata("RackLeakDetect", "rack-001"),
         })
         .await
         .unwrap();
 
         // Send value
         tx.send(MqttMessage::Value {
-            topic: "BMS/v1/site/rack/point/Value".to_string(),
+            topic: "BMS/v1/PUB/Value/Rack/RackLeakDetect/site/rack/point".to_string(),
             value: test_value_message(FaultValue::Faulting),
         })
         .await

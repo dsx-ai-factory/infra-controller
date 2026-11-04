@@ -287,12 +287,7 @@ func (ar *APIRack) FromProto(protoRack *flowv1.Rack, includeComponents bool) {
 			ar.Description = *info.Description
 		}
 	}
-	ar.NVLinkDomainIDs = make([]string, 0, len(protoRack.GetNvlDomainIds()))
-	for _, domainID := range protoRack.GetNvlDomainIds() {
-		if domainID != nil {
-			ar.NVLinkDomainIDs = append(ar.NVLinkDomainIDs, domainID.GetId())
-		}
-	}
+	ar.NVLinkDomainIDs = append([]string{}, protoRack.GetNvlDomainExternalIds()...)
 	ar.TaskStats.FromProto(protoRack.GetTaskStats())
 	ar.Health = nil
 	if protoRack.GetHealth() != nil {

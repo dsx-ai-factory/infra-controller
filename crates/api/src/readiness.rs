@@ -45,8 +45,8 @@ const READINESS_CHECK_INTERVAL: Duration = Duration::from_secs(5);
 /// start timing out.
 const READINESS_CHECK_TIMEOUT: Duration = Duration::from_secs(3);
 
-/// A periodic PostgreSQL readiness check failed. Alertable: repeated
-/// occurrences mean `/ready` is reporting the replica unready and Kubernetes
+/// A startup or periodic PostgreSQL readiness check failed. Alertable:
+/// repeated occurrences mean `/ready` is reporting the replica unready and Kubernetes
 /// should be pulling it out of Service endpoints.
 #[derive(carbide_instrument::Event)]
 #[event(
@@ -56,32 +56,54 @@ const READINESS_CHECK_TIMEOUT: Duration = Duration::from_secs(3);
     log = warn,
     metric = counter,
     message = "database readiness check failed",
-    describe = "Number of periodic PostgreSQL readiness checks that failed, backing /ready"
+    describe = "Number of startup and periodic PostgreSQL readiness check failures for /ready"
 )]
 struct DatabaseReadinessCheckFailed {
     #[context]
     error: String,
 }
 
-/// Spawn the periodic PostgreSQL readiness check that keeps `health_controller`
-/// in sync with the database's actual availability. Runs until `cancel_token`
-/// is cancelled.
-pub(crate) fn spawn_database_readiness_probe(
-    join_set: &mut JoinSet<()>,
-    db_pool: &PgPool,
-    health_controller: HealthController,
-    cancel_token: CancellationToken,
-) -> eyre::Result<()> {
-    join_set
-        .build_task()
-        .name("database_readiness_probe")
-        .spawn(run_database_readiness_probe(
-            dedicated_probe_pool(db_pool),
-            health_controller,
-            cancel_token,
-            READINESS_CHECK_INTERVAL,
-        ))?;
-    Ok(())
+/// Owns the dedicated pool used for both initial and periodic database readiness checks.
+///
+/// Reusing one pool preserves identical writability and connection-replacement behavior across
+/// the startup handoff.
+pub(crate) struct DatabaseReadinessProbe {
+    db_pool: PgPool,
+}
+
+impl DatabaseReadinessProbe {
+    /// Creates the lazy dedicated pool so preparing the probe does not touch the network before
+    /// the API listener starts.
+    pub(crate) fn new(db_pool: &PgPool) -> Self {
+        Self {
+            db_pool: dedicated_probe_pool(db_pool),
+        }
+    }
+
+    /// Performs the fresh startup check so readiness never inherits stale resource-setup success.
+    pub(crate) async fn check(&self) -> bool {
+        check_database_readiness(&self.db_pool, READINESS_CHECK_TIMEOUT).await
+    }
+
+    /// Continues periodic checks with the same pool so startup and steady-state readiness cannot
+    /// disagree because they used different connection state.
+    pub(crate) fn spawn(
+        self,
+        join_set: &mut JoinSet<()>,
+        health_controller: HealthController,
+        cancel_token: CancellationToken,
+    ) -> eyre::Result<()> {
+        join_set
+            .build_task()
+            .name("database_readiness_probe")
+            .spawn(run_database_readiness_probe(
+                self.db_pool,
+                health_controller,
+                cancel_token,
+                READINESS_CHECK_INTERVAL,
+            ))?;
+        Ok(())
+    }
 }
 
 /// A single dedicated connection for the readiness probe, separate from the

@@ -6,6 +6,7 @@ package util
 import (
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"reflect"
 	"regexp"
@@ -34,9 +35,9 @@ const (
 )
 
 var (
-	LeadingWhitespaceRegexp  = regexp.MustCompile("^\\s+.*")
-	TrailingWhitespaceRegexp = regexp.MustCompile(".*\\s+$")
-	NotAllWhitespaceRegexp   = regexp.MustCompile("[^\\s]+")
+	LeadingWhitespaceRegexp  = regexp.MustCompile(`^\s+.*`)
+	TrailingWhitespaceRegexp = regexp.MustCompile(`.*\s+$`)
+	NotAllWhitespaceRegexp   = regexp.MustCompile(`[^\s]+`)
 	ShaHashRegex             = regexp.MustCompile("^[A-Fa-f0-9]+$")
 	Sha256LowercaseHexRegex  = regexp.MustCompile("^[a-f0-9]{64}$")
 	DiskImagePathRegex       = regexp.MustCompile(`^(smallest|/dev/(nvme[0-9]+n[0-9]+|[sv]d[a-z]+|disk/by-id/[^/[:space:]]+))$`)
@@ -80,6 +81,41 @@ func ValidateDiskImagePath(value interface{}) error {
 		return errInvalidDiskImagePath
 	}
 
+	return nil
+}
+
+// ValidateExpectedBmcIPAddress rejects addresses that cannot identify one BMC.
+// Other syntactically valid addresses retain the existing API behavior.
+func ValidateExpectedBmcIPAddress(value interface{}) error {
+	return validateSingleInterfaceIPAddress("BmcIpAddress", value)
+}
+
+// ValidateExpectedFixedIPAddress applies the BmcIpAddress rule to an expected
+// interface's fixed IP, which Core reserves in the same way.
+func ValidateExpectedFixedIPAddress(value interface{}) error {
+	return validateSingleInterfaceIPAddress("FixedIP", value)
+}
+
+func validateSingleInterfaceIPAddress(field string, value interface{}) error {
+	invalid := fmt.Errorf("%s must be a valid IPv4 or IPv6 address that is not unspecified, multicast, or limited broadcast", field)
+
+	var address string
+	switch ip := value.(type) {
+	case string:
+		address = ip
+	case *string:
+		if ip == nil {
+			return nil
+		}
+		address = *ip
+	default:
+		return invalid
+	}
+
+	parsed := net.ParseIP(address)
+	if parsed == nil || parsed.IsUnspecified() || parsed.IsMulticast() || parsed.Equal(net.IPv4bcast) {
+		return invalid
+	}
 	return nil
 }
 

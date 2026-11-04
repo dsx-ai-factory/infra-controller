@@ -24,10 +24,6 @@ pub(super) trait JsonExt {
     where
         Self: Sized;
 
-    fn delete_fields(self, fields: &[&str]) -> serde_json::Value
-    where
-        Self: Sized;
-
     fn into_ok_response(self) -> Response<Body>
     where
         Self: Sized + ToString,
@@ -52,15 +48,6 @@ pub(super) trait JsonExt {
 impl JsonExt for serde_json::Value {
     fn patch(mut self, patch: impl JsonPatch) -> serde_json::Value {
         json_patch(&mut self, patch.json_patch());
-        self
-    }
-
-    fn delete_fields(mut self, fields: &[&str]) -> serde_json::Value {
-        if let serde_json::Value::Object(obj) = &mut self {
-            for f in fields {
-                obj.remove(*f);
-            }
-        }
         self
     }
 

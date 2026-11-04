@@ -20,7 +20,7 @@ use std::collections::HashMap;
 use carbide_uuid::switch::{SwitchIdSource, SwitchType};
 use mac_address::MacAddress;
 use model::address_selection_strategy::AddressSelectionStrategy;
-use model::expected_switch::ExpectedSwitch;
+use model::expected_switch::{ExpectedNvosInterface, ExpectedSwitch};
 use model::machine_interface_address::MachineInterfaceAssociation;
 use model::metadata::Metadata;
 use model::network_prefix::NewNetworkPrefix;
@@ -119,7 +119,10 @@ pub async fn create_seeded_discovered(
         ExpectedSwitch {
             expected_switch_id: None,
             bmc_mac_address,
-            nvos_mac_addresses: vec![nvos_mac_address],
+            nvos_interfaces: vec![ExpectedNvosInterface {
+                mac_address: nvos_mac_address,
+                is_primary: true,
+            }],
             serial_number: serial_number.clone(),
             bmc_username: "ADMIN".into(),
             bmc_password: "Pwd2023x0x0x0x7".into(),

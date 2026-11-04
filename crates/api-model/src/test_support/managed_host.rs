@@ -320,6 +320,7 @@ impl From<ManagedHostConfig> for EndpointExplorationReport {
                 boot_order: None,
                 bios_version: None,
                 serial_console_ssh_port: None,
+                processors: None,
             }],
             chassis: vec![Chassis {
                 id: "System.Embedded.1".to_string(),
@@ -341,12 +342,14 @@ impl From<ManagedHostConfig> for EndpointExplorationReport {
                         description: Some("The information of BMC (Primary) firmware.".to_string()),
                         version: Some("5.10.20".to_string()),
                         release_date: None,
+                        drive: None,
                     },
                     Inventory {
                         id: "Current-159-1.13.2__BIOS.Setup.1-1".to_string(),
                         description: Some("The information of Firmware firmware.".to_string()),
                         version: Some("1.12.0".to_string()),
                         release_date: None,
+                        drive: None,
                     },
                 ],
             }],
@@ -358,11 +361,8 @@ impl From<ManagedHostConfig> for EndpointExplorationReport {
             lockdown_status: None,
             power_shelf_id: None,
             switch_id: None,
-            physical_slot_number: None,
-            compute_tray_index: None,
-            revision_id: None,
-            topology_id: None,
             remediation_error: None,
+            ..Default::default()
         }
     }
 }

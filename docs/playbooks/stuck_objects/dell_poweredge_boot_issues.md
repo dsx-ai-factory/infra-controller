@@ -1,4 +1,4 @@
-# Restore a Missing DPU Boot Device on Dell PowerEdge
+# Restore a Missing DPU Boot Device on Dell PowerEdge <Badge intent="info">v2.2</Badge> <Badge intent="launch" minimal>New</Badge>
 
 Use this playbook when a Dell PowerEdge server with a DPU no longer lists its
 UEFI HTTP device. This issue has been observed on PowerEdge R750, R760, and
@@ -84,7 +84,7 @@ Try NICo machine setup first:
 
    ```bash
    MAC_ADDRESS=$(nico-admin-cli -f json machine show <machine-id> \
-     | jq -r '.interfaces[] | select(.primary_interface == true) | .mac_address')
+     | jq -r '.status.interfaces[] | select(.primary_interface == true) | .mac_address')
    ```
 
 1. Run machine setup against the BMC:

@@ -37,8 +37,8 @@ func init() {
 	ruleAssociateCmd.Flags().StringVar(&assocRackID, "rack-id", "", "Rack ID (required)")
 	ruleAssociateCmd.Flags().StringVar(&assocRuleID, "rule-id", "", "Rule ID (required)")
 
-	ruleAssociateCmd.MarkFlagRequired("rack-id")
-	ruleAssociateCmd.MarkFlagRequired("rule-id")
+	cobra.CheckErr(ruleAssociateCmd.MarkFlagRequired("rack-id"))
+	cobra.CheckErr(ruleAssociateCmd.MarkFlagRequired("rule-id"))
 }
 
 // runRuleAssociate is the RunE handler for ruleAssociateCmd. It parses the

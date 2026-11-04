@@ -17,7 +17,7 @@
 
 use std::convert::Infallible;
 use std::net::{SocketAddr, TcpListener};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -33,6 +33,7 @@ use rustls::ServerConfig;
 use rustls_pemfile::Item;
 use rustls_pki_types::PrivateKeyDer;
 use tempfile::{NamedTempFile, TempDir};
+use tokio::sync::Notify;
 
 use crate::Options;
 
@@ -100,6 +101,16 @@ pub(super) fn setup_agent_run_env(
         }
     }
 
+    setup_agent_run_options(addr, td, acf, test_metadata_service, &root_dir).map(Some)
+}
+
+pub(super) fn setup_agent_run_options(
+    addr: &SocketAddr,
+    td: &TempDir,
+    acf: &NamedTempFile,
+    test_metadata_service: bool,
+    root_dir: &Path,
+) -> eyre::Result<Options> {
     let hbn_root = td.path();
     tracing::info!(?hbn_root, "Using HBN root");
     fs::create_dir_all(hbn_root.join("etc/frr"))?;
@@ -131,7 +142,7 @@ pub(super) fn setup_agent_run_env(
         }))),
     };
 
-    Ok(Some(opts))
+    Ok(opts)
 }
 
 pub(super) async fn run_grpc_server(
@@ -258,19 +269,73 @@ impl HttpBody for GrpcBody {
     }
 }
 
-/// Takes an rpc object (built from rpc/proto/forge.proto) and turns into into a gRPC axum response
-pub(super) fn respond(out: impl prost::Message) -> impl IntoResponse {
+/// Emits one valid gRPC message and then signals the client decoder's wait for pending trailers.
+///
+/// Callers must pass this body directly to Tonic so body polling observes client consumption.
+struct StalledGrpcBody {
+    data: Option<Bytes>,
+    trailers_polled: Option<Arc<Notify>>,
+}
+
+impl HttpBody for StalledGrpcBody {
+    type Data = Bytes;
+    type Error = Infallible;
+
+    fn poll_frame(
+        self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+        let this = self.get_mut();
+        if let Some(data) = this.data.take() {
+            return Poll::Ready(Some(Ok(Frame::data(data))));
+        }
+
+        // Signal Tonic's next frame request so tests advance time only after message decoding.
+        if let Some(trailers_polled) = this.trailers_polled.take() {
+            trailers_polled.notify_one();
+        }
+        Poll::Pending
+    }
+
+    fn is_end_stream(&self) -> bool {
+        false
+    }
+}
+
+/// Encodes one uncompressed gRPC message so successful and stalled responses use identical bytes.
+fn encode_grpc_message(out: impl prost::Message) -> Vec<u8> {
     let msg_len = out.encoded_len() as u32;
     let mut body = Vec::with_capacity(1 + 4 + msg_len as usize);
     // first byte is compression: 0 means none
-    body.push(0u8);
+    body.push(0);
     // next four bytes are length as bigendian u32
     body.extend_from_slice(&msg_len.to_be_bytes());
     // and finally the message
     out.encode(&mut body).unwrap();
+    body
+}
 
+/// Takes an rpc object (built from rpc/proto/forge.proto) and turns into into a gRPC axum response
+pub(crate) fn respond(out: impl prost::Message) -> impl IntoResponse {
     Response::builder()
         .header(header::CONTENT_TYPE, "application/grpc+tonic")
-        .body(GrpcBody::new(body))
+        .body(GrpcBody::new(encode_grpc_message(out)))
+        .unwrap()
+}
+
+/// Returns a valid gRPC message with pending trailers so tests can bound complete unary calls.
+///
+/// Callers must pass the response body directly to Tonic so the signal observes the client
+/// decoder waiting for trailers rather than an HTTP server polling its response body.
+pub(crate) fn respond_then_stall_before_trailers(
+    out: impl prost::Message,
+    trailers_polled: Arc<Notify>,
+) -> impl IntoResponse {
+    Response::builder()
+        .header(header::CONTENT_TYPE, "application/grpc+tonic")
+        .body(StalledGrpcBody {
+            data: Some(Bytes::from(encode_grpc_message(out))),
+            trailers_polled: Some(trailers_polled),
+        })
         .unwrap()
 }

@@ -19,14 +19,18 @@
 
 use carbide_secrets::credentials::{CredentialKey, Credentials};
 use carbide_uuid::switch::SwitchId;
-use model::switch::{ConfigureCertificateState, ConfiguringState, Switch, SwitchControllerState};
+use model::switch::{
+    ConfigureCertificateState, ConfiguringState, DisableMtlsState, Switch, SwitchControllerState,
+};
 use state_controller::state_handler::{
     StateHandlerContext, StateHandlerError, StateHandlerOutcome,
 };
 
 use crate::certificate::{
-    ConfigureSwitchCertificateMode, StartConfigureSwitchCertificateResult,
-    poll_configure_switch_certificate_job, start_configure_switch_certificate,
+    ConfigureSwitchCertificateMode, DisableSwitchMtlsPollOutcome,
+    StartConfigureSwitchCertificateResult, StartDisableSwitchMtlsResult,
+    poll_configure_switch_certificate_job, poll_disable_switch_mtls_job,
+    start_configure_switch_certificate, start_disable_switch_mtls,
 };
 use crate::context::SwitchStateHandlerContextObjects;
 use crate::nvos_password_rotation::{
@@ -58,6 +62,9 @@ pub async fn handle_configuring(
     };
 
     match config_state {
+        ConfiguringState::DisableMtls { disable_mtls } => {
+            handle_disable_mtls(switch_id, state, ctx, disable_mtls).await
+        }
         ConfiguringState::ConfigureCertificate {
             configure_certificate,
         } => handle_configure_certificate(switch_id, state, ctx, configure_certificate).await,
@@ -337,6 +344,85 @@ pub(crate) async fn ensure_nvos_admin_credentials(
     Ok(NvosAdminCredentialStatus::Available)
 }
 
+async fn handle_disable_mtls(
+    switch_id: &SwitchId,
+    state: &Switch,
+    ctx: &mut StateHandlerContext<'_, SwitchStateHandlerContextObjects>,
+    disable_mtls: DisableMtlsState,
+) -> Result<StateHandlerOutcome<SwitchControllerState>, StateHandlerError> {
+    match disable_mtls {
+        DisableMtlsState::Start => handle_disable_mtls_start(switch_id, state, ctx).await,
+        DisableMtlsState::WaitForComplete { job_id } => {
+            handle_disable_mtls_wait_for_complete(switch_id, ctx, &job_id).await
+        }
+    }
+}
+
+/// Where initial ingestion continues once mTLS removal is done or skipped.
+fn configure_certificate_start() -> SwitchControllerState {
+    SwitchControllerState::Configuring {
+        config_state: ConfiguringState::ConfigureCertificate {
+            configure_certificate: ConfigureCertificateState::Start,
+        },
+    }
+}
+
+async fn handle_disable_mtls_start(
+    switch_id: &SwitchId,
+    state: &Switch,
+    ctx: &mut StateHandlerContext<'_, SwitchStateHandlerContextObjects>,
+) -> Result<StateHandlerOutcome<SwitchControllerState>, StateHandlerError> {
+    if let Some(outcome) = ensure_certificate_operation_credentials(switch_id, state, ctx).await? {
+        return Ok(outcome);
+    }
+
+    match start_disable_switch_mtls(switch_id, state, ctx).await? {
+        StartDisableSwitchMtlsResult::Skipped => Ok(StateHandlerOutcome::transition(
+            configure_certificate_start(),
+        )),
+        StartDisableSwitchMtlsResult::EarlyTransition(outcome) => Ok(outcome),
+        StartDisableSwitchMtlsResult::JobStarted(job_id) => Ok(StateHandlerOutcome::transition(
+            SwitchControllerState::Configuring {
+                config_state: ConfiguringState::DisableMtls {
+                    disable_mtls: DisableMtlsState::WaitForComplete { job_id },
+                },
+            },
+        )),
+    }
+}
+
+async fn handle_disable_mtls_wait_for_complete(
+    switch_id: &SwitchId,
+    ctx: &mut StateHandlerContext<'_, SwitchStateHandlerContextObjects>,
+    job_id: &str,
+) -> Result<StateHandlerOutcome<SwitchControllerState>, StateHandlerError> {
+    match poll_disable_switch_mtls_job(switch_id, ctx, job_id).await? {
+        DisableSwitchMtlsPollOutcome::Completed => {
+            tracing::info!(
+                %job_id,
+                switch_id = ?switch_id,
+                "Switch: existing mTLS bindings disabled",
+            );
+            Ok(StateHandlerOutcome::transition(
+                configure_certificate_start(),
+            ))
+        }
+        // Certificate configuration is deliberately not attempted: it would
+        // reach NVUE through the same stale client trust.
+        DisableSwitchMtlsPollOutcome::Failed(cause) => Ok(StateHandlerOutcome::transition(
+            SwitchControllerState::Error {
+                cause: format!(
+                    "Switch {switch_id}: disabling existing mTLS bindings failed; \
+                     certificate configuration was not attempted: {cause}"
+                ),
+            },
+        )),
+        DisableSwitchMtlsPollOutcome::InProgress => Ok(StateHandlerOutcome::wait(format!(
+            "switch mTLS-disable job {job_id} in progress"
+        ))),
+    }
+}
+
 async fn handle_configure_certificate(
     switch_id: &SwitchId,
     state: &mut Switch,
@@ -353,15 +439,19 @@ async fn handle_configure_certificate(
     }
 }
 
-async fn handle_configure_certificate_start(
+/// Ensures the per-switch NVOS credential that component-manager endpoints need.
+///
+/// Returns `Some(wait)` when the operation must wait for credentials to be
+/// imported or corrected, and `None` when it may proceed.
+async fn ensure_certificate_operation_credentials(
     switch_id: &SwitchId,
     state: &Switch,
     ctx: &mut StateHandlerContext<'_, SwitchStateHandlerContextObjects>,
-) -> Result<StateHandlerOutcome<SwitchControllerState>, StateHandlerError> {
-    // `start_configure_switch_certificate` skips certificate bring-up without
-    // either a rack association or component manager. Resolve credentials only
-    // when that operation can start so skipped configurations retain their
-    // existing behavior.
+) -> Result<Option<StateHandlerOutcome<SwitchControllerState>>, StateHandlerError> {
+    // Disabling mTLS and configuring certificates skip without either a rack
+    // association or component manager. Resolve credentials only when those
+    // operations can start so skipped configurations retain their existing
+    // behavior.
     //
     // Certificate endpoint construction requires a per-switch NVOS
     // username/password. Preserve an existing effective credential. When it is
@@ -388,21 +478,33 @@ async fn handle_configure_certificate_start(
             match ensure_nvos_admin_credentials(switch_id, bmc_mac_address, ctx).await? {
                 NvosAdminCredentialStatus::Available => {}
                 NvosAdminCredentialStatus::Skip => {
-                    // Stay in `ConfigureCertificate::Start` so periodic
+                    // Stay in the current `Start` state so periodic
                     // reconciliation retries after credentials are imported.
-                    return Ok(StateHandlerOutcome::wait(format!(
+                    return Ok(Some(StateHandlerOutcome::wait(format!(
                         "switch {switch_id}: waiting for NVOS admin credentials"
-                    )));
+                    ))));
                 }
                 NvosAdminCredentialStatus::Error(cause) => {
                     // Expected-switch credential metadata can be corrected
                     // without resetting the switch controller state.
-                    return Ok(StateHandlerOutcome::wait(format!(
+                    return Ok(Some(StateHandlerOutcome::wait(format!(
                         "switch {switch_id}: waiting for valid NVOS admin credentials: {cause}"
-                    )));
+                    ))));
                 }
             }
         }
+    }
+
+    Ok(None)
+}
+
+async fn handle_configure_certificate_start(
+    switch_id: &SwitchId,
+    state: &Switch,
+    ctx: &mut StateHandlerContext<'_, SwitchStateHandlerContextObjects>,
+) -> Result<StateHandlerOutcome<SwitchControllerState>, StateHandlerError> {
+    if let Some(outcome) = ensure_certificate_operation_credentials(switch_id, state, ctx).await? {
+        return Ok(outcome);
     }
 
     match start_configure_switch_certificate(
@@ -443,8 +545,15 @@ async fn handle_configure_certificate_wait_for_complete(
                 },
             ))
         }
+        // Initial ingestion has removed mTLS bindings by this point, so a failed
+        // install leaves the switch without the required mTLS.
         crate::certificate::ConfigureSwitchCertificatePollOutcome::Failed(cause) => Ok(
-            StateHandlerOutcome::transition(SwitchControllerState::Error { cause }),
+            StateHandlerOutcome::transition(SwitchControllerState::Error {
+                cause: format!(
+                    "Switch {switch_id}: certificate configuration failed; \
+                     mTLS restoration is incomplete: {cause}"
+                ),
+            }),
         ),
         crate::certificate::ConfigureSwitchCertificatePollOutcome::InProgress => Ok(
             StateHandlerOutcome::wait(format!("switch certificate job {job_id} in progress")),

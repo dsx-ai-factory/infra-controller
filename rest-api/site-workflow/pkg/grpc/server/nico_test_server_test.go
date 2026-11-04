@@ -5,6 +5,9 @@ package server
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"encoding/json"
 	"testing"
 
 	"github.com/gogo/status"
@@ -147,4 +150,57 @@ func TestReencryptTenantIdentitySecrets(t *testing.T) {
 		require.Equal(t, codes.NotFound, status.Code(err))
 		assert.Equal(t, `Identity configuration not found for org "other-org"`, status.Convert(err).Message())
 	})
+}
+
+func TestJwksDocumentForKeys(t *testing.T) {
+	const keyID = "fixture-key"
+	const keyUse = "sig"
+	scalar := make([]byte, p256CoordinateLen)
+	scalar[len(scalar)-1] = 43
+	validKey, err := ecdsa.ParseRawPrivateKey(elliptic.P256(), scalar)
+	require.NoError(t, err)
+	otherScalar := make([]byte, 48)
+	otherScalar[len(otherScalar)-1] = 1
+	otherKey, err := ecdsa.ParseRawPrivateKey(elliptic.P384(), otherScalar)
+	require.NoError(t, err)
+	tests := []struct {
+		name      string
+		key       *ecdsa.PrivateKey
+		wantError string
+	}{
+		{
+			name: "P-256 retains a leading zero coordinate",
+			key:  validKey,
+		},
+		{
+			name:      "invalid public key",
+			key:       &ecdsa.PrivateKey{},
+			wantError: "encode public key",
+		},
+		{
+			name:      "wrong curve",
+			key:       otherKey,
+			wantError: "expected P-256 public key",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			document, err := jwksDocumentForKeys([]*identityKeyMaterial{{privateKey: tt.key, kid: keyID}}, keyUse)
+			if tt.wantError != "" {
+				require.ErrorContains(t, err, tt.wantError)
+				assert.Empty(t, document)
+				return
+			}
+			require.NoError(t, err)
+			var decoded struct {
+				Keys []map[string]string `json:"keys"`
+			}
+			require.NoError(t, json.Unmarshal([]byte(document), &decoded))
+			require.Len(t, decoded.Keys, 1)
+			assert.Equal(t, map[string]string{
+				"kty": "EC", "crv": "P-256", "alg": jwtESAlg, "use": keyUse, "kid": keyID,
+				"x": "mGriUG8f8QTQQjCGHY9LSY9LxMbQCbMPdUTcEpuC0o0", "y": "ADzMwKZGDgrjKKTZfTx7YdhvxiicGJ8lJREMRBuwfpc",
+			}, decoded.Keys[0])
+		})
+	}
 }

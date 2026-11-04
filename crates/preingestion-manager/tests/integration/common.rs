@@ -26,6 +26,26 @@ use model::site_explorer::{
 };
 use sqlx::PgConnection;
 
+/// Rewrites an endpoint's exploration report so `identify_dpu()` reports a BlueField-3.
+pub(super) async fn mark_endpoint_bluefield3(
+    txn: &mut PgConnection,
+    addr: IpAddr,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "UPDATE explored_endpoints SET exploration_report = \
+         jsonb_set( \
+             jsonb_set( \
+                 jsonb_set(exploration_report, '{Systems,0,Id}', to_jsonb('Bluefield'::text)), \
+                 '{Chassis,0,Id}', to_jsonb('Card1'::text)), \
+             '{Chassis,0,Model}', to_jsonb('NVIDIA BlueField 3 DPU'::text)) \
+         WHERE address = $1",
+    )
+    .bind(addr)
+    .execute(txn)
+    .await?;
+    Ok(())
+}
+
 pub(super) async fn insert_endpoint_version(
     txn: &mut PgConnection,
     addr: &str,
@@ -115,6 +135,7 @@ fn build_exploration_report(
             boot_order: None,
             bios_version: None,
             serial_console_ssh_port: None,
+            processors: None,
         }],
         chassis: vec![Chassis {
             model: Some(model.to_string()),
@@ -136,12 +157,14 @@ fn build_exploration_report(
                     description: None,
                     version: Some(bmc_version.to_string()),
                     release_date: None,
+                    drive: None,
                 },
                 Inventory {
                     id: "Current-159-1.13.2__BIOS.Setup.1-1".to_string(),
                     description: None,
                     version: Some(uefi_version.to_string()),
                     release_date: None,
+                    drive: None,
                 },
             ],
         }],
@@ -153,11 +176,8 @@ fn build_exploration_report(
         lockdown_status: None,
         power_shelf_id: None,
         switch_id: None,
-        compute_tray_index: None,
-        physical_slot_number: None,
-        revision_id: None,
-        topology_id: None,
         remediation_error: None,
+        ..Default::default()
     };
     report.model = report.model();
     report

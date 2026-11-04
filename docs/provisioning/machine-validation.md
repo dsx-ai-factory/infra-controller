@@ -208,9 +208,8 @@ legacy container tests configured with `tests add`.
 ### 1. Allow the plugin runtime profile in site configuration
 
 Add the policy to the site's existing Machine Validation configuration, then
-roll out the normal site configuration deployment. With Helm, this is the TOML
-in `nico-api.siteConfig.nicoApiSiteConfig`; with Kustomize, it is
-`deploy/files/nico-api/nico-api-site-config.toml`. Keep the rest of the site
+roll out the normal site configuration deployment. This is the TOML in
+`nico-api.siteConfig.nicoApiSiteConfig`. Keep the rest of the site
 configuration intact.
 
 ```toml
@@ -271,7 +270,7 @@ Plugins run unprivileged by default. A privileged plugin requires
 `--privileged` and `allow_privileged_plugins = true` in the site policy.
 A plugin that also needs a writable host-root mount requires
 `--host-access-full`, `allow_full_host_plugins = true`, and the approval in the
-next step.
+next step. The full-host profile also shares the host PID namespace.
 
 ### 4. Qualify, verify, approve, and enable
 

@@ -1,4 +1,4 @@
-# NICo Flow
+# NICo Flow <Badge intent="info">v2.2</Badge> <Badge intent="launch" minimal>New</Badge>
 
 Flow provides rack inventory and durable orchestration for power control, firmware updates, ingestion, and bring-up. It groups component targets by rack so each rack has its own task and execution status.
 

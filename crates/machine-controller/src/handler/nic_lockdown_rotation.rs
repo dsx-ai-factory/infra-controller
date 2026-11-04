@@ -155,7 +155,9 @@ pub(crate) async fn handle_rotating_nic_lockdown(
 
     // Collect SVPC interfaces up front so the borrow of `state` does not overlap
     // the mutable `txn` borrow inside the loop.
-    let svpc: Vec<_> = svpc_interfaces(state).collect();
+    let mut svpc: Vec<_> = svpc_interfaces(state).collect();
+    // Match observation merging's ID order before acquiring multiple card locks.
+    svpc.sort_by_key(|interface| interface.id);
 
     // Whether at least one card is still actively converging (kicked this tick or
     // mid-rekey within its step budget). While true the host waits; once false

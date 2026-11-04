@@ -46,6 +46,8 @@ func (p *Pagination) Validate() error {
 type OrderBy struct {
 	Column    string         `json:"column"`
 	Direction OrderDirection `json:"direction"`
+	// IsExpression marks a trusted SQL expression supplied by application code.
+	IsExpression bool `json:"-"`
 }
 
 func (ob *OrderBy) Validate() error {

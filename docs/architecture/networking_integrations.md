@@ -78,10 +78,14 @@ There needs to be a mechanism that periodically compares the expected networking
     - Immediately before a normal PXE restart, `WaitingForRebootToReady`
       repeats the aggregate health and primary p0 checks. Instance deletion and
       explicit custom iPXE requests bypass these checks.
-    - A live `UpdateInstanceConfig` request uses
-      `NetworkConfigUpdate/WaitingForConfigSynced`. This state waits for current
-      DPU observations and health alerts that prevent host state changes. It does
-      not apply the primary p0 PXE gate or restart the host.
+    - A live `UpdateInstanceConfig` request keeps old resources until the
+      required DPU reports and aggregate health checks pass. NICo checks them
+      in `NetworkConfigUpdate/WaitingForConfigSynced`, then again in
+      `NetworkConfigUpdate/ReleaseOldResources` before releasing the resources.
+      The update does not restart the host or apply the primary p0 PXE gate.
+      Refer to
+      [Live Network Update Resource Release](state_machines/managedhost.md#live-network-update-resource-release)
+      for the required reports and the exception for hosts without DPUs.
     - During instance termination, one state in the state machine should wait until the machine is isolated from any other machine in the network. If this step is omitted (to let the machine proceed termination in the case of an unhealthy network fabric), the respective machine must at least be tagged with a health alert that would prevent a different tenant from using the host. Both options guarantee that no other tenant will get access to the tenants network partition.
 
 ### Machine Capabilities and Instance types

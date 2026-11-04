@@ -48,6 +48,13 @@ def test_asks_for_the_one_host_rather_than_the_whole_site(recorded):
     assert calls == [["managed-host", "show", HOST_ID]]
 
 
+def test_machine_vendor_uses_status_discovery_info(recorded):
+    calls = recorded({"status": {"discovery_info": {"dmi_data": {"sys_vendor": "NVIDIA"}}}})
+
+    assert admin_cli.get_machine_vendor(HOST_ID) == "NVIDIA"
+    assert calls == [["machine", "show", HOST_ID]]
+
+
 def test_accepts_a_host_wrapped_in_managed_hosts(recorded):
     recorded({"managed_hosts": [HOST]})
 

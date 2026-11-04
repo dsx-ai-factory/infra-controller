@@ -52,6 +52,7 @@ impl TryFrom<rpc::protos::dns::Domain> for NewDomain {
         Ok(NewDomain {
             name: proto.name,
             default_ttl: zone_ttl_from_proto(proto.default_ttl)?,
+            vpc_id: proto.vpc_id,
             soa,
         })
     }
@@ -71,6 +72,7 @@ impl From<Domain> for rpc::protos::dns::Domain {
             id: Some(domain.id),
             name: domain.name,
             default_ttl: domain.default_ttl.map(u32::from),
+            vpc_id: domain.vpc_id,
             created: Some(domain.created.into()),
             updated: Some(domain.updated.into()),
             deleted: domain.deleted.map(|d| d.into()),
@@ -131,6 +133,7 @@ impl TryFrom<rpc::protos::dns::Domain> for Domain {
             id: domain_id,
             name: domain.name,
             default_ttl: zone_ttl_from_proto(domain.default_ttl)?,
+            vpc_id: domain.vpc_id,
             created,
             updated,
             deleted,

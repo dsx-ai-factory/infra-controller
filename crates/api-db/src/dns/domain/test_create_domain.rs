@@ -15,11 +15,127 @@
  * limitations under the License.
  */
 
+use carbide_uuid::vpc::VpcId;
 use db::ObjectColumnFilter;
 use model::dns::NewDomain;
 
 use crate as db;
 use crate::DatabaseError;
+use crate::test_support::vpc::insert_vpc;
+
+async fn persist_owned(
+    txn: &mut sqlx::PgConnection,
+    name: &str,
+    vpc_id: Option<VpcId>,
+) -> Result<model::dns::Domain, DatabaseError> {
+    db::dns::domain::persist(
+        NewDomain {
+            vpc_id,
+            ..NewDomain::new(name)
+        },
+        txn,
+    )
+    .await
+}
+
+#[crate::sqlx_test]
+async fn live_domain_names_are_unique(pool: sqlx::PgPool) {
+    let mut txn = pool.begin().await.expect("begin fixture transaction");
+    let first_vpc = insert_vpc(txn.as_mut(), "name-a").await;
+    let second_vpc = insert_vpc(txn.as_mut(), "name-b").await;
+    let zone = persist_owned(txn.as_mut(), "shared.example", Some(first_vpc))
+        .await
+        .expect("create the first VPC-owned domain");
+
+    let mut attempt = sqlx::Acquire::begin(&mut txn).await.expect("savepoint");
+    // Use SQL because persist rejects uppercase names. The index must still
+    // treat Shared.Example. and shared.example as the same name.
+    let error = sqlx::query("INSERT INTO domains (name, vpc_id) VALUES ('Shared.Example.', $1)")
+        .bind(second_vpc)
+        .execute(attempt.as_mut())
+        .await
+        .expect_err("a second live zone with the same normalised name is rejected");
+    attempt.rollback().await.expect("release savepoint");
+    assert_eq!(
+        error
+            .as_database_error()
+            .and_then(|db_error| db_error.constraint()),
+        Some("domains_live_name_key"),
+        "{error}"
+    );
+
+    db::dns::domain::delete(zone, txn.as_mut())
+        .await
+        .expect("delete the first zone");
+    persist_owned(txn.as_mut(), "shared.example", Some(second_vpc))
+        .await
+        .expect("a deleted zone's name is free for another VPC");
+}
+
+#[crate::sqlx_test]
+async fn different_vpcs_can_own_parent_and_child_domains(pool: sqlx::PgPool) {
+    let mut txn = pool.begin().await.expect("begin fixture transaction");
+    for name in ["customer.example", "gpu.customer.example"] {
+        let vpc_id = insert_vpc(txn.as_mut(), name).await;
+        persist_owned(txn.as_mut(), name, Some(vpc_id))
+            .await
+            .expect("create independently owned domain");
+    }
+}
+
+// A live domain must be deleted before its VPC. Once the VPC is deleted,
+// it cannot be used as the owner of another domain.
+#[crate::sqlx_test]
+async fn live_domain_pins_its_vpc(pool: sqlx::PgPool) {
+    let mut txn = pool.begin().await.expect("begin fixture transaction");
+    let vpc_id = insert_vpc(txn.as_mut(), "dns-owner").await;
+    let domain = persist_owned(txn.as_mut(), "owner.example", Some(vpc_id))
+        .await
+        .expect("create domain");
+
+    // A unique constraint violation aborts its transaction. Use a savepoint
+    // so we can still delete the domain and its VPC below.
+    let mut attempt = sqlx::Acquire::begin(&mut txn).await.expect("savepoint");
+    let duplicate = persist_owned(attempt.as_mut(), "second.example", Some(vpc_id)).await;
+    attempt.rollback().await.expect("release savepoint");
+    assert!(
+        matches!(duplicate, Err(DatabaseError::InvalidArgument(ref message)) if message.contains("already owns a domain")),
+        "{duplicate:?}"
+    );
+
+    assert!(matches!(
+        db::vpc::try_delete(txn.as_mut(), vpc_id).await,
+        Err(DatabaseError::FailedPrecondition(_))
+    ));
+
+    db::dns::domain::delete(domain, txn.as_mut())
+        .await
+        .expect("delete domain");
+    db::vpc::try_delete(txn.as_mut(), vpc_id)
+        .await
+        .expect("delete unreferenced VPC");
+    assert!(matches!(
+        persist_owned(txn.as_mut(), "stale.example", Some(vpc_id)).await,
+        Err(DatabaseError::NotFoundError { .. })
+    ));
+}
+
+#[crate::sqlx_test]
+async fn vpc_domains_must_be_forward_zones(pool: sqlx::PgPool) {
+    let mut txn = pool.begin().await.expect("begin fixture transaction");
+    let vpc_id = insert_vpc(txn.as_mut(), "reverse-owner").await;
+    for name in ["in-addr.arpa", "0.0.d.f.ip6.arpa."] {
+        let result = persist_owned(txn.as_mut(), name, Some(vpc_id)).await;
+        assert!(
+            matches!(
+                result,
+                Err(DatabaseError::InvalidArgument(ref message))
+                    if message.contains("forward zones")
+            ),
+            "{name}: {result:?}"
+        );
+    }
+}
 
 #[crate::sqlx_test]
 async fn create_delete_valid_domain(pool: sqlx::PgPool) {
@@ -53,8 +169,8 @@ async fn create_delete_valid_domain(pool: sqlx::PgPool) {
 
 #[crate::sqlx_test]
 async fn normalized_reverse_zone_names_are_unique(pool: sqlx::PgPool) {
-    // Dotted and non-dotted names identify the same reverse zone, so the
-    // database must reject a second live spelling through the partial index.
+    // Dotted and undotted spellings are the same zone. The index rejects the
+    // second spelling, and persist reports it as "already exists".
     let mut txn = pool.begin().await.unwrap();
     db::dns::domain::persist(NewDomain::new("0.10.in-addr.arpa"), txn.as_mut())
         .await
@@ -63,17 +179,10 @@ async fn normalized_reverse_zone_names_are_unique(pool: sqlx::PgPool) {
     let duplicate =
         db::dns::domain::persist(NewDomain::new("0.10.in-addr.arpa."), txn.as_mut()).await;
 
-    assert!(matches!(
-        duplicate,
-        Err(DatabaseError::Sqlx(error))
-            if matches!(
-                &error.source,
-                sqlx::Error::Database(database_error)
-                    if database_error.is_unique_violation()
-                        && database_error.constraint()
-                            == Some("domains_live_reverse_zone_name_key")
-            )
-    ));
+    assert!(
+        matches!(duplicate, Err(DatabaseError::InvalidArgument(ref message)) if message.contains("already exists")),
+        "{duplicate:?}"
+    );
 }
 
 #[crate::sqlx_test]

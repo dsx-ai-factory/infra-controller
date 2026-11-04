@@ -29,12 +29,13 @@ import (
 // contain only a subset of components (e.g., those selected for an operation).
 // Always verify the context in which a Rack object is used.
 type Rack struct {
-	RackProfileID *string               `json:"rack_profile_id,omitempty"`
-	Info          deviceinfo.DeviceInfo `json:"info"`
-	ExternalID    string                `json:"external_id,omitempty"`
-	Loc           location.Location     `json:"loc"`
-	Components    []component.Component `json:"components"`
-	NVLDomainID   uuid.UUID             `json:"nvl_domain_id"`
+	RackProfileID       *string               `json:"rack_profile_id,omitempty"`
+	Info                deviceinfo.DeviceInfo `json:"info"`
+	ExternalID          string                `json:"external_id,omitempty"`
+	Loc                 location.Location     `json:"loc"`
+	Components          []component.Component `json:"components"`
+	NVLDomainID         uuid.UUID             `json:"nvl_domain_id"`
+	NVLDomainExternalID *string               `json:"nvl_domain_external_id"`
 	// OperationStatus is derived from supported active components in the rack.
 	// It is an operability summary, not the Core rack controller lifecycle state.
 	OperationStatus types.Phase `json:"operation_status"`
@@ -189,16 +190,14 @@ func (r *Rack) IsSealed() bool {
 func (r *Rack) String() string {
 	var builder strings.Builder
 
-	builder.WriteString(fmt.Sprintf(
-		"Name: %s, Manufacturer: %s, SN: %s, Location: %s",
+	fmt.Fprintf(&builder, "Name: %s, Manufacturer: %s, SN: %s, Location: %s",
 		r.Info.Name,
 		r.Info.Manufacturer,
 		r.Info.SerialNumber,
-		r.Loc.Encode(),
-	))
+		r.Loc.Encode())
 
 	for i, c := range r.Components {
-		builder.WriteString(fmt.Sprintf("\n[%2d] %v", i, &c))
+		fmt.Fprintf(&builder, "\n[%2d] %v", i, &c)
 	}
 
 	return builder.String()

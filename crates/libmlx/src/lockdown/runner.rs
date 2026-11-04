@@ -16,9 +16,13 @@
  */
 
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::{Command, Output, Stdio};
+use std::time::Duration;
 
 use crate::lockdown::error::{MlxError, MlxResult};
+use crate::lockdown::lockdown::LockStatus;
+use crate::runner::FirmwareToolExecutor;
+use crate::runner::command_builder::CommandSpec;
 
 // FlintRunner is a wrapper for executing flint commands.
 pub struct FlintRunner {
@@ -28,7 +32,64 @@ pub struct FlintRunner {
     dry_run: bool,
 }
 
+#[derive(Clone, Copy, Debug)]
+enum KeyOperation {
+    Enable,
+    Disable,
+    SetKey,
+}
+
+impl KeyOperation {
+    fn args(self) -> &'static [&'static str] {
+        match self {
+            Self::Enable => &["hw_access", "enable"],
+            Self::Disable => &["hw_access", "disable"],
+            Self::SetKey => &["set_key"],
+        }
+    }
+
+    fn classify_output(self, output: Output) -> MlxResult<()> {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+
+        // Already messages on either stream take precedence over exit status.
+        // `SetKey` ignores them and uses only the exit status.
+        match self {
+            Self::Enable
+                if stderr.contains("already enabled") || stdout.contains("already enabled") =>
+            {
+                return Err(MlxError::AlreadyUnlocked);
+            }
+            Self::Disable
+                if stderr.contains("already disabled") || stdout.contains("already disabled") =>
+            {
+                return Err(MlxError::AlreadyLocked);
+            }
+            Self::Enable | Self::Disable | Self::SetKey => {}
+        }
+
+        if !output.status.success() {
+            // Tool output may echo the key. Include only the operation and status.
+            return Err(MlxError::CommandFailed(format!(
+                "{} failed: {}",
+                self.args().join(" "),
+                output.status
+            )));
+        }
+
+        Ok(())
+    }
+}
+
 impl FlintRunner {
+    /// Shared lookup order; each execution path keeps its own probe policy.
+    pub(crate) const CANDIDATE_PATHS: [&'static str; 4] = [
+        "flint",
+        "/usr/bin/flint",
+        "/usr/local/bin/flint",
+        "/opt/mellanox/mft/bin/flint",
+    ];
+
     // new creates a new FlintRunner instance.
     pub fn new() -> MlxResult<Self> {
         let flint_path = Self::find_flint()?;
@@ -54,21 +115,20 @@ impl FlintRunner {
 
     // find_flint attempts to find the flint executable in common locations.
     fn find_flint() -> MlxResult<String> {
-        let common_paths = [
-            "flint",
-            "/usr/bin/flint",
-            "/usr/local/bin/flint",
-            "/opt/mellanox/mft/bin/flint",
-        ];
-
-        for path in &common_paths {
-            if let Ok(output) = Command::new(path)
+        for path in &Self::CANDIDATE_PATHS {
+            let Ok(mut child) = Command::new(path)
                 .arg("--version")
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
-                .status()
-                && output.success()
-            {
+                .spawn()
+            else {
+                continue;
+            };
+            let status = child.wait().map_err(|source| MlxError::ProcessUnsettled {
+                operation: "version probe",
+                source,
+            })?;
+            if status.success() {
                 return Ok(path.to_string());
             }
         }
@@ -81,6 +141,23 @@ impl FlintRunner {
         format!("{} {}", self.flint_path, args.join(" "))
     }
 
+    /// Keep spawn failures distinct from lost completion evidence. Raw
+    /// arguments and output cannot enter these errors because keys may occur
+    /// in either one.
+    fn execute(command: &mut Command, operation: &'static str) -> MlxResult<Output> {
+        let child = command
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|error| {
+                MlxError::CommandFailed(format!("failed to execute {operation}: {error}"))
+            })?;
+        child
+            .wait_with_output()
+            .map_err(|source| MlxError::ProcessUnsettled { operation, source })
+    }
+
     // query_device queries device information and hardware access status.
     pub fn query_device(&self, device_id: &str) -> MlxResult<String> {
         let args = ["-d", device_id, "q"];
@@ -89,11 +166,29 @@ impl FlintRunner {
             return Err(MlxError::DryRun(self.build_command(&args)));
         }
 
-        let output = Command::new(&self.flint_path)
-            .args(args)
-            .output()
-            .map_err(|e| MlxError::CommandFailed(format!("Failed to execute query: {e}")))?;
+        let output = Self::execute(Command::new(&self.flint_path).args(args), "query")?;
+        // The synchronous public API returns lowercase status strings.
+        Self::classify_query_output(device_id, output).map(|status| status.to_string())
+    }
 
+    pub(super) async fn query_device_bounded(
+        &self,
+        device_id: &str,
+        executor: &FirmwareToolExecutor,
+        timeout: Duration,
+    ) -> MlxResult<LockStatus> {
+        let command = CommandSpec::new(&self.flint_path).args(["-d", device_id, "q"]);
+        if self.dry_run {
+            return Err(MlxError::DryRun(command.to_string()));
+        }
+        let output = executor
+            .execute(&command, timeout)
+            .await
+            .map_err(|error| MlxError::CommandAttempt(error.into()))?;
+        Self::classify_query_output(device_id, output)
+    }
+
+    fn classify_query_output(device_id: &str, output: Output) -> MlxResult<LockStatus> {
         if !output.status.success() {
             let stdout = String::from_utf8_lossy(&output.stdout);
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -101,7 +196,7 @@ impl FlintRunner {
             // Check specific error conditions first.
             if stderr.contains("HW access is disabled") || stdout.contains("HW access is disabled")
             {
-                return Ok("locked".to_string());
+                return Ok(LockStatus::Locked);
             } else if stderr.contains("Cannot open") || stdout.contains("Cannot open") {
                 return Err(MlxError::DeviceNotFound(device_id.to_string()));
             } else if stderr.contains("Permission denied") || stdout.contains("Permission denied") {
@@ -112,102 +207,119 @@ impl FlintRunner {
             return Err(MlxError::CommandFailed(error_msg));
         }
 
-        Ok("unlocked".to_string())
+        Ok(LockStatus::Unlocked)
     }
 
-    // enable_hw_access enables hardware access with the provided key.
+    /// Enable hardware access with a key of 1–16 bare ASCII hexadecimal digits.
+    ///
+    /// Returns [`MlxError::InvalidKey`] before execution for malformed keys, or
+    /// [`MlxError::DryRun`] with the key redacted when dry-run is enabled.
+    /// [`MlxError::AlreadyUnlocked`] takes precedence over exit status when flint
+    /// reports access already enabled. Other launch or exit failures return
+    /// [`MlxError::CommandFailed`] without tool output, which may contain keys.
+    /// Failed completion collection returns [`MlxError::ProcessUnsettled`].
     pub fn enable_hw_access(&self, device_id: &str, key: &str) -> MlxResult<()> {
-        // Validate key format (should be 8 hex digits for 64-bit key)
-        if !Self::is_valid_key(key) {
-            return Err(MlxError::InvalidKey);
-        }
-
-        let args = ["-d", device_id, "hw_access", "enable", key];
-
-        if self.dry_run {
-            return Err(MlxError::DryRun(self.build_command(&args)));
-        }
-
-        let output = Command::new(&self.flint_path)
-            .args(args)
-            .output()
-            .map_err(|e| MlxError::CommandFailed(format!("Failed to execute enable: {e}")))?;
-
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
-
-        // Check for "already enabled" even on success (exit code 0)
-        if stderr.contains("already enabled") || stdout.contains("already enabled") {
-            return Err(MlxError::AlreadyUnlocked);
-        }
-
-        if !output.status.success() {
-            let error_msg = format!("stdout: {}\nstderr: {}", stdout.trim(), stderr.trim());
-            return Err(MlxError::CommandFailed(error_msg));
-        }
-
-        Ok(())
+        self.run_key_command(KeyOperation::Enable, device_id, key)
     }
 
-    // disable_hw_access disables hardware access with the provided key.
+    /// Disable hardware access with a key of 1–16 bare ASCII hexadecimal digits.
+    ///
+    /// Returns [`MlxError::InvalidKey`] before execution for malformed keys, or
+    /// [`MlxError::DryRun`] with the key redacted when dry-run is enabled.
+    /// [`MlxError::AlreadyLocked`] takes precedence over exit status when flint
+    /// reports access already disabled. Other launch or exit failures return
+    /// [`MlxError::CommandFailed`] without tool output, which may contain keys.
+    /// Failed completion collection returns [`MlxError::ProcessUnsettled`].
     pub fn disable_hw_access(&self, device_id: &str, key: &str) -> MlxResult<()> {
-        // Validate key format (should be 8 hex digits for 64-bit key)
-        if !Self::is_valid_key(key) {
-            return Err(MlxError::InvalidKey);
-        }
-
-        let args = ["-d", device_id, "hw_access", "disable", key];
-
-        if self.dry_run {
-            return Err(MlxError::DryRun(self.build_command(&args)));
-        }
-
-        let output = Command::new(&self.flint_path)
-            .args(args)
-            .output()
-            .map_err(|e| MlxError::CommandFailed(format!("Failed to execute disable: {e}")))?;
-
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
-
-        // Check for "already disabled" even on success (exit code 0)
-        if stderr.contains("already disabled") || stdout.contains("already disabled") {
-            return Err(MlxError::AlreadyLocked);
-        }
-
-        if !output.status.success() {
-            let error_msg = format!("stdout: {}\nstderr: {}", stdout.trim(), stderr.trim());
-            return Err(MlxError::CommandFailed(error_msg));
-        }
-
-        Ok(())
+        self.run_key_command(KeyOperation::Disable, device_id, key)
     }
 
-    // set_key sets a new hardware access key.
+    pub(super) async fn enable_hw_access_bounded(
+        &self,
+        device_id: &str,
+        key: &str,
+        executor: &FirmwareToolExecutor,
+        timeout: Duration,
+    ) -> MlxResult<()> {
+        self.run_key_command_bounded(KeyOperation::Enable, device_id, key, executor, timeout)
+            .await
+    }
+
+    pub(super) async fn disable_hw_access_bounded(
+        &self,
+        device_id: &str,
+        key: &str,
+        executor: &FirmwareToolExecutor,
+        timeout: Duration,
+    ) -> MlxResult<()> {
+        self.run_key_command_bounded(KeyOperation::Disable, device_id, key, executor, timeout)
+            .await
+    }
+
+    /// Set a hardware access key of 1–16 bare ASCII hexadecimal digits.
+    ///
+    /// Returns [`MlxError::InvalidKey`] before execution for malformed keys, or
+    /// [`MlxError::DryRun`] with the key redacted when dry-run is enabled.
+    /// Launch or exit failures return [`MlxError::CommandFailed`] without tool
+    /// output, which may contain keys. This operation does not classify Already
+    /// responses; any successful exit returns `Ok(())`. Failed completion
+    /// collection returns [`MlxError::ProcessUnsettled`].
     pub fn set_key(&self, device_id: &str, key: &str) -> MlxResult<()> {
+        self.run_key_command(KeyOperation::SetKey, device_id, key)
+    }
+
+    fn run_key_command(
+        &self,
+        operation: KeyOperation,
+        device_id: &str,
+        key: &str,
+    ) -> MlxResult<()> {
+        let command = self.prepare_key_command(operation, device_id, key)?;
+        let name = match operation {
+            KeyOperation::Enable => "enable",
+            KeyOperation::Disable => "disable",
+            KeyOperation::SetKey => "set_key",
+        };
+        let output = Self::execute(&mut command.to_command(), name)?;
+
+        operation.classify_output(output)
+    }
+
+    fn prepare_key_command(
+        &self,
+        operation: KeyOperation,
+        device_id: &str,
+        key: &str,
+    ) -> MlxResult<CommandSpec> {
         if !Self::is_valid_key(key) {
             return Err(MlxError::InvalidKey);
         }
 
-        let args = ["-d", device_id, "set_key", key];
+        let command = CommandSpec::new(&self.flint_path)
+            .args(["-d", device_id])
+            .args(operation.args().iter().copied());
 
         if self.dry_run {
-            return Err(MlxError::DryRun(self.build_command(&args)));
+            return Err(MlxError::DryRun(command.arg("[REDACTED]").to_string()));
         }
 
-        let output = Command::new(&self.flint_path)
-            .args(args)
-            .output()
-            .map_err(|e| MlxError::CommandFailed(format!("Failed to execute set_key: {e}")))?;
+        Ok(command.arg(key))
+    }
 
-        if !output.status.success() {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            let error_msg = format!("stdout: {}\nstderr: {}", stdout.trim(), stderr.trim());
-            return Err(MlxError::CommandFailed(error_msg));
-        }
-
-        Ok(())
+    async fn run_key_command_bounded(
+        &self,
+        operation: KeyOperation,
+        device_id: &str,
+        key: &str,
+        executor: &FirmwareToolExecutor,
+        timeout: Duration,
+    ) -> MlxResult<()> {
+        let command = self.prepare_key_command(operation, device_id, key)?;
+        let output = executor
+            .execute(&command, timeout)
+            .await
+            .map_err(|error| MlxError::CommandAttempt(error.into()))?;
+        operation.classify_output(output)
     }
 
     // burn burns a firmware image onto the device. This runs:
@@ -227,15 +339,14 @@ impl FlintRunner {
             )));
         }
 
-        let image_str = image_path.to_string_lossy();
-        let args = ["-d", device_id, "-y", "-i", &image_str, "burn"];
+        let command = self.burn_command(device_id, image_path);
 
         if self.dry_run {
-            return Err(MlxError::DryRun(self.build_command(&args)));
+            return Err(MlxError::DryRun(command.to_string()));
         }
 
-        let output = Command::new(&self.flint_path)
-            .args(args)
+        let output = command
+            .to_command()
             .output()
             .map_err(|e| MlxError::CommandFailed(format!("Failed to execute burn: {e}")))?;
 
@@ -271,19 +382,15 @@ impl FlintRunner {
             )));
         }
 
-        let image_str = image_path.to_string_lossy();
-        let args = ["-d", device_id, "-i", &image_str, "verify"];
+        let command = self.verify_image_command(device_id, image_path);
 
         if self.dry_run {
-            return Err(MlxError::DryRun(self.build_command(&args)));
+            return Err(MlxError::DryRun(command.to_string()));
         }
 
-        let output = Command::new(&self.flint_path)
-            .args(args)
-            .output()
-            .map_err(|e| {
-                MlxError::CommandFailed(format!("Failed to execute verify with image: {e}"))
-            })?;
+        let output = command.to_command().output().map_err(|e| {
+            MlxError::CommandFailed(format!("Failed to execute verify with image: {e}"))
+        })?;
 
         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
@@ -302,9 +409,23 @@ impl FlintRunner {
         Ok(stdout)
     }
 
-    // is_valid_key validates that the key is in the correct format (8 hex digits).
+    pub(crate) fn burn_command(&self, device: &str, image: &Path) -> CommandSpec {
+        CommandSpec::new(&self.flint_path)
+            .args(["-d", device, "-y", "-i"])
+            .arg(image.to_string_lossy())
+            .arg("burn")
+    }
+
+    pub(crate) fn verify_image_command(&self, device: &str, image: &Path) -> CommandSpec {
+        CommandSpec::new(&self.flint_path)
+            .args(["-d", device, "-i"])
+            .arg(image.to_string_lossy())
+            .arg("verify")
+    }
+
+    // Keep the library's bare-hex rule, allowing unpadded values up to 64 bits.
     fn is_valid_key(key: &str) -> bool {
-        key.len() == 8 && key.chars().all(|c| c.is_ascii_hexdigit())
+        (1..=16).contains(&key.len()) && key.bytes().all(|c| c.is_ascii_hexdigit())
     }
 
     // validate_device_id validates device ID format.
@@ -342,12 +463,11 @@ mod coverage_tests {
 
     use super::*;
 
-    // err_kind projects an MlxError onto a stable discriminant string so we can
-    // distinguish *which* error a deterministic path returns without relying on
-    // MlxError being PartialEq (it is not). Only the variants the deterministic
-    // (no-flint-spawn) paths in this file can produce are named here.
+    // Compare error variants without requiring MlxError to implement PartialEq.
     fn err_kind(e: &MlxError) -> &'static str {
         match e {
+            MlxError::ProcessUnsettled { .. } => "ProcessUnsettled",
+            MlxError::CommandAttempt(_) => "CommandAttempt",
             MlxError::CommandFailed(_) => "CommandFailed",
             MlxError::DeviceNotFound(_) => "DeviceNotFound",
             MlxError::InvalidDeviceId(_) => "InvalidDeviceId",
@@ -363,13 +483,17 @@ mod coverage_tests {
         }
     }
 
-    // is_valid_key accepts exactly 8 ASCII hex digits; anything else is rejected.
-    // Covers: too short, too long, exactly-8 valid (upper and lower), non-hex
-    // chars, empty, and embedded whitespace.
+    /// Accept full derived keys and shorter tool-supported inputs while keeping
+    /// validation limited to the bare hexadecimal representation of a 64-bit key.
     #[test]
-    fn is_valid_key_requires_eight_hex_digits() {
+    fn is_valid_key_accepts_up_to_sixteen_hex_digits() {
         value_scenarios!(
             run = FlintRunner::is_valid_key;
+            "a single hex digit" {
+                // The minimum accepted width must not require zero padding.
+                "a" => true,
+            }
+
             "eight lowercase hex digits" {
                 "0a1b2c3d" => true,
             }
@@ -382,27 +506,39 @@ mod coverage_tests {
                 "12345678" => true,
             }
 
-            "seven digits is too short" {
-                "1234567" => false,
+            "shorter unpadded keys" {
+                // Callers may pass a key below eight digits without padding it.
+                "1234567" => true,
             }
 
-            "nine digits is too long" {
-                "123456789" => false,
+            "keys longer than eight digits" {
+                // Intermediate widths must work alongside eight and sixteen.
+                "123456789" => true,
+            }
+
+            "a full 64-bit key" {
+                // Derived keys encode all eight bytes as sixteen hex digits.
+                "0123456789abcdef" => true,
+            }
+
+            "seventeen digits exceeds the key width" {
+                // A leading zero must not bypass the representation's width limit.
+                "0123456789abcdef0" => false,
             }
 
             "empty string" {
                 "" => false,
             }
 
-            "right length but non-hex char 'g'" {
+            "a non-hex character is rejected" {
                 "1234567g" => false,
             }
 
-            "right length but contains a space" {
+            "a space is not a hex digit" {
                 "1234 678" => false,
             }
 
-            "0x-prefixed is not bare hex of length 8" {
+            "0x-prefixed is not bare hex" {
                 "0x123456" => false,
             }
         );
@@ -497,10 +633,8 @@ mod coverage_tests {
         assert!(!off.dry_run);
     }
 
-    // In dry-run mode the command-issuing methods short-circuit to MlxError::DryRun
-    // (carrying the would-be command string) before spawning flint, so these are
-    // deterministic. Key-taking methods validate the key FIRST: an invalid key
-    // yields InvalidKey even under dry-run; a valid key yields DryRun.
+    /// Keep dry-run diagnostics useful without exposing keys through either
+    /// error formatter or requiring a flint executable.
     #[test]
     fn dry_run_methods_short_circuit() {
         let runner = FlintRunner::with_path("flint").with_dry_run(true);
@@ -518,7 +652,7 @@ mod coverage_tests {
         assert_eq!(err_kind(&en), "DryRun");
         assert_eq!(
             en.to_string(),
-            "dry run - would have executed: flint -d dev0 hw_access enable 0a1b2c3d"
+            "dry run - would have executed: flint -d dev0 hw_access enable [REDACTED]"
         );
 
         // disable_hw_access: valid key -> DryRun with the disable command string.
@@ -526,7 +660,7 @@ mod coverage_tests {
         assert_eq!(err_kind(&dis), "DryRun");
         assert_eq!(
             dis.to_string(),
-            "dry run - would have executed: flint -d dev0 hw_access disable 0a1b2c3d"
+            "dry run - would have executed: flint -d dev0 hw_access disable [REDACTED]"
         );
 
         // set_key: valid key -> DryRun with the set_key command string.
@@ -534,26 +668,32 @@ mod coverage_tests {
         assert_eq!(err_kind(&sk), "DryRun");
         assert_eq!(
             sk.to_string(),
-            "dry run - would have executed: flint -d dev0 set_key 0a1b2c3d"
+            "dry run - would have executed: flint -d dev0 set_key [REDACTED]"
         );
+
+        for error in [en, dis, sk] {
+            assert!(!format!("{error:?}").contains("0a1b2c3d"));
+        }
     }
 
-    // Key validation precedes the dry-run check in every key-taking method, so an
-    // invalid key short-circuits to InvalidKey regardless of dry-run state.
+    /// Reject malformed keys before dry-run command construction so validation
+    /// errors cannot disclose the rejected input.
     #[test]
     fn invalid_key_takes_precedence_over_dry_run() {
         let runner = FlintRunner::with_path("flint").with_dry_run(true);
 
-        // Each key-taking method, fed a too-short key, must report InvalidKey.
+        // Each key-taking method must reject malformed keys without exposing them.
         value_scenarios!(
             run = |which| {
-                let bad = "xyz"; // not 8 hex digits
+                let bad = "xyz";
                 let e = match which {
                     "enable" => runner.enable_hw_access("dev0", bad).unwrap_err(),
                     "disable" => runner.disable_hw_access("dev0", bad).unwrap_err(),
                     "set_key" => runner.set_key("dev0", bad).unwrap_err(),
                     _ => unreachable!(),
                 };
+                assert!(!e.to_string().contains(bad));
+                assert!(!format!("{e:?}").contains(bad));
                 err_kind(&e)
             };
             "enable_hw_access rejects a bad key" {
@@ -568,6 +708,133 @@ mod coverage_tests {
                 "set_key" => "InvalidKey",
             }
         );
+    }
+
+    /// Spaces distinguish individual arguments from a joined command string.
+    /// The runner accepts these directly; the manager validates device IDs.
+    #[test]
+    fn key_commands_preserve_full_keys_and_argument_boundaries() {
+        let runner = FlintRunner::with_path("/opt/mellanox tools/flint");
+        let device_id = "device with spaces";
+        let key = "0a1B2c3D4e5F6789";
+
+        value_scenarios!(
+            run = |operation| {
+                let command = runner
+                    .prepare_key_command(operation, device_id, key)
+                    .unwrap()
+                    .to_command();
+                assert_eq!(command.get_program(), "/opt/mellanox tools/flint");
+                command.get_args().map(|arg| arg.to_str().unwrap().to_owned()).collect::<Vec<_>>()
+            };
+            "enable preserves the full key in its own argument" {
+                KeyOperation::Enable =>
+                    Vec::from(["-d", device_id, "hw_access", "enable", key].map(str::to_string)),
+            }
+
+            "disable preserves the full key in its own argument" {
+                KeyOperation::Disable =>
+                    Vec::from(["-d", device_id, "hw_access", "disable", key].map(str::to_string)),
+            }
+
+            "set_key preserves the full key in its own argument" {
+                KeyOperation::SetKey =>
+                    Vec::from(["-d", device_id, "set_key", key].map(str::to_string)),
+            }
+        );
+    }
+
+    /// Include the key in both streams and letter cases so failures must omit
+    /// tool output to keep both error formatters safe.
+    #[cfg(unix)]
+    #[test]
+    fn key_command_results_preserve_status_and_suppress_secrets() {
+        use std::os::unix::process::ExitStatusExt;
+        use std::process::ExitStatus;
+
+        let key = "0a1B2c3D4e5F6789";
+        let uppercase_key = key.to_uppercase();
+
+        value_scenarios!(
+            run = |(operation, status, stdout, stderr): (KeyOperation, i32, &str, &str)| {
+                let output = Output {
+                    // `from_raw` takes a wait status, with the exit code in bits 8-15.
+                    status: ExitStatus::from_raw(status << 8),
+                    stdout: format!("{key}\n{stdout}\n").into_bytes(),
+                    stderr: format!("{uppercase_key}\n{stderr}\n").into_bytes(),
+                };
+                match operation.classify_output(output) {
+                    Ok(()) => ("Ok", String::new()),
+                    Err(error) => {
+                        let display = error.to_string();
+                        let debug = format!("{error:?}");
+                        for rendered in [&display, &debug] {
+                            assert!(!rendered.contains(key));
+                            assert!(!rendered.contains(&uppercase_key));
+                        }
+                        (err_kind(&error), display)
+                    }
+                }
+            };
+            "enable failure" {
+                (KeyOperation::Enable, 42, "", "") =>
+                    ("CommandFailed", "command execution failed: hw_access enable failed: exit status: 42".to_string()),
+            }
+
+            "disable failure" {
+                (KeyOperation::Disable, 42, "", "") =>
+                    ("CommandFailed", "command execution failed: hw_access disable failed: exit status: 42".to_string()),
+            }
+
+            "a failed key update ignores Already messages" {
+                (KeyOperation::SetKey, 42, "already disabled", "already enabled") =>
+                    ("CommandFailed", "command execution failed: set_key failed: exit status: 42".to_string()),
+            }
+
+            "a successful key update ignores Already messages" {
+                (KeyOperation::SetKey, 0, "already disabled", "already enabled") =>
+                    ("Ok", String::new()),
+            }
+
+            "enable succeeds without an Already message" {
+                (KeyOperation::Enable, 0, "", "") => ("Ok", String::new()),
+            }
+
+            "disable succeeds without an Already message" {
+                (KeyOperation::Disable, 0, "", "") => ("Ok", String::new()),
+            }
+
+            "already disabled on a successful exit" {
+                (KeyOperation::Disable, 0, "already disabled", "") =>
+                    ("AlreadyLocked", "hardware access is already disabled".to_string()),
+            }
+
+            "already enabled takes precedence over a failed exit" {
+                (KeyOperation::Enable, 42, "", "already enabled") =>
+                    ("AlreadyUnlocked", "hardware access is already enabled".to_string()),
+            }
+
+            "already enabled on stdout with a successful exit" {
+                (KeyOperation::Enable, 0, "already enabled", "") =>
+                    ("AlreadyUnlocked", "hardware access is already enabled".to_string()),
+            }
+
+            "already disabled on stderr takes precedence over a failed exit" {
+                (KeyOperation::Disable, 42, "", "already disabled") =>
+                    ("AlreadyLocked", "hardware access is already disabled".to_string()),
+            }
+        );
+    }
+
+    /// Without dry-run, invalid input must still win over a launch failure.
+    #[test]
+    fn invalid_key_is_rejected_before_launch() {
+        let directory = tempfile::tempdir().unwrap();
+        let missing = directory.path().join("flint");
+        let runner = FlintRunner::with_path(missing.to_str().unwrap());
+
+        let result = runner.set_key("dev0", "xyz");
+        assert!(matches!(result, Err(MlxError::InvalidKey)), "{result:?}");
     }
 
     // burn / verify_image check that the image path exists BEFORE any dry-run or

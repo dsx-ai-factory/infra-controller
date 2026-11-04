@@ -39,11 +39,11 @@ type MockBoostrap struct{}
 
 func (m *MockBoostrap) Init()  {}
 func (m *MockBoostrap) Start() {}
-func (m *MockBoostrap) DownloadAndStoreCreds(otpOverride []byte) error {
+func (m *MockBoostrap) DownloadAndStoreCreds(ctx context.Context, otpOverride []byte) error {
 	return nil
 }
-func (m *MockBoostrap) GetState() []string {
-	return []string{"state1", "state2"}
+func (m *MockBoostrap) CheckRegistration() error {
+	return nil
 }
 func (m *MockBoostrap) RegisterSubscriber() error {
 	return nil
@@ -59,6 +59,11 @@ func TestOTPHandler_ReceiveAndSaveOTP(t *testing.T) {
 	mtc := &tmocks.Client{}
 
 	siteID := "test-site-id"
+	registration := &bootstraptypes.Registration{}
+	registration.Load(siteID, "startupOtp")
+	bootstrap := bootstraptypes.NewBootstrapInstance()
+	bootstrap.ReplaceConfig(bootstraptypes.SecretConfig{UUID: siteID})
+	bootstrap.Registration = registration
 
 	ManagerAccess = &Manager.ManagerAccess{
 		API: &Manager.ManagerAPI{
@@ -76,11 +81,7 @@ func TestOTPHandler_ReceiveAndSaveOTP(t *testing.T) {
 		Data: &Manager.ManagerData{
 			EB: &elektratypes.Elektra{
 				Managers: &managertypes.Managers{
-					Bootstrap: &bootstraptypes.Bootstrap{
-						Config: &bootstraptypes.SecretConfig{
-							UUID: siteID,
-						},
-					},
+					Bootstrap: bootstrap,
 					Workflow: &workflowtypes.Workflow{
 						Temporal: workflowtypes.Temporal{
 							Publisher: mtc,
@@ -187,4 +188,6 @@ func TestOTPHandler_ReceiveAndSaveOTP(t *testing.T) {
 	bootstrapSecret, err := client.CoreV1().Secrets("default").Get(context.TODO(), ManagerAccess.Conf.EB.BootstrapSecretName, metav1.GetOptions{})
 	assert.NoError(t, err)
 	assert.Equal(t, mockOtp, string(bootstrapSecret.Data["otp"]))
+	// The liveness check must not take the rotated OTP for a re-pair once it is mounted.
+	assert.NoError(t, registration.Check(siteID, mockOtp))
 }

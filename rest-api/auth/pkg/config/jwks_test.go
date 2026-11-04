@@ -186,7 +186,8 @@ func TestJwksConfig_UpdateJWKs(t *testing.T) {
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusOK)
 				// Return a valid JWKS with at least one key
-				w.Write([]byte(`{"keys": [{"kty":"RSA","use":"sig","kid":"test-key-1","alg":"RS256","n":"test-n-value","e":"AQAB"}]}`))
+				// Mock response writes are best-effort if the client closes the connection.
+				_, _ = w.Write([]byte(`{"keys": [{"kty":"RSA","use":"sig","kid":"test-key-1","alg":"RS256","n":"test-n-value","e":"AQAB"}]}`))
 			},
 			expectError: false,
 		},
@@ -195,7 +196,7 @@ func TestJwksConfig_UpdateJWKs(t *testing.T) {
 			serverResponse: func(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusOK)
-				w.Write([]byte(`{"keys": [invalid json`))
+				_, _ = w.Write([]byte(`{"keys": [invalid json`))
 			},
 			expectError:   true,
 			errorContains: "invalid",
@@ -385,7 +386,7 @@ func TestJwksConfig_Concurrency(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{
+		_, _ = w.Write([]byte(`{
 			"keys": [
 				{
 					"kty": "RSA",
@@ -509,7 +510,7 @@ func TestJwksConfig_LastUpdate(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		// Return a valid JWKS with at least one key
-		w.Write([]byte(`{"keys": [{"kty":"RSA","use":"sig","kid":"test-key-1","alg":"RS256","n":"test-n-value","e":"AQAB"}]}`))
+		_, _ = w.Write([]byte(`{"keys": [{"kty":"RSA","use":"sig","kid":"test-key-1","alg":"RS256","n":"test-n-value","e":"AQAB"}]}`))
 	}))
 	defer server.Close()
 
@@ -549,7 +550,7 @@ func TestJwksConfig_ThrottlingMechanism(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{"keys": [{"kty":"RSA","use":"sig","kid":"test-key-1","alg":"RS256","n":"test-n-value","e":"AQAB"}]}`))
+		_, _ = w.Write([]byte(`{"keys": [{"kty":"RSA","use":"sig","kid":"test-key-1","alg":"RS256","n":"test-n-value","e":"AQAB"}]}`))
 	}))
 	defer server.Close()
 
@@ -710,6 +711,51 @@ func TestGetKeyFromJWKS_NoKidWithAlgorithm(t *testing.T) {
 	}
 }
 
+// TestJwksConfig_ValidateTokenRequiresExpiration guards that a correctly
+// signed token without exp is rejected, rather than staying valid until its
+// signing key is rotated out.
+func TestJwksConfig_ValidateTokenRequiresExpiration(t *testing.T) {
+	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+	jwksServer := createMockJWKSServerWithKeys(t, []testKeyInfo{
+		{key: privateKey.Public(), keyId: "rsa-key-1", algorithm: "RS256", use: "sig"},
+	})
+	defer jwksServer.Close()
+	jwksConfig := NewJwksConfig("test-config", jwksServer.URL, "test-issuer", TokenOriginKasSsa, false, nil, nil)
+	require.NoError(t, jwksConfig.UpdateJWKS())
+
+	tests := []struct {
+		name    string
+		claims  jwt.MapClaims
+		wantErr error
+	}{
+		{
+			name:    "signed token without exp is rejected",
+			claims:  jwt.MapClaims{"iss": "test-issuer", "sub": "test-subject"},
+			wantErr: jwt.ErrTokenRequiredClaimMissing,
+		},
+		{
+			name:   "signed token with a future exp is accepted",
+			claims: jwt.MapClaims{"iss": "test-issuer", "sub": "test-subject", "exp": time.Now().Add(time.Hour).Unix()},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			unsigned := jwt.NewWithClaims(jwt.SigningMethodRS256, tt.claims)
+			unsigned.Header["kid"] = "rsa-key-1"
+			tokenString, err := unsigned.SignedString(privateKey)
+			require.NoError(t, err)
+
+			_, err = jwksConfig.ValidateToken(tokenString, jwt.MapClaims{})
+			if tt.wantErr != nil {
+				require.ErrorIs(t, err, tt.wantErr)
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
+}
+
 // testKeyInfo represents key information for testing
 type testKeyInfo struct {
 	key       interface{}
@@ -795,7 +841,7 @@ func createMockJWKSServerWithKeys(t *testing.T, keys []testKeyInfo) *httptest.Se
 
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		w.Write(jsonData)
+		_, _ = w.Write(jsonData)
 	}))
 }
 

@@ -2175,6 +2175,8 @@ mod tests {
         use model::resource_pool::define::Range;
         IbFabricDefinition {
             endpoints: vec![],
+            backend: None,
+            remote_pool: None,
             pkeys: ranges
                 .into_iter()
                 .map(|(start, end)| Range {
@@ -2572,6 +2574,8 @@ mod tests {
                     let definition = IbFabricDefinition {
                         endpoints: vec!["https://ufm-1".to_string()],
                         pkeys: Vec::new(),
+                        backend: None,
+                        remote_pool: None,
                     };
                     let mut fabric_data = FabricData::default();
                     let mut fabric_metrics = FabricMetrics::default();

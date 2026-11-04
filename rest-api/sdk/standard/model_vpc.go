@@ -39,7 +39,7 @@ type VPC struct {
 	ControllerVpcId NullableString `json:"controllerVpcId,omitempty"`
 	// Network virtualization type of the VPC. Flat VPCs hold instances on zero-DPU hosts (or hosts with their DPU in NIC mode); their interfaces are bound to underlay (HostInband) network segments and NICo does not drive their data plane.
 	NetworkVirtualizationType NullableString `json:"networkVirtualizationType,omitempty"`
-	// Whether this VPC uses SLAAC allocation mode for instance IPv6 interfaces. When true, Core allocates a `/64` to each interface that includes IPv6 and retains the prefix without assigning a concrete IPv6 host address. This value is fixed when the VPC is created. NICo does not yet configure router advertisements (RAs); that support is tracked by https://github.com/NVIDIA/infra-controller/issues/2398.
+	// Whether this VPC uses SLAAC allocation mode for instance IPv6 interfaces. When true, Core allocates a `/64` to each interface that includes IPv6 and retains the prefix without assigning a concrete IPv6 host address. This value is fixed when the VPC is created. The DPU sends router advertisements (RAs) on routed FNN interfaces. With SLAAC enabled, it sends them only when the interface prefix is exactly a `/64`.
 	SlaacEnabled *bool `json:"slaacEnabled,omitempty"`
 	// Routing profile type for the VPC. Populated when Site has Native Networking enabled and network virtualization type is `FNN`.
 	RoutingProfile NullableString `json:"routingProfile,omitempty"`
@@ -55,8 +55,8 @@ type VPC struct {
 	Vni NullableInt32 `json:"vni,omitempty"`
 	// ID of the Network Security Group attached to the VPC
 	NetworkSecurityGroupId NullableString `json:"networkSecurityGroupId,omitempty"`
-	// Propagation details for the attached Network Security Group
-	NetworkSecurityGroupPropagationDetails *NetworkSecurityGroupPropagationDetails `json:"networkSecurityGroupPropagationDetails,omitempty"`
+	// Propagation details for the attached Network Security Group. Null when no propagation details are available, including when no Network Security Group is attached
+	NetworkSecurityGroupPropagationDetails NullableNetworkSecurityGroupPropagationDetails `json:"networkSecurityGroupPropagationDetails,omitempty"`
 	// ID of the default NVLink Logical Partition that GPUs for all Instances in the VPC will attach to
 	NvLinkLogicalPartitionId NullableString `json:"nvLinkLogicalPartitionId,omitempty"`
 	// String key-value pairs describing VPC labels
@@ -699,36 +699,47 @@ func (o *VPC) UnsetNetworkSecurityGroupId() {
 	o.NetworkSecurityGroupId.Unset()
 }
 
-// GetNetworkSecurityGroupPropagationDetails returns the NetworkSecurityGroupPropagationDetails field value if set, zero value otherwise.
+// GetNetworkSecurityGroupPropagationDetails returns the NetworkSecurityGroupPropagationDetails field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *VPC) GetNetworkSecurityGroupPropagationDetails() NetworkSecurityGroupPropagationDetails {
-	if o == nil || IsNil(o.NetworkSecurityGroupPropagationDetails) {
+	if o == nil || IsNil(o.NetworkSecurityGroupPropagationDetails.Get()) {
 		var ret NetworkSecurityGroupPropagationDetails
 		return ret
 	}
-	return *o.NetworkSecurityGroupPropagationDetails
+	return *o.NetworkSecurityGroupPropagationDetails.Get()
 }
 
 // GetNetworkSecurityGroupPropagationDetailsOk returns a tuple with the NetworkSecurityGroupPropagationDetails field value if set, nil otherwise
 // and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *VPC) GetNetworkSecurityGroupPropagationDetailsOk() (*NetworkSecurityGroupPropagationDetails, bool) {
-	if o == nil || IsNil(o.NetworkSecurityGroupPropagationDetails) {
+	if o == nil {
 		return nil, false
 	}
-	return o.NetworkSecurityGroupPropagationDetails, true
+	return o.NetworkSecurityGroupPropagationDetails.Get(), o.NetworkSecurityGroupPropagationDetails.IsSet()
 }
 
 // HasNetworkSecurityGroupPropagationDetails returns a boolean if a field has been set.
 func (o *VPC) HasNetworkSecurityGroupPropagationDetails() bool {
-	if o != nil && !IsNil(o.NetworkSecurityGroupPropagationDetails) {
+	if o != nil && o.NetworkSecurityGroupPropagationDetails.IsSet() {
 		return true
 	}
 
 	return false
 }
 
-// SetNetworkSecurityGroupPropagationDetails gets a reference to the given NetworkSecurityGroupPropagationDetails and assigns it to the NetworkSecurityGroupPropagationDetails field.
+// SetNetworkSecurityGroupPropagationDetails gets a reference to the given NullableNetworkSecurityGroupPropagationDetails and assigns it to the NetworkSecurityGroupPropagationDetails field.
 func (o *VPC) SetNetworkSecurityGroupPropagationDetails(v NetworkSecurityGroupPropagationDetails) {
-	o.NetworkSecurityGroupPropagationDetails = &v
+	o.NetworkSecurityGroupPropagationDetails.Set(&v)
+}
+
+// SetNetworkSecurityGroupPropagationDetailsNil sets the value for NetworkSecurityGroupPropagationDetails to be an explicit nil
+func (o *VPC) SetNetworkSecurityGroupPropagationDetailsNil() {
+	o.NetworkSecurityGroupPropagationDetails.Set(nil)
+}
+
+// UnsetNetworkSecurityGroupPropagationDetails ensures that no value is present for NetworkSecurityGroupPropagationDetails, not even an explicit nil
+func (o *VPC) UnsetNetworkSecurityGroupPropagationDetails() {
+	o.NetworkSecurityGroupPropagationDetails.Unset()
 }
 
 // GetNvLinkLogicalPartitionId returns the NvLinkLogicalPartitionId field value if set, zero value otherwise (both if not set or set to explicit null).
@@ -992,8 +1003,8 @@ func (o VPC) ToMap() (map[string]interface{}, error) {
 	if o.NetworkSecurityGroupId.IsSet() {
 		toSerialize["networkSecurityGroupId"] = o.NetworkSecurityGroupId.Get()
 	}
-	if !IsNil(o.NetworkSecurityGroupPropagationDetails) {
-		toSerialize["networkSecurityGroupPropagationDetails"] = o.NetworkSecurityGroupPropagationDetails
+	if o.NetworkSecurityGroupPropagationDetails.IsSet() {
+		toSerialize["networkSecurityGroupPropagationDetails"] = o.NetworkSecurityGroupPropagationDetails.Get()
 	}
 	if o.NvLinkLogicalPartitionId.IsSet() {
 		toSerialize["nvLinkLogicalPartitionId"] = o.NvLinkLogicalPartitionId.Get()

@@ -23,7 +23,9 @@
 //! Path matching is component-wise with the wildcard semantics described by
 //! [`PathComponent`]. A single trailing slash on the request path is not a
 //! component, because Redfish names the same resource with and without it.
+//! Percent-escape hex digits match case-insensitively; escapes stay encoded.
 
+use std::borrow::Cow;
 use std::fmt::{Display, Formatter};
 use std::str::FromStr;
 
@@ -43,6 +45,31 @@ use serde::{Deserialize, Deserializer};
 pub(crate) struct RequestPattern {
     verbs: Vec<Verb>,
     path: PathPattern,
+}
+
+/// Percent escapes an ACL allow wildcard is permitted to consume.
+#[derive(Clone)]
+pub(crate) enum WildcardEscapes {
+    /// Only these decoded octet values; an empty list keeps wildcards strict.
+    Listed(Vec<u8>),
+    /// Any percent escape, subject to the proxy's separate path guard.
+    All,
+}
+
+impl WildcardEscapes {
+    /// Checks only the wildcard's portion, leaving literal escapes to the pattern.
+    fn matches(&self, fragment: &str) -> bool {
+        match self {
+            Self::All => true,
+            Self::Listed(octets) => fragment.split('%').skip(1).all(|suffix| {
+                suffix
+                    .get(..2)
+                    .filter(|digits| digits.bytes().all(|byte| byte.is_ascii_hexdigit()))
+                    .and_then(|digits| u8::from_str_radix(digits, 16).ok())
+                    .is_some_and(|octet| octets.contains(&octet))
+            }),
+        }
+    }
 }
 
 impl<'de> Deserialize<'de> for RequestPattern {
@@ -111,6 +138,52 @@ impl FromStr for RequestPattern {
 impl RequestPattern {
     /// Returns whether this pattern matches `method` and `path`.
     pub(crate) fn matches(&self, method: &http::Method, path: &str) -> bool {
+        self.matches_with_wildcard_escapes(method, path, &WildcardEscapes::All)
+    }
+
+    /// Matches an ACL allow rule, limiting wildcard escapes to its explicit policy.
+    pub(crate) fn matches_allow_escapes(
+        &self,
+        method: &http::Method,
+        path: &str,
+        allow_escapes: &WildcardEscapes,
+    ) -> bool {
+        self.matches_with_wildcard_escapes(method, path, allow_escapes)
+    }
+
+    /// ACL literals must contain complete `%HH` escapes. This restriction does
+    /// not change parsing or wildcard matching for request classes.
+    pub(crate) fn validate_percent_escapes(&self) -> Result<(), PatternParseError> {
+        for component in &self.path.components {
+            let literal = match component {
+                PathComponent::PrefixWildcard(s)
+                | PathComponent::SuffixWildcard(s)
+                | PathComponent::Exact(s) => s,
+                PathComponent::SingleWildcard | PathComponent::DoubleWildcard => continue,
+            };
+            if !literal.split('%').skip(1).all(|suffix| {
+                suffix
+                    .as_bytes()
+                    .get(..2)
+                    .is_some_and(|digits| digits.iter().all(u8::is_ascii_hexdigit))
+            }) {
+                return Err(PatternParseError {
+                    orig: self.to_string(),
+                    err: "percent escapes must use the literal `%HH` spelling".to_string(),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// Matches the method and path, normalizing escape hex case.
+    /// `allow_escapes` controls which escapes wildcards may consume.
+    fn matches_with_wildcard_escapes(
+        &self,
+        method: &http::Method,
+        path: &str,
+        allow_escapes: &WildcardEscapes,
+    ) -> bool {
         if !self.verbs.is_empty() && !self.verbs.iter().any(|verb| verb.0.eq(method)) {
             return false;
         }
@@ -118,10 +191,11 @@ impl RequestPattern {
         let Some(path) = path.strip_prefix('/') else {
             return false;
         };
+        let path = normalize_percent_escape_case(path);
         // `/redfish/v1/` and `/redfish/v1` name the same resource (libredfish
         // requests the service root with the trailing slash), so a single
         // trailing slash is not a path component.
-        let path = path.strip_suffix('/').unwrap_or(path);
+        let path = path.strip_suffix('/').unwrap_or(path.as_ref());
         if path.is_empty() {
             return self.path.components.is_empty()
                 || matches!(
@@ -145,7 +219,7 @@ impl RequestPattern {
                 pattern_components.len() == path_components.len()
                     && pattern_components.iter().zip(path_components.iter()).all(
                         |(pattern_component, path_component)| {
-                            pattern_component.matches(path_component)
+                            pattern_component.matches(path_component, allow_escapes)
                         },
                     )
             }
@@ -158,10 +232,22 @@ impl RequestPattern {
                     return false;
                 }
 
+                let wildcard_end = path_components.len() - suffix.len();
+                if !path_components[prefix.len()..wildcard_end]
+                    .iter()
+                    .all(|component| allow_escapes.matches(component))
+                {
+                    return false;
+                }
+
                 prefix.iter().zip(path_components.iter()).all(
-                    |(pattern_component, path_component)| pattern_component.matches(path_component),
+                    |(pattern_component, path_component)| {
+                        pattern_component.matches(path_component, allow_escapes)
+                    },
                 ) && suffix.iter().rev().zip(path_components.iter().rev()).all(
-                    |(pattern_component, path_component)| pattern_component.matches(path_component),
+                    |(pattern_component, path_component)| {
+                        pattern_component.matches(path_component, allow_escapes)
+                    },
                 )
             }
         }
@@ -237,6 +323,9 @@ impl FromStr for PathComponent {
             return Ok(PathComponent::DoubleWildcard);
         }
 
+        let normalized = normalize_percent_escape_case(s);
+        let s = normalized.as_ref();
+
         if s.contains('*') {
             if s.matches('*').count() > 1 {
                 return Err(format!(
@@ -263,6 +352,25 @@ impl FromStr for PathComponent {
 
         Ok(PathComponent::Exact(s.to_string()))
     }
+}
+
+/// RFC 3986 section 6.2.2.1 makes hex digits in `%HH` case-insensitive.
+/// Keep escapes encoded so ACL allow wildcards can enforce their escape policy.
+fn normalize_percent_escape_case(path: &str) -> Cow<'_, str> {
+    let mut normalized = Cow::Borrowed(path);
+    for (index, _) in path.match_indices('%') {
+        let Some(digits) = path.get(index + 1..index + 3) else {
+            continue;
+        };
+        if digits.bytes().all(|digit| digit.is_ascii_hexdigit())
+            && digits.bytes().any(|digit| digit.is_ascii_lowercase())
+        {
+            normalized
+                .to_mut()
+                .replace_range(index + 1..index + 3, &digits.to_ascii_uppercase());
+        }
+    }
+    normalized
 }
 
 fn validate_path_component(orig: &str, as_whole_path: &str) -> Result<(), String> {
@@ -293,11 +401,19 @@ impl Display for PathComponent {
 }
 
 impl PathComponent {
-    fn matches(&self, s: &str) -> bool {
+    /// Matches a component whose escape hex case is already normalized.
+    /// Literal portions match independently of the wildcard's escape policy.
+    fn matches(&self, s: &str, allow_escapes: &WildcardEscapes) -> bool {
         match self {
-            PathComponent::SingleWildcard | PathComponent::DoubleWildcard => true,
-            PathComponent::PrefixWildcard(prefix) => s.starts_with(prefix),
-            PathComponent::SuffixWildcard(suffix) => s.ends_with(suffix),
+            PathComponent::SingleWildcard | PathComponent::DoubleWildcard => {
+                allow_escapes.matches(s)
+            }
+            PathComponent::PrefixWildcard(prefix) => s
+                .strip_prefix(prefix)
+                .is_some_and(|rest| allow_escapes.matches(rest)),
+            PathComponent::SuffixWildcard(suffix) => s
+                .strip_suffix(suffix)
+                .is_some_and(|rest| allow_escapes.matches(rest)),
             PathComponent::Exact(expected) => expected == s,
         }
     }

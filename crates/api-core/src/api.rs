@@ -34,7 +34,9 @@ use carbide_ib_fabric::ib::IBFabricManager;
 use carbide_machine_controller::dpf::DpfOperations;
 use carbide_machine_controller::io::MachineStateControllerIO;
 use carbide_rack::bms_client::BmsDsxExchangeHandle;
+use carbide_rack_controller::firmware_object::FirmwareObjectFetcher;
 use carbide_redfish::libredfish::{BmcCredentialOps, RedfishClientPool};
+use carbide_resource_pool::ResourcePoolRegistry;
 use carbide_secrets::SecretsError;
 use carbide_secrets::certificates::CertificateProvider;
 use carbide_secrets::credentials::{
@@ -55,6 +57,7 @@ use model::resource_pool::common::CommonPools;
 use sqlx::PgTransaction;
 use state_controller::controller::Enqueuer;
 use tokio_stream::Stream;
+use tokio_util::sync::CancellationToken;
 use tonic::{Request, Response, Status, Streaming};
 
 use self::metrics::ApiMetricsEmitter;
@@ -63,6 +66,7 @@ use crate::cfg::file::CarbideConfig;
 use crate::dynamic_settings::DynamicSettings;
 use crate::ethernet_virtualization::EthVirtData;
 use crate::logging::log_limiter::LogLimiter;
+use crate::resource_pool::ResourcePoolMonitor;
 use crate::scout_stream::ConnectionRegistry;
 use crate::{CarbideError, CarbideResult};
 
@@ -85,6 +89,10 @@ pub struct Api {
     pub(crate) bmc_session_manager: Arc<crate::credentials::BmcSessionManager>,
     pub(crate) eth_data: EthVirtData,
     pub(crate) common_pools: Arc<CommonPools>,
+    /// Pool backends resolved at startup; runtime lookups also see later growth.
+    pub(crate) resource_pool_registry: ResourcePoolRegistry,
+    /// Shared inventory and provider observations for admin inspection and metrics.
+    pub(crate) resource_pool_monitor: ResourcePoolMonitor,
     pub(crate) ib_fabric_manager: Arc<dyn IBFabricManager>,
     // `pub` (not `pub(crate)`): read by the `carbide-api-web` admin UI for config-derived display.
     pub runtime_config: Arc<CarbideConfig>,
@@ -104,6 +112,7 @@ pub struct Api {
     pub(crate) machine_state_handler_enqueuer: Enqueuer<MachineStateControllerIO>,
     pub(crate) metric_emitter: ApiMetricsEmitter,
     pub(crate) component_manager: Option<component_manager::component_manager::ComponentManager>,
+    pub(crate) firmware_object_fetcher: Arc<dyn FirmwareObjectFetcher>,
     pub(crate) bms_client: OnceLock<Arc<BmsDsxExchangeHandle>>,
     pub(crate) secrets_context: Option<crate::secrets::SecretsContext>,
     /// Validator for node-auth bearer JWTs (issue #355). `Some` only when
@@ -111,6 +120,7 @@ pub struct Api {
     /// listener.
     pub(crate) node_jwt_validator: Option<Arc<crate::node_auth::NodeJwtValidator>>,
     pub(crate) console_log_source: Arc<dyn crate::console_logs::ConsoleLogSource>,
+    pub(crate) cancel_token: CancellationToken,
 }
 
 pub(crate) type ScoutStreamType =
@@ -137,6 +147,13 @@ impl Forge for Api {
         request: Request<rpc::VersionRequest>,
     ) -> Result<Response<rpc::BuildInfo>, Status> {
         crate::handlers::api::version(self, request).await
+    }
+
+    async fn get_rms_version(
+        &self,
+        request: Request<rpc::GetRmsVersionRequest>,
+    ) -> Result<Response<rpc::GetRmsVersionResponse>, Status> {
+        crate::handlers::rms::get_rms_version(self, request).await
     }
 
     async fn create_domain(
@@ -251,6 +268,20 @@ impl Forge for Api {
         request: Request<rpc::VpcsByIdsRequest>,
     ) -> Result<Response<rpc::VpcList>, Status> {
         crate::handlers::vpc::find_by_ids(self, request).await
+    }
+
+    async fn find_routing_profile_names(
+        &self,
+        request: Request<rpc::RoutingProfileSearchFilter>,
+    ) -> Result<Response<rpc::RoutingProfileNameList>, Status> {
+        crate::handlers::routing_profile::find_names(self, request)
+    }
+
+    async fn find_routing_profiles_by_names(
+        &self,
+        request: Request<rpc::RoutingProfilesByNamesRequest>,
+    ) -> Result<Response<rpc::NamedRoutingProfileList>, Status> {
+        crate::handlers::routing_profile::find_by_names(self, request)
     }
 
     async fn get_vpc_routing_state(
@@ -397,6 +428,20 @@ impl Forge for Api {
         request: Request<rpc::SpxPartitionsByIdsRequest>,
     ) -> Result<Response<rpc::SpxPartitionList>, Status> {
         crate::handlers::spx_partition::find_by_ids(self, request).await
+    }
+
+    async fn get_machine_spx_multiplane(
+        &self,
+        request: Request<rpc::MachineSpxMultiplaneRequest>,
+    ) -> Result<Response<rpc::MachineSpxMultiplane>, Status> {
+        crate::handlers::spx_multiplane::get(self, request).await
+    }
+
+    async fn update_machine_spx_multiplane_maintenance(
+        &self,
+        request: Request<rpc::MachineSpxMultiplaneMaintenanceUpdateRequest>,
+    ) -> Result<Response<rpc::MachineSpxMultiplane>, Status> {
+        crate::handlers::spx_multiplane::update(self, request).await
     }
 
     async fn find_ib_partition_ids(
@@ -586,6 +631,60 @@ impl Forge for Api {
         request: Request<rpc::NetworkSegmentStateHistoriesRequest>,
     ) -> Result<Response<rpc::StateHistories>, Status> {
         crate::handlers::network_segment::find_state_histories(self, request).await
+    }
+
+    async fn find_external_validation_hold_ids(
+        &self,
+        _request: Request<rpc::ExternalValidationHoldSearchFilter>,
+    ) -> Result<Response<rpc::ExternalValidationHoldIdList>, Status> {
+        Err(Status::unimplemented(
+            "external validation holds are not implemented",
+        ))
+    }
+
+    async fn find_external_validation_holds_by_ids(
+        &self,
+        _request: Request<rpc::ExternalValidationHoldsByIdsRequest>,
+    ) -> Result<Response<rpc::ExternalValidationHoldList>, Status> {
+        Err(Status::unimplemented(
+            "external validation holds are not implemented",
+        ))
+    }
+
+    async fn start_external_validation(
+        &self,
+        _request: Request<rpc::StartExternalValidationRequest>,
+    ) -> Result<Response<rpc::StartExternalValidationResponse>, Status> {
+        Err(Status::unimplemented(
+            "external validation attempts are not implemented",
+        ))
+    }
+
+    async fn cancel_external_validation(
+        &self,
+        _request: Request<rpc::CancelExternalValidationRequest>,
+    ) -> Result<Response<rpc::ExternalValidationAttempt>, Status> {
+        Err(Status::unimplemented(
+            "external validation attempts are not implemented",
+        ))
+    }
+
+    async fn complete_external_validation(
+        &self,
+        _request: Request<rpc::CompleteExternalValidationRequest>,
+    ) -> Result<Response<rpc::ExternalValidationAttempt>, Status> {
+        Err(Status::unimplemented(
+            "external validation attempts are not implemented",
+        ))
+    }
+
+    async fn remove_external_validation_hold(
+        &self,
+        _request: Request<rpc::RemoveExternalValidationHoldRequest>,
+    ) -> Result<Response<()>, Status> {
+        Err(Status::unimplemented(
+            "external validation hold removal is not implemented",
+        ))
     }
 
     async fn allocate_instance(
@@ -872,6 +971,20 @@ impl Forge for Api {
         crate::handlers::tenant::update(self, request).await
     }
 
+    async fn get_tenant_nic_firmware_config(
+        &self,
+        request: Request<rpc::GetTenantNicFirmwareConfigRequest>,
+    ) -> Result<Response<rpc::GetTenantNicFirmwareConfigResponse>, Status> {
+        crate::handlers::tenant::get_nic_firmware_config(self, request).await
+    }
+
+    async fn set_tenant_nic_firmware_config(
+        &self,
+        request: Request<rpc::SetTenantNicFirmwareConfigRequest>,
+    ) -> Result<Response<rpc::SetTenantNicFirmwareConfigResponse>, Status> {
+        crate::handlers::tenant::set_nic_firmware_config(self, request).await
+    }
+
     async fn find_tenants_by_organization_ids(
         &self,
         request: Request<rpc::TenantByOrganizationIdsRequest>,
@@ -996,6 +1109,13 @@ impl Forge for Api {
         request: Request<::rpc::forge::MachinesByIdsRequest>,
     ) -> Result<Response<::rpc::MachineList>, Status> {
         crate::handlers::machine::find_machines_by_ids(self, request).await
+    }
+
+    async fn find_host_states_by_ids(
+        &self,
+        request: Request<rpc::HostStatesByIdsRequest>,
+    ) -> Result<Response<rpc::HostStateList>, Status> {
+        crate::handlers::host_state::find_host_states_by_ids(self, request).await
     }
 
     async fn find_machine_state_histories(
@@ -1354,6 +1474,13 @@ impl Forge for Api {
         request: Request<rpc::GrowResourcePoolRequest>,
     ) -> Result<Response<rpc::GrowResourcePoolResponse>, Status> {
         crate::handlers::resource_pool::grow(self, request).await
+    }
+
+    async fn admin_inspect_resource_pools(
+        &self,
+        request: Request<rpc::InspectResourcePoolsRequest>,
+    ) -> Result<Response<rpc::InspectResourcePoolsResponse>, Status> {
+        crate::handlers::resource_pool::inspect(self, request).await
     }
 
     async fn admin_list_resource_pools(
@@ -2079,6 +2206,41 @@ impl Forge for Api {
         request: Request<()>,
     ) -> Result<Response<()>, Status> {
         crate::handlers::expected_rack::delete_all_expected_racks(self, request).await
+    }
+
+    async fn create_expected_nv_link_domain(
+        &self,
+        request: Request<rpc::CreateExpectedNvLinkDomainRequest>,
+    ) -> Result<Response<rpc::ExpectedNvLinkDomain>, Status> {
+        crate::handlers::expected_nvlink_domain::create(self, request).await
+    }
+
+    async fn delete_expected_nv_link_domain(
+        &self,
+        request: Request<rpc::ExpectedNvLinkDomainRequest>,
+    ) -> Result<Response<()>, Status> {
+        crate::handlers::expected_nvlink_domain::delete(self, request).await
+    }
+
+    async fn get_expected_nv_link_domain(
+        &self,
+        request: Request<rpc::ExpectedNvLinkDomainRequest>,
+    ) -> Result<Response<rpc::ExpectedNvLinkDomain>, Status> {
+        crate::handlers::expected_nvlink_domain::get(self, request).await
+    }
+
+    async fn find_expected_nv_link_domain_ids(
+        &self,
+        request: Request<rpc::ExpectedNvLinkDomainSearchFilter>,
+    ) -> Result<Response<rpc::ExpectedNvLinkDomainIdList>, Status> {
+        crate::handlers::expected_nvlink_domain::find_ids(self, request).await
+    }
+
+    async fn find_expected_nv_link_domains_by_ids(
+        &self,
+        request: Request<rpc::ExpectedNvLinkDomainsByIdsRequest>,
+    ) -> Result<Response<rpc::ExpectedNvLinkDomainList>, Status> {
+        crate::handlers::expected_nvlink_domain::find_by_ids(self, request).await
     }
 
     async fn add_expected_rack_group(
@@ -3026,6 +3188,76 @@ impl Forge for Api {
         crate::handlers::firmware::delete_host_firmware_config(self, request).await
     }
 
+    async fn create_nic_firmware_profile(
+        &self,
+        request: Request<rpc::CreateNicFirmwareProfileRequest>,
+    ) -> Result<Response<rpc::NicFirmwareProfileResponse>, Status> {
+        crate::handlers::nic_firmware::create(self, request).await
+    }
+
+    async fn find_nic_firmware_profile_ids(
+        &self,
+        request: Request<rpc::FindNicFirmwareProfileIdsRequest>,
+    ) -> Result<Response<rpc::FindNicFirmwareProfileIdsResponse>, Status> {
+        crate::handlers::nic_firmware::find_ids(self, request).await
+    }
+
+    async fn find_nic_firmware_profiles_by_ids(
+        &self,
+        request: Request<rpc::FindNicFirmwareProfilesByIdsRequest>,
+    ) -> Result<Response<rpc::FindNicFirmwareProfilesByIdsResponse>, Status> {
+        crate::handlers::nic_firmware::find_by_ids(self, request).await
+    }
+
+    async fn update_nic_firmware_profile(
+        &self,
+        request: Request<rpc::UpdateNicFirmwareProfileRequest>,
+    ) -> Result<Response<rpc::NicFirmwareProfileResponse>, Status> {
+        crate::handlers::nic_firmware::update(self, request).await
+    }
+
+    async fn set_nic_firmware_site_selection(
+        &self,
+        request: Request<rpc::SetNicFirmwareSiteSelectionRequest>,
+    ) -> Result<Response<rpc::NicFirmwareSiteSelectionResponse>, Status> {
+        crate::handlers::nic_firmware::set_site_selection(self, request).await
+    }
+
+    async fn find_nic_firmware_site_selection_ids(
+        &self,
+        request: Request<rpc::NicFirmwareSiteSelectionSearchFilter>,
+    ) -> Result<Response<rpc::FindNicFirmwareSiteSelectionIdsResponse>, Status> {
+        crate::handlers::nic_firmware::find_site_selection_ids(self, request).await
+    }
+
+    async fn find_nic_firmware_site_selections_by_ids(
+        &self,
+        request: Request<rpc::FindNicFirmwareSiteSelectionsByIdsRequest>,
+    ) -> Result<Response<rpc::FindNicFirmwareSiteSelectionsByIdsResponse>, Status> {
+        crate::handlers::nic_firmware::find_site_selections_by_ids(self, request).await
+    }
+
+    async fn set_machine_nic_firmware_config(
+        &self,
+        request: Request<rpc::SetMachineNicFirmwareConfigRequest>,
+    ) -> Result<Response<()>, Status> {
+        crate::handlers::nic_firmware::set_machine_config(self, request).await
+    }
+
+    async fn get_desired_nic_firmware(
+        &self,
+        request: Request<rpc::GetDesiredNicFirmwareRequest>,
+    ) -> Result<Response<rpc::GetDesiredNicFirmwareResponse>, Status> {
+        crate::handlers::nic_firmware::get_desired(self, request).await
+    }
+
+    async fn delete_nic_firmware_profile(
+        &self,
+        request: Request<rpc::DeleteNicFirmwareProfileRequest>,
+    ) -> Result<Response<()>, Status> {
+        crate::handlers::nic_firmware::delete(self, request).await
+    }
+
     async fn create_sku(
         &self,
         request: Request<rpc::SkuList>,
@@ -3088,6 +3320,13 @@ impl Forge for Api {
 
     async fn replace_sku(&self, request: Request<rpc::Sku>) -> Result<Response<rpc::Sku>, Status> {
         crate::handlers::sku::replace_sku(self, request).await
+    }
+
+    async fn replace_sku_components(
+        &self,
+        request: Request<rpc::ReplaceSkuComponentsRequest>,
+    ) -> Result<Response<rpc::Sku>, Status> {
+        crate::handlers::sku::replace_sku_components(self, request).await
     }
 
     async fn set_managed_host_quarantine_state(
@@ -3773,6 +4012,13 @@ impl Forge for Api {
         crate::handlers::mlx_admin::show_device_report(self, request).await
     }
 
+    async fn mlx_admin_show_device_identities(
+        &self,
+        request: Request<mlx_device_pb::MlxAdminDeviceIdentitiesRequest>,
+    ) -> Result<Response<mlx_device_pb::MlxAdminDeviceIdentitiesResponse>, Status> {
+        crate::handlers::mlx_device_identity::show(self, request).await
+    }
+
     async fn mlx_admin_registry_list(
         &self,
         request: Request<mlx_device_pb::MlxAdminRegistryListRequest>,
@@ -3843,6 +4089,16 @@ impl Forge for Api {
 
         crate::handlers::power_options::allow_ingestion_and_power_on(self, &request.into_inner())
             .await
+    }
+
+    async fn get_component_power_details(
+        &self,
+        request: Request<rpc::GetComponentPowerDetailsRequest>,
+    ) -> Result<Response<rpc::GetComponentPowerDetailsResponse>, Status> {
+        crate::handlers::component_manager::power_details::get_component_power_details(
+            self, request,
+        )
+        .await
     }
 
     async fn component_power_control(
@@ -4134,9 +4390,7 @@ impl Api {
             let machine = match db::machine::find_one(&mut txn, &machine_id, search_config).await {
                 Err(err) => {
                     tracing::warn!(%machine_id, error = %err, "failed loading machine");
-                    return Err(CarbideError::InvalidArgument(
-                        "err loading machine".to_string(),
-                    ));
+                    return Err(err.into());
                 }
                 Ok(None) => {
                     tracing::info!(%machine_id, "machine not found");

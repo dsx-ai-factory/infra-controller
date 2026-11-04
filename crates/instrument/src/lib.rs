@@ -616,6 +616,9 @@ pub mod log_events;
 pub use log_events::LogEventsMetric;
 pub mod red;
 
+#[cfg(feature = "otlp-tracing")]
+pub mod otlp_tracing;
+
 #[cfg(feature = "test-support")]
 pub mod testing;
 

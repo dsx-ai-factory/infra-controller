@@ -18,6 +18,7 @@
 //! Who a caller is and what it may send: its identity from its client
 //! certificate, whether it may use the proxy at all (the principal
 //! allow-list), and whether it may send this request (the ACL).
+//! Ambiguous request paths are rejected before the per-request ACL is evaluated.
 
 use axum::body::Body;
 use axum::extract::State;
@@ -26,18 +27,72 @@ use carbide_authn::SpiffeContext;
 use carbide_authn::middleware::{AuthContext, Authorization, CertDescriptionMiddleware, Principal};
 use carbide_instrument::emit;
 use http::{Request, Response, StatusCode};
+use url::Url;
 
 use crate::config::AuthConfig;
-use crate::metrics::{AuthContextMissing, PrincipalAllowListDenied, RequestAclDenied};
-use crate::proxy::{BmcProxyError, BmcProxyState};
+use crate::metrics::{
+    AuthContextMissing, PathRejectionReason, PrincipalAllowListDenied, RequestAclDenied,
+    RequestPathRejected,
+};
+use crate::proxy::{BmcProxyError, BmcProxyState, error_response};
+
+/// Rejects paths whose spelling or structure cannot safely be authorized.
+pub(super) fn reject_ambiguous_path<B>(request: &Request<B>) -> Option<Response<Body>> {
+    let path = request.uri().path();
+    let reason = path_rejection_reason(path)?;
+    emit(RequestPathRejected::new(
+        request.method(),
+        path.to_string(),
+        reason,
+    ));
+    Some(error_response(
+        (
+            StatusCode::BAD_REQUEST,
+            "request URL path is ambiguous or contains an invalid escape",
+        )
+            .into(),
+    ))
+}
+
+/// A reserved, non-routable origin used only to reproduce upstream URL parsing.
+const PATH_PROBE_BASE: &str = "https://bmc-proxy.invalid";
+
+/// Reject URL-parser rewrites, encoded backslashes, controls and nested
+/// encoding. Encoded slashes remain literal for the ACL's escape policy.
+fn path_rejection_reason(path: &str) -> Option<PathRejectionReason> {
+    let Ok(parsed) = Url::parse(&format!("{PATH_PROBE_BASE}{path}")) else {
+        return Some(PathRejectionReason::InvalidPath);
+    };
+    if parsed.path() != path {
+        return Some(PathRejectionReason::RewrittenPath);
+    }
+    path.split('%').skip(1).find_map(|suffix| {
+        let Some(digits) = suffix.get(..2) else {
+            return Some(PathRejectionReason::MalformedEscape);
+        };
+        if !digits.bytes().all(|digit| digit.is_ascii_hexdigit()) {
+            return Some(PathRejectionReason::MalformedEscape);
+        }
+        let octet = u8::from_str_radix(digits, 16)
+            .expect("two ASCII hexadecimal digits always fit in a u8");
+        match octet {
+            b'\\' => Some(PathRejectionReason::EncodedSeparator),
+            b'%' => Some(PathRejectionReason::NestedEncoding),
+            0..=0x1f | 0x7f => Some(PathRejectionReason::EncodedControl),
+            _ => None,
+        }
+    })
+}
 
 impl BmcProxyState {
-    pub(super) fn allows(&self, request: &Request<Body>) -> bool {
+    /// The caller's principal identifiers, when the ACL lets one of them send
+    /// `request`.
+    pub(super) fn authorized_caller(&self, request: &Request<Body>) -> Option<Vec<String>> {
         let Some(auth_context) = request.extensions().get::<AuthContext<()>>() else {
             emit(AuthContextMissing::RequestAcl {
                 method_label: request.method().into(),
             });
-            return false;
+            return None;
         };
 
         let principal_ids = request_principal_ids(auth_context);
@@ -54,9 +109,10 @@ impl BmcProxyState {
                 format!("{principal_ids:?}"),
                 request.uri().path().to_string(),
             ));
+            return None;
         }
 
-        allowed
+        Some(principal_ids)
     }
 }
 
@@ -137,8 +193,11 @@ mod tests {
     use carbide_instrument::testing::{MetricsCapture, capture_logs};
     use carbide_test_support::{Check, check_values, value_scenarios};
 
-    use super::{BmcProxyState, authorize_principal_allow_list, request_principal_ids};
-    use crate::metrics::MethodLabel;
+    use super::{
+        BmcProxyState, authorize_principal_allow_list, path_rejection_reason,
+        reject_ambiguous_path, request_principal_ids,
+    };
+    use crate::metrics::{MethodLabel, PathRejectionReason};
     use crate::proxy::test_support::*;
 
     const AUTHORIZATION_TEST_CONFIG: &str = r#"
@@ -206,7 +265,7 @@ mod tests {
         ];
         let metrics = MetricsCapture::start();
         let mut result = false;
-        let logs = capture_logs(|| result = state.allows(&request));
+        let logs = capture_logs(|| result = state.authorized_caller(&request).is_some());
 
         AuthorizationObservation {
             result,
@@ -279,7 +338,7 @@ mod tests {
         );
     }
 
-    /// `BmcProxyState::allows` owns the per-principal ACL boundary. An ordinary
+    /// `BmcProxyState::authorized_caller` owns the per-principal ACL boundary. An ordinary
     /// policy rejection moves the denial counter, while a missing `AuthContext`
     /// still rejects the request but moves only the middleware-error counter.
     #[test]
@@ -392,6 +451,94 @@ mod tests {
                 },
             ],
             |input| observe_principal_allow_list(&state, input),
+        );
+    }
+
+    #[test]
+    fn ambiguous_paths_are_rejected_without_decoding_safe_escapes() {
+        value_scenarios!(
+            run = path_rejection_reason;
+            "unchanged paths reach the ACL" {
+                "/redfish/v1/" => None,
+                "/redfish/v1//Systems" => None,
+                "/redfish/v1/Registries/%23Resource%20Name" => None,
+                "/nvue_v1/revision/changeset%2Fadmin%2f2026-10-14_12.00.00" => None,
+                "/redfish/v1/Managers/BMC/Hosts/[2001:db8::1]" => None,
+            }
+            "upstream URL parsing changes the path" {
+                "/redfish/v1/Systems/../Managers" => Some(PathRejectionReason::RewrittenPath),
+                "/redfish/v1/%2e%2e/Managers" => Some(PathRejectionReason::RewrittenPath),
+                "/redfish/v1/Systems\\..\\Managers" => Some(PathRejectionReason::RewrittenPath),
+                "/redfish/v1/Systems/{id}" => Some(PathRejectionReason::RewrittenPath),
+            }
+            "escapes change structure or enable another decoding pass" {
+                "/redfish/v1/Systems%5cfoo" => Some(PathRejectionReason::EncodedSeparator),
+                "/redfish/v1/%252e%252e/x" => Some(PathRejectionReason::NestedEncoding),
+                "/redfish/v1/%00" => Some(PathRejectionReason::EncodedControl),
+                "/redfish/v1/%7f" => Some(PathRejectionReason::EncodedControl),
+            }
+            "malformed escapes" {
+                "/redfish/v1/%2" => Some(PathRejectionReason::MalformedEscape),
+                "/redfish/v1/%GG" => Some(PathRejectionReason::MalformedEscape),
+                "/redfish/v1/%+1" => Some(PathRejectionReason::MalformedEscape),
+            }
+        );
+    }
+
+    #[test]
+    fn path_rejection_records_only_bounded_metric_labels() {
+        check_values(
+            [
+                Check {
+                    scenario: "rewritten path is refused and recorded",
+                    input: "/redfish/v1/Systems/../Managers",
+                    expect: (
+                        Some(StatusCode::BAD_REQUEST),
+                        1.0,
+                        Some("rewritten_path".to_string()),
+                    ),
+                },
+                Check {
+                    scenario: "typed backslash reason preserves its existing log spelling",
+                    input: "/redfish/v1/Systems%5cfoo",
+                    expect: (
+                        Some(StatusCode::BAD_REQUEST),
+                        1.0,
+                        Some("encoded_separator".to_string()),
+                    ),
+                },
+                Check {
+                    scenario: "unchanged path produces no rejection",
+                    input: "/redfish/v1/Systems",
+                    expect: (None, 0.0, None),
+                },
+            ],
+            |path| {
+                let metrics = MetricsCapture::start();
+                let request = Request::builder()
+                    .method(Method::GET)
+                    .uri(path)
+                    .body(Body::empty())
+                    .expect("path test request builds");
+                let mut refusal = None;
+                let logs = capture_logs(|| refusal = reject_ambiguous_path(&request));
+                if let Some(log) = logs.first() {
+                    assert_eq!(
+                        log.field("event_name"),
+                        Some("bmc_proxy_request_path_rejected")
+                    );
+                    assert_eq!(log.field("path"), Some(path));
+                }
+                (
+                    refusal.map(|response| response.status()),
+                    metrics.counter_delta(
+                        AUTHORIZATION_DENIED_METRIC,
+                        &[("authorization_layer", "request_path"), ("method", "get")],
+                    ),
+                    logs.first()
+                        .and_then(|log| log.field("reason").map(str::to_owned)),
+                )
+            },
         );
     }
 }

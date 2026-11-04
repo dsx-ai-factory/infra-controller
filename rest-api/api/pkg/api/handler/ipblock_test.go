@@ -18,7 +18,6 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/pagination"
 	authz "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
-	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/otelecho"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/ipam"
@@ -156,8 +155,7 @@ func testIPBlockBuildIPBlock(t *testing.T, dbSession *cdb.Session, name string, 
 }
 
 // testIPBlockBuildTenantSitePrefix creates a private Tenant SitePrefix. The
-// combination of TenantID and SitePrefixID keeps it out of generic IPBlock
-// handlers.
+// unmanaged classification keeps it out of generic IPBlock handlers.
 func testIPBlockBuildTenantSitePrefix(t *testing.T, dbSession *cdb.Session, name string, site *cdbm.Site, ip *cdbm.InfrastructureProvider, tenant *cdbm.Tenant, prefix string, prefixLength int, status string, user *cdbm.User) *cdbm.IPBlock {
 	t.Helper()
 	sitePrefixID := uuid.New()
@@ -167,6 +165,7 @@ func testIPBlockBuildTenantSitePrefix(t *testing.T, dbSession *cdb.Session, name
 		InfrastructureProviderID: ip.ID,
 		TenantID:                 &tenant.ID,
 		SitePrefixID:             &sitePrefixID,
+		Managed:                  cutil.GetPtr(false),
 		RoutingType:              cdbm.IPBlockRoutingTypeDatacenterOnly,
 		Prefix:                   prefix,
 		PrefixLength:             prefixLength,
@@ -410,7 +409,7 @@ func TestIPBlockHandler_Create(t *testing.T) {
 	require.NoError(t, err)
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	tests := []struct {
 		name               string
@@ -657,7 +656,6 @@ func TestIPBlockHandler_Create(t *testing.T) {
 				ec.Set("user", tc.user)
 			}
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			cipbh := CreateIPBlockHandler{
@@ -767,7 +765,7 @@ func TestIPBlockHandler_Update(t *testing.T) {
 	tempClient := &tmocks.Client{}
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	tests := []struct {
 		name               string
@@ -925,7 +923,6 @@ func TestIPBlockHandler_Update(t *testing.T) {
 				ec.Set("user", tc.user)
 			}
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			tah := UpdateIPBlockHandler{
@@ -1079,7 +1076,7 @@ func TestIPBlockHandler_Get(t *testing.T) {
 	tempClient := &tmocks.Client{}
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	tests := []struct {
 		name                              string
@@ -1331,7 +1328,6 @@ func TestIPBlockHandler_Get(t *testing.T) {
 				ec.Set("user", tc.user)
 			}
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			tah := GetIPBlockHandler{
@@ -1348,6 +1344,7 @@ func TestIPBlockHandler_Get(t *testing.T) {
 				err := json.Unmarshal(rec.Body.Bytes(), rsp)
 				assert.Nil(t, err)
 				assert.Equal(t, tc.expectedID, rsp.ID)
+				assert.True(t, rsp.Managed, "visible IP Blocks remain provider-managed independently of tenant assignment")
 				assert.Equal(t, tc.expectedStatusDetailsCnt, len(rsp.StatusHistory))
 				if tc.queryIncludeProviderRelation != nil || tc.queryIncludeTenantRelation != nil || tc.queryIncludeSiteRelation != nil {
 					if tc.expectedInfrastructureProviderOrg != nil {
@@ -1516,7 +1513,7 @@ func TestIPBlockHandler_GetAll(t *testing.T) {
 	tempClient := &tmocks.Client{}
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	tests := []struct {
 		name                              string
@@ -1804,7 +1801,6 @@ func TestIPBlockHandler_GetAll(t *testing.T) {
 				ec.Set("user", tc.user)
 			}
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			gaipbh := GetAllIPBlockHandler{
@@ -1829,6 +1825,9 @@ func TestIPBlockHandler_GetAll(t *testing.T) {
 			err = json.Unmarshal(rec.Body.Bytes(), &resp)
 			assert.Nil(t, err)
 			assert.Equal(t, tc.expectedCnt, len(resp))
+			for _, block := range resp {
+				assert.True(t, block.Managed)
+			}
 
 			ph := rec.Header().Get(pagination.ResponseHeaderName)
 			assert.NotEmpty(t, ph)
@@ -1982,7 +1981,7 @@ func TestDerivedIPBlockHandler_GetAll(t *testing.T) {
 	tempClient := &tmocks.Client{}
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	tests := []struct {
 		name                              string
@@ -2197,7 +2196,6 @@ func TestDerivedIPBlockHandler_GetAll(t *testing.T) {
 				ec.Set("user", tc.user)
 			}
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			gaipbh := GetAllDerivedIPBlockHandler{
@@ -2336,7 +2334,7 @@ func TestIPBlockHandler_Delete(t *testing.T) {
 	tempClient := &tmocks.Client{}
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	tests := []struct {
 		name               string
@@ -2468,7 +2466,6 @@ func TestIPBlockHandler_Delete(t *testing.T) {
 				ec.Set("user", tc.user)
 			}
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			dipbh := DeleteIPBlockHandler{
@@ -2554,8 +2551,7 @@ func TestIPBlockHandler_Delete(t *testing.T) {
 		ec.SetParamNames("orgName", "id")
 		ec.SetParamValues(ipOrg1, id.String())
 		ec.Set("user", user)
-		requestCtx := context.WithValue(raceCtx, otelecho.TracerKey, tracer) //nolint:staticcheck // Middleware owns the context key.
-		ec.SetRequest(ec.Request().WithContext(requestCtx))
+		ec.SetRequest(ec.Request().WithContext(raceCtx))
 
 		done := make(chan error, 1)
 		go func() {

@@ -36,8 +36,9 @@ use carbide_systemd::systemd;
 use carbide_uuid::machine::DpuMachineId;
 use eyre::WrapErr;
 use forge_certs::cert_renewal::ClientCertRenewer;
+use forge_dpu_agent_utils::FMDS_IPV6_ADDRESS;
 use forge_dpu_remediation::remediation::{MachineInfo, RemediationExecutor};
-use ipnetwork::IpNetwork;
+use ipnetwork::{IpNetwork, Ipv6Network};
 use mac_address::MacAddress;
 use prost::Message as _;
 use tokio::signal::unix::{SignalKind, signal};
@@ -49,22 +50,23 @@ use version_compare::Version;
 
 use crate::command_line::HbnConfigMode;
 use crate::dpu::DpuNetworkInterfaces;
-use crate::dpu::interface::Interface;
+use crate::dpu::interface::{Interface, IpInterface};
 use crate::dpu::route::{DpuRoutePlan, IpRoute, Route};
 use crate::duppet::{SummaryFormat, SyncOptions};
 use crate::ethernet_virtualization::{
     InterfaceTranslationMode, NvueClientContext, NvueUpdateFlavor, ServiceAddresses,
+    managed_host_ipv4_loopback,
 };
 use crate::fmds_client::{FmdsUpdater, register_external_connection_metric};
 use crate::health::HealthCheckParams;
 use crate::host_machine_id::get_host_machine_id_retry;
 use crate::instrumentation::{
-    LldpCollection, NetworkStatus, OvsRestart, create_metrics, get_dpu_agent_meter,
-    get_prometheus_registry,
+    AgentMetricsState, LldpCollection, NetworkStatus, OvsRestart, create_metrics,
+    get_dpu_agent_meter, get_prometheus_registry,
 };
 use crate::machine_inventory_updater::MachineInventoryUpdaterConfig;
 use crate::network_monitor::{self, NetworkPingerType};
-use crate::util::get_host_boot_timestamp;
+use crate::util::{get_host_boot_timestamp, jittered_interval};
 use crate::{
     FMDS_MINIMUM_HBN_VERSION, HBNDeviceNames, NVUE_MINIMUM_HBN_VERSION, RunOptions, astra_weave,
     command_line, ethernet_virtualization, extension_services, get_non_empty_str, hbn, health,
@@ -87,6 +89,7 @@ pub(super) async fn setup_and_run(
     agent_config: AgentConfig,
     options: command_line::RunOptions,
 ) -> eyre::Result<()> {
+    let fmds_requires_ipv6 = agent_config.fmds_armos_networking.ipv6_gateway()?.is_some();
     systemd::notify_start().await?;
     tracing::info!(
         version = carbide_version::version!(),
@@ -181,6 +184,12 @@ pub(super) async fn setup_and_run(
         }
     }
 
+    // Retain the metadata listener with the other background services so it
+    // stops before the main loop hands control back to its caller.
+    let mut background_tasks = JoinSet::new();
+    let cancel_token = CancellationToken::new();
+    let mut pending_metadata_service = None;
+
     // And now set up our FMDS updater, which will either be our original
     // embedded server (which spins up a local listener within the DPU agent)
     // or will talk to an external FMDS server via gRPC (which is colocated
@@ -198,15 +207,43 @@ pub(super) async fn setup_and_run(
             last_connect_succeeded,
         }
     } else {
-        if options.enable_metadata_service {
-            crate::metadata_service::spawn_metadata_service(
+        if options.enable_metadata_service
+            && options.agent_platform_type.is_dpu_os()
+            && fmds_requires_ipv6
+            && agent_config
+                .metadata_service
+                .address
+                .parse::<std::net::SocketAddr>()
+                .is_ok_and(|address| address.ip() == IpAddr::V6(FMDS_IPV6_ADDRESS))
+        {
+            // An exact bind needs the address first. The normal network update
+            // assigns it after HBN identifies the ARM interface, then starts FMDS.
+            pending_metadata_service = Some(PendingMetadataService {
+                address: agent_config.metadata_service.address.clone(),
+                metrics: metrics.clone(),
+                state: instance_metadata_state.clone(),
+            });
+        } else if options.enable_metadata_service {
+            let metadata_result = crate::metadata_service::spawn_metadata_service(
                 agent_config.metadata_service.address.clone(),
                 metrics.clone(),
                 instance_metadata_state.clone(),
+                fmds_requires_ipv6,
+                &mut background_tasks,
+                cancel_token.clone(),
             )
-            .unwrap_or_else(|e| {
-                tracing::warn!(error = format!("{e:#}"), "Failed to run metadata service");
-            });
+            .await;
+            if let Err(error) = metadata_result {
+                if fmds_requires_ipv6 {
+                    return Err(
+                        error.wrap_err("failed to start the requested IPv6 metadata service")
+                    );
+                }
+                tracing::warn!(
+                    error = format!("{error:#}"),
+                    "Failed to run metadata service"
+                );
+            }
         }
         tracing::info!("Using FmdsUpdater::Embedded FMDS service");
         FmdsUpdater::Embedded(instance_metadata_state.clone())
@@ -405,11 +442,6 @@ pub(super) async fn setup_and_run(
         .as_ref()
         .map(|prefix| InterfaceTranslationMode::Prepend(prefix.clone()));
 
-    // Spawn any further background task into this set and give it a clone of
-    // this token, so one cancel and one join below shut them all down.
-    let mut background_tasks = JoinSet::new();
-    let cancel_token = CancellationToken::new();
-
     let lldp_platform_type = options.agent_platform_type.clone();
     let latest_lldp = carbide_host_support::lldp_collector_task::start_lldp_collector(
         move || {
@@ -444,6 +476,7 @@ pub(super) async fn setup_and_run(
         machine_id,
         periodic_config_reader,
         fmds_updater,
+        pending_metadata_service,
         client_cert_renewer,
         hbn_device_names,
         is_hbn_up: false,
@@ -475,10 +508,49 @@ pub(super) async fn setup_and_run(
         ovs_restart_retry_backoff: None,
     };
 
-    let outcome = main_loop.run().await;
+    let outcome = main_loop.run(&mut background_tasks, &cancel_token).await;
     cancel_token.cancel();
     background_tasks.join_all().await;
     outcome
+}
+
+/// Keep an exact IPv6 listener pending until reconciliation assigns its address.
+/// A failed bind retains these inputs so the next network update can retry it.
+struct PendingMetadataService {
+    address: String,
+    metrics: Arc<AgentMetricsState>,
+    state: Arc<instance_metadata_endpoint::InstanceMetadataRouterStateImpl>,
+}
+
+/// Assign FMDS addresses before starting an exact listener. DAD must finish
+/// before either the listener or reply routes can use the IPv6 source address.
+async fn apply_fmds_interface(
+    interface: &str,
+    network_plan: DpuNetworkInterfaces,
+    require_ipv6: bool,
+    pending: &mut Option<PendingMetadataService>,
+    background_tasks: &mut JoinSet<()>,
+    cancel_token: &CancellationToken,
+) -> eyre::Result<()> {
+    let interface_plan = Interface::plan(interface, network_plan).await?;
+    tracing::trace!(?interface_plan, "Interface plan");
+    Interface::apply(interface_plan).await?;
+    if require_ipv6 {
+        Interface::wait_for_ipv6_address(interface, FMDS_IPV6_ADDRESS).await?;
+    }
+    if let Some(service) = pending.as_ref() {
+        crate::metadata_service::spawn_metadata_service(
+            service.address.clone(),
+            service.metrics.clone(),
+            service.state.clone(),
+            true,
+            background_tasks,
+            cancel_token.clone(),
+        )
+        .await?;
+        *pending = None;
+    }
+    Ok(())
 }
 
 struct MainLoop {
@@ -488,6 +560,7 @@ struct MainLoop {
     build_version: String,
     periodic_config_reader: Box<periodic_config_fetcher::PeriodicConfigFetcherReader>,
     fmds_updater: FmdsUpdater,
+    pending_metadata_service: Option<PendingMetadataService>,
     client_cert_renewer: ClientCertRenewer,
     hbn_device_names: HBNDeviceNames,
     is_hbn_up: bool,
@@ -667,12 +740,31 @@ impl CurrentNetworkVersion {
         // rendering.
         config.enable_dhcp = false;
 
-        // Tenant IPv6 addresses can feed routed RA or an L2 SVI's VRR address,
-        // while admin family-neutral fields remain non-rendering inputs.
+        // Fetch-time address normalization mirrors the admin V6 host `/128`
+        // and SVI into the compatibility sidecar before this fingerprint is
+        // built. The canonical segment prefix is the only distinct address-list
+        // render input; V4 address-list entries do not feed HBN rendering.
+        let renders_admin_ipv6 = config.use_admin_network
+            && config.is_primary_dpu
+            && config.network_virtualization_type() == ::rpc::forge::VpcVirtualizationType::Fnn;
         if let Some(admin_interface) = &mut config.admin_interface {
-            admin_interface.addresses.clear();
+            if renders_admin_ipv6 {
+                admin_interface.addresses.retain(|address| {
+                    address.address_family == i32::from(::rpc::forge::AddressFamily::V6)
+                });
+                for address in &mut admin_interface.addresses {
+                    address.ip.clear();
+                    address.interface_prefix.clear();
+                    address.gateway = None;
+                    address.svi_ip = None;
+                    address.tenant_vrf_loopback_ip = None;
+                }
+            } else {
+                admin_interface.addresses.clear();
+            }
         }
 
+        // Tenant IPv6 addresses can feed routed RA or an L2 SVI's VRR address.
         let renders_tenant_ipv6 = !config.use_admin_network
             && config.network_virtualization_type() == ::rpc::forge::VpcVirtualizationType::Fnn;
         for interface in &mut config.tenant_interfaces {
@@ -713,7 +805,9 @@ impl CurrentNetworkVersion {
         config.anycast_site_prefixes.sort_unstable();
         config
             .additional_route_target_imports
-            .sort_by_key(|route_target| (route_target.asn, route_target.vni));
+            .sort_by_key(|route_target| {
+                (route_target.asn, route_target.vni, route_target.vni_self)
+            });
 
         if let Some(admin_interface) = &mut config.admin_interface {
             Self::normalize_interface(admin_interface);
@@ -763,10 +857,14 @@ impl CurrentNetworkVersion {
     fn normalize_routing_profile(routing_profile: &mut rpc::RoutingProfile) {
         routing_profile
             .route_target_imports
-            .sort_by_key(|route_target| (route_target.asn, route_target.vni));
+            .sort_by_key(|route_target| {
+                (route_target.asn, route_target.vni, route_target.vni_self)
+            });
         routing_profile
             .route_targets_on_exports
-            .sort_by_key(|route_target| (route_target.asn, route_target.vni));
+            .sort_by_key(|route_target| {
+                (route_target.asn, route_target.vni, route_target.vni_self)
+            });
         Self::sort_prefix_entries(&mut routing_profile.accepted_leaks_from_underlay);
         Self::sort_prefix_entries(&mut routing_profile.allowed_anycast_prefixes);
     }
@@ -840,15 +938,22 @@ async fn fetch_last_dhcp_requests(dhcp_grpc_server: Option<&str>) -> Vec<rpc::La
 
 impl MainLoop {
     /// Runs the MainLoop in endless mode
-    async fn run(&mut self) -> Result<(), eyre::Report> {
+    async fn run(
+        &mut self,
+        background_tasks: &mut JoinSet<()>,
+        cancel_token: &CancellationToken,
+    ) -> Result<(), eyre::Report> {
         let mut term_signal = signal(SignalKind::terminate())?;
         let mut hup_signal = signal(SignalKind::hangup())?;
 
         loop {
-            let result = self.run_single_iteration().await?;
+            let result = self
+                .run_single_iteration(background_tasks, cancel_token)
+                .await?;
             if result.stop_agent {
                 return Ok(());
             }
+            let loop_delay = jittered_interval(result.loop_period, &mut rand::rng());
 
             tokio::select! {
                 biased;
@@ -867,9 +972,9 @@ impl MainLoop {
                     self.client_cert_renewer.renew_on_next_check();
                     self.inventory_updater_time = now;
                     self.version_check_time = now;
-                    // the loop_period sleep is interrupted so we will fetch new network config
+                    // Interrupt the wait and apply the latest cached config.
                 }
-                _ = tokio::time::sleep(result.loop_period) => {}
+                _ = tokio::time::sleep(loop_delay) => {}
             }
         }
     }
@@ -944,7 +1049,11 @@ impl MainLoop {
     }
 
     /// Runs a single iteration of the main loop
-    async fn run_single_iteration(&mut self) -> Result<IterationResult, eyre::Report> {
+    async fn run_single_iteration(
+        &mut self,
+        background_tasks: &mut JoinSet<()>,
+        cancel_token: &CancellationToken,
+    ) -> Result<IterationResult, eyre::Report> {
         let loop_start = Instant::now();
 
         if let Err(err) = systemd::notify_watchdog().await {
@@ -999,7 +1108,8 @@ impl MainLoop {
         // `read` does not block
         match self.periodic_config_reader.net_conf_read() {
             Some(conf) => {
-                // DHCP server only runs on the primary dpu or when using the tenant network
+                // Secondary-admin service reservations do not produce host-interface timestamps, so
+                // report request history only for primary DPUs or DPUs using the tenant network.
                 if !conf.use_admin_network || conf.is_primary_dpu {
                     status_out.last_dhcp_requests =
                         fetch_last_dhcp_requests(self.options.dhcp_grpc_server.as_deref()).await;
@@ -1007,14 +1117,7 @@ impl MainLoop {
 
                 let instance_data = self.periodic_config_reader.meta_data_conf_reader();
 
-                // The fetcher projects `addresses` into the compatibility prefix before use.
-                #[allow(deprecated)]
-                let proposed_routes: Vec<_> = conf
-                    .tenant_interfaces
-                    .iter()
-                    .filter_map(|interface| interface.prefix.as_deref())
-                    .filter_map(|prefix| IpNetwork::from_str(prefix).ok())
-                    .collect();
+                let fmds_ipv6_gateway = self.agent_config.fmds_armos_networking.ipv6_gateway()?;
 
                 let tenant_peers = ethernet_virtualization::tenant_peers(&conf);
                 let mut should_check_ipv6_unicast = false;
@@ -1109,7 +1212,12 @@ impl MainLoop {
                             },
                         };
 
-                    let update_result = if let Some(err) = supplemental_config_error {
+                    let mut nvue_applied_before_fmds = false;
+                    let update_result = if let Err(error) =
+                        require_dhcp_before_ipv6_only_network_update(&conf, &dhcp_result)
+                    {
+                        Err(error)
+                    } else if let Some(err) = supplemental_config_error {
                         Err(err)
                     } else if self
                         .current_network_version
@@ -1121,60 +1229,90 @@ impl MainLoop {
                         );
                         Ok(false)
                     } else {
-                        if self.options.agent_platform_type.is_dpu_os()
-                            && hbn_version >= self.fmds_minimum_hbn_version
-                        {
-                            let fmds_proposed_interfaces = &self.agent_config.fmds_armos_networking;
-                            let network_plan = DpuNetworkInterfaces::new(fmds_proposed_interfaces);
+                        // Address, DAD, listener and route failures belong to this
+                        // update, not agent startup. Keep the version pending and
+                        // report the error so the next tick retries the same config.
+                        async {
+                            let nvue_first = self.options.agent_platform_type.is_dpu_os()
+                                && fmds_ipv6_gateway.is_some();
+                            let apply_fmds = async {
+                                if self.options.agent_platform_type.is_dpu_os()
+                                    && hbn_version >= self.fmds_minimum_hbn_version
+                                {
+                                    let proposed_routes = fmds_tenant_routes(&conf)?;
+                                    let fmds_proposed_interfaces =
+                                        &self.agent_config.fmds_armos_networking;
+                                    let network_plan =
+                                        DpuNetworkInterfaces::new(fmds_proposed_interfaces);
+                                    apply_fmds_interface(
+                                        self.hbn_device_names.sfs[0],
+                                        network_plan,
+                                        fmds_ipv6_gateway.is_some(),
+                                        &mut self.pending_metadata_service,
+                                        background_tasks,
+                                        cancel_token,
+                                    )
+                                    .await?;
 
-                            let fmds_interface_plan =
-                                Interface::plan(self.hbn_device_names.sfs[0], network_plan).await?;
-                            tracing::trace!(interface_plan = ?fmds_interface_plan, "Interface plan");
+                                    // Reply routes select a source assigned above. Do not acknowledge
+                                    // this configuration before both the address and route are installed.
+                                    let route_plan = plan_fmds_armos_routing(
+                                        self.hbn_device_names.sfs[0],
+                                        &proposed_routes,
+                                        fmds_ipv6_gateway,
+                                    )
+                                    .await?;
+                                    tracing::trace!(route_plan = ?route_plan, "Route plan");
 
-                            Interface::apply(fmds_interface_plan).await?;
+                                    Route::apply(route_plan).await?;
+                                }
+                                Ok::<_, eyre::Report>(())
+                            };
 
-                            // plan_fmds_armos_routing reads the interface's current IPv4 address
-                            // for prefsrc and returns Ok(None) when no address is present, skipping
-                            // route installation entirely. The config-version cache can prevent a
-                            // retry on the next tick, so the interface address must be applied
-                            // before the route plan is computed.
-                            let route_plan = plan_fmds_armos_routing(
-                                self.hbn_device_names.sfs[0],
-                                &proposed_routes,
-                            )
-                            .await?;
-                            tracing::trace!(route_plan = ?route_plan, "Route plan");
-
-                            if let Some(route_plan) = route_plan {
-                                Route::apply(route_plan).await?;
+                            let update_flavor = match self.nvue_context.as_mut() {
+                                Some(nvue_context) => NvueUpdateFlavor::RestApi { nvue_context },
+                                None => NvueUpdateFlavor::StartupFile {
+                                    hbn_root: &self.agent_config.hbn.root_dir,
+                                    skip_post: self.agent_config.hbn.skip_reload,
+                                },
+                            };
+                            let apply_nvue = ethernet_virtualization::update_nvue(
+                                virtualization_type,
+                                update_flavor,
+                                &conf,
+                                &self.service_addrs,
+                                self.hbn_device_names.clone(),
+                                supplemental_config.as_deref(),
+                                fmds_ipv6_gateway,
+                            );
+                            if nvue_first {
+                                // A duplicate or tentative metadata address must not prevent
+                                // tenant changes, especially quarantine, from reaching NVUE.
+                                let hbn_changed = apply_nvue.await?;
+                                nvue_applied_before_fmds = true;
+                                has_changed_hbn_config = hbn_changed;
+                                has_changed_configs = hbn_changed;
+                                apply_fmds.await?;
+                                Ok(hbn_changed)
+                            } else {
+                                // Keep the existing IPv4 address/route-before-NVUE ordering.
+                                apply_fmds.await?;
+                                apply_nvue.await
                             }
                         }
-
-                        let update_flavor = match self.nvue_context.as_mut() {
-                            Some(nvue_context) => NvueUpdateFlavor::RestApi { nvue_context },
-                            None => NvueUpdateFlavor::StartupFile {
-                                hbn_root: &self.agent_config.hbn.root_dir,
-                                skip_post: self.agent_config.hbn.skip_reload,
-                            },
-                        };
-                        ethernet_virtualization::update_nvue(
-                            virtualization_type,
-                            update_flavor,
-                            &conf,
-                            &self.service_addrs,
-                            self.hbn_device_names.clone(),
-                            supplemental_config.as_deref(),
-                        )
                         .await
                     };
 
-                    // Astra (Weave EW VPC) reconciliation is independent of HBN/DHCP: it is
-                    // reported on network status below, but a failure here must not block
-                    // the HBN/DHCP bookkeeping (or the readiness gate) that follows.
-                    let astra_config_status = astra_weave::build_notify_weave_ew_vpc_astra_config(
-                        conf.astra_config.as_ref(),
-                    )
-                    .await;
+                    // Maintenance-only delivery must not reconcile Weave attachments.
+                    let mut astra_config_status = None;
+                    if let Some(astra_config) = conf.astra_config.as_ref()
+                        && astra_config.is_attachment_config_present.unwrap_or(true)
+                    {
+                        astra_config_status = Some(
+                            astra_weave::build_notify_weave_ew_vpc_astra_config(Some(astra_config))
+                                .await,
+                        );
+                    }
 
                     match (update_result, dhcp_result) {
                         (Ok(hbn_changed), Ok(dhcp_changed)) => {
@@ -1220,6 +1358,18 @@ impl MainLoop {
                         }
                         (update_result, dhcp_result) => {
                             let mut errors = Vec::new();
+                            if nvue_applied_before_fmds {
+                                // NVUE already applied the transition. Its OVS restart must
+                                // not wait for FMDS recovery, but neither may we acknowledge it.
+                                self.restart_ovs_after_admin_network_change_if_needed(
+                                    &conf,
+                                    &mut status_out,
+                                )
+                                .await;
+                                if let Some(error) = status_out.network_config_error.take() {
+                                    errors.push(error);
+                                }
+                            }
                             if let Err(err) = update_result {
                                 errors.push(format!("update={err:#}"));
                             }
@@ -1235,22 +1385,12 @@ impl MainLoop {
                         }
                     }
 
-                    match astra_config_status {
-                        Ok(status) => {
-                            if conf.astra_config.is_some() {
-                                status_out.astra_config_status = Some(status);
-                            }
-                        }
-                        Err(err) => {
-                            tracing::error!(
-                                error = format!("{err:#}"),
-                                "Notifying Weave EW VPC Astra config"
-                            );
-                            // Don't clobber a real HBN/DHCP failure already reported above.
-                            if status_out.network_config_error.is_none() {
-                                status_out.network_config_error = Some(err.to_string());
-                            }
-                        }
+                    if let Some(result) = astra_config_status {
+                        set_astra_config_status(
+                            conf.astra_config.as_ref(),
+                            result,
+                            &mut status_out,
+                        );
                     }
 
                     // In case of secondary DPU, the interface must be disabled if on admin network, else enabled.
@@ -1261,6 +1401,20 @@ impl MainLoop {
                     {
                         tracing::error!(error = format!("{err:#}"), "Updating interface state.");
                     }
+                }
+
+                // Xplane maintenance has no dependency on HBN being up. Its
+                // per-port failures are reported without changing HBN/DHCP
+                // acknowledgments or the readiness gate.
+                if let Some(astra_config) = conf.astra_config.as_ref()
+                    && astra_config.is_maintenance_config_present.unwrap_or(true)
+                {
+                    status_out.astra_config_status =
+                        crate::astra_xplane::build_notify_xplane_maintenance_config(
+                            astra_config,
+                            status_out.astra_config_status.take(),
+                        )
+                        .await;
                 }
 
                 // Feed the latest instance metadata to FMDS and acknowledge it
@@ -1603,6 +1757,40 @@ fn effective_virtualization_type(
     Ok(virtualization_type)
 }
 
+/// `set_astra_config_status` reports attempted Astra reconciliation independently
+/// of HBN/DHCP acknowledgements. Absent configuration leaves the report unchanged.
+/// Failure records an error unless the caller has already recorded one.
+fn set_astra_config_status(
+    config: Option<&rpc::AstraConfig>,
+    result: eyre::Result<rpc::AstraConfigStatus>,
+    status_out: &mut rpc::DpuNetworkStatus,
+) {
+    if config.is_none() {
+        return;
+    }
+
+    status_out.astra_config_status = Some(match result {
+        Ok(status) => status,
+        Err(err) => {
+            tracing::error!(
+                error = format!("{err:#}"),
+                "Notifying Weave EW VPC Astra config"
+            );
+            // Keep an HBN/DHCP error the caller already recorded.
+            if status_out.network_config_error.is_none() {
+                status_out.network_config_error = Some(format!("{err:#}"));
+            }
+            // An empty report retracts Core's previous Astra readiness. Omitting
+            // the report would leave that observation unchanged after failure.
+            rpc::AstraConfigStatus {
+                is_attachment_status_present: Some(true),
+                is_maintenance_status_present: Some(false),
+                ..Default::default()
+            }
+        }
+    });
+}
+
 fn ack_network_config_update(
     conf: &ManagedHostNetworkConfigResponse,
     instance_data: Option<&periodic_config_fetcher::InstanceMetadata>,
@@ -1668,41 +1856,92 @@ fn ack_network_config_update(
     )
 }
 
-// TODO(chet): We'll eventually want a documented IPv6 address we can
-// configure here for tenants to hit FMDS over IPv6.
+/// `fmds_tenant_routes` includes IPv6 segment prefixes from the canonical
+/// addresses, which the legacy IPv4 projection cannot represent.
+#[allow(deprecated)]
+fn fmds_tenant_routes(conf: &ManagedHostNetworkConfigResponse) -> eyre::Result<Vec<IpNetwork>> {
+    let mut routes = Vec::new();
+    for interface in &conf.tenant_interfaces {
+        let prefixes = interface.prefix.iter().map(String::as_str).chain(
+            interface
+                .addresses
+                .iter()
+                .filter(|address| address.address_family == rpc::AddressFamily::V6 as i32)
+                .map(|address| address.prefix.as_str()),
+        );
+        for prefix in prefixes.filter(|prefix| !prefix.is_empty()) {
+            let network = prefix
+                .parse::<IpNetwork>()
+                .wrap_err_with(|| format!("invalid FMDS tenant prefix: {prefix}"))?;
+            routes.push(network);
+        }
+    }
+    Ok(routes)
+}
+
+/// `plan_fmds_armos_routing` plans tenant reply routes through the matching
+/// HBN peer, using only metadata source addresses present on the local interface.
 async fn plan_fmds_armos_routing(
     interface: &str,
-    proposed_routes: &Vec<IpNetwork>,
-) -> eyre::Result<Option<DpuRoutePlan>> {
-    let mut proposed_plan = Vec::new();
-
+    proposed_routes: &[IpNetwork],
+    ipv6_gateway: Option<Ipv6Network>,
+) -> eyre::Result<DpuRoutePlan> {
     let interfaces = Interface::current_addresses(interface).await?;
+    let desired = fmds_reply_routes(interface, &interfaces, proposed_routes, ipv6_gateway)?;
+    Route::plan(interface, desired).await
+}
 
-    // find all ipv4 addresses on interface
-    let fmds_interface = interfaces
+/// `fmds_reply_routes` keeps IPv4's configured source and selects the explicit
+/// IPv6 metadata address, never an interface's incidental link-local address.
+fn fmds_reply_routes(
+    interface: &str,
+    interfaces: &[IpInterface],
+    proposed_routes: &[IpNetwork],
+    ipv6_gateway: Option<Ipv6Network>,
+) -> eyre::Result<Vec<IpRoute>> {
+    let addresses: Vec<_> = interfaces
         .iter()
-        .find_map(|e| e.addr_info.iter().find(|i| i.family == "inet"));
-
-    tracing::trace!(?fmds_interface, "fmds_interface");
-
-    if let Some(ipinterface) = fmds_interface {
-        for route in proposed_routes {
-            let new_route = IpRoute {
-                dst: *route,
-                dev: None,
-                protocol: None,
-                scope: None,
-                gateway: Some(IpAddr::from([169, 254, 169, 253])), // use gateway IP from inside HBN container
-                prefsrc: Some(ipinterface.local),
-                flags: vec![],
-            };
-            proposed_plan.push(new_route);
-        }
-        let plan = Route::plan(interface, proposed_plan).await?;
-        Ok(Some(plan))
-    } else {
-        Ok(None)
+        .flat_map(|interface| &interface.addr_info)
+        .map(|address| address.local)
+        .collect();
+    let mut routes = Vec::new();
+    for route in proposed_routes {
+        let (source, gateway) = match route {
+            IpNetwork::V4(_) => {
+                let Some(source) = addresses.iter().copied().find(IpAddr::is_ipv4) else {
+                    // Preserve the existing opt-out when no IPv4 source is configured.
+                    continue;
+                };
+                (Some(source), IpAddr::from([169, 254, 169, 253]))
+            }
+            IpNetwork::V6(_) => {
+                let Some(gateway) = ipv6_gateway else {
+                    // IPv6 transport is opt-in; retain IPv4-only deployments unchanged.
+                    continue;
+                };
+                (
+                    addresses
+                        .iter()
+                        .copied()
+                        .find(|address| *address == IpAddr::V6(FMDS_IPV6_ADDRESS)),
+                    IpAddr::V6(gateway.ip()),
+                )
+            }
+        };
+        let source = source.ok_or_else(|| {
+            eyre::eyre!("FMDS interface {interface} has no metadata source address for {route}")
+        })?;
+        routes.push(IpRoute {
+            dst: *route,
+            dev: Some(interface.to_string()),
+            protocol: None,
+            scope: None,
+            gateway: Some(gateway),
+            prefsrc: Some(source),
+            flags: vec![],
+        });
     }
+    Ok(routes)
 }
 
 /// Push the DPU's network status to nico-api.
@@ -1915,6 +2154,30 @@ ATF: v2.2(release):4.9.3-")
     }
 
     // This method will either reboot a card or just return ok.
+    Ok(())
+}
+
+/// Require confirmed DHCP acceptance before IPv6-primary NVUE and FMDS updates, including later
+/// network-policy changes that configure DHCP. Secondary admin DPUs without service listeners only
+/// stop DHCP, so a failed stop must not delay their NVUE isolation. Callers must leave the network
+/// version pending after any DHCP error so the next iteration retries.
+fn require_dhcp_before_ipv6_only_network_update(
+    config: &rpc::ManagedHostNetworkConfigResponse,
+    dhcp_result: &eyre::Result<bool>,
+) -> eyre::Result<()> {
+    let Some(host) = &config.managed_host_config else {
+        return Ok(());
+    };
+    let stops_dhcp = config.use_admin_network
+        && !config.is_primary_dpu
+        && config
+            .service_vpc_slot_inventory
+            .as_ref()
+            .is_none_or(|inventory| inventory.slots.is_empty());
+    if !stops_dhcp && managed_host_ipv4_loopback(host)?.is_none() && dhcp_result.is_err() {
+        // The caller reports the original DHCP error alongside this gate error.
+        eyre::bail!("IPv6-only network update is waiting for DHCP");
+    }
     Ok(())
 }
 

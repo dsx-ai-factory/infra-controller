@@ -118,7 +118,7 @@ pods:
         networkStatusRunInterval: "120s"
         # Gateways of [networks.simulated-oob] and [networks.simulated-underlay].
         bmcDhcpRelayAddress: "10.200.0.1"
-        underlayDhcpRelayAddress: "10.104.0.1"
+        underlayDhcpRelayAddress: "10.201.0.1"
         dpusInNicMode: false
 extraEnv:
   - name: RUST_LOG

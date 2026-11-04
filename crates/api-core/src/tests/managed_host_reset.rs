@@ -24,9 +24,11 @@ use std::time::Duration;
 use carbide_dpf::types::{DpuDeviceSummary, DpuNodeSummary, HostDpfSnapshot};
 use carbide_dpf::{DpuDeploymentType, DpuPhase};
 use carbide_machine_controller::dpf::{DpfOperations, MockDpfOperations};
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::{MachineId, MachineIdSource, MachineType, PredictedHostMachineId};
+use model::controller_outcome::PersistentStateHandlerOutcome;
 use model::machine::{
-    CleanupContext, CleanupState, DpuDiscoveringState, FailureDetails, ManagedHostState, ResetState,
+    CleanupContext, CleanupState, DpuDiscoveringState, FailureCause, FailureDetails, FailureSource,
+    ManagedHostState, ResetState, StateMachineArea,
 };
 use rpc::forge::forge_server::Forge;
 use rpc::forge::managed_host_reset_request::Mode;
@@ -34,23 +36,29 @@ use rpc::forge::{ManagedHostResetListRequest, ManagedHostResetRequest, UpdateIni
 use tokio::time::timeout;
 use tonic::{Code, Request};
 
-use crate::tests::common::api_fixtures::test_managed_host::TestManagedHost;
-use crate::tests::common::api_fixtures::{
-    TestEnv, TestEnvOverrides, create_managed_host, create_managed_host_with_dpf, create_test_env,
-    create_test_env_with_overrides, get_config,
+use crate::tests::common::api_fixtures::instance::seed_service_vpc_endpoint;
+use crate::tests::common::api_fixtures::test_managed_host::{
+    TestManagedHost, TestPredictedManagedHost,
 };
+use crate::tests::common::api_fixtures::{
+    TestEnv, TestEnvOverrides, create_managed_host, create_managed_host_with_dpf,
+    create_managed_host_with_dpf_multi, create_test_env, create_test_env_with_overrides,
+    get_config, network_configured_with_health,
+};
+use crate::tests::dpf::phase_observation;
 
 const TEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Expectations for the initial provisioning flow, shared by every env below.
 fn provisioning_mock() -> MockDpfOperations {
     let mut mock = MockDpfOperations::new();
-    mock.expect_register_dpu_device().returning(|_, _| Ok(()));
+    mock.expect_register_dpu_device()
+        .returning(|_, _, _| Ok(()));
     mock.expect_register_dpu_node().returning(|_| Ok(()));
     mock.expect_release_maintenance_hold().returning(|_| Ok(()));
     mock.expect_is_reboot_required().returning(|_| Ok(false));
-    mock.expect_get_dpu_phase()
-        .returning(|_, _| Ok(DpuPhase::Ready));
+    mock.expect_get_dpu_phase_observation()
+        .returning(|_, _| Ok(phase_observation(DpuPhase::Ready)));
     mock.expect_deployment_type_for_dpu()
         .returning(|_, _| Ok(DpuDeploymentType::Bf3));
     mock.expect_verify_node_labels().returning(|_, _| Ok(true));
@@ -70,7 +78,7 @@ async fn dpf_test_env(pool: sqlx::PgPool) -> TestEnv {
 /// `DeletingCrs` polls on.
 #[derive(Clone, Copy)]
 enum DpfCrs {
-    Present,
+    Present { dpu_count: usize },
     Gone,
 }
 
@@ -83,8 +91,8 @@ async fn reset_controller_env(pool: sqlx::PgPool, crs: DpfCrs) -> TestEnv {
     env_with_dpf_mock(pool, mock).await
 }
 
-/// `create_managed_host_with_dpf` provisions a single DPU, so a present CR set is the
-/// DPUNode plus exactly one DPUDevice. Any other count reads as a half-drained set.
+/// A present CR set must match the fixture's DPU count. An incomplete set
+/// reports a teardown error instead of waiting for all CRs to disappear.
 fn host_dpf_snapshot(crs: DpfCrs) -> HostDpfSnapshot {
     match crs {
         DpfCrs::Gone => HostDpfSnapshot {
@@ -92,22 +100,30 @@ fn host_dpf_snapshot(crs: DpfCrs) -> HostDpfSnapshot {
             dpu_devices: Vec::new(),
             dpus: Vec::new(),
         },
-        DpfCrs::Present => HostDpfSnapshot {
-            dpu_node: Some(DpuNodeSummary {
-                name: "node-mock".to_string(),
-                labels: Default::default(),
-                annotations: Default::default(),
-                dpu_device_refs: vec!["device-0".to_string()],
-            }),
-            dpu_devices: vec![DpuDeviceSummary {
-                name: "device-0".to_string(),
-                labels: Default::default(),
-                bmc_ip: None,
-                bmc_port: None,
-                serial_number: String::new(),
-            }],
-            dpus: Vec::new(),
-        },
+        DpfCrs::Present { dpu_count } => {
+            let device_names = (0..dpu_count)
+                .map(|index| format!("device-{index}"))
+                .collect::<Vec<_>>();
+            HostDpfSnapshot {
+                dpu_node: Some(DpuNodeSummary {
+                    name: "node-mock".to_string(),
+                    labels: Default::default(),
+                    annotations: Default::default(),
+                    dpu_device_refs: device_names.clone(),
+                }),
+                dpu_devices: device_names
+                    .into_iter()
+                    .map(|name| DpuDeviceSummary {
+                        name,
+                        labels: Default::default(),
+                        bmc_ip: None,
+                        bmc_port: None,
+                        serial_number: String::new(),
+                    })
+                    .collect(),
+                dpus: Vec::new(),
+            }
+        }
     }
 }
 
@@ -157,13 +173,11 @@ fn reset_request_allowing_instance(machine_id: MachineId) -> Request<ManagedHost
     request
 }
 
-/// A `Set` has to land in `machines.reset_requested` and become visible to both the
-/// controller and `reset list`. That column is the controller's only view of the request,
-/// so a persistence or projection break does not surface as an error: the request is
-/// accepted and the reset simply never happens. `started_at` must come back unset, since
-/// an unstarted request is exactly what the controller hinge fires on.
+/// `Set` persists a pending request in `machines.reset_requested` that both
+/// the controller and `reset list` can read. With no Instance to retain, Reset
+/// proceeds to DPF teardown even when no DPU network observation is available.
 #[crate::sqlx_test]
-async fn reset_set_records_a_request_that_the_pending_list_reports(pool: sqlx::PgPool) {
+async fn reset_without_instance_records_request_and_skips_network_wait(pool: sqlx::PgPool) {
     let env = dpf_test_env(pool).await;
     let managed_host = dpf_ingested_host(&env).await;
     managed_host.mark_machine_for_updates().await;
@@ -213,6 +227,234 @@ async fn reset_set_records_a_request_that_the_pending_list_reports(pool: sqlx::P
     assert!(
         listed.hosts[0].started_at.is_none(),
         "the operator reads an absent Started At as 'the controller has not picked this up'"
+    );
+    drop(txn);
+
+    // An unassigned host can need Reset precisely because its agent never
+    // reported a usable configuration. There is no tenant allocation to retain.
+    sqlx::query("UPDATE machines SET network_status_observation = NULL WHERE id = $1")
+        .bind(managed_host.dpu_ids[0])
+        .execute(&env.pool)
+        .await
+        .unwrap();
+    env.run_machine_state_controller_iteration_until_state_matches(
+        &managed_host.host().id,
+        3,
+        ManagedHostState::Reset {
+            reset_state: ResetState::DeletingCrs,
+        },
+    )
+    .await;
+    let mut txn = env.db_txn().await;
+    let snapshot = managed_host.snapshot(&mut txn).await;
+    assert!(snapshot.instance.is_none());
+    assert!(
+        snapshot.dpu_snapshots[0]
+            .network_status_observation
+            .is_none()
+    );
+    assert!(
+        snapshot
+            .host_snapshot
+            .reset_requested
+            .as_ref()
+            .unwrap()
+            .started_at
+            .is_some()
+    );
+}
+
+/// A preparation failure is safe to recover, but reset must still wait for
+/// independent lockdown readback and the controller's persisted Failed phase.
+#[crate::sqlx_test]
+async fn reset_waits_for_nic_firmware_lockdown_restoration(pool: sqlx::PgPool) {
+    use carbide_libmlx_model::firmware::operation::{
+        FirmwareOperation, FirmwareOperationPhase, FirmwareOperationState,
+    };
+    use carbide_libmlx_model::firmware::result::FirmwareFlashReport;
+    use model::machine::nic_firmware::NicFirmwarePhase;
+    use model::test_support::nic_firmware as fixtures;
+    use rpc::protos::mlx_device as pb;
+    use rpc::protos::mlx_device::mlx_device_lockdown_result::Result as LockdownResult;
+
+    use crate::auth::AuthContext;
+
+    let env = dpf_test_env(pool).await;
+    let managed_host = dpf_ingested_host(&env).await;
+    managed_host.mark_machine_for_updates().await;
+    let host_id: MachineId = managed_host.id.into();
+
+    // A reset queued before firmware recovery resumed remains withdrawable.
+    env.api
+        .trigger_managed_host_reset(reset_request(host_id, Mode::Set))
+        .await
+        .unwrap();
+    let mut admitted = fixtures::operation();
+    admitted.phase = NicFirmwarePhase::UpdatingFirmware { target_index: 0 };
+    let target = &mut admitted.targets[0];
+    target.supervisor_instance_id = Some("reset-test-helper".into());
+    target.receipt = Some(FirmwareOperation {
+        operation_id: admitted.operation_id.clone(),
+        state: FirmwareOperationState::Failed,
+        phase: Some(FirmwareOperationPhase::Prepare),
+        report: FirmwareFlashReport {
+            expected_version: Some(target.resolution.entry.firmware.version.clone()),
+            ..Default::default()
+        },
+        diagnostic: Some("image preparation failed before mutation".into()),
+    });
+    admitted.validate().expect("valid admitted operation");
+    let mut txn = env.db_txn().await;
+    db::machine::update_state(
+        &mut txn,
+        managed_host.id.as_host_machine_id(),
+        &ManagedHostState::NicFirmwareUpdating {
+            operation: admitted,
+        },
+    )
+    .await
+    .unwrap();
+    txn.commit().await.unwrap();
+
+    env.api
+        .trigger_managed_host_reset(reset_request(host_id, Mode::Clear))
+        .await
+        .unwrap();
+    let error = env
+        .api
+        .trigger_managed_host_reset(reset_request(host_id, Mode::Set))
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), Code::FailedPrecondition);
+    assert!(error.message().contains("NIC firmware recovery"));
+    let active = db::machine::find_one(&env.pool, &managed_host.id, Default::default())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(active.reset_requested.is_none());
+    assert!(matches!(
+        active.state.value,
+        ManagedHostState::NicFirmwareUpdating {
+            operation: model::machine::nic_firmware::NicFirmwareOperation {
+                phase: NicFirmwarePhase::UpdatingFirmware { .. },
+                ..
+            }
+        }
+    ));
+
+    env.run_machine_state_controller_iteration_without_requeue()
+        .await;
+    let restoring = db::machine::find_one(&env.pool, &managed_host.id, Default::default())
+        .await
+        .unwrap()
+        .unwrap();
+    let ManagedHostState::NicFirmwareUpdating { operation } = &restoring.state.value else {
+        panic!("preparation failure must restore lockdown before allowing reset");
+    };
+    assert!(matches!(
+        operation.phase,
+        NicFirmwarePhase::RestoringLockdown {
+            failure: Some(_),
+            ..
+        }
+    ));
+    assert!(operation.lockdown.result.is_none());
+
+    // The reset API must preserve restoration ownership until its independent
+    // status read has committed, even though preparation already failed safely.
+    let error = env
+        .api
+        .trigger_managed_host_reset(reset_request(host_id, Mode::Set))
+        .await
+        .expect_err("reset must wait for lockdown restoration");
+    assert_eq!(error.code(), Code::FailedPrecondition);
+    let retained = db::machine::find_one(&env.pool, &managed_host.id, Default::default())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(retained.reset_requested.is_none());
+    assert_eq!(retained.state.value, restoring.state.value);
+    assert_eq!(retained.state.version, restoring.state.version);
+
+    // Report a separate status read for the restoration revision before the
+    // controller can persist Failed and release the reset guard.
+    let target = &operation.targets[0];
+    let model::nic_firmware::NicFirmwareCardSelector::Mac(mac) = target.selector else {
+        panic!("fixture selects its card by MAC")
+    };
+    let observed_device = pb::MlxDeviceInfo {
+        pci_name: target.pci_name.clone(),
+        base_mac: mac.to_string(),
+        ..Default::default()
+    };
+    let mut request = Request::new(pb::PublishMlxObservationReportRequest {
+        report: Some(pb::MlxObservationReport {
+            machine_id: Some(host_id),
+            observations: vec![pb::MlxObservation {
+                device_info: Some(observed_device),
+                lockdown_result: Some(pb::MlxDeviceLockdownResult {
+                    controller_state_version: restoring.state.version.to_string(),
+                    pci_name: target.pci_name.clone(),
+                    expected_device: Some(target.selector.clone().into()),
+                    result: Some(LockdownResult::StatusReport(pb::StatusReport {
+                        device_id: target.pci_name.clone(),
+                        status: pb::LockStatus::Unlocked.into(),
+                        timestamp: chrono::Utc::now().to_rfc3339(),
+                    })),
+                }),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }),
+    });
+    let mut auth = AuthContext::default();
+    auth.principals
+        .push(carbide_authn::middleware::Principal::SpiffeMachineIdentifier(host_id.to_string()));
+    request.extensions_mut().insert(auth);
+    env.api
+        .publish_mlx_observation_report(request)
+        .await
+        .unwrap();
+    env.run_machine_state_controller_iteration_without_requeue()
+        .await;
+
+    let failed = db::machine::find_one(&env.pool, &managed_host.id, Default::default())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        failed.state.value,
+        ManagedHostState::NicFirmwareUpdating {
+            operation: model::machine::nic_firmware::NicFirmwareOperation {
+                phase: NicFirmwarePhase::Failed { .. },
+                ..
+            }
+        }
+    ));
+    assert!(failed.reset_requested.is_none());
+    env.api
+        .trigger_managed_host_reset(reset_request(host_id, Mode::Set))
+        .await
+        .unwrap();
+    env.run_machine_state_controller_iteration_without_requeue()
+        .await;
+
+    let resetting = db::machine::find_one(&env.pool, &managed_host.id, Default::default())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        resetting.state.value,
+        ManagedHostState::Reset {
+            reset_state: ResetState::DeletingInstance,
+        }
+    );
+    assert!(
+        resetting
+            .reset_requested
+            .expect("accepted reset")
+            .started_at
+            .is_some()
     );
 }
 
@@ -520,7 +762,7 @@ async fn host_state(env: &TestEnv, managed_host: &TestManagedHost) -> ManagedHos
 /// would recreate nothing and strand the host.
 #[crate::sqlx_test]
 async fn reset_holds_in_deleting_crs_while_the_dpf_crs_remain(pool: sqlx::PgPool) {
-    let env = reset_controller_env(pool, DpfCrs::Present).await;
+    let env = reset_controller_env(pool, DpfCrs::Present { dpu_count: 1 }).await;
     let managed_host = dpf_ingested_host(&env).await;
     enter_deleting_crs(&env, &managed_host).await;
 
@@ -615,100 +857,460 @@ async fn reset_completes_while_the_host_carries_a_failure_record(pool: sqlx::PgP
     );
 }
 
-/// Allocates an instance on the host, then requests a reset that destroys it.
-async fn request_reset_with_live_instance(
-    env: &TestEnv,
-    managed_host: &TestManagedHost,
-    ignore_cleanup: bool,
-) {
-    // The required alert prevents allocation, so allocate before marking for updates.
+/// Reset retains the Instance and its addresses until both DPUs acknowledge
+/// Admin, including when release has started or cleanup is disabled.
+#[crate::sqlx_test]
+async fn reset_retains_instance_until_every_dpu_acknowledges_admin(pool: sqlx::PgPool) {
+    struct Case {
+        name: &'static str,
+        release_before_reset: bool,
+        ignore_cleanup: bool,
+    }
+
+    let env = reset_controller_env(pool, DpfCrs::Present { dpu_count: 2 }).await;
     let segment_id = env.create_vpc_and_tenant_segment().await;
-    let _instance = managed_host
-        .instance_builer(env)
+    for case in [
+        Case {
+            name: "active Instance with host cleanup",
+            release_before_reset: false,
+            ignore_cleanup: false,
+        },
+        Case {
+            name: "terminating Instance with cleanup disabled",
+            release_before_reset: true,
+            ignore_cleanup: true,
+        },
+    ] {
+        let managed_host = timeout(TEST_TIMEOUT, create_managed_host_with_dpf_multi(&env, 2))
+            .await
+            .expect("timed out during initial provisioning");
+        let host_id: MachineId = managed_host.id.into();
+        let instance = managed_host
+            .instance_builer(&env)
+            .single_interface_network_config(segment_id)
+            .build()
+            .await;
+
+        let mut txn = env.db_txn().await;
+        let snapshot = managed_host.snapshot(&mut txn).await;
+        assert!(!snapshot.use_admin_network(), "{}", case.name);
+        assert!(
+            snapshot.managed_host_network_config_version_synced(),
+            "{}",
+            case.name
+        );
+        let tenant_version = snapshot.host_snapshot.network_config.version;
+        let allocated_addresses = db::instance_address::find_all_by_instance_id_and_segment_id(
+            txn.as_mut(),
+            &instance.id,
+            &segment_id,
+        )
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|address| (address.address, address.prefix, address.vpc_id))
+        .collect::<Vec<_>>();
+        assert!(!allocated_addresses.is_empty(), "{}", case.name);
+        txn.commit().await.unwrap();
+
+        if case.release_before_reset {
+            env.api
+                .release_instance(Request::new(rpc::InstanceReleaseRequest {
+                    id: Some(instance.id),
+                    issue: None,
+                    is_repair_tenant: None,
+                    delete_attribution: None,
+                }))
+                .await
+                .unwrap();
+        }
+        managed_host.mark_machine_for_updates().await;
+        let mut request = reset_request(host_id, Mode::Set);
+        request.get_mut().allow_reset_with_instance = !case.release_before_reset;
+        request.get_mut().ignore_cleanup = case.ignore_cleanup;
+        env.api.trigger_managed_host_reset(request).await.unwrap();
+
+        let deleting_instance = ManagedHostState::Reset {
+            reset_state: ResetState::DeletingInstance,
+        };
+        env.run_machine_state_controller_iteration_until_state_matches(
+            &managed_host.host().id,
+            3,
+            deleting_instance.clone(),
+        )
+        .await;
+        env.run_machine_state_controller_iteration().await;
+
+        let mut txn = env.db_txn().await;
+        let snapshot = managed_host.snapshot(&mut txn).await;
+        assert!(snapshot.use_admin_network(), "{}", case.name);
+        let admin_version = snapshot.host_snapshot.network_config.version;
+        assert_ne!(admin_version, tenant_version, "{}", case.name);
+        assert!(
+            !snapshot.managed_host_network_config_version_synced(),
+            "{}",
+            case.name
+        );
+        txn.commit().await.unwrap();
+
+        for dpu_id in &managed_host.dpu_ids {
+            let response = env
+                .api
+                .get_managed_host_network_config(Request::new(
+                    rpc::forge::ManagedHostNetworkConfigRequest {
+                        dpu_machine_id: Some(*dpu_id),
+                    },
+                ))
+                .await
+                .unwrap()
+                .into_inner();
+            assert!(response.use_admin_network, "{}", case.name);
+            assert!(response.tenant_interfaces.is_empty(), "{}", case.name);
+            assert_eq!(
+                response.managed_host_config_version,
+                admin_version.to_string(),
+                "{}",
+                case.name
+            );
+        }
+
+        // Reload persisted snapshots on each pass. Neither a stale observation
+        // nor one DPU's acknowledgement permits releasing the tenant's addresses.
+        for acknowledged_dpus in [0, 1] {
+            if acknowledged_dpus == 1 {
+                network_configured_with_health(&env, &managed_host.dpu_ids[0], None).await;
+            }
+            env.run_machine_state_controller_iteration().await;
+            let mut txn = env.db_txn().await;
+            let snapshot = managed_host.snapshot(&mut txn).await;
+            assert_eq!(snapshot.managed_state, deleting_instance, "{}", case.name);
+            assert_eq!(
+                snapshot.instance.as_ref().unwrap().id,
+                instance.id,
+                "{}",
+                case.name
+            );
+            assert_eq!(
+                snapshot.host_snapshot.network_config.version, admin_version,
+                "{}",
+                case.name
+            );
+            assert!(
+                !snapshot.managed_host_network_config_version_synced(),
+                "{}",
+                case.name
+            );
+            let retained_addresses = db::instance_address::find_all_by_instance_id_and_segment_id(
+                txn.as_mut(),
+                &instance.id,
+                &segment_id,
+            )
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|address| (address.address, address.prefix, address.vpc_id))
+            .collect::<Vec<_>>();
+            assert_eq!(retained_addresses, allocated_addresses, "{}", case.name);
+            txn.commit().await.unwrap();
+            assert_eq!(
+                instance.rpc_instance().await.status().tenant(),
+                rpc::TenantState::Terminating,
+                "{}",
+                case.name
+            );
+        }
+
+        network_configured_with_health(&env, &managed_host.dpu_ids[1], None).await;
+        let deleting_crs = ManagedHostState::Reset {
+            reset_state: ResetState::DeletingCrs,
+        };
+        let next_state = if case.ignore_cleanup {
+            deleting_crs.clone()
+        } else {
+            ManagedHostState::WaitingForCleanup {
+                cleanup_state: CleanupState::HostCleanup {
+                    boss_controller_id: None,
+                },
+                cleanup_context: CleanupContext::Reset,
+            }
+        };
+        env.run_machine_state_controller_iteration_until_state_matches(
+            &managed_host.host().id,
+            5,
+            next_state,
+        )
+        .await;
+
+        let mut txn = env.db_txn().await;
+        assert!(
+            db::instance::find_id_by_machine_id(txn.as_mut(), &host_id)
+                .await
+                .unwrap()
+                .is_none(),
+            "{}",
+            case.name
+        );
+        assert!(
+            db::instance_address::find_all_by_instance_id_and_segment_id(
+                txn.as_mut(),
+                &instance.id,
+                &segment_id,
+            )
+            .await
+            .unwrap()
+            .is_empty(),
+            "{}",
+            case.name
+        );
+
+        if !case.ignore_cleanup {
+            // Scout's completion report permits the existing cleanup path to
+            // hand the host over to DPF teardown.
+            let host = managed_host.host().db_machine(&mut txn).await;
+            db::machine::update_reboot_time(&host, &mut txn)
+                .await
+                .unwrap();
+            db::machine::update_cleanup_time(&host, &mut txn)
+                .await
+                .unwrap();
+        }
+        txn.commit().await.unwrap();
+        if !case.ignore_cleanup {
+            env.run_machine_state_controller_iteration_until_state_matches(
+                &managed_host.host().id,
+                3,
+                deleting_crs,
+            )
+            .await;
+        }
+    }
+}
+
+/// A predicted host in Failed/DpfProvisioning with dpf.used_for_ingestion=true
+/// and the HostUpdateInProgress alert can be reset.
+#[crate::sqlx_test]
+async fn reset_set_accepts_predicted_host_after_dpf_failure(pool: sqlx::PgPool) {
+    let env = dpf_test_env(pool).await;
+    let managed_host = dpf_ingested_host(&env).await;
+    // Preserve the DPF fixture's persisted attachments, replacing only its host identity.
+    let predicted_id: PredictedHostMachineId = MachineId::new(
+        MachineIdSource::ProductBoardChassisSerial,
+        [0xAC; 32],
+        MachineType::PredictedHost,
+    )
+    .try_into()
+    .unwrap();
+    let mut txn = env.db_txn().await;
+    let renamed = sqlx::query("UPDATE machines SET id = $1 WHERE id = $2")
+        .bind(predicted_id)
+        .bind(managed_host.id)
+        .execute(&mut *txn)
+        .await
+        .unwrap();
+    assert_eq!(renamed.rows_affected(), 1);
+    let predicted_host = TestPredictedManagedHost {
+        id: predicted_id,
+        dpu_ids: managed_host.dpu_ids,
+        api: env.api.clone(),
+    };
+    let predicted_host_id: MachineId = predicted_host.id.into();
+
+    db::machine::update_state(
+        &mut txn,
+        predicted_id.as_host_machine_id(),
+        &ManagedHostState::Failed {
+            details: FailureDetails {
+                cause: FailureCause::DpfProvisioning {
+                    err: "test failure".to_string(),
+                },
+                failed_at: chrono::Utc::now(),
+                source: FailureSource::StateMachineArea(StateMachineArea::MainFlow),
+            },
+            machine_id: predicted_host_id,
+            retry_count: 0,
+        },
+    )
+    .await
+    .unwrap();
+    txn.commit().await.unwrap();
+
+    let mut txn = env.db_txn().await;
+    let snapshot = predicted_host.snapshot(&mut txn).await;
+    assert_eq!(
+        snapshot.host_snapshot.id.machine_type(),
+        MachineType::PredictedHost
+    );
+    assert!(snapshot.host_snapshot.config.dpf.used_for_ingestion);
+    assert!(snapshot.instance.is_none());
+    assert!(matches!(
+        snapshot.managed_state,
+        ManagedHostState::Failed {
+            details: FailureDetails {
+                cause: FailureCause::DpfProvisioning { .. },
+                ..
+            },
+            ..
+        }
+    ));
+    drop(txn);
+
+    let error = env
+        .api
+        .trigger_managed_host_reset(reset_request(predicted_host_id, Mode::Set))
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), Code::InvalidArgument);
+    assert!(error.message().contains("HostUpdateInProgress"));
+
+    predicted_host.mark_machine_for_updates().await;
+
+    env.api
+        .trigger_managed_host_reset(reset_request(predicted_host_id, Mode::Set))
+        .await
+        .unwrap();
+
+    let mut txn = env.db_txn().await;
+    let request = predicted_host
+        .host()
+        .db_machine(&mut txn)
+        .await
+        .reset_requested
+        .expect("the reset request should persist on the host row");
+    assert_eq!(request.initiator, UpdateInitiator::AdminCli.as_str_name());
+    assert!(request.started_at.is_none(), "a fresh request is unstarted");
+
+    drop(txn);
+
+    // The same host-only gate protects Clear; withdraw before the controller picks it up.
+    env.api
+        .trigger_managed_host_reset(reset_request(predicted_host_id, Mode::Clear))
+        .await
+        .unwrap();
+    let mut txn = env.db_txn().await;
+    assert!(
+        predicted_host
+            .host()
+            .db_machine(&mut txn)
+            .await
+            .reset_requested
+            .is_none()
+    );
+    drop(txn);
+    env.api
+        .trigger_managed_host_reset(reset_request(predicted_host_id, Mode::Set))
+        .await
+        .unwrap();
+
+    env.run_machine_state_controller_iteration().await;
+
+    let mut txn = env.db_txn().await;
+    let snapshot = predicted_host.snapshot(&mut txn).await;
+    assert_eq!(
+        snapshot.managed_state,
+        ManagedHostState::Reset {
+            reset_state: ResetState::DeletingInstance,
+        }
+    );
+    assert!(
+        snapshot
+            .host_snapshot
+            .reset_requested
+            .as_ref()
+            .unwrap()
+            .started_at
+            .is_some()
+    );
+}
+
+/// Verifies reset applies Admin networking before retained service endpoints block Instance
+/// deletion, allowing dataplane removal without releasing endpoint ownership.
+#[crate::sqlx_test]
+async fn reset_applies_admin_before_waiting_for_service_vpc_cleanup(pool: sqlx::PgPool) {
+    // Create a reset-capable host whose instance has durable endpoint ownership.
+    let env = dpf_test_env(pool).await;
+    let managed_host = dpf_ingested_host(&env).await;
+    let segment_id = env.create_vpc_and_tenant_segment().await;
+    let instance = managed_host
+        .instance_builer(&env)
         .single_interface_network_config(segment_id)
         .build()
         .await;
-    managed_host.mark_machine_for_updates().await;
+    let endpoint =
+        seed_service_vpc_endpoint(&env, instance.id, managed_host.dpu_ids[0], segment_id).await;
 
-    let mut request = reset_request_allowing_instance(managed_host.id.into());
-    request.get_mut().ignore_cleanup = ignore_cleanup;
-    env.api.trigger_managed_host_reset(request).await.unwrap();
-}
-
-/// Deleting a live instance leaves the host as the tenant used it, so the reset cleans the
-/// host up before deleting its DPF CRs.
-#[crate::sqlx_test]
-async fn reset_cleans_up_the_host_after_deleting_a_live_instance(pool: sqlx::PgPool) {
-    let env = reset_controller_env(pool, DpfCrs::Present).await;
-    let managed_host = dpf_ingested_host(&env).await;
-    let host_id: MachineId = managed_host.id.into();
-    request_reset_with_live_instance(&env, &managed_host, false).await;
-
-    env.run_machine_state_controller_iteration_until_state_matches(
-        &managed_host.host().id,
-        5,
-        ManagedHostState::WaitingForCleanup {
-            cleanup_state: CleanupState::HostCleanup {
-                boss_controller_id: None,
-            },
-            cleanup_context: CleanupContext::Reset,
-        },
-    )
-    .await;
-
+    // Capture the tenant generation so the test proves reset publishes a distinct Admin generation.
     let mut txn = env.db_txn().await;
-    assert!(
-        db::instance::find_id_by_machine_id(txn.as_mut(), &host_id)
-            .await
-            .unwrap()
-            .is_none(),
-        "the reset has to delete the instance before cleaning up the host"
-    );
-
-    // Stand in for scout reporting that it cleaned up the host.
-    let host = managed_host.host().db_machine(&mut txn).await;
-    db::machine::update_reboot_time(&host, &mut txn)
+    let tenant_version = managed_host
+        .snapshot(&mut txn)
         .await
-        .unwrap();
-    db::machine::update_cleanup_time(&host, &mut txn)
-        .await
-        .unwrap();
+        .host_snapshot
+        .network_config
+        .version;
     txn.commit().await.unwrap();
 
+    // Record an acknowledged reset and enter its instance-deletion substate.
+    managed_host.mark_machine_for_updates().await;
+    env.api
+        .trigger_managed_host_reset(reset_request_allowing_instance(managed_host.id.into()))
+        .await
+        .unwrap();
+    let deleting_instance = ManagedHostState::Reset {
+        reset_state: ResetState::DeletingInstance,
+    };
     env.run_machine_state_controller_iteration_until_state_matches(
         &managed_host.host().id,
         3,
-        ManagedHostState::Reset {
-            reset_state: ResetState::DeletingCrs,
-        },
-    )
-    .await;
-}
-
-/// `--ignore-cleanup` sends the reset straight from deleting the instance to deleting the
-/// DPF CRs. Without the skip, the host would wait in cleanup and never reach `DeletingCrs`.
-#[crate::sqlx_test]
-async fn reset_skips_cleanup_when_the_operator_ignores_it(pool: sqlx::PgPool) {
-    let env = reset_controller_env(pool, DpfCrs::Present).await;
-    let managed_host = dpf_ingested_host(&env).await;
-    let host_id: MachineId = managed_host.id.into();
-    request_reset_with_live_instance(&env, &managed_host, true).await;
-
-    env.run_machine_state_controller_iteration_until_state_matches(
-        &managed_host.host().id,
-        5,
-        ManagedHostState::Reset {
-            reset_state: ResetState::DeletingCrs,
-        },
+        deleting_instance.clone(),
     )
     .await;
 
+    // Reset requests Admin networking while retaining the endpoint and Instance.
+    env.run_machine_state_controller_iteration().await;
     let mut txn = env.db_txn().await;
-    assert!(
-        db::instance::find_id_by_machine_id(txn.as_mut(), &host_id)
-            .await
-            .unwrap()
-            .is_none(),
-        "the reset has to delete the instance even when cleanup is skipped"
+    let snapshot = managed_host.snapshot(&mut txn).await;
+    assert_eq!(snapshot.managed_state, deleting_instance);
+    assert!(snapshot.use_admin_network());
+    assert!(!snapshot.managed_host_network_config_version_synced());
+    assert_ne!(
+        snapshot.host_snapshot.network_config.version,
+        tenant_version
     );
+    assert!(
+        matches!(
+            &snapshot.host_snapshot.controller_state_outcome,
+            Some(PersistentStateHandlerOutcome::Wait { reason, .. }) if reason
+                == "waiting for DPUs to apply Admin networking before deleting the Instance"
+        ),
+        "expected the Admin-network acknowledgement wait, got {:?}",
+        snapshot.host_snapshot.controller_state_outcome
+    );
+    let persisted = snapshot.instance.expect("instance remains assigned");
+    assert!(persisted.deleted.is_none());
+    assert_eq!(
+        persisted.config.network.service_interfaces,
+        vec![endpoint.clone()]
+    );
+    txn.commit().await.unwrap();
+
+    // Acknowledging Admin advances reset to the cleanup guard without releasing ownership.
+    network_configured_with_health(&env, &managed_host.dpu_ids[0], None).await;
+    env.run_machine_state_controller_iteration().await;
+    let mut txn = env.db_txn().await;
+    let snapshot = managed_host.snapshot(&mut txn).await;
+    assert_eq!(snapshot.managed_state, deleting_instance);
+    assert!(snapshot.use_admin_network());
+    assert!(snapshot.managed_host_network_config_version_synced());
+    assert!(
+        matches!(
+            &snapshot.host_snapshot.controller_state_outcome,
+            Some(PersistentStateHandlerOutcome::Wait { reason, .. }) if reason
+                == "waiting for service VPC network cleanup before deleting the Instance"
+        ),
+        "expected the service-network cleanup wait, got {:?}",
+        snapshot.host_snapshot.controller_state_outcome
+    );
+    let persisted = snapshot.instance.expect("instance remains assigned");
+    assert!(persisted.deleted.is_none());
+    assert_eq!(persisted.config.network.service_interfaces, vec![endpoint]);
+    txn.commit().await.unwrap();
 }

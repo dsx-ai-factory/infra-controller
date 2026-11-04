@@ -5,7 +5,6 @@ package store
 
 import (
 	"context"
-	"database/sql"
 	stderrors "errors"
 	"fmt"
 
@@ -24,6 +23,7 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/devicetypes"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/errors"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/rackopreport"
+	commonutils "github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/utils"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/inventoryobjects/component"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/inventoryobjects/nvldomain"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/inventoryobjects/rack"
@@ -462,6 +462,7 @@ func (s *PostgresStore) GetComponentsByExternalIDs(
 		Where("c.external_id IN (?)", bun.In(externalIDs)).
 		Relation("BMCs").
 		Relation("Rack").
+		Relation("Rack.NVLDomain").
 		Scan(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query components by external IDs: %w", err)
@@ -474,6 +475,40 @@ func (s *PostgresStore) GetComponentsByExternalIDs(
 	}
 
 	return result, nil
+}
+
+// GetComponentIdentitiesByIDsIncludingDeleted reads only the identity fields
+// needed to display recorded task targets. Rack membership is deliberately not
+// filtered: a component may have moved since the task was recorded.
+func (s *PostgresStore) GetComponentIdentitiesByIDsIncludingDeleted(
+	ctx context.Context,
+	ids []uuid.UUID,
+) ([]component.Identity, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+
+	var rows []struct {
+		ID         uuid.UUID
+		Type       string
+		ExternalID *string
+	}
+	err := s.pg.DB.NewSelect().Model((*model.Component)(nil)).
+		Column("c.id", "c.type", "c.external_id").
+		WhereAllWithDeleted().Where("c.id IN (?)", bun.In(ids)).Scan(ctx, &rows)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read retained component identities: %w", err)
+	}
+
+	identities := make([]component.Identity, 0, len(rows))
+	for _, row := range rows {
+		identity := component.Identity{ID: row.ID, Type: devicetypes.ComponentTypeFromString(row.Type)}
+		if row.ExternalID != nil {
+			identity.ExternalID = *row.ExternalID
+		}
+		identities = append(identities, identity)
+	}
+	return identities, nil
 }
 
 // CreateNVLDomain creates a new NVL domain.
@@ -581,8 +616,8 @@ func (s *PostgresStore) AttachRacksToNVLDomain(
 		}
 
 		for _, rack := range racks {
-			rack.NVLDomainID = nvlDomainID.ID
-			if err := rack.Patch(ctx, tx); err != nil {
+			err := updateRackNVLDomain(ctx, tx, rack.ID, &nvlDomain.ID)
+			if err != nil {
 				return errors.GRPCErrorInternal(err.Error())
 			}
 		}
@@ -633,8 +668,8 @@ func (s *PostgresStore) DetachRacksFromNVLDomain(
 		}
 
 		for _, rack := range racks {
-			rack.NVLDomainID = uuid.Nil
-			if err := rack.Patch(ctx, tx); err != nil {
+			err := updateRackNVLDomain(ctx, tx, rack.ID, nil)
+			if err != nil {
 				return errors.GRPCErrorInternal(err.Error())
 			}
 		}
@@ -645,14 +680,44 @@ func (s *PostgresStore) DetachRacksFromNVLDomain(
 	return s.runInTx(ctx, operation)
 }
 
+func updateRackNVLDomain(
+	ctx context.Context,
+	tx bun.Tx,
+	rackID uuid.UUID,
+	nvlDomainID *uuid.UUID,
+) error {
+	query := tx.NewUpdate().
+		Model((*model.Rack)(nil)).
+		Where("id = ?", rackID)
+	if nvlDomainID == nil {
+		query = query.Set("nvldomain_id = NULL")
+	} else {
+		query = query.Set("nvldomain_id = ?", *nvlDomainID)
+	}
+
+	result, err := query.Exec(ctx)
+	if err != nil {
+		return err
+	}
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rowsAffected != 1 {
+		return fmt.Errorf("update rack %s NVL domain affected %d rows", rackID, rowsAffected)
+	}
+	return nil
+}
+
 // GetListOfNVLDomains lists NVL domains matching the given criteria.
 func (s *PostgresStore) GetListOfNVLDomains(
 	ctx context.Context,
 	info dbquery.StringQueryInfo,
 	pagination *dbquery.Pagination,
+	options ...nvldomain.ListOptions,
 ) ([]*nvldomain.NVLDomain, int32, error) {
 	domains, total, err := model.GetListOfNVLDomains(
-		ctx, s.pg.DB, info, pagination,
+		ctx, s.pg.DB, info, pagination, options...,
 	)
 	if err != nil {
 		return nil, 0, err
@@ -664,6 +729,15 @@ func (s *PostgresStore) GetListOfNVLDomains(
 	}
 
 	return results, total, nil
+}
+
+// GetNVLDomain resolves typed internal or external domain identity.
+func (s *PostgresStore) GetNVLDomain(ctx context.Context, id identifier.Identifier) (*nvldomain.NVLDomain, error) {
+	domain, err := s.getNVLDomain(ctx, s.pg.DB, id)
+	if err != nil {
+		return nil, err
+	}
+	return dao.NVLDomainFrom(domain), nil
 }
 
 // GetRacksForNVLDomain retrieves all racks belonging to an NVL domain.
@@ -682,35 +756,6 @@ func (s *PostgresStore) GetRacksForNVLDomain(
 
 	operation := func(ctx context.Context, tx bun.Tx) error {
 		domainUUID := nvlDomainID.ID
-		externalID := nvlDomainID.ExternalID
-		// External IDs prefer racks; typed UUIDs retain domain membership lookup.
-		if externalID != "" {
-			var rackDAO model.Rack
-			q := tx.NewSelect().Model(&rackDAO).Where("r.external_id = ?", externalID)
-			if withComponents {
-				q = q.Relation("Components").Relation("Components.BMCs")
-			}
-			err := q.Scan(ctx)
-			if err == nil {
-				resolved, err := s.rackFromDAO(ctx, tx, &rackDAO)
-				if err != nil {
-					return err
-				}
-				results = append(results, resolved)
-				return nil
-			}
-			if !stderrors.Is(err, sql.ErrNoRows) {
-				return s.checkDBGetError(err, "rack for NVLink domain")
-			}
-			domainUUID, err = uuid.Parse(externalID)
-			if err != nil || domainUUID == uuid.Nil {
-				return errors.GRPCErrorNotFound(fmt.Sprintf("nvl domain %s", externalID))
-			}
-			_, err = s.getNVLDomain(ctx, tx, identifier.Identifier{ID: domainUUID})
-			if err != nil {
-				return err
-			}
-		}
 		if domainUUID == uuid.Nil {
 			nvlDomain, err := s.getNVLDomain(ctx, tx, nvlDomainID)
 			if err != nil {
@@ -743,6 +788,37 @@ func (s *PostgresStore) GetRacksForNVLDomain(
 		return nil, err
 	}
 
+	return results, nil
+}
+
+// GetRacksForNVLDomains bounds database round trips independently of page size.
+// Unknown or empty domains have no members; the caller owns domain existence.
+func (s *PostgresStore) GetRacksForNVLDomains(ctx context.Context, domainIDs []uuid.UUID, withComponents bool) (map[uuid.UUID][]*rack.Rack, error) {
+	results := make(map[uuid.UUID][]*rack.Rack)
+	if len(domainIDs) == 0 {
+		return results, nil
+	}
+	err := s.runInTx(ctx, func(ctx context.Context, tx bun.Tx) error {
+		var rows []model.Rack
+		query := tx.NewSelect().Model(&rows).Where("nvldomain_id IN (?)", bun.In(domainIDs)).Order("r.id ASC")
+		if withComponents {
+			query = query.Relation("Components").Relation("Components.BMCs")
+		}
+		if err := query.Scan(ctx); err != nil {
+			return err
+		}
+		racks, err := s.racksFromDAOs(ctx, tx, rows)
+		if err != nil {
+			return err
+		}
+		for _, rack := range racks {
+			results[rack.NVLDomainID] = append(results[rack.NVLDomainID], rack)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
 	return results, nil
 }
 
@@ -782,6 +858,8 @@ func (s *PostgresStore) getNVLDomain(
 
 	if nvlDomainID.ID != uuid.Nil {
 		nvlDomain.ID = nvlDomainID.ID
+	} else if nvlDomainID.ExternalID != "" {
+		nvlDomain.ExternalID = &nvlDomainID.ExternalID
 	} else {
 		nvlDomain.Name = nvlDomainID.Name
 	}
@@ -846,7 +924,25 @@ func (s *PostgresStore) racksFromDAOs(
 	}
 
 	results := make([]*rack.Rack, 0, len(rackDAOs))
+	domainIDs := make([]uuid.UUID, 0, len(rackDAOs))
+	for _, row := range rackDAOs {
+		if row.NVLDomainID != uuid.Nil {
+			domainIDs = append(domainIDs, row.NVLDomainID)
+		}
+	}
+	domainsByID := make(map[uuid.UUID]*model.NVLDomain)
+	if len(domainIDs) > 0 {
+		var domains []model.NVLDomain
+		err = idb.NewSelect().Model(&domains).Where("id IN (?)", bun.In(domainIDs)).Scan(ctx)
+		if err != nil {
+			return nil, err
+		}
+		for i := range domains {
+			domainsByID[domains[i].ID] = &domains[i]
+		}
+	}
 	for i := range rackDAOs {
+		rackDAOs[i].NVLDomain = domainsByID[rackDAOs[i].NVLDomainID]
 		converted := dao.RackFrom(&rackDAOs[i])
 		converted.OperationStatus = statuses[rackDAOs[i].ID]
 		results = append(results, converted)
@@ -978,8 +1074,10 @@ func (pi *rackPatchInfo) patch() error {
 		}
 	}
 
-	if pr := pi.ndao.BuildPatch(pi.cdao); pr != nil {
-		if err := pr.Patch(pi.ctx, pi.tx); err != nil {
+	pr := pi.ndao.BuildColumnPatch(pi.cdao)
+	if pr != nil {
+		err := pr.Patch(pi.ctx, pi.tx)
+		if err != nil {
 			log.Debug().Msgf("failed to patch rack: %s", err.Error())
 			return err
 		}
@@ -1012,8 +1110,10 @@ func (pi *rackPatchInfo) patchComponent(
 
 		pi.opReport.UpdateCompReport(nc.ID, nc.SerialInfo(), "Added")
 	} else {
-		if pc := nc.BuildPatch(cc); pc != nil {
-			if err := pc.Patch(pi.ctx, pi.tx); err != nil {
+		pc := nc.BuildColumnPatch(cc)
+		if pc != nil {
+			err := pc.Patch(pi.ctx, pi.tx)
+			if err != nil {
 				log.Debug().Msgf("failed to patch component: %s", err.Error())
 				return err
 			}
@@ -1090,22 +1190,42 @@ func (s *PostgresStore) AddComponent(ctx context.Context, comp *component.Compon
 }
 
 // PatchComponent updates a single component's fields and reconciles BMCs in the database.
-func (s *PostgresStore) PatchComponent(ctx context.Context, comp *component.Component) error {
-	newDAO := dao.ComponentTo(comp, comp.RackID)
+func (s *PostgresStore) PatchComponent(ctx context.Context, patch ComponentPatch) error {
+	componentPatch := model.ComponentPatch{
+		ID:              patch.ID,
+		FirmwareVersion: patch.FirmwareVersion,
+		RackID:          patch.RackID,
+		SlotID:          patch.SlotID,
+		TrayIndex:       patch.TrayIndex,
+		HostID:          patch.HostID,
+	}
+	if patch.Description != nil {
+		description := commonutils.JSONStringToMap("description", *patch.Description)
+		componentPatch.Description = &description
+	}
+
+	componentDAO := &model.Component{ID: patch.ID}
+	for _, bmcType := range devicetypes.BMCTypes() {
+		bmcs := patch.BMCsByType[bmcType]
+		for i := range bmcs {
+			componentDAO.BMCs = append(componentDAO.BMCs, *dao.BMCTo(bmcType, &bmcs[i], componentDAO))
+		}
+	}
 
 	operation := func(ctx context.Context, tx bun.Tx) error {
-		if err := newDAO.Patch(ctx, tx); err != nil {
+		err := componentPatch.Patch(ctx, tx)
+		if err != nil {
 			return err
 		}
 
-		if len(newDAO.BMCs) == 0 {
+		if len(componentDAO.BMCs) == 0 {
 			return nil
 		}
 
 		// Load existing BMCs for this component
 		var existingBMCs []model.BMC
 		if err := tx.NewSelect().Model(&existingBMCs).
-			Where("component_id = ?", newDAO.ID).Scan(ctx); err != nil {
+			Where("component_id = ?", componentDAO.ID).Scan(ctx); err != nil {
 			return err
 		}
 
@@ -1114,8 +1234,8 @@ func (s *PostgresStore) PatchComponent(ctx context.Context, comp *component.Comp
 			bmcsByMac[existingBMCs[i].MacAddress] = &existingBMCs[i]
 		}
 
-		for i := range newDAO.BMCs {
-			nb := &newDAO.BMCs[i]
+		for i := range componentDAO.BMCs {
+			nb := &componentDAO.BMCs[i]
 			if cb, ok := bmcsByMac[nb.MacAddress]; ok {
 				if pb := nb.BuildPatch(cb); pb != nil {
 					if err := pb.Patch(ctx, tx); err != nil {

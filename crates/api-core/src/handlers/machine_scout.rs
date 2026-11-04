@@ -17,12 +17,13 @@
 use ::rpc::forge::ForgeAgentControlResponse;
 use ::rpc::model::machine::get_action_for_dpu_state;
 use ::rpc::{forge as rpc, forge_agent_control_response as fac, scout_firmware_upgrade as sfu};
-use carbide_uuid::machine::{HostOrDpuId, MachineId, MachineIdSubtype};
+use carbide_uuid::machine::{DpuMachineId, HostOrDpuId, MachineId, MachineIdSubtype};
 use model::machine::machine_search_config::MachineSearchConfig;
 use model::machine::{
     BomValidating, CleanupContext, CleanupState, DecommissioningState, DeconfiguringHostState,
-    FailureCause, FailureDetails, FailureSource, HostReprovisionState, InstanceState, MachineState,
-    MachineValidatingState, ManagedHostState, MeasuringState, StateMachineArea, ValidationState,
+    FailureCause, FailureDetails, FailureSource, HostMachine, HostReprovisionState, InstanceState,
+    MachineState, MachineValidatingState, ManagedHostState, MeasuringState, StateMachineArea,
+    ValidationState,
 };
 use tonic::{Request, Response, Status};
 
@@ -170,39 +171,91 @@ pub(crate) async fn forge_agent_control(
 
     use rpc::forge_agent_control_response::Action;
 
-    let machine_id: MachineId =
-        convert_and_log_machine_id(request.into_inner().machine_id.as_ref())?;
+    let authenticated_machine_id = crate::auth::authenticated_machine_id(&request);
+    let request = request.into_inner();
+    let machine_id: MachineId = convert_and_log_machine_id(request.machine_id.as_ref())?;
 
-    let (machine, mut txn) = api
-        .load_machine(&machine_id, MachineSearchConfig::default())
-        .await?;
-
-    let dpu_machine_id = carbide_uuid::machine::DpuMachineId::try_from(machine.id);
-    let host_machine = if let Ok(dpu_machine_id) = &dpu_machine_id {
-        db::machine::find_host_by_dpu_machine_id(&mut txn, dpu_machine_id)
-            .await?
+    let (action, maybe_pending_txn) = if let Ok(dpu_machine_id) = DpuMachineId::try_from(machine_id)
+    {
+        let mut txn = api.txn_begin().await.map_err(CarbideError::from)?;
+        let dpu_machine_id = match db::machine::find_dpu_id(&mut txn, &dpu_machine_id).await {
+            Err(error) => {
+                tracing::warn!(%machine_id, error = %error, "failed loading machine");
+                return Err(CarbideError::from(error).into());
+            }
+            Ok(None) => {
+                tracing::info!(%machine_id, "machine not found");
+                return Err(CarbideError::NotFoundError {
+                    kind: "machine",
+                    id: machine_id.to_string(),
+                }
+                .into());
+            }
+            Ok(Some(id)) => id,
+        };
+        let state = db::machine::lookup_host_state_by_dpu_machine_id(&mut txn, &dpu_machine_id)
+            .await
+            .map_err(CarbideError::from)?
             .ok_or(CarbideError::NotFoundError {
                 kind: "machine",
                 id: machine_id.to_string(),
-            })?
-    } else {
-        db::machine::update_scout_contact_time(&machine_id, &mut txn).await?;
-        machine
-            .clone()
-            .try_into()
-            .map_err(|error| CarbideError::internal(format!("invalid host machine: {error}")))?
-    };
-
-    // Respond based on machine current state
-    let state = host_machine.current_state();
-
-    let (action, maybe_pending_txn) = if let Ok(dpu_machine_id) = &dpu_machine_id {
+            })?;
         (
-            get_action_for_dpu_state(state, dpu_machine_id).map_err(CarbideError::from)?,
+            get_action_for_dpu_state(&state, &dpu_machine_id).map_err(CarbideError::from)?,
             Some(txn),
         )
     } else {
+        let (machine, mut txn) = api
+            .load_machine(&machine_id, MachineSearchConfig::default())
+            .await?;
+        db::machine::update_scout_contact_time(&machine_id, &mut txn)
+            .await
+            .map_err(CarbideError::from)?;
+        let host_machine = HostMachine::try_from(machine.clone())
+            .map_err(|error| CarbideError::internal(format!("invalid host machine: {error}")))?;
+        let state = host_machine.current_state();
+
         match state {
+            ManagedHostState::NicFirmwareUpdating { operation } => {
+                if authenticated_machine_id? != Some(machine_id) {
+                    return Err(CarbideError::PermissionDeniedError(
+                        "NIC firmware actions require the authenticated host identity".into(),
+                    )
+                    .into());
+                }
+                // The committed phase authorizes this request. Delivery may
+                // record a dependency failure, but cannot create an admission.
+                let owner = db::instance::find_by_machine_id(&mut txn, &machine_id)
+                    .await
+                    .map_err(CarbideError::from)?;
+                let owner_is_current = operation.purpose.matches_owner(
+                    owner
+                        .as_ref()
+                        .map(|owner| (owner.id, owner.deleted.is_some())),
+                );
+                // The contact write holds the host row. Read current failure
+                // details now rather than trusting the earlier host snapshot.
+                let submission_permitted = owner_is_current
+                    && !db::machine::has_recorded_managed_host_failure(&mut txn, &host_machine.id)
+                        .await
+                        .map_err(CarbideError::from)?;
+                // Finish the contact write before credential lookup. The saved
+                // phase authorizes delivery; no row lock spans external I/O.
+                txn.commit().await.map_err(CarbideError::from)?;
+                // Lost ownership or recorded failure stops new submissions,
+                // while observation and lockdown restoration remain available.
+                (
+                    super::nic_firmware_operation::control_action(
+                        api,
+                        host_machine.id,
+                        machine.current_version(),
+                        operation,
+                        submission_permitted,
+                    )
+                    .await?,
+                    None,
+                )
+            }
             ManagedHostState::HostInit {
                 machine_state: MachineState::Init,
             } => (Action::retry(), Some(txn)),
@@ -451,7 +504,7 @@ pub(crate) async fn forge_agent_control(
     };
 
     tracing::info!(
-        machine_id = %machine.id,
+        %machine_id,
         action = action.as_str_name(),
         "forge agent control",
     );
@@ -521,12 +574,34 @@ pub(crate) async fn reboot_completed(
 ) -> Result<Response<rpc::MachineRebootCompletedResponse>, Status> {
     log_request_data(&request);
 
+    let authenticated_machine_id = crate::auth::authenticated_machine_id(&request);
     let req = request.into_inner();
     let machine_id: MachineId = convert_and_log_machine_id(req.machine_id.as_ref())?;
-
+    // Keep the state check and timestamp write under the same row lock. A report
+    // that read an earlier state must not bypass firmware activation's identity check.
     let (machine, mut txn) = api
-        .load_machine(&machine_id, MachineSearchConfig::default())
+        .load_machine(
+            &machine_id,
+            MachineSearchConfig {
+                for_update: true,
+                ..Default::default()
+            },
+        )
         .await?;
+
+    // Firmware activation uses this timestamp to leave Rebooting. Requests
+    // without a machine identity retain their behavior outside that workflow,
+    // but cannot confirm a firmware activation for another host.
+    if matches!(
+        machine.current_state(),
+        ManagedHostState::NicFirmwareUpdating { .. }
+    ) && authenticated_machine_id? != Some(machine_id)
+    {
+        return Err(CarbideError::PermissionDeniedError(
+            "NIC firmware activation reports require the authenticated host identity".into(),
+        )
+        .into());
+    }
 
     record_reboot_duration_metric(&api.metric_emitter, &machine);
 

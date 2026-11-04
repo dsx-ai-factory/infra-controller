@@ -26,13 +26,17 @@ use ::rpc::forge::{
 use carbide_instrument::testing::MetricsCapture;
 use carbide_secrets::credentials::{BgpCredentialType, CredentialKey, Credentials};
 use carbide_uuid::machine::{AsMachineId, DpuMachineId};
+use carbide_uuid::network::NetworkSegmentId;
+use carbide_uuid::vpc::VpcId;
 use common::api_fixtures::network_segment::{
-    FIXTURE_TENANT_NETWORK_SEGMENT_GATEWAYS, create_tenant_network_segment,
+    FIXTURE_TENANT_NETWORK_SEGMENT_GATEWAYS, FIXTURE_UNDERLAY_NETWORK_SEGMENT_GATEWAY,
+    create_tenant_network_segment, create_underlay_network_segment,
 };
 use common::api_fixtures::{self, create_managed_host, dpu, network_configured_with_health};
 use config_version::ConfigVersion;
 use db::ConditionalWrite;
 use db::machine::AdminNetworkChangeNotPending;
+use model::expected_machine::{ExpectedInterface, ExpectedInterfaceRole};
 use model::machine::network::ManagedHostQuarantineMode;
 use rpc::Metadata;
 use rpc::forge::forge_server::Forge;
@@ -43,7 +47,7 @@ use crate::cfg::file::{
 use crate::tests::common;
 use crate::tests::common::api_fixtures::TestEnvOverrides;
 use crate::tests::common::api_fixtures::site_explorer::MockExploredHost;
-use crate::tests::common::rpc_builder::VpcCreationRequest;
+use crate::tests::common::rpc_builder::{DhcpDiscovery, VpcCreationRequest};
 
 async fn set_use_admin_network_changed(
     env: &api_fixtures::TestEnv,
@@ -123,6 +127,83 @@ async fn record_dpu_network_status(
         }))
         .await
         .unwrap();
+}
+
+/// Creates an FNN environment without default network segments.
+///
+/// Admin IPv6 projection tests control segment creation order because host allocation before or
+/// after admin-VPC attachment is the behavior under test.
+async fn create_admin_ipv6_test_env(pool: sqlx::PgPool) -> api_fixtures::TestEnv {
+    let mut site_prefixes = api_fixtures::TEST_SITE_PREFIXES.to_vec();
+    site_prefixes.push("2001:db8::/32".parse().unwrap());
+    let mut overrides = TestEnvOverrides {
+        site_prefixes: Some(site_prefixes),
+        create_network_segments: Some(false),
+        ..Default::default()
+    }
+    .with_fnn_config(None);
+    overrides.fnn_config.as_mut().unwrap().admin_vpc = Some(AdminFnnConfig {
+        enabled: true,
+        vpc_vni: Some(10000),
+        routing_profile: FnnRoutingProfileConfig::default(),
+    });
+    let env = api_fixtures::create_test_env_with_overrides(pool, overrides).await;
+    create_underlay_network_segment(&env.api).await;
+    env
+}
+
+/// Creates a dual-stack admin segment with caller-controlled IPv6 reservation and VPC state.
+///
+/// The shared builder keeps normal projection, cross-segment reassignment, and pre-FNN `/127`
+/// allocation on the same public segment-creation path.
+async fn create_dual_stack_admin_segment(
+    env: &api_fixtures::TestEnv,
+    name: &str,
+    ipv4_prefix: &str,
+    ipv4_gateway: &str,
+    ipv6_prefix: &str,
+    ipv6_reserve_first: i32,
+    vpc_id: Option<VpcId>,
+) -> NetworkSegmentId {
+    env.api
+        .create_network_segment(tonic::Request::new(
+            rpc::forge::NetworkSegmentCreationRequest {
+                id: None,
+                mtu: Some(1500),
+                name: name.to_string(),
+                prefixes: vec![
+                    rpc::forge::NetworkPrefix {
+                        id: None,
+                        prefix: ipv4_prefix.to_string(),
+                        gateway: Some(ipv4_gateway.to_string()),
+                        reserve_first: 3,
+                        free_ip_count: 0,
+                        svi_ip: None,
+                        free_ip_count_v2: None,
+                        free_ip_count_saturated: false,
+                    },
+                    rpc::forge::NetworkPrefix {
+                        id: None,
+                        prefix: ipv6_prefix.to_string(),
+                        gateway: None,
+                        reserve_first: ipv6_reserve_first,
+                        free_ip_count: 0,
+                        svi_ip: None,
+                        free_ip_count_v2: None,
+                        free_ip_count_saturated: false,
+                    },
+                ],
+                subdomain_id: Some(env.domain.into()),
+                vpc_id,
+                segment_type: rpc::forge::NetworkSegmentType::Admin as i32,
+                infer_slaac_eui64_addresses: false,
+            },
+        ))
+        .await
+        .unwrap()
+        .into_inner()
+        .id
+        .expect("created admin segment must have an id")
 }
 
 #[crate::sqlx_test]
@@ -233,6 +314,10 @@ async fn test_managed_host_network_config(pool: sqlx::PgPool) {
         .into_inner();
 
     assert!(
+        response.instance.is_none(),
+        "a host without an instance must omit the nested instance"
+    );
+    assert!(
         response
             .managed_host_config
             .as_ref()
@@ -244,6 +329,7 @@ async fn test_managed_host_network_config(pool: sqlx::PgPool) {
     assert_eq!(response.dhcpv6_server_preference, Some(0));
 
     let admin_interface = response.admin_interface.expect("admin interface");
+    assert!(admin_interface.ipv6_interface_config.is_none());
     assert_eq!(
         admin_interface.addresses,
         vec![rpc::forge::InterfaceAddressConfig {
@@ -256,6 +342,921 @@ async fn test_managed_host_network_config(pool: sqlx::PgPool) {
             tenant_vrf_loopback_ip: admin_interface.tenant_vrf_loopback_ip,
         }]
     );
+}
+
+/// Verifies complete FNN dual-stack projection, non-FNN IPv4-only gating, and a degraded
+/// V6-host/no-SVI response, because canonical, compatibility, and valid IPv4 must agree.
+#[crate::sqlx_test]
+#[allow(deprecated)]
+async fn test_managed_host_network_config_projects_dual_stack_admin_addresses(pool: sqlx::PgPool) {
+    // Attach a normal dual-stack segment to the admin VPC before provisioning the host.
+    let env = create_admin_ipv6_test_env(pool).await;
+    let admin_segment_id = create_dual_stack_admin_segment(
+        &env,
+        "DUAL_STACK_ADMIN",
+        "192.0.2.0/24",
+        "192.0.2.1",
+        "2001:db8:9::/64",
+        3,
+        None,
+    )
+    .await;
+    env.run_network_segment_controller_iteration().await;
+    env.run_network_segment_controller_iteration().await;
+    crate::db_init::create_admin_vpc(&env.api, Some(10000))
+        .await
+        .unwrap();
+    crate::db_init::update_network_segments_svi_ip(&env.pool)
+        .await
+        .unwrap();
+
+    // Provisioning runs admin-address reconciliation, so both families must already be persisted
+    // before the response is assembled.
+    let host_config = env.managed_host_config();
+    let managed_host =
+        dpu::create_dpu_machine_in_waiting_for_network_install(&env, &host_config).await;
+    let dpu_machine_id = managed_host.dpu().id;
+
+    // Read the primary interface through the database API to prove provisioning persisted exactly
+    // one address per family rather than trusting its return value.
+    let mut txn = env.db_txn().await;
+    let persisted_interface = db::machine_interface::find_by_machine_and_segment(
+        txn.as_mut(),
+        managed_host.id.as_machine_id(),
+        admin_segment_id,
+    )
+    .await
+    .unwrap()
+    .into_iter()
+    .find(|interface| interface.primary_interface)
+    .expect("primary admin interface");
+    txn.rollback().await.unwrap();
+    assert_eq!(persisted_interface.addresses.len(), 2);
+    let persisted_ipv4 = persisted_interface
+        .addresses
+        .iter()
+        .copied()
+        .find(|address| address.is_ipv4())
+        .expect("persisted IPv4 address");
+    let persisted_ipv6 = persisted_interface
+        .addresses
+        .iter()
+        .copied()
+        .find(|address| address.is_ipv6())
+        .expect("persisted IPv6 address");
+
+    // Fetch through the public RPC and verify IPv4 compatibility plus complete, matching IPv6
+    // projections in deterministic V4-then-V6 order.
+    let response = env
+        .api
+        .get_managed_host_network_config(tonic::Request::new(ManagedHostNetworkConfigRequest {
+            dpu_machine_id: Some(dpu_machine_id),
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+    let admin_interface = response.admin_interface.expect("admin interface");
+    let ipv4 = persisted_ipv4.to_string();
+    let ipv6 = persisted_ipv6.to_string();
+    let ipv4_host_route = format!("{ipv4}/32");
+    let ipv6_host_route = format!("{ipv6}/128");
+    assert_eq!(admin_interface.gateway.as_deref(), Some("192.0.2.1/24"));
+    assert_eq!(admin_interface.ip.as_deref(), Some(ipv4.as_str()));
+    assert_eq!(
+        admin_interface.interface_prefix.as_deref(),
+        Some(ipv4_host_route.as_str())
+    );
+    assert_eq!(admin_interface.vpc_prefixes, vec![ipv4_host_route.clone()]);
+    assert_eq!(admin_interface.prefix.as_deref(), Some("192.0.2.0/24"));
+    assert_eq!(admin_interface.svi_ip.as_deref(), Some("192.0.2.2/24"));
+    assert_eq!(
+        admin_interface.ipv6_interface_config,
+        Some(rpc::forge::FlatInterfaceIpv6Config {
+            ip: ipv6.clone(),
+            interface_prefix: ipv6_host_route.clone(),
+            svi_ip: Some("2001:db8:9::2/64".to_string()),
+        })
+    );
+    let expected_ipv4_address = rpc::forge::InterfaceAddressConfig {
+        address_family: rpc::forge::AddressFamily::V4.into(),
+        ip: ipv4,
+        interface_prefix: ipv4_host_route,
+        prefix: "192.0.2.0/24".to_string(),
+        gateway: Some("192.0.2.1/24".to_string()),
+        svi_ip: Some("192.0.2.2/24".to_string()),
+        tenant_vrf_loopback_ip: None,
+    };
+    assert_eq!(
+        admin_interface.addresses,
+        vec![
+            expected_ipv4_address.clone(),
+            rpc::forge::InterfaceAddressConfig {
+                address_family: rpc::forge::AddressFamily::V6.into(),
+                ip: ipv6,
+                interface_prefix: ipv6_host_route,
+                prefix: "2001:db8:9::/64".to_string(),
+                gateway: None,
+                svi_ip: Some("2001:db8:9::2/64".to_string()),
+                tenant_vrf_loopback_ip: None,
+            },
+        ]
+    );
+
+    // The same allocated segment must remain IPv4-only when admin FNN is disabled, even though
+    // the database contains a complete IPv6 prefix/address pair.
+    let mut txn = env.db_txn().await;
+    let mut snapshot = managed_host.snapshot(&mut txn).await;
+    let booturl = None;
+    let (non_fnn_admin_interface, _) = crate::ethernet_virtualization::admin_network(
+        txn.as_mut(),
+        &snapshot,
+        &dpu_machine_id,
+        crate::ethernet_virtualization::AdminNetworkOptions {
+            fnn_enabled: false,
+            common_pools: &env.common_pools,
+            booturl: &booturl,
+            use_vpc_vrf_loopback: false,
+            routing_profile: None,
+        },
+    )
+    .await
+    .unwrap();
+    txn.rollback().await.unwrap();
+    assert!(non_fnn_admin_interface.ipv6_interface_config.is_none());
+    let [non_fnn_address] = non_fnn_admin_interface.addresses.as_slice() else {
+        panic!("non-FNN admin must expose exactly one canonical address")
+    };
+    assert_eq!(
+        non_fnn_address.address_family(),
+        rpc::forge::AddressFamily::V4
+    );
+    assert_eq!(
+        non_fnn_address.ip.as_str(),
+        non_fnn_admin_interface.ip.as_deref().unwrap()
+    );
+
+    // A dual-stack segment still requires its host IPv4 allocation, even when
+    // the IPv6 configuration could otherwise provide a complete response.
+    let active_interface = snapshot
+        .host_snapshot
+        .status
+        .interfaces
+        .iter_mut()
+        .find(|interface| interface.id == persisted_interface.id)
+        .unwrap();
+    active_interface.addresses.retain(std::net::IpAddr::is_ipv6);
+    assert_eq!(active_interface.addresses, vec![persisted_ipv6]);
+    let mut txn = env.db_txn().await;
+    let error = crate::ethernet_virtualization::admin_network(
+        txn.as_mut(),
+        &snapshot,
+        &dpu_machine_id,
+        crate::ethernet_virtualization::AdminNetworkOptions {
+            fnn_enabled: true,
+            common_pools: &env.common_pools,
+            booturl: &booturl,
+            use_vpc_vrf_loopback: false,
+            routing_profile: None,
+        },
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.code(), tonic::Code::InvalidArgument);
+    assert!(error.message().contains("no IPv4 address found"));
+    txn.rollback().await.unwrap();
+
+    // Model a failed IPv6 SVI backfill while retaining the allocated host address. The incomplete
+    // IPv6 role set must not prevent Core from returning the valid IPv4 config.
+    let mut txn = env.db_txn().await;
+    let cleared_svi = sqlx::query(
+        "UPDATE network_prefixes SET svi_ip = NULL \
+         WHERE segment_id = $1 AND family(prefix) = 6",
+    )
+    .bind(admin_segment_id)
+    .execute(txn.as_mut())
+    .await
+    .unwrap();
+    assert_eq!(cleared_svi.rows_affected(), 1);
+    txn.commit().await.unwrap();
+
+    let response = env
+        .api
+        .get_managed_host_network_config(tonic::Request::new(ManagedHostNetworkConfigRequest {
+            dpu_machine_id: Some(dpu_machine_id),
+        }))
+        .await
+        .expect("missing IPv6 SVI must not break an IPv4-only admin response")
+        .into_inner();
+    let admin_interface = response.admin_interface.expect("admin interface");
+    assert!(admin_interface.ipv6_interface_config.is_none());
+    assert_eq!(admin_interface.addresses, vec![expected_ipv4_address]);
+}
+
+/// Gatewayless admin definitions must survive DPU discovery and produce stateful DHCPv6 config.
+/// Unrelated relay metadata must not redirect the host allocation away from its admin segment.
+#[crate::sqlx_test]
+#[allow(deprecated)]
+async fn test_managed_host_network_config_supports_ipv6_only_admin(pool: sqlx::PgPool) {
+    let env = create_admin_ipv6_test_env(pool).await;
+    let config: crate::cfg::file::InitialObjectsConfig = toml::from_str(
+        r#"
+            [networks.ipv6-admin]
+            type = "admin"
+            prefix = "2001:db8:9::/64"
+            mtu = 1500
+            reserve_first = 3
+
+            [networks.unrelated-ipv6-underlay]
+            type = "underlay"
+            prefix = "2001:db8:a::/64"
+            dhcpv6_link_address = "2001:db8:9::"
+            mtu = 1500
+            reserve_first = 3
+        "#,
+    )
+    .unwrap();
+    crate::db_init::create_initial_networks(&env.api, &env.pool, &config.networks.unwrap())
+        .await
+        .unwrap();
+    env.run_network_segment_controller_iteration().await;
+    env.run_network_segment_controller_iteration().await;
+    crate::db_init::create_admin_vpc(&env.api, Some(10000))
+        .await
+        .unwrap();
+    crate::db_init::update_network_segments_svi_ip(&env.pool)
+        .await
+        .unwrap();
+
+    let mut txn = env.db_txn().await;
+    let segment = db::network_segment::find_by_name(&mut txn, "ipv6-admin")
+        .await
+        .unwrap();
+    let [prefix] = segment.prefixes.as_slice() else {
+        panic!("IPv6-only admin segment must have exactly one prefix")
+    };
+    assert!(prefix.gateway.is_none());
+    assert!(prefix.dhcpv6_link_address.is_none());
+    assert_eq!(prefix.svi_ip, Some("2001:db8:9::2".parse().unwrap()));
+    let unrelated = db::network_segment::find_by_name(&mut txn, "unrelated-ipv6-underlay")
+        .await
+        .unwrap();
+    assert_eq!(
+        unrelated.prefixes[0].dhcpv6_link_address,
+        Some(prefix.prefix.network())
+    );
+    txn.rollback().await.unwrap();
+
+    let mut host_config = env.managed_host_config();
+    let dpu_oob_mac = host_config.get_and_assert_single_dpu().oob_mac_address;
+    // The fixture's IPv4 admin relay is absent here. Declare the underlay DPU
+    // OS identity before DHCP so site exploration does not probe it as a BMC.
+    host_config
+        .expected_machine_data
+        .get_or_insert_with(Default::default)
+        .interfaces
+        .push(ExpectedInterface {
+            mac_address: Some(dpu_oob_mac),
+            role: ExpectedInterfaceRole::DpuOs,
+            ..Default::default()
+        });
+    api_fixtures::site_explorer::register_expected_machine(&env, &host_config, None).await;
+    let dpu_config = host_config.get_and_assert_single_dpu();
+    env.api
+        .discover_dhcp(
+            DhcpDiscovery::builder(
+                dpu_config.oob_mac_address,
+                FIXTURE_UNDERLAY_NETWORK_SEGMENT_GATEWAY.ip(),
+            )
+            .tonic_request(),
+        )
+        .await
+        .expect("DPU out-of-band DHCP must succeed on the IPv4 underlay");
+    let managed_host =
+        dpu::create_dpu_machine_in_waiting_for_network_install(&env, &host_config).await;
+    let dpu_machine_id = managed_host.dpu().id;
+    let mut txn = env.db_txn().await;
+    let dpu_interfaces =
+        db::machine_interface::find_by_mac_address(txn.as_mut(), dpu_config.oob_mac_address)
+            .await
+            .unwrap();
+    let [dpu_interface] = dpu_interfaces.as_slice() else {
+        panic!("DPU discovery requires exactly one out-of-band interface")
+    };
+    txn.rollback().await.unwrap();
+
+    // Site exploration creates the host link before the fixture submits DPU
+    // discovery. Check the public RPC explicitly so that earlier setup cannot
+    // hide a failure to rediscover an IPv6-only admin interface.
+    assert_eq!(
+        dpu::dpu_discover_machine(&env, dpu_config, dpu_interface.id).await,
+        dpu_machine_id.into()
+    );
+
+    let mut txn = env.db_txn().await;
+    let interfaces = db::machine_interface::find_by_machine_and_segment(
+        txn.as_mut(),
+        managed_host.id.as_machine_id(),
+        segment.id,
+    )
+    .await
+    .unwrap();
+    txn.rollback().await.unwrap();
+    let [interface] = interfaces.as_slice() else {
+        panic!("discovery must persist exactly one host admin interface")
+    };
+    assert!(interface.primary_interface);
+    assert_eq!(interface.attached_dpu_machine_id, Some(dpu_machine_id));
+    let [std::net::IpAddr::V6(address)] = interface.addresses.as_slice() else {
+        panic!("IPv6-only admin interface must have exactly one IPv6 address")
+    };
+    assert!(prefix.prefix.contains((*address).into()));
+    let host_route = format!("{address}/128");
+
+    let response = env
+        .api
+        .get_managed_host_network_config(tonic::Request::new(ManagedHostNetworkConfigRequest {
+            dpu_machine_id: Some(dpu_machine_id),
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(response.use_admin_network);
+    assert!(response.enable_dhcp);
+    assert!(response.is_primary_dpu);
+    assert_eq!(response.host_interface_id, Some(interface.id.to_string()));
+    let admin = response.admin_interface.as_ref().expect("admin interface");
+    assert!(admin.ip.is_none());
+    assert!(admin.gateway.is_none());
+    assert!(admin.prefix.is_none());
+    assert!(admin.interface_prefix.is_none());
+    assert!(admin.svi_ip.is_none());
+    assert!(admin.vpc_prefixes.is_empty());
+    assert_eq!(
+        admin.ipv6_interface_config,
+        Some(rpc::forge::FlatInterfaceIpv6Config {
+            ip: address.to_string(),
+            interface_prefix: host_route.clone(),
+            svi_ip: Some("2001:db8:9::2/64".to_string()),
+        })
+    );
+    assert_eq!(
+        admin.addresses,
+        vec![rpc::forge::InterfaceAddressConfig {
+            address_family: rpc::forge::AddressFamily::V6.into(),
+            ip: address.to_string(),
+            interface_prefix: host_route.clone(),
+            prefix: "2001:db8:9::/64".to_string(),
+            gateway: None,
+            svi_ip: Some("2001:db8:9::2/64".to_string()),
+            tenant_vrf_loopback_ip: None,
+        }]
+    );
+
+    // The public response must produce a stateful DHCPv6 binding without requiring IPv4.
+    let vlan = format!("vlan{}", admin.vlan_id);
+    let dhcp =
+        carbide_rpc_utils::dhcp::HostConfig::try_from(response, "pf0hpf_if", "pf0vf", "_if", true)
+            .unwrap();
+    assert_eq!(dhcp.host_interface_id, interface.id);
+    assert_eq!(dhcp.host_ip_addresses.len(), 1);
+    let dhcp_interface = &dhcp.host_ip_addresses[&vlan];
+    assert!(dhcp_interface.address.is_none());
+    assert!(dhcp_interface.gateway.is_none());
+    assert!(dhcp_interface.prefix.is_none());
+    assert_eq!(
+        dhcp_interface.ipv6,
+        Some(carbide_rpc_utils::dhcp::InterfaceInfoV6 {
+            address: Some(*address),
+            prefix: host_route,
+        })
+    );
+
+    // Without FNN there is no IPv6 admin SVI path, even for this complete segment.
+    let mut txn = env.db_txn().await;
+    let snapshot = managed_host.snapshot(&mut txn).await;
+    let error = crate::ethernet_virtualization::admin_network(
+        txn.as_mut(),
+        &snapshot,
+        &dpu_machine_id,
+        crate::ethernet_virtualization::AdminNetworkOptions {
+            fnn_enabled: false,
+            common_pools: &env.common_pools,
+            booturl: &None,
+            use_vpc_vrf_loopback: false,
+            routing_profile: None,
+        },
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.code(), tonic::Code::Internal);
+    assert!(error.message().contains("has no IPv4 network prefix"));
+    txn.rollback().await.unwrap();
+
+    // A failed SVI backfill has no IPv4 fallback here; returning an empty admin config would
+    // leave the host without either DHCPv6 routing or a usable IPv4 configuration.
+    let cleared = sqlx::query("UPDATE network_prefixes SET svi_ip = NULL WHERE segment_id = $1")
+        .bind(segment.id)
+        .execute(&env.pool)
+        .await
+        .unwrap();
+    assert_eq!(cleared.rows_affected(), 1);
+    let error = env
+        .api
+        .get_managed_host_network_config(tonic::Request::new(ManagedHostNetworkConfigRequest {
+            dpu_machine_id: Some(dpu_machine_id),
+        }))
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), tonic::Code::Internal);
+    assert!(error.message().contains("no complete IPv6 configuration"));
+}
+
+/// Verifies Core never combines a retained IPv6 address with a different admin segment.
+///
+/// Static reassignment and production reconciliation operate per address family, so the response
+/// boundary must suppress stale IPv6 rather than publishing a host from one segment with another
+/// segment's prefix and SVI.
+#[crate::sqlx_test]
+#[allow(deprecated)]
+async fn test_managed_host_network_config_omits_ipv6_outside_reassigned_admin_segment(
+    pool: sqlx::PgPool,
+) {
+    // Provision the host while the source is the only admin segment.
+    let env = create_admin_ipv6_test_env(pool).await;
+    let source_segment_id = create_dual_stack_admin_segment(
+        &env,
+        "DUAL_STACK_ADMIN_SOURCE",
+        "192.0.2.0/24",
+        "192.0.2.1",
+        "2001:db8:9::/64",
+        3,
+        None,
+    )
+    .await;
+    env.run_network_segment_controller_iteration().await;
+    env.run_network_segment_controller_iteration().await;
+    crate::db_init::create_admin_vpc(&env.api, Some(10000))
+        .await
+        .unwrap();
+    crate::db_init::update_network_segments_svi_ip(&env.pool)
+        .await
+        .unwrap();
+    let host_config = env.managed_host_config();
+    let managed_host =
+        dpu::create_dpu_machine_in_waiting_for_network_install(&env, &host_config).await;
+    let dpu_machine_id = managed_host.dpu().id;
+
+    // Capture the primary interface, its source IPv6 address, and the shared admin VPC.
+    let mut txn = env.db_txn().await;
+    let source_interface = db::machine_interface::find_by_machine_and_segment(
+        txn.as_mut(),
+        managed_host.id.as_machine_id(),
+        source_segment_id,
+    )
+    .await
+    .unwrap()
+    .into_iter()
+    .find(|interface| interface.primary_interface)
+    .expect("primary source admin interface");
+    let primary_interface_id = source_interface.id;
+    let source_ipv6 = source_interface
+        .addresses
+        .iter()
+        .copied()
+        .find(|address| address.is_ipv6())
+        .expect("source admin interface must have IPv6");
+    let admin_vpc_id = db::vpc::find_by_segment(txn.as_mut(), source_segment_id)
+        .await
+        .unwrap()
+        .expect("source admin segment must belong to the admin VPC")
+        .id;
+    txn.rollback().await.unwrap();
+
+    // Add a second dual-stack admin segment to the same FNN VPC.
+    let target_segment_id = create_dual_stack_admin_segment(
+        &env,
+        "DUAL_STACK_ADMIN_TARGET",
+        "192.0.12.0/24",
+        "192.0.12.1",
+        "2001:db8:12::/64",
+        3,
+        Some(admin_vpc_id),
+    )
+    .await;
+    env.run_network_segment_controller_iteration().await;
+    env.run_network_segment_controller_iteration().await;
+    crate::db_init::update_network_segments_svi_ip(&env.pool)
+        .await
+        .unwrap();
+
+    // Public static assignment moves the interface to the target while replacing only IPv4.
+    let target_ipv4: std::net::IpAddr = "192.0.12.42".parse().unwrap();
+    env.api
+        .assign_static_address(tonic::Request::new(
+            rpc::forge::AssignStaticAddressRequest {
+                interface_id: Some(primary_interface_id),
+                ip_address: target_ipv4.to_string(),
+            },
+        ))
+        .await
+        .unwrap();
+
+    // Production reconciliation must not make the stale sibling-family allocation appear valid.
+    let mut txn = env.db_txn().await;
+    db::machine_interface::reconcile_admin_addresses_for_host(
+        txn.as_mut(),
+        managed_host.id.as_machine_id(),
+    )
+    .await
+    .unwrap();
+    txn.commit().await.unwrap();
+
+    // Re-read persistence to establish the inconsistent but reachable projection input.
+    let mut txn = env.db_txn().await;
+    let persisted_interface = db::machine_interface::find_one(txn.as_mut(), primary_interface_id)
+        .await
+        .unwrap();
+    txn.rollback().await.unwrap();
+    assert_eq!(persisted_interface.segment_id, target_segment_id);
+    assert_eq!(
+        persisted_interface
+            .addresses
+            .iter()
+            .copied()
+            .find(|address| address.is_ipv4()),
+        Some(target_ipv4)
+    );
+    assert!(
+        persisted_interface.addresses.contains(&source_ipv6),
+        "reconciliation currently preserves the existing sibling-family address"
+    );
+
+    // The public payload must retain target IPv4 while omitting both IPv6 representations.
+    let response = env
+        .api
+        .get_managed_host_network_config(tonic::Request::new(ManagedHostNetworkConfigRequest {
+            dpu_machine_id: Some(dpu_machine_id),
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+    let admin_interface = response.admin_interface.expect("admin interface");
+    assert_eq!(admin_interface.ip.as_deref(), Some("192.0.12.42"));
+    assert_eq!(
+        admin_interface.interface_prefix.as_deref(),
+        Some("192.0.12.42/32")
+    );
+    assert_eq!(admin_interface.prefix.as_deref(), Some("192.0.12.0/24"));
+    assert_eq!(admin_interface.gateway.as_deref(), Some("192.0.12.1/24"));
+    assert_eq!(admin_interface.svi_ip.as_deref(), Some("192.0.12.2/24"));
+    assert!(admin_interface.ipv6_interface_config.is_none());
+    let [canonical_ipv4] = admin_interface.addresses.as_slice() else {
+        panic!("reassigned admin interface must expose only canonical IPv4")
+    };
+    assert_eq!(
+        canonical_ipv4.address_family(),
+        rpc::forge::AddressFamily::V4
+    );
+    assert_eq!(canonical_ipv4.ip, "192.0.12.42");
+    assert_eq!(canonical_ipv4.interface_prefix, "192.0.12.42/32");
+    assert_eq!(canonical_ipv4.prefix, "192.0.12.0/24");
+    assert_eq!(canonical_ipv4.gateway.as_deref(), Some("192.0.12.1/24"));
+    assert_eq!(canonical_ipv4.svi_ip.as_deref(), Some("192.0.12.2/24"));
+}
+
+/// Verifies Core omits admin IPv6 when the host owns the address later used for VRR.
+///
+/// A `/127` allocated before FNN attachment has only enough endpoints for the host and SVI, so
+/// publishing its network endpoint as VRR would duplicate a live host address.
+#[crate::sqlx_test]
+#[allow(deprecated)]
+async fn test_managed_host_network_config_omits_admin_ipv6_when_host_owns_vrr_address(
+    pool: sqlx::PgPool,
+) {
+    // Allocate the host before admin-FNN startup attaches the segment and backfills its SVI.
+    let env = create_admin_ipv6_test_env(pool).await;
+    let admin_segment_id = create_dual_stack_admin_segment(
+        &env,
+        "ADMIN_IPV6_127",
+        "192.0.2.0/24",
+        "192.0.2.1",
+        "2001:db8:9::/127",
+        0,
+        None,
+    )
+    .await;
+    env.run_network_segment_controller_iteration().await;
+    env.run_network_segment_controller_iteration().await;
+    let host_config = env.managed_host_config();
+    let managed_host =
+        dpu::create_dpu_machine_in_waiting_for_network_install(&env, &host_config).await;
+    let dpu_machine_id = managed_host.dpu().id;
+
+    // Re-read persistence to prove the host took the network endpoint before an SVI existed.
+    let mut txn = env.db_txn().await;
+    let persisted_interface = db::machine_interface::find_by_machine_and_segment(
+        txn.as_mut(),
+        managed_host.id.as_machine_id(),
+        admin_segment_id,
+    )
+    .await
+    .unwrap()
+    .into_iter()
+    .find(|interface| interface.primary_interface)
+    .expect("primary admin interface");
+    let persisted_ipv4 = persisted_interface
+        .addresses
+        .iter()
+        .copied()
+        .find(|address| address.is_ipv4())
+        .expect("persisted IPv4 address");
+    let persisted_ipv6 = persisted_interface
+        .addresses
+        .iter()
+        .copied()
+        .find(|address| address.is_ipv6())
+        .expect("persisted IPv6 address");
+    let persisted_admin_segment = db::network_segment::admin(txn.as_mut())
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|segment| segment.id == admin_segment_id)
+        .expect("persisted admin segment");
+    let ipv6_prefix = persisted_admin_segment
+        .prefixes
+        .iter()
+        .find(|prefix| prefix.prefix.is_ipv6())
+        .expect("persisted IPv6 prefix");
+    assert_eq!(persisted_ipv6, ipv6_prefix.prefix.network());
+    assert!(ipv6_prefix.svi_ip.is_none());
+    txn.rollback().await.unwrap();
+
+    // Production startup attaches the existing segment and assigns its only other endpoint to SVI.
+    crate::db_init::create_admin_vpc(&env.api, Some(10000))
+        .await
+        .unwrap();
+    crate::db_init::update_network_segments_svi_ip(&env.pool)
+        .await
+        .unwrap();
+    let mut txn = env.db_txn().await;
+    let persisted_admin_segment = db::network_segment::admin(txn.as_mut())
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|segment| segment.id == admin_segment_id)
+        .expect("persisted admin segment");
+    let ipv6_prefix = persisted_admin_segment
+        .prefixes
+        .iter()
+        .find(|prefix| prefix.prefix.is_ipv6())
+        .expect("persisted IPv6 prefix");
+    assert_eq!(ipv6_prefix.svi_ip, Some("2001:db8:9::1".parse().unwrap()));
+    txn.rollback().await.unwrap();
+
+    // The public payload retains IPv4 but suppresses the conflicting sidecar and canonical V6.
+    let response = env
+        .api
+        .get_managed_host_network_config(tonic::Request::new(ManagedHostNetworkConfigRequest {
+            dpu_machine_id: Some(dpu_machine_id),
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+    let admin_interface = response.admin_interface.expect("admin interface");
+    let ipv4 = persisted_ipv4.to_string();
+    let ipv4_host_route = format!("{persisted_ipv4}/32");
+    assert_eq!(admin_interface.gateway.as_deref(), Some("192.0.2.1/24"));
+    assert_eq!(admin_interface.ip.as_deref(), Some(ipv4.as_str()));
+    assert_eq!(
+        admin_interface.interface_prefix.as_deref(),
+        Some(ipv4_host_route.as_str())
+    );
+    assert_eq!(admin_interface.vpc_prefixes, vec![ipv4_host_route.clone()]);
+    assert_eq!(admin_interface.prefix.as_deref(), Some("192.0.2.0/24"));
+    assert_eq!(admin_interface.svi_ip.as_deref(), Some("192.0.2.2/24"));
+    assert!(admin_interface.ipv6_interface_config.is_none());
+    assert_eq!(
+        admin_interface.addresses,
+        vec![rpc::forge::InterfaceAddressConfig {
+            address_family: rpc::forge::AddressFamily::V4.into(),
+            ip: ipv4,
+            interface_prefix: ipv4_host_route,
+            prefix: "192.0.2.0/24".to_string(),
+            gateway: Some("192.0.2.1/24".to_string()),
+            svi_ip: Some("192.0.2.2/24".to_string()),
+            tenant_vrf_loopback_ip: None,
+        }]
+    );
+}
+
+/// Verifies collision handling omits both IPv6 projections without hiding persisted IPv4.
+///
+/// Each collision test proves its distinct persisted role conflict before this helper checks the
+/// common public response contract.
+#[allow(deprecated)]
+async fn assert_admin_ipv6_omitted_while_ipv4_survives(
+    env: &api_fixtures::TestEnv,
+    dpu_machine_id: DpuMachineId,
+    persisted_ipv4: std::net::IpAddr,
+) {
+    // Fetch through the public RPC after establishing the persisted collision.
+    let response = env
+        .api
+        .get_managed_host_network_config(tonic::Request::new(ManagedHostNetworkConfigRequest {
+            dpu_machine_id: Some(dpu_machine_id),
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+    let admin_interface = response.admin_interface.expect("admin interface");
+    let ipv4 = persisted_ipv4.to_string();
+
+    // Both compatibility and canonical projections must omit IPv6 while retaining IPv4.
+    assert_eq!(admin_interface.ip.as_deref(), Some(ipv4.as_str()));
+    assert!(admin_interface.ipv6_interface_config.is_none());
+    let [canonical_ipv4] = admin_interface.addresses.as_slice() else {
+        panic!("conflicting admin IPv6 must leave exactly one canonical IPv4 address")
+    };
+    assert_eq!(
+        canonical_ipv4.address_family(),
+        rpc::forge::AddressFamily::V4
+    );
+    assert_eq!(canonical_ipv4.ip, ipv4);
+}
+
+/// Verifies Core omits admin IPv6 when the persisted SVI equals the VRR address.
+///
+/// Allocating an SVI before a host on an unreserved `/127` gives the SVI the network endpoint, so
+/// projection must not program that same endpoint as VRR.
+#[crate::sqlx_test]
+#[allow(deprecated)]
+async fn test_managed_host_network_config_omits_admin_ipv6_when_svi_matches_vrr_address(
+    pool: sqlx::PgPool,
+) {
+    // Attach the `/127` to FNN and allocate its SVI before provisioning the host.
+    let env = create_admin_ipv6_test_env(pool).await;
+    let admin_segment_id = create_dual_stack_admin_segment(
+        &env,
+        "ADMIN_IPV6_SVI_VRR_COLLISION",
+        "192.0.2.0/24",
+        "192.0.2.1",
+        "2001:db8:9::/127",
+        0,
+        None,
+    )
+    .await;
+    env.run_network_segment_controller_iteration().await;
+    env.run_network_segment_controller_iteration().await;
+    crate::db_init::create_admin_vpc(&env.api, Some(10000))
+        .await
+        .unwrap();
+    crate::db_init::update_network_segments_svi_ip(&env.pool)
+        .await
+        .unwrap();
+
+    // Provisioning must use the remaining endpoint while preserving valid IPv4.
+    let host_config = env.managed_host_config();
+    let managed_host =
+        dpu::create_dpu_machine_in_waiting_for_network_install(&env, &host_config).await;
+    let dpu_machine_id = managed_host.dpu().id;
+
+    // Re-read persistence to prove this case exercises SVI=VRR independently.
+    let mut txn = env.db_txn().await;
+    let persisted_interface = db::machine_interface::find_by_machine_and_segment(
+        txn.as_mut(),
+        managed_host.id.as_machine_id(),
+        admin_segment_id,
+    )
+    .await
+    .unwrap()
+    .into_iter()
+    .find(|interface| interface.primary_interface)
+    .expect("primary admin interface");
+    let persisted_ipv4 = persisted_interface
+        .addresses
+        .iter()
+        .copied()
+        .find(std::net::IpAddr::is_ipv4)
+        .expect("persisted IPv4 address");
+    let persisted_ipv6 = persisted_interface
+        .addresses
+        .iter()
+        .copied()
+        .find(std::net::IpAddr::is_ipv6)
+        .expect("persisted IPv6 address");
+    let persisted_admin_segment = db::network_segment::admin(txn.as_mut())
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|segment| segment.id == admin_segment_id)
+        .expect("persisted admin segment");
+    let ipv6_prefix = persisted_admin_segment
+        .prefixes
+        .iter()
+        .find(|prefix| prefix.prefix.is_ipv6())
+        .expect("persisted IPv6 prefix");
+    let persisted_svi = ipv6_prefix.svi_ip.expect("persisted IPv6 SVI");
+    assert_eq!(persisted_svi, ipv6_prefix.prefix.network());
+    assert_ne!(persisted_ipv6, persisted_svi);
+    txn.rollback().await.unwrap();
+
+    assert_admin_ipv6_omitted_while_ipv4_survives(&env, dpu_machine_id, persisted_ipv4).await;
+}
+
+/// Verifies Core omits admin IPv6 when public static assignment gives the host the SVI address.
+///
+/// SVI storage is separate from machine-address ownership, so the response boundary must reject
+/// this reachable collision while continuing to return the interface's IPv4 configuration.
+#[crate::sqlx_test]
+#[allow(deprecated)]
+async fn test_managed_host_network_config_omits_admin_ipv6_when_host_matches_svi_address(
+    pool: sqlx::PgPool,
+) {
+    // Provision a normal dual-stack FNN admin interface with an existing IPv6 SVI.
+    let env = create_admin_ipv6_test_env(pool).await;
+    let admin_segment_id = create_dual_stack_admin_segment(
+        &env,
+        "ADMIN_IPV6_HOST_SVI_COLLISION",
+        "192.0.2.0/24",
+        "192.0.2.1",
+        "2001:db8:9::/64",
+        3,
+        None,
+    )
+    .await;
+    env.run_network_segment_controller_iteration().await;
+    env.run_network_segment_controller_iteration().await;
+    crate::db_init::create_admin_vpc(&env.api, Some(10000))
+        .await
+        .unwrap();
+    crate::db_init::update_network_segments_svi_ip(&env.pool)
+        .await
+        .unwrap();
+    let host_config = env.managed_host_config();
+    let managed_host =
+        dpu::create_dpu_machine_in_waiting_for_network_install(&env, &host_config).await;
+    let dpu_machine_id = managed_host.dpu().id;
+
+    // Read the public-assignment target and interface identity from persistence.
+    let mut txn = env.db_txn().await;
+    let persisted_interface = db::machine_interface::find_by_machine_and_segment(
+        txn.as_mut(),
+        managed_host.id.as_machine_id(),
+        admin_segment_id,
+    )
+    .await
+    .unwrap()
+    .into_iter()
+    .find(|interface| interface.primary_interface)
+    .expect("primary admin interface");
+    let primary_interface_id = persisted_interface.id;
+    let persisted_admin_segment = db::network_segment::admin(txn.as_mut())
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|segment| segment.id == admin_segment_id)
+        .expect("persisted admin segment");
+    let persisted_svi = persisted_admin_segment
+        .prefixes
+        .iter()
+        .find(|prefix| prefix.prefix.is_ipv6())
+        .and_then(|prefix| prefix.svi_ip)
+        .expect("persisted IPv6 SVI");
+    txn.rollback().await.unwrap();
+
+    // Public static assignment can select an SVI because it is not a machine-address owner.
+    env.api
+        .assign_static_address(tonic::Request::new(
+            rpc::forge::AssignStaticAddressRequest {
+                interface_id: Some(primary_interface_id),
+                ip_address: persisted_svi.to_string(),
+            },
+        ))
+        .await
+        .unwrap();
+
+    // Re-read persistence to prove this case exercises host=SVI independently.
+    let mut txn = env.db_txn().await;
+    let persisted_interface = db::machine_interface::find_one(txn.as_mut(), primary_interface_id)
+        .await
+        .unwrap();
+    let persisted_ipv4 = persisted_interface
+        .addresses
+        .iter()
+        .copied()
+        .find(std::net::IpAddr::is_ipv4)
+        .expect("persisted IPv4 address");
+    let persisted_ipv6 = persisted_interface
+        .addresses
+        .iter()
+        .copied()
+        .find(std::net::IpAddr::is_ipv6)
+        .expect("persisted IPv6 address");
+    assert_eq!(persisted_interface.segment_id, admin_segment_id);
+    assert_eq!(persisted_ipv6, persisted_svi);
+    txn.rollback().await.unwrap();
+
+    assert_admin_ipv6_omitted_while_ipv4_survives(&env, dpu_machine_id, persisted_ipv4).await;
 }
 
 #[crate::sqlx_test]
@@ -281,6 +1282,37 @@ async fn test_managed_host_network_config_does_not_clear_use_admin_network_chang
     assert_eq!(
         use_admin_network_changed(&env, dpu_machine_id).await,
         Some(true)
+    );
+}
+
+#[crate::sqlx_test]
+async fn test_record_dpu_network_status_requires_existing_dpu(pool: sqlx::PgPool) {
+    let env = api_fixtures::create_test_env(pool).await;
+    let dpu_machine_id: DpuMachineId =
+        "fm100dskla0ihp0pn4tv7v1js2k2mo37sl0jjr8141okqg8pjpdpfihaa80"
+            .parse()
+            .unwrap();
+
+    let error = env
+        .api
+        .record_dpu_network_status(tonic::Request::new(DpuNetworkStatus {
+            dpu_machine_id: Some(dpu_machine_id),
+            dpu_agent_version: Some(dpu::TEST_DPU_AGENT_VERSION.to_string()),
+            observed_at: Some(SystemTime::now().into()),
+            network_config_version: Some(ConfigVersion::initial().version_string()),
+            dpu_health: Some(rpc::health::HealthReport {
+                source: "forge-dpu-agent".to_string(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }))
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.code(), tonic::Code::NotFound);
+    assert_eq!(
+        error.message(),
+        format!("machine not found: {dpu_machine_id}")
     );
 }
 
@@ -352,10 +1384,22 @@ async fn test_rejected_network_observation_does_not_acknowledge_admin_network_ch
         .await
         .unwrap_err();
     assert_eq!(error.code(), tonic::Code::Internal);
+    assert_eq!(error.message(), "internal database error");
+    let source = std::error::Error::source(&error)
+        .expect("database status source")
+        .source()
+        .expect("original database error")
+        .downcast_ref::<db::DatabaseError>()
+        .expect("typed database error");
+    let db::DatabaseError::Sqlx(annotated) = source else {
+        panic!("expected the original database error: {source:?}");
+    };
+    assert!(matches!(annotated.source, sqlx::Error::RowNotFound));
     assert!(
-        error
-            .message()
-            .contains("update machine status observation")
+        annotated
+            .to_string()
+            .contains("update machine status observation"),
+        "{annotated}"
     );
     assert_eq!(
         use_admin_network_changed(&env, dpu_machine_id).await,
@@ -392,6 +1436,7 @@ async fn test_record_dpu_network_status_counts_failed_host_wakeup(pool: sqlx::Pg
     let env = api_fixtures::create_test_env(pool.clone()).await;
     let mh = create_managed_host(&env).await;
     let dpu_machine_id = mh.dpu().id;
+    let network_config_version = "V2-T1".to_string();
 
     // Remove the state-handler queue table so the host wakeup enqueue fails
     // while the status report itself stays healthy.
@@ -403,12 +1448,19 @@ async fn test_record_dpu_network_status_counts_failed_host_wakeup(pool: sqlx::Pg
     let metrics = MetricsCapture::start();
     // A never-before-observed network config version registers as a change,
     // which is what prompts the host state-handler wakeup.
-    record_dpu_network_status(
-        &env,
-        dpu_machine_id,
-        Some("wakeup-probe-version".to_string()),
-    )
-    .await;
+    record_dpu_network_status(&env, dpu_machine_id, Some(network_config_version.clone())).await;
+
+    assert_eq!(
+        metrics.counter_delta(
+            "carbide_state_handler_wakeup_failures_total",
+            &[("trigger", "dpu_network_status")],
+        ),
+        1.0
+    );
+
+    // The first report committed despite the failed wakeup. Its versions
+    // now match, so another report must not enqueue another host wakeup.
+    record_dpu_network_status(&env, dpu_machine_id, Some(network_config_version)).await;
 
     assert_eq!(
         metrics.counter_delta(
@@ -464,6 +1516,61 @@ async fn test_managed_host_network_config_with_sitewide_bgp_password(pool: sqlx:
     );
 }
 
+/// Verifies legacy global route targets with omitted VNIs become explicit zero
+/// values in both managed-host response fields before reaching the DPU.
+#[crate::sqlx_test]
+async fn test_managed_host_network_config_normalizes_legacy_global_route_targets(
+    pool: sqlx::PgPool,
+) {
+    // Omit each local administrator while distinct ASNs identify both fields.
+    let mut overrides = TestEnvOverrides::default().with_fnn_config(None);
+    let fnn_config = overrides
+        .fnn_config
+        .as_mut()
+        .expect("fixture FNN configuration");
+    fnn_config.common_internal_route_target = Some(RouteTargetConfig {
+        asn: 64_512,
+        vni: None,
+        vni_self: false,
+    });
+    fnn_config.additional_route_target_imports = vec![RouteTargetConfig {
+        asn: 64_513,
+        vni: None,
+        vni_self: false,
+    }];
+    let env = api_fixtures::create_test_env_with_overrides(pool, overrides).await;
+    let host_config = env.managed_host_config();
+    let dpu_machine_id = dpu::create_dpu_machine(&env, &host_config).await;
+
+    // Fetch the response carrying both global route-target fields.
+    let response = env
+        .api
+        .get_managed_host_network_config(tonic::Request::new(ManagedHostNetworkConfigRequest {
+            dpu_machine_id: Some(dpu_machine_id),
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+
+    // Both fields must contain concrete zero rather than omitted legacy values.
+    assert_eq!(
+        response.common_internal_route_target,
+        Some(rpc::common::RouteTarget {
+            asn: 64_512,
+            vni: Some(0),
+            vni_self: false,
+        })
+    );
+    assert_eq!(
+        response.additional_route_target_imports,
+        vec![rpc::common::RouteTarget {
+            asn: 64_513,
+            vni: Some(0),
+            vni_self: false,
+        }]
+    );
+}
+
 #[crate::sqlx_test]
 async fn test_managed_host_network_config_narrows_interface_anycast_prefixes(pool: sqlx::PgPool) {
     let profile_type = "ANYCAST_SUBSET_TEST";
@@ -474,7 +1581,8 @@ async fn test_managed_host_network_config_narrows_interface_anycast_prefixes(poo
     ];
     let inherited_import = RouteTargetConfig {
         asn: 65001,
-        vni: 123,
+        vni: Some(123),
+        vni_self: false,
     };
 
     // Configure inherited properties and a base prefix that the VPC will replace.
@@ -608,18 +1716,20 @@ async fn test_managed_host_network_config_narrows_interface_anycast_prefixes(poo
     assert!(vpc_routing_profile.leak_default_route_from_underlay);
     assert_eq!(vpc_routing_profile.route_target_imports.len(), 1);
     assert_eq!(vpc_routing_profile.route_target_imports[0].asn, 65001);
-    assert_eq!(vpc_routing_profile.route_target_imports[0].vni, 123);
+    assert_eq!(vpc_routing_profile.route_target_imports[0].vni, Some(123));
+    assert!(!vpc_routing_profile.route_target_imports[0].vni_self);
 }
 
+/// Verifies Core resolves one symbolic target independently for each interface
+/// VPC and policy direction so the DPU receives only concrete values.
 #[crate::sqlx_test]
 async fn test_managed_host_network_config_includes_per_vpc_routing_profiles(pool: sqlx::PgPool) {
-    let internal_import = RouteTargetConfig {
-        asn: 65001,
-        vni: 111,
-    };
-    let external_export = RouteTargetConfig {
-        asn: 65002,
-        vni: 222,
+    // Reuse one symbolic target so only the associated VPC distinguishes
+    // rendered values.
+    let symbolic_target = RouteTargetConfig {
+        asn: 429_000_000,
+        vni: None,      // Keep one definition reusable across distinct VPCs.
+        vni_self: true, // Each interface must substitute its own allocated VNI.
     };
 
     // Configure two distinguishable FNN routing profiles.
@@ -636,7 +1746,7 @@ async fn test_managed_host_network_config_includes_per_vpc_routing_profiles(pool
                         internal: Some(true),
                         access_tier: Some(1),
                         leak_default_route_from_underlay: Some(true),
-                        route_target_imports: Some(vec![internal_import.clone()]),
+                        route_target_imports: Some(vec![symbolic_target.clone()]),
                         ..Default::default()
                     },
                 ),
@@ -646,7 +1756,7 @@ async fn test_managed_host_network_config_includes_per_vpc_routing_profiles(pool
                         internal: Some(false),
                         access_tier: Some(2),
                         leak_tenant_host_routes_to_underlay: Some(true),
-                        route_targets_on_exports: Some(vec![external_export.clone()]),
+                        route_targets_on_exports: Some(vec![symbolic_target.clone()]),
                         ..Default::default()
                     },
                 ),
@@ -780,8 +1890,9 @@ async fn test_managed_host_network_config_includes_per_vpc_routing_profiles(pool
     assert_eq!(
         internal_profile.route_target_imports,
         vec![rpc::common::RouteTarget {
-            asn: internal_import.asn,
-            vni: internal_import.vni,
+            asn: symbolic_target.asn,
+            vni: Some(internal_vni),
+            vni_self: false,
         }]
     );
 
@@ -790,9 +1901,57 @@ async fn test_managed_host_network_config_includes_per_vpc_routing_profiles(pool
     assert_eq!(
         external_profile.route_targets_on_exports,
         vec![rpc::common::RouteTarget {
-            asn: external_export.asn,
-            vni: external_export.vni,
+            asn: symbolic_target.asn,
+            vni: Some(external_vni),
+            vni_self: false,
         }]
+    );
+}
+
+/// Verifies tenant-interface rendering rejects a retained negative VPC VNI so
+/// managed-host configuration cannot publish its wrapped unsigned value.
+#[crate::sqlx_test]
+async fn test_managed_host_network_config_rejects_negative_tenant_vni(pool: sqlx::PgPool) {
+    // Create one valid tenant interface before changing its persisted VPC status.
+    let env = api_fixtures::create_test_env(pool).await;
+    let segment_id = env.create_vpc_and_tenant_segment().await;
+    let managed_host = create_managed_host(&env).await;
+    managed_host
+        .instance_builer(&env)
+        .single_interface_network_config(segment_id)
+        .build()
+        .await;
+
+    // Inject retained state allowed by JSONB but not produced by current APIs.
+    let mut txn = env.db_txn().await;
+    let vpc = db::vpc::find_by_segment(txn.as_mut(), segment_id)
+        .await
+        .unwrap()
+        .expect("fixture segment belongs to a VPC");
+    sqlx::query("UPDATE vpcs SET status = $1 WHERE id = $2")
+        .bind(sqlx::types::Json(model::vpc::VpcStatus {
+            vni: Some(-1), // Drives the defensive signed-to-unsigned conversion.
+        }))
+        .bind(vpc.id)
+        .execute(txn.as_mut())
+        .await
+        .unwrap();
+    txn.commit().await.unwrap();
+
+    // Request the DPU configuration that renders the retained tenant VPC.
+    let error = env
+        .api
+        .get_managed_host_network_config(tonic::Request::new(ManagedHostNetworkConfigRequest {
+            dpu_machine_id: Some(managed_host.dpu().id),
+        }))
+        .await
+        .expect_err("negative retained VNI must be rejected");
+
+    // Fail explicitly instead of returning the wrapped `u32`.
+    assert_eq!(error.code(), tonic::Code::Internal);
+    assert_eq!(
+        error.message(),
+        format!("internal error: VPC attached to segment {segment_id} has a negative VNI")
     );
 }
 
@@ -960,11 +2119,14 @@ async fn test_managed_host_network_config_includes_fnn_vrf_loopback_when_enabled
     assert_eq!(loopback.loopback_ip.to_string(), loopback_ip);
 }
 
+/// Verifies the admin VPC resolves symbolic targets once for both routing-profile
+/// response fields while the default loopback setting remains disabled.
 #[crate::sqlx_test]
 #[allow(deprecated)]
 async fn test_managed_host_network_config_omits_admin_fnn_vrf_loopback_by_default(
     pool: sqlx::PgPool,
 ) {
+    // Configure one symbolic admin target and a fixed VNI for deterministic resolution.
     let mut overrides = TestEnvOverrides::default().with_fnn_config(None);
     overrides.fnn_config.as_mut().unwrap().admin_vpc = Some(AdminFnnConfig {
         enabled: true,
@@ -972,8 +2134,9 @@ async fn test_managed_host_network_config_omits_admin_fnn_vrf_loopback_by_defaul
         routing_profile: FnnRoutingProfileConfig {
             leak_default_route_from_underlay: Some(true),
             route_target_imports: Some(vec![RouteTargetConfig {
-                asn: 64512,
-                vni: 10000,
+                asn: 429_000_000,
+                vni: None,      // Keep the configured target symbolic.
+                vni_self: true, // Resolve from the allocated admin VPC VNI.
             }]),
             ..Default::default()
         },
@@ -1010,7 +2173,6 @@ async fn test_managed_host_network_config_omits_admin_fnn_vrf_loopback_by_defaul
     assert!(response.use_admin_network);
     assert_eq!(admin_interface.vpc_vni, 10000);
     assert!(admin_interface.tenant_vrf_loopback_ip.is_none());
-    assert!(response.routing_profile.is_some());
 
     let routing_profile = admin_interface
         .vpc_routing_profile
@@ -1019,8 +2181,10 @@ async fn test_managed_host_network_config_omits_admin_fnn_vrf_loopback_by_defaul
     assert!(admin_interface.interface_routing_profile.is_none());
     assert!(routing_profile.leak_default_route_from_underlay);
     assert_eq!(routing_profile.route_target_imports.len(), 1);
-    assert_eq!(routing_profile.route_target_imports[0].asn, 64512);
-    assert_eq!(routing_profile.route_target_imports[0].vni, 10000);
+    assert_eq!(routing_profile.route_target_imports[0].asn, 429_000_000);
+    assert_eq!(routing_profile.route_target_imports[0].vni, Some(10000));
+    assert!(!routing_profile.route_target_imports[0].vni_self);
+    assert_eq!(response.routing_profile.as_ref(), Some(routing_profile));
 
     // Verify the admin VPC also did not allocate a VPC/DPU loopback row.
     let mut txn = env.db_txn().await;
@@ -1036,6 +2200,48 @@ async fn test_managed_host_network_config_omits_admin_fnn_vrf_loopback_by_defaul
         .await
         .unwrap();
     assert!(loopback.is_none());
+}
+
+/// Verifies disabled admin FNN policy is omitted because no admin VPC exists
+/// to resolve its symbolic route targets.
+#[crate::sqlx_test]
+#[allow(deprecated)]
+async fn test_managed_host_network_config_omits_disabled_admin_fnn_routing_profile(
+    pool: sqlx::PgPool,
+) {
+    // Configure a symbolic admin target while leaving admin FNN disabled.
+    let mut overrides = TestEnvOverrides::default().with_fnn_config(None);
+    overrides.fnn_config.as_mut().unwrap().admin_vpc = Some(AdminFnnConfig {
+        enabled: false, // Prevents creation of the required admin VPC.
+        vpc_vni: None,
+        routing_profile: FnnRoutingProfileConfig {
+            leak_default_route_from_underlay: Some(true),
+            route_target_imports: Some(vec![RouteTargetConfig {
+                asn: 429_000_000,
+                vni: None,
+                vni_self: true, // Must remain unused while admin FNN is disabled.
+            }]),
+            ..Default::default()
+        },
+    });
+    let env = api_fixtures::create_test_env_with_overrides(pool, overrides).await;
+    let managed_host = create_managed_host(&env).await;
+
+    // Fetch configuration for a DPU remaining on the non-FNN admin network.
+    let response = env
+        .api
+        .get_managed_host_network_config(tonic::Request::new(ManagedHostNetworkConfigRequest {
+            dpu_machine_id: Some(managed_host.dpu_ids[0]),
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+
+    // Neither field may expose policy from the disabled admin configuration.
+    let admin_interface = response.admin_interface.expect("admin interface");
+    assert_eq!(admin_interface.vpc_vni, 0);
+    assert!(admin_interface.vpc_routing_profile.is_none());
+    assert!(response.routing_profile.is_none());
 }
 
 #[crate::sqlx_test]
@@ -1319,6 +2525,7 @@ async fn test_managed_host_network_config_with_extension_services(pool: sqlx::Pg
         .api
         .create_dpu_extension_service(tonic::Request::new(CreateDpuExtensionServiceRequest {
             dpu_target: None,
+            service_vpc_interfaces: vec![],
             service_id: None,
             service_name: "test1".to_string(),
             service_type: DpuExtensionServiceType::KubernetesPod as i32,
@@ -1327,6 +2534,7 @@ async fn test_managed_host_network_config_with_extension_services(pool: sqlx::Pg
             data: create_extension_service_data("test"),
             credential: None,
             observability: None,
+            deployment_type: 0,
         }))
         .await
         .unwrap()
@@ -1342,6 +2550,7 @@ async fn test_managed_host_network_config_with_extension_services(pool: sqlx::Pg
         .api
         .create_dpu_extension_service(tonic::Request::new(CreateDpuExtensionServiceRequest {
             dpu_target: None,
+            service_vpc_interfaces: vec![],
             service_id: None,
             service_name: "test2".to_string(),
             service_type: DpuExtensionServiceType::KubernetesPod as i32,
@@ -1350,6 +2559,7 @@ async fn test_managed_host_network_config_with_extension_services(pool: sqlx::Pg
             data: create_extension_service_data("test2"),
             credential: None,
             observability: None,
+            deployment_type: 0,
         }))
         .await
         .unwrap()
@@ -1366,10 +2576,12 @@ async fn test_managed_host_network_config_with_extension_services(pool: sqlx::Pg
             InstanceDpuExtensionServiceConfig {
                 service_id: extension_service1.service_id.clone(),
                 version: service1_version.clone(),
+                service_vpc_ids: vec![],
             },
             InstanceDpuExtensionServiceConfig {
                 service_id: extension_service2.service_id.clone(),
                 version: service2_version.clone(),
+                service_vpc_ids: vec![],
             },
         ],
     };

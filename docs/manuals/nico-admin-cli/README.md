@@ -5,7 +5,7 @@ communicates with `nico-api` over gRPC with mutual TLS (mTLS).
 
 For building the CLI, connecting to `nico-api`, TLS flag reference, logging,
 and a quick connectivity check, see [`nico-admin-cli.md`](../nico-admin-cli.md).
-For mTLS cert generation and server-side auth configuration, see
+For the mTLS certificate lifecycle and server-side auth configuration, see
 [`nico-api-auth.md`](../nico-api-auth.md).
 
 ## Command reference

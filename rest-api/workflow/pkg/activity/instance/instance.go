@@ -18,7 +18,6 @@ import (
 
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
-	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
 	cdbp "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
 
 	sc "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/client/site"
@@ -78,7 +77,7 @@ func (mi ManageInstance) UpdateInstancesInDB(ctx context.Context, siteID uuid.UU
 
 	stDAO := cdbm.NewSiteDAO(mi.dbSession)
 
-	site, err := stDAO.GetByID(ctx, nil, siteID, nil, false)
+	site, err := stDAO.GetByID(ctx, nil, siteID, nil, false, false)
 	if err != nil {
 		if err == cdb.ErrDoesNotExist {
 			logger.Warn().Err(err).Msg("received Machine inventory for unknown or deleted Site")
@@ -613,7 +612,7 @@ func (mi ManageInstance) UpdateInstancesInDB(ctx context.Context, siteID uuid.UU
 			cdbm.InfiniBandInterfaceFilterInput{
 				InstanceIDs: []uuid.UUID{instance.ID},
 			},
-			paginator.PageInput{Limit: cwutil.GetPtr(cdbp.TotalLimit)},
+			cdbp.PageInput{Limit: cwutil.GetPtr(cdbp.TotalLimit)},
 			[]string{cdbm.InfiniBandPartitionRelationName},
 		)
 		if serr != nil {
@@ -737,7 +736,7 @@ func (mi ManageInstance) UpdateInstancesInDB(ctx context.Context, siteID uuid.UU
 			cdbm.SpectrumXAttachmentFilterInput{
 				InstanceIDs: []uuid.UUID{instance.ID},
 			},
-			paginator.PageInput{Limit: cwutil.GetPtr(cdbp.TotalLimit)},
+			cdbp.PageInput{Limit: cwutil.GetPtr(cdbp.TotalLimit)},
 			nil,
 		)
 		if serr != nil {
@@ -821,6 +820,34 @@ func (mi ManageInstance) UpdateInstancesInDB(ctx context.Context, siteID uuid.UU
 					}
 				}
 
+				// OVS metadata is client-owned config, so the Site status carries none of it;
+				// the reconciled value comes from the reported attachment config instead. Only
+				// a changed value is written, and only for an OVS attachment (attachment_ovs is
+				// nil otherwise), matching how the MAC, IP and VF fields are reconciled above.
+				var bridgeName *string
+				var ovnNetworkName *string
+				clearOvnNetworkName := false
+				if ovs := attachmentConfig.GetAttachmentOvs(); ovs != nil {
+					reportedBridgeName := ovs.GetBridgeName()
+					if sxa.BridgeName == nil || *sxa.BridgeName != reportedBridgeName {
+						bridgeName = &reportedBridgeName
+					}
+
+					// attachment_ovs is the client-owned config echoed back whole, so it is
+					// authoritative for ovn_network_name: a reported value is taken, and an
+					// omitted one means the mapping was removed and the persisted value must
+					// be cleared. Leaving it would report stale metadata and re-send the old
+					// mapping to Core on a later unrelated PATCH.
+					if ovs.OvnNetworkName != nil {
+						reportedOvnNetworkName := ovs.GetOvnNetworkName()
+						if sxa.OvnNetworkName == nil || *sxa.OvnNetworkName != reportedOvnNetworkName {
+							ovnNetworkName = &reportedOvnNetworkName
+						}
+					} else if sxa.OvnNetworkName != nil {
+						clearOvnNetworkName = true
+					}
+				}
+
 				var status *string
 				if controllerInstance.Status.SpxStatus.ConfigsSynced == corev1.SyncState_SYNCED {
 					isSpectrumXConfigSynced = true
@@ -829,23 +856,43 @@ func (mi ManageInstance) UpdateInstancesInDB(ctx context.Context, siteID uuid.UU
 					}
 				}
 
-				if macAddress == nil && ipAddress == nil && virtualFunctionID == nil && status == nil {
+				if macAddress == nil && ipAddress == nil && virtualFunctionID == nil && bridgeName == nil && ovnNetworkName == nil && status == nil && !clearOvnNetworkName {
 					continue
 				}
 
-				_, serr := sxaDAO.Update(
-					ctx,
-					nil,
-					cdbm.SpectrumXAttachmentUpdateInput{
-						SpectrumXAttachmentID: sxa.ID,
-						MacAddress:            macAddress,
-						IPAddress:             ipAddress,
-						VirtualFunctionID:     virtualFunctionID,
-						Status:                status,
-					},
-				)
-				if serr != nil {
-					slogger.Error().Err(serr).Str("SpectrumX Attachment ID", sxa.ID.String()).Msg("failed to update SpectrumX Attachment in DB")
+				if macAddress != nil || ipAddress != nil || virtualFunctionID != nil || bridgeName != nil || ovnNetworkName != nil || status != nil {
+					_, serr := sxaDAO.Update(
+						ctx,
+						nil,
+						cdbm.SpectrumXAttachmentUpdateInput{
+							SpectrumXAttachmentID: sxa.ID,
+							MacAddress:            macAddress,
+							IPAddress:             ipAddress,
+							VirtualFunctionID:     virtualFunctionID,
+							BridgeName:            bridgeName,
+							OvnNetworkName:        ovnNetworkName,
+							Status:                status,
+						},
+					)
+					if serr != nil {
+						slogger.Error().Err(serr).Str("SpectrumX Attachment ID", sxa.ID.String()).Msg("failed to update SpectrumX Attachment in DB")
+					}
+				}
+
+				// Update only writes provided values, so a removed ovn_network_name is
+				// cleared explicitly to drop the stale mapping.
+				if clearOvnNetworkName {
+					_, cerr := sxaDAO.Clear(
+						ctx,
+						nil,
+						cdbm.SpectrumXAttachmentClearInput{
+							SpectrumXAttachmentID: sxa.ID,
+							OvnNetworkName:        true,
+						},
+					)
+					if cerr != nil {
+						slogger.Error().Err(cerr).Str("SpectrumX Attachment ID", sxa.ID.String()).Msg("failed to clear SpectrumX Attachment OVN network name in DB")
+					}
 				}
 			}
 		}
@@ -959,7 +1006,7 @@ func (mi ManageInstance) UpdateInstancesInDB(ctx context.Context, siteID uuid.UU
 			cdbm.NVLinkInterfaceFilterInput{
 				InstanceIDs: []uuid.UUID{instance.ID},
 			},
-			paginator.PageInput{Limit: cwutil.GetPtr(cdbp.TotalLimit)},
+			cdbp.PageInput{Limit: cwutil.GetPtr(cdbp.TotalLimit)},
 			[]string{cdbm.NVLinkLogicalPartitionRelationName},
 		)
 
@@ -1135,7 +1182,7 @@ func (mi ManageInstance) UpdateInstancesInDB(ctx context.Context, siteID uuid.UU
 	instancesToTerminate := []*cdbm.Instance{}
 
 	// If inventory paging is enabled, we only need to do this once and we do it on the last page
-	if instanceInventory.InventoryPage == nil || instanceInventory.InventoryPage.TotalPages == 0 || (instanceInventory.InventoryPage.CurrentPage == instanceInventory.InventoryPage.TotalPages) {
+	if util.ShouldReconcileDeletions(instanceInventory.GetInventoryPage()) {
 		for _, instance := range existingInstanceIDMap {
 			found := false
 
@@ -1167,7 +1214,7 @@ func (mi ManageInstance) UpdateInstancesInDB(ctx context.Context, siteID uuid.UU
 
 			serr := mi.deleteInstanceFromDB(ctx, tx, instance, logger)
 			if serr != nil {
-				slogger.Error().Err(serr).Str("Instance ID", instance.ID.String()).Msg("failed to delete Instance from DB")
+				slogger.Error().Err(serr).Msg("failed to delete Instance from DB")
 				terr := tx.Rollback()
 				if terr != nil {
 					slogger.Error().Err(terr).Msg("failed to rollback transaction")
@@ -1178,7 +1225,7 @@ func (mi ManageInstance) UpdateInstancesInDB(ctx context.Context, siteID uuid.UU
 					slogger.Error().Err(err).Msg("error committing Instance delete transaction to DB")
 				} else {
 					// Add delete lifecycle event for metrics
-					slogger.Info().Str("Instance ID", instance.ID.String()).Msg("recording instance delete lifecycle event")
+					slogger.Info().Msg("recording instance delete lifecycle event")
 					instanceLifecycleEvents = append(instanceLifecycleEvents, cwm.InventoryObjectLifecycleEvent{ObjectID: instance.ID, Deleted: cwutil.GetPtr(time.Now())})
 				}
 			}
@@ -1625,7 +1672,7 @@ func (milm ManageInstanceLifecycleMetrics) RecordInstanceStatusTransitionMetrics
 
 	siteName, err := milm.siteNames.Get(ctx, milm.dbSession, siteID)
 	if err != nil {
-		logger.Error().Err(err).Str("Site ID", siteID.String()).Msg("failed to retrieve Site from DB")
+		logger.Error().Err(err).Msg("failed to retrieve Site from DB")
 		return err
 	}
 
@@ -1720,7 +1767,7 @@ func NewManageInstanceLifecycleMetrics(reg prometheus.Registerer, dbSession *cdb
 			prometheus.GaugeOpts{
 				Namespace: namespace,
 				Name:      "instance_operation_latency_seconds",
-				Help:      "Current latency of instance operations",
+				Help:      "Latency in seconds of the most recently recorded completed instance operation for each label set on this worker replica",
 			},
 			[]string{"site", "site_id", "operation_type", "from_status", "to_status"}),
 		siteNames: cwm.NewSiteNameCache(),

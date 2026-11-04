@@ -20,14 +20,14 @@ license = "Apache-2.0"
 requires-python = "==3.12.*"
 dependencies = [
     "bcrypt>=5.0.0",
-    "cryptography>=46.0.3",
+    "cryptography>=50.0.0",
     "paramiko>=4.0.0",
     "hvac>=2.4.0",
     # Confirms the rendered cloud-init user-data is valid YAML before it is
     # handed to NICo, rather than after a provision cycle fails on it.
     "pyyaml>=6.0.2",
-    "pytest>=9.0.1",
-    "requests>=2.32.0",
+    "pytest>=9.0.3",
+    "requests>=2.33.0",
 ]
 
 [build-system]

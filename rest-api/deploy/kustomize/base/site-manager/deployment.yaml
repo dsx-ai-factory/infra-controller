@@ -1,26 +1,26 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# carbide-rest-site-manager Deployment
+# nico-rest-site-manager Deployment
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: carbide-rest-site-manager
+  name: nico-rest-site-manager
   labels:
-    app: carbide-rest-site-manager
+    app: nico-rest-site-manager
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: carbide-rest-site-manager
+      app: nico-rest-site-manager
   template:
     metadata:
       labels:
-        app: carbide-rest-site-manager
+        app: nico-rest-site-manager
     spec:
       imagePullSecrets:
         - name: image-pull-secret
-      serviceAccountName: carbide-rest-site-manager
+      serviceAccountName: nico-rest-site-manager
       # 1000 is the `nvs` user the image declares. The image names it rather
       # than giving a UID, which the kubelet cannot verify, so runAsNonRoot
       # needs the number spelled out here.
@@ -30,7 +30,7 @@ spec:
         fsGroup: 1000
       containers:
         - name: site-manager
-          image: carbide-rest-site-manager
+          image: nico-rest-site-manager
           imagePullPolicy: IfNotPresent
           securityContext:
             readOnlyRootFilesystem: true
@@ -40,10 +40,15 @@ spec:
                 - ALL
           args:
             - --listen-port=8100
-            - --creds-manager-url=https://carbide-rest-cert-manager.carbide-rest:8000
+            # This host name has to be one of nico-rest-cert-manager's
+            # --dns-name SANs, because the connection is verified.
+            - --creds-manager-url=https://nico-rest-cert-manager.nico-rest:8000
+            # The CA that signs that listener, not the issuer of this service's
+            # own serving certificate. They are configured independently.
+            - --creds-manager-ca-path=/etc/credsmgr-ca/ca.crt
             - --tls-cert-path=/etc/tls/tls.crt
             - --tls-key-path=/etc/tls/tls.key
-            - --namespace=carbide-rest
+            - --namespace=nico-rest
             - --debug
           ports:
             - containerPort: 8100
@@ -51,6 +56,9 @@ spec:
           volumeMounts:
             - name: tls-certs
               mountPath: /etc/tls
+              readOnly: true
+            - name: credsmgr-ca
+              mountPath: /etc/credsmgr-ca
               readOnly: true
             - name: tmp
               mountPath: /tmp
@@ -79,6 +87,14 @@ spec:
         - name: tls-certs
           secret:
             secretName: site-manager-tls
+        # Only the CA certificate is projected. The signing key lives in the
+        # same Secret and sitemgr has no business reading it.
+        - name: credsmgr-ca
+          secret:
+            secretName: ca-signing-secret
+            items:
+              - key: tls.crt
+                path: ca.crt
         # sitemgr skips its own cert issuance while --tls-cert-path and
         # --tls-key-path are set. Dropping either flag sends it back to writing
         # /tmp/mgr.cert, so keep this writable alongside the read-only root

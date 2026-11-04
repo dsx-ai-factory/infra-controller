@@ -120,6 +120,8 @@ pub struct BmcEndpointExplorer {
     bmc_client: Arc<AuthenticatedBmcClient>,
     rotate_switch_nvos_credentials: Arc<AtomicBool>,
     mode: SiteExplorerExploreMode,
+    /// Whether nv-redfish reports include drive firmware inventory entries.
+    explore_drive_firmware: bool,
     /// Used to record per-device BMC rotation convergence at the moment the
     /// device is moved onto the site-wide BMC root (see
     /// [`Self::set_bmc_root_credentials`]). `None` only for the standalone
@@ -140,8 +142,16 @@ impl BmcEndpointExplorer {
             bmc_client,
             rotate_switch_nvos_credentials,
             mode,
+            explore_drive_firmware: false,
             database_connection,
         }
+    }
+
+    /// Sets whether nv-redfish reports include drive firmware inventory
+    /// entries; off unless set.
+    pub fn with_drive_firmware(mut self, explore_drive_firmware: bool) -> Self {
+        self.explore_drive_firmware = explore_drive_firmware;
+        self
     }
 
     async fn get_sitewide_bmc_password(
@@ -382,7 +392,12 @@ impl BmcEndpointExplorer {
             SiteExplorerExploreMode::NvRedfish => {
                 self.bmc_client
                     .redfish_client
-                    .nv_generate_exploration_report(bmc_ip_address, access, boot_interface)
+                    .nv_generate_exploration_report(
+                        bmc_ip_address,
+                        access,
+                        boot_interface,
+                        self.explore_drive_firmware,
+                    )
                     .await
             }
             SiteExplorerExploreMode::CompareResult => {
@@ -399,7 +414,12 @@ impl BmcEndpointExplorer {
                 let nvredfish = self
                     .bmc_client
                     .redfish_client
-                    .nv_generate_exploration_report(bmc_ip_address, access, boot_interface)
+                    .nv_generate_exploration_report(
+                        bmc_ip_address,
+                        access,
+                        boot_interface,
+                        self.explore_drive_firmware,
+                    )
                     .await;
                 match (&libredfish, &nvredfish) {
                     (Ok(report), Ok(nv_report)) => warn_report_diff(report, nv_report),
@@ -502,6 +522,7 @@ impl BmcEndpointExplorer {
         bmc_ip_address: SocketAddr,
         bmc_mac_address: MacAddress,
         username: &str,
+        vendor: RedfishVendor,
     ) -> Result<Credentials, EndpointExplorationError> {
         tracing::info!(
             %bmc_ip_address, %bmc_mac_address,
@@ -528,6 +549,11 @@ impl BmcEndpointExplorer {
         self.bmc_client
             .redfish_client
             .validate_bmc_credentials(bmc_ip_address, credentials.clone())
+            .await?;
+
+        self.bmc_client
+            .redfish_client
+            .restore_bmc_root_ipmi_access(bmc_ip_address, vendor, credentials.clone())
             .await?;
 
         self.set_bmc_root_credentials(bmc_mac_address, &credentials, Some(version))
@@ -749,24 +775,14 @@ impl EndpointExplorer for BmcEndpointExplorer {
                     .await
                 {
                     Ok(report) => report,
-                    // BMCs (HPE iLO, NVIDIA GB200/GB300, Vera Rubin, Lenovo AMI,
-                    // Viking AMI) can return intermittent 401 errors even with
-                    // valid credentials.
+                    // BMCs can return intermittent 401 errors even with valid
+                    // credentials.
                     // Allow up to MAX_AUTH_RETRIES before escalating to regular Unauthorized.
                     Err(EndpointExplorationError::Unauthorized {
                         details,
                         response_body,
                         response_code,
-                    }) if matches!(
-                        vendor,
-                        RedfishVendor::Hpe
-                            | RedfishVendor::NvidiaGBx00
-                            | RedfishVendor::LenovoGB300
-                            | RedfishVendor::LenovoAMI
-                            | RedfishVendor::AMI
-                            | RedfishVendor::VeraRubin
-                    ) =>
-                    {
+                    }) => {
                         const MAX_AUTH_RETRIES: u32 = 5;
 
                         let previous_count = last_exploration_error
@@ -903,6 +919,7 @@ impl EndpointExplorer for BmcEndpointExplorer {
                             bmc_ip_address,
                             bmc_mac_address,
                             bmc_cred_data.username,
+                            vendor,
                         )
                         .await?
                     }
@@ -1593,14 +1610,22 @@ fn warn_report_diff(report1: &EndpointExplorationReport, report2: &EndpointExplo
         );
     }
 
-    for (s1, s2) in report1.systems.iter().zip(report2.systems.iter()) {
-        if s1.id != s2.id {
-            tracing::warn!(
-                libredfish_system_id = ?s1.id,
-                nvredfish_system_id = ?s2.id,
-                "system IDs are not equal"
-            );
-        } else {
+    if report1.primary_system().map(|system| &system.id)
+        != report2.primary_system().map(|system| &system.id)
+    {
+        tracing::warn!(
+            libredfish_primary_system = ?report1.primary_system().map(|system| &system.id),
+            nvredfish_primary_system = ?report2.primary_system().map(|system| &system.id),
+            "primary system IDs are not equal"
+        );
+    }
+    let second_systems = report2
+        .systems
+        .iter()
+        .map(|system| (&system.id, system))
+        .collect::<HashMap<_, _>>();
+    for s1 in &report1.systems {
+        if let Some(s2) = second_systems.get(&s1.id) {
             if s1.ethernet_interfaces != s2.ethernet_interfaces {
                 tracing::warn!(
                     system_id = ?s1.id,
@@ -1635,6 +1660,13 @@ fn warn_report_diff(report1: &EndpointExplorationReport, report2: &EndpointExplo
                     nvredfish_serial_number = ?s2.serial_number,
                     "system serial numbers are not equal"
                 );
+            }
+
+            if s1.processors != s2.processors {
+                tracing::warn!(system_id = %s1.id,
+                    libredfish_processors = ?s1.processors,
+                    nvredfish_processors = ?s2.processors,
+                    "system processors are not equal");
             }
 
             if s1.attributes != s2.attributes {
@@ -1715,6 +1747,23 @@ fn warn_report_diff(report1: &EndpointExplorationReport, report2: &EndpointExplo
                 );
             }
 
+            if s1.bios_version != s2.bios_version {
+                tracing::warn!(system_id = %s1.id,
+                    libredfish_bios_version = ?s1.bios_version,
+                    nvredfish_bios_version = ?s2.bios_version,
+                    "system BIOS versions are not equal");
+            }
+            if report1
+                .primary_system()
+                .is_none_or(|primary| primary.id != s1.id)
+                && s1.serial_console_ssh_port != s2.serial_console_ssh_port
+            {
+                tracing::warn!(system_id = %s1.id,
+                    libredfish_serial_console_ssh_port = ?s1.serial_console_ssh_port,
+                    nvredfish_serial_console_ssh_port = ?s2.serial_console_ssh_port,
+                    "system serial-console ports are not equal");
+            }
+
             if s1.boot_order != s2.boot_order {
                 tracing::warn!(
                     system_id = ?s1.id,
@@ -1723,6 +1772,8 @@ fn warn_report_diff(report1: &EndpointExplorationReport, report2: &EndpointExplo
                     "system boot orders are not equal"
                 );
             }
+        } else {
+            tracing::warn!(system_id = %s1.id, "system is missing from the second report");
         }
     }
 
@@ -1878,34 +1929,37 @@ fn warn_report_diff(report1: &EndpointExplorationReport, report2: &EndpointExplo
         )
     }
 
-    if report1.physical_slot_number != report2.physical_slot_number {
+    let position1 = report1.rack_position();
+    let position2 = report2.rack_position();
+
+    if position1.physical_slot_number != position2.physical_slot_number {
         tracing::warn!(
-            libredfish_physical_slot_number = ?report1.physical_slot_number,
-            nvredfish_physical_slot_number = ?report2.physical_slot_number,
+            libredfish_physical_slot_number = ?position1.physical_slot_number,
+            nvredfish_physical_slot_number = ?position2.physical_slot_number,
             "physical slot numbers are not equal"
         )
     }
 
-    if report1.compute_tray_index != report2.compute_tray_index {
+    if position1.compute_tray_index != position2.compute_tray_index {
         tracing::warn!(
-            libredfish_compute_tray_index = ?report1.compute_tray_index,
-            nvredfish_compute_tray_index = ?report2.compute_tray_index,
+            libredfish_compute_tray_index = ?position1.compute_tray_index,
+            nvredfish_compute_tray_index = ?position2.compute_tray_index,
             "compute tray indexes are not equal"
         )
     }
 
-    if report1.topology_id != report2.topology_id {
+    if position1.topology_id != position2.topology_id {
         tracing::warn!(
-            libredfish_topology_id = ?report1.topology_id,
-            nvredfish_topology_id = ?report2.topology_id,
+            libredfish_topology_id = ?position1.topology_id,
+            nvredfish_topology_id = ?position2.topology_id,
             "topology IDs are not equal"
         )
     }
 
-    if report1.revision_id != report2.revision_id {
+    if position1.revision_id != position2.revision_id {
         tracing::warn!(
-            libredfish_revision_id = ?report1.revision_id,
-            nvredfish_revision_id = ?report2.revision_id,
+            libredfish_revision_id = ?position1.revision_id,
+            nvredfish_revision_id = ?position2.revision_id,
             "revision IDs are not equal"
         )
     }
@@ -1917,6 +1971,7 @@ mod tests {
 
     use arc_swap::ArcSwap;
     use axum::Router;
+    use bmc_mock::test_support::nvidia_gh200_swapped_managers_router;
     use bmc_mock::{CombinedServer, ListenerOrAddress};
     use carbide_instrument::Outcome;
     use carbide_instrument::testing::{
@@ -2138,6 +2193,12 @@ mod tests {
                     interface.id.as_deref() == Some("disabled") && interface.mac_address.is_none()
                 })
         );
+    }
+
+    #[tokio::test]
+    async fn explorer_chooses_correct_manager() {
+        let report = explore_router_in_default_mode(nvidia_gh200_swapped_managers_router()).await;
+        assert_eq!(report.managers[0].id, "BMC_0");
     }
 
     #[tokio::test]
@@ -2475,6 +2536,61 @@ mod tests {
             reingest_with_sitewide_password,
         )
         .await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn recovered_lenovo_credentials_require_ipmi_repair_before_storage() {
+        let _metrics_window = MetricsCapture::start();
+        let fixture = prepare_reingestion_fixture(DpuGeneration {
+            product: "BlueField-3 DPU",
+            username: "root",
+        })
+        .await
+        .unwrap();
+        // Model a Lenovo whose password changed before the IPMI repair completed.
+        fixture.sim.seed_user("1", SITEWIDE_PASSWORD);
+        fixture
+            .sim
+            .fail_next_ipmi_access("transient IPMI repair failure");
+        let result = fixture
+            .explorer
+            .try_sitewide_bmc_root_credentials(
+                fixture.bmc_ip_address,
+                fixture.interface.mac_address,
+                "1",
+                RedfishVendor::Lenovo,
+            )
+            .await;
+        assert!(result.is_err());
+        assert!(!fixture.sim.ipmi_account_access_enabled("1"));
+        assert!(
+            fixture
+                .credential_manager
+                .get_credentials(&fixture.per_bmc_credential_key)
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        fixture
+            .explorer
+            .try_sitewide_bmc_root_credentials(
+                fixture.bmc_ip_address,
+                fixture.interface.mac_address,
+                "1",
+                RedfishVendor::Lenovo,
+            )
+            .await
+            .unwrap();
+        assert!(fixture.sim.ipmi_account_access_enabled("1"));
+        assert_eq!(
+            fixture
+                .credential_manager
+                .get_credentials(&fixture.per_bmc_credential_key)
+                .await
+                .unwrap(),
+            Some(Credentials::new("1", SITEWIDE_PASSWORD))
+        );
     }
 
     // Authentication failures are throttled, so pause time to test rejection without waiting.

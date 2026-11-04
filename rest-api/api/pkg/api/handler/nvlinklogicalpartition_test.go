@@ -20,7 +20,6 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
 	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
 	authz "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
-	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/otelecho"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
@@ -135,7 +134,7 @@ func TestNVLinkLogicalPartitionHandler_Create(t *testing.T) {
 	assert.Nil(t, err)
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	e := echo.New()
 	cfg := common.GetTestConfig()
@@ -353,7 +352,6 @@ func TestNVLinkLogicalPartitionHandler_Create(t *testing.T) {
 				ec.Set("user", tc.user)
 			}
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			cibph := CreateNVLinkLogicalPartitionHandler{
@@ -485,7 +483,7 @@ func TestNVLinkLogicalPartitionHandler_Update(t *testing.T) {
 	assert.Nil(t, err)
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	cfg := common.GetTestConfig()
 
@@ -736,7 +734,6 @@ func TestNVLinkLogicalPartitionHandler_Update(t *testing.T) {
 				ec.Set("user", tc.user)
 			}
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			uibph := UpdateNVLinkLogicalPartitionHandler{
@@ -847,6 +844,7 @@ func TestNVLinkLogicalPartitionHandler_GetAll(t *testing.T) {
 
 	ts3 := testBuildTenantSiteAssociation(t, dbSession, tnOrg4, tn2.ID, site3.ID, tnu4.ID)
 	assert.NotNil(t, ts3)
+	testInstanceSiteBuildAllocation(t, dbSession, site3, tn2, "test-allocation-3", ipu)
 
 	cfg := common.GetTestConfig()
 	tempClient := &tmocks.Client{}
@@ -951,7 +949,7 @@ func TestNVLinkLogicalPartitionHandler_GetAll(t *testing.T) {
 	assert.NotNil(t, nvlifc6)
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	tests := []struct {
 		name                     string
@@ -1211,7 +1209,6 @@ func TestNVLinkLogicalPartitionHandler_GetAll(t *testing.T) {
 				ec.Set("user", tc.user)
 			}
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			ibpah := GetAllNVLinkLogicalPartitionHandler{
@@ -1372,7 +1369,7 @@ func TestNVLinkLogicalPartitionHandler_GetByID(t *testing.T) {
 	assert.NotNil(t, nvlifc2)
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	tests := []struct {
 		name                           string
@@ -1520,7 +1517,6 @@ func TestNVLinkLogicalPartitionHandler_GetByID(t *testing.T) {
 				ec.Set("user", tc.user)
 			}
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			nvllpgh := GetNVLinkLogicalPartitionHandler{
@@ -1664,7 +1660,7 @@ func TestNVLinkLogicalPartitionHandler_Delete(t *testing.T) {
 	_ = testInstanceBuildInstanceNVLinkInterface(t, dbSession, site2.ID, instNvDel.ID, nvllp4.ID, cutil.GetPtr(uuid.New()), cutil.GetPtr("NVIDIA GB200"), 0, cdbm.NVLinkInterfaceStatusReady)
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	e := echo.New()
 	cfg := common.GetTestConfig()
@@ -1888,7 +1884,6 @@ func TestNVLinkLogicalPartitionHandler_Delete(t *testing.T) {
 				ec.Set("user", tc.user)
 			}
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			ibpdh := DeleteNVLinkLogicalPartitionHandler{

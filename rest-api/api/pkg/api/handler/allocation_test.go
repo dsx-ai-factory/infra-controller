@@ -19,12 +19,10 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/pagination"
 	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
 	authz "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
-	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/otelecho"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/ipam"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
-	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
 	cdbp "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
 	cipam "github.com/NVIDIA/infra-controller/rest-api/ipam"
 	"github.com/google/uuid"
@@ -183,8 +181,8 @@ func TestAllocationHandler_Create(t *testing.T) {
 	ipb4 := testIPBlockBuildIPBlock(t, dbSession, "test4pb", site4, ip2, &tenant3.ID, cdbm.IPBlockRoutingTypeDatacenterOnly, "196.162.0.0", 16, cdbm.IPBlockProtocolVersionV4, false, cdbm.IPBlockStatusReady, ipu)
 	ipb5 := testIPBlockBuildIPBlock(t, dbSession, "test4pb", site5, ip2, &tenant4.ID, cdbm.IPBlockRoutingTypeDatacenterOnly, "194.162.0.0", 16, cdbm.IPBlockProtocolVersionV4, false, cdbm.IPBlockStatusReady, ipu)
 
-	// Matching the provider and site is not enough. A record with SitePrefixID
-	// set belongs to SitePrefix and cannot be the parent of an Allocation.
+	// Matching the provider and site is not enough. A tenant-managed block
+	// cannot be the parent of an Allocation.
 	tenantSitePrefix := testIPBlockBuildTenantSitePrefix(t, dbSession, "private-site-prefix", site, ip, tenant1, "192.169.0.0", 16, cdbm.IPBlockStatusReady, ipu)
 
 	ipbFG := testIPBlockBuildIPBlock(t, dbSession, "testipbFG", site, ip, nil, cdbm.IPBlockRoutingTypeDatacenterOnly, "192.170.0.0", 16, cdbm.IPBlockProtocolVersionV4, false, cdbm.IPBlockStatusReady, ipu)
@@ -275,7 +273,7 @@ func TestAllocationHandler_Create(t *testing.T) {
 	assert.NotNil(t, parentPrefIBP2)
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	// Mock Temporal call
 	tmc1 := &tmocks.Client{}
@@ -581,7 +579,6 @@ func TestAllocationHandler_Create(t *testing.T) {
 				ec.Set("user", tc.user)
 			}
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			cipbh := CreateAllocationHandler{
@@ -781,8 +778,7 @@ func TestAllocationHandler_Create(t *testing.T) {
 		ec.SetParamNames("orgName")
 		ec.SetParamValues(ipOrg1)
 		ec.Set("user", ipu)
-		requestCtx := context.WithValue(raceCtx, otelecho.TracerKey, tracer) //nolint:staticcheck // Middleware owns the context key.
-		ec.SetRequest(ec.Request().WithContext(requestCtx))
+		ec.SetRequest(ec.Request().WithContext(raceCtx))
 
 		handlerStarted = true
 		go func() {
@@ -880,9 +876,8 @@ func testCreateAllocation(t *testing.T, dbSession *cdb.Session, ipamStorage cipa
 	}
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
-	ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 	ec.SetRequest(ec.Request().WithContext(ctx))
 
 	// Mock Temporal Site Client pool for ALlocaiton creation
@@ -1035,7 +1030,7 @@ func TestAllocationHandler_GetAll(t *testing.T) {
 	}
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	tests := []struct {
 		name                              string
@@ -1088,7 +1083,7 @@ func TestAllocationHandler_GetAll(t *testing.T) {
 			querySiteIDs:   []string{site1.ID.String()},
 			expectedErr:    false,
 			expectedStatus: http.StatusOK,
-			expectedCnt:    paginator.DefaultLimit,
+			expectedCnt:    cdbp.DefaultLimit,
 			expectedTotal:  &totalCount,
 		},
 		{
@@ -1140,7 +1135,7 @@ func TestAllocationHandler_GetAll(t *testing.T) {
 			queryIncludeRelations3:        nil,
 			expectedErr:                   false,
 			expectedStatus:                http.StatusOK,
-			expectedCnt:                   paginator.DefaultLimit,
+			expectedCnt:                   cdbp.DefaultLimit,
 			expectedTotal:                 &totalCount,
 		},
 		{
@@ -1153,7 +1148,7 @@ func TestAllocationHandler_GetAll(t *testing.T) {
 			queryIncludeRelations3:        nil,
 			expectedErr:                   false,
 			expectedStatus:                http.StatusOK,
-			expectedCnt:                   paginator.DefaultLimit,
+			expectedCnt:                   cdbp.DefaultLimit,
 			expectedTotal:                 &totalCount,
 		},
 		{
@@ -1163,7 +1158,7 @@ func TestAllocationHandler_GetAll(t *testing.T) {
 			queryTenantIDs: []string{tenant1.ID.String()},
 			expectedErr:    false,
 			expectedStatus: http.StatusOK,
-			expectedCnt:    paginator.DefaultLimit,
+			expectedCnt:    cdbp.DefaultLimit,
 			expectedTotal:  &totalCount,
 		},
 		{
@@ -1174,7 +1169,7 @@ func TestAllocationHandler_GetAll(t *testing.T) {
 			querySiteIDs:   []string{site1.ID.String()},
 			expectedErr:    false,
 			expectedStatus: http.StatusOK,
-			expectedCnt:    paginator.DefaultLimit,
+			expectedCnt:    cdbp.DefaultLimit,
 			expectedTotal:  &totalCount,
 		},
 		{
@@ -1185,7 +1180,7 @@ func TestAllocationHandler_GetAll(t *testing.T) {
 			queryTenantIDs:                []string{tenant1.ID.String()},
 			expectedErr:                   false,
 			expectedStatus:                http.StatusOK,
-			expectedCnt:                   paginator.DefaultLimit,
+			expectedCnt:                   cdbp.DefaultLimit,
 			expectedTotal:                 &totalCount,
 		},
 		{
@@ -1196,7 +1191,7 @@ func TestAllocationHandler_GetAll(t *testing.T) {
 			querySiteIDs:                  []string{site1.ID.String()},
 			expectedErr:                   false,
 			expectedStatus:                http.StatusOK,
-			expectedCnt:                   paginator.DefaultLimit,
+			expectedCnt:                   cdbp.DefaultLimit,
 			expectedTotal:                 &totalCount,
 		},
 		{
@@ -1208,7 +1203,7 @@ func TestAllocationHandler_GetAll(t *testing.T) {
 			querySiteIDs:                  []string{site1.ID.String()},
 			expectedErr:                   false,
 			expectedStatus:                http.StatusOK,
-			expectedCnt:                   paginator.DefaultLimit,
+			expectedCnt:                   cdbp.DefaultLimit,
 			expectedTotal:                 &totalCount,
 		},
 		{
@@ -1222,7 +1217,7 @@ func TestAllocationHandler_GetAll(t *testing.T) {
 			expectedErr:                       false,
 			expectedInfrastructureProviderOrg: cutil.GetPtr(ip.Org),
 			expectedStatus:                    http.StatusOK,
-			expectedCnt:                       paginator.DefaultLimit,
+			expectedCnt:                       cdbp.DefaultLimit,
 			expectedTotal:                     &totalCount,
 		},
 		{
@@ -1238,7 +1233,7 @@ func TestAllocationHandler_GetAll(t *testing.T) {
 			expectedTenantOrg:                 cutil.GetPtr(tenant1.Org),
 			expectedErr:                       false,
 			expectedStatus:                    http.StatusOK,
-			expectedCnt:                       paginator.DefaultLimit,
+			expectedCnt:                       cdbp.DefaultLimit,
 			expectedTotal:                     &totalCount,
 		},
 		{
@@ -1253,7 +1248,7 @@ func TestAllocationHandler_GetAll(t *testing.T) {
 			expectedSiteName:                  cutil.GetPtr(site1.Name),
 			expectedErr:                       false,
 			expectedStatus:                    http.StatusOK,
-			expectedCnt:                       paginator.DefaultLimit,
+			expectedCnt:                       cdbp.DefaultLimit,
 			expectedTotal:                     &totalCount,
 		},
 		{
@@ -1303,7 +1298,7 @@ func TestAllocationHandler_GetAll(t *testing.T) {
 			querySearch:                   cutil.GetPtr("allocation-"),
 			expectedErr:                   false,
 			expectedStatus:                http.StatusOK,
-			expectedCnt:                   paginator.DefaultLimit,
+			expectedCnt:                   cdbp.DefaultLimit,
 			expectedTotal:                 &totalCount,
 		},
 		{
@@ -1327,7 +1322,7 @@ func TestAllocationHandler_GetAll(t *testing.T) {
 			querySearch:                   cutil.GetPtr("allocation Registered"),
 			expectedErr:                   false,
 			expectedStatus:                http.StatusOK,
-			expectedCnt:                   paginator.DefaultLimit,
+			expectedCnt:                   cdbp.DefaultLimit,
 			expectedTotal:                 &totalCount,
 		},
 		{
@@ -1375,7 +1370,7 @@ func TestAllocationHandler_GetAll(t *testing.T) {
 			queryStatuses:                 []string{cdbm.AllocationStatusRegistered},
 			expectedErr:                   false,
 			expectedStatus:                http.StatusOK,
-			expectedCnt:                   paginator.DefaultLimit,
+			expectedCnt:                   cdbp.DefaultLimit,
 			expectedTotal:                 &totalCount,
 		},
 		{
@@ -1481,7 +1476,7 @@ func TestAllocationHandler_GetAll(t *testing.T) {
 			queryTenantIDs: []string{tenant1.ID.String(), tenant2.ID.String()},
 			expectedErr:    false,
 			expectedStatus: http.StatusOK,
-			expectedCnt:    paginator.DefaultLimit,
+			expectedCnt:    cdbp.DefaultLimit,
 			expectedTotal:  &totalCount,
 		},
 		{
@@ -1492,7 +1487,7 @@ func TestAllocationHandler_GetAll(t *testing.T) {
 			querySiteIDs:   []string{site1.ID.String(), site2.ID.String()},
 			expectedErr:    false,
 			expectedStatus: http.StatusOK,
-			expectedCnt:    paginator.DefaultLimit,
+			expectedCnt:    cdbp.DefaultLimit,
 			expectedTotal:  &totalCount,
 		},
 		{
@@ -1504,7 +1499,7 @@ func TestAllocationHandler_GetAll(t *testing.T) {
 			queryStatuses:                 []string{cdbm.AllocationStatusRegistered, cdbm.AllocationStatusPending},
 			expectedErr:                   false,
 			expectedStatus:                http.StatusOK,
-			expectedCnt:                   paginator.DefaultLimit,
+			expectedCnt:                   cdbp.DefaultLimit,
 			expectedTotal:                 &totalCount,
 		},
 		{
@@ -1651,8 +1646,6 @@ func TestAllocationHandler_GetAll(t *testing.T) {
 			if tc.user != nil {
 				ec.Set("user", tc.user)
 			}
-
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
@@ -1803,7 +1796,7 @@ func TestAllocationHandler_GetByID(t *testing.T) {
 	assert.NotNil(t, aIPB)
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	tests := []struct {
 		name                              string
@@ -1999,7 +1992,6 @@ func TestAllocationHandler_GetByID(t *testing.T) {
 				ec.Set("user", tc.user)
 			}
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			tah := GetAllocationHandler{
@@ -2105,6 +2097,7 @@ func TestAllocationHandler_Update(t *testing.T) {
 	ipb := common.TestBuildIPBlock(t, dbSession, "test-ip-block", site, &tenant1.ID, cdbm.IPBlockRoutingTypePublic, "192.168.1.0", 24, cdbm.IPBlockProtocolVersionV4, ipu)
 
 	parentPref, err := ipam.CreateIpamEntryForIPBlock(ctx, ipamStorage, ipb.Prefix, ipb.PrefixLength, ipb.RoutingType, ipb.InfrastructureProviderID.String(), ipb.SiteID.String())
+	require.NoError(t, err)
 	assert.NotNil(t, parentPref)
 
 	acGoodIT := model.APIAllocationConstraintCreateRequest{ResourceType: cdbm.AllocationResourceTypeInstanceType, ResourceTypeID: it1.ID.String(), ConstraintType: cdbm.AllocationConstraintTypeReserved, ConstraintValue: 2}
@@ -2140,7 +2133,7 @@ func TestAllocationHandler_Update(t *testing.T) {
 	assert.Nil(t, err)
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	// Mock Temporal call
 	tmc1 := &tmocks.Client{}
@@ -2333,7 +2326,6 @@ func TestAllocationHandler_Update(t *testing.T) {
 				ec.Set("user", tc.user)
 			}
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			tah := UpdateAllocationHandler{
@@ -2561,7 +2553,7 @@ func TestAllocationHandler_Delete(t *testing.T) {
 	vpcPrefix := testAllocationBuildVpcPrefix(t, dbSession, tenant1, vpc1, "testVPCPrefix", childVpcPrefixIBP)
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	// Mock Temporal call
 	tmc1 := &tmocks.Client{}
@@ -2793,7 +2785,6 @@ func TestAllocationHandler_Delete(t *testing.T) {
 				ec.Set("user", tc.user)
 			}
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			dah := DeleteAllocationHandler{
@@ -2861,6 +2852,72 @@ func TestAllocationHandler_Delete(t *testing.T) {
 			if tc.verifyChildSpanner {
 				span := oteltrace.SpanFromContext(ec.Request().Context())
 				assert.True(t, span.SpanContext().IsValid())
+			}
+		})
+	}
+
+	cases := []struct {
+		name                     string
+		providerGrant            bool
+		siteOverride             *bool
+		crossTenantProviderGrant bool
+		crossTenantSiteOverride  *bool
+		revokeGrant              bool
+	}{
+		{name: "last allocation preserves provider grant", providerGrant: true},
+		{name: "last allocation preserves site grant", siteOverride: cutil.GetPtr(true)},
+		{name: "last allocation preserves site denial overriding provider grant", providerGrant: true, siteOverride: cutil.GetPtr(false)},
+		{name: "last allocation removes association after provider grant is revoked", providerGrant: true, revokeGrant: true},
+		{name: "last allocation preserves cross-Tenant site grant", crossTenantSiteOverride: cutil.GetPtr(true)},
+		{name: "last allocation preserves cross-Tenant site denial overriding provider grant", crossTenantProviderGrant: true, crossTenantSiteOverride: cutil.GetPtr(false)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tenant := common.TestBuildTenant(t, dbSession, tc.name, uuid.NewString(), tnu)
+			account := common.TestBuildTenantAccountWithCapabilities(t, dbSession, ip, &tenant.ID, tenant.Org, cdbm.TenantAccountStatusReady, tnu, cdbm.TenantAccountConfig{
+				TargetedInstanceCreation:     tc.providerGrant,
+				CrossTenantInterfaceCreation: tc.crossTenantProviderGrant,
+			})
+			ts := cdbm.TestBuildTenantSite(t, dbSession, tenant, site, &cdbm.TenantSiteConfig{
+				TargetedInstanceCreation:     tc.siteOverride,
+				CrossTenantInterfaceCreation: tc.crossTenantSiteOverride,
+			}, tnu)
+			allocation := common.TestBuildAllocation(t, dbSession, site, tenant, tc.name, tnu)
+			if tc.revokeGrant {
+				accountConfig := account.Config
+				accountConfig.TargetedInstanceCreation = false
+				_, err := cdbm.NewTenantAccountDAO(dbSession).Update(ctx, nil, cdbm.TenantAccountUpdateInput{
+					TenantAccountID: account.ID, Config: &accountConfig,
+				})
+				require.NoError(t, err)
+			}
+			e := echo.New()
+			rec := httptest.NewRecorder()
+			ec := e.NewContext(httptest.NewRequest(http.MethodDelete, "/", nil), rec)
+			ec.SetParamNames("orgName", "id")
+			ec.SetParamValues(ipOrg1, allocation.ID.String())
+			ec.Set("user", ipu)
+			handler := DeleteAllocationHandler{dbSession: dbSession, cfg: cfg}
+			err := handler.Handle(ec)
+			require.NoError(t, err)
+			require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+			_, err = cdbm.NewAllocationDAO(dbSession).GetByID(ctx, nil, allocation.ID, nil)
+			require.ErrorIs(t, err, cdb.ErrDoesNotExist)
+			remaining, err := cdbm.NewTenantSiteDAO(dbSession).GetByID(ctx, nil, ts.ID, nil)
+			if tc.revokeGrant {
+				require.ErrorIs(t, err, cdb.ErrDoesNotExist)
+				account, err = cdbm.NewTenantAccountDAO(dbSession).GetByID(ctx, nil, account.ID, nil)
+				require.NoError(t, err)
+				assert.False(t, account.Config.TargetedInstanceCreation)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tc.siteOverride, remaining.Config.TargetedInstanceCreation)
+			assert.Equal(t, tc.crossTenantSiteOverride, remaining.Config.CrossTenantInterfaceCreation)
+			if tc.crossTenantSiteOverride != nil {
+				crossTenantAllowed, err := cdbm.TenantHasCrossTenantInterfaceCreation(ctx, nil, dbSession, tenant, site.ID)
+				require.NoError(t, err)
+				assert.Equal(t, *tc.crossTenantSiteOverride, crossTenantAllowed)
 			}
 		})
 	}
@@ -2934,7 +2991,7 @@ func TestInstanceTypeAllocationForMultipleTenants(t *testing.T) {
 		"CreateTenant", mock.Anything).Return(wrun, nil)
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	tests := []struct {
 		name                 string
@@ -2983,7 +3040,6 @@ func TestInstanceTypeAllocationForMultipleTenants(t *testing.T) {
 				ec.Set("user", tc.user)
 			}
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			cipbh := CreateAllocationHandler{

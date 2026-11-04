@@ -166,7 +166,7 @@ pub(crate) struct Args {
     #[clap(
         long = "bmc-ip-address",
         value_name = "BMC_IP_ADDRESS",
-        help = "Static BMC IP (pre-allocates machine_interface for site explorer, same as expected switches)"
+        help = "Static BMC IP (pre-allocates machine_interface for site explorer, same as expected switches). Must not be unspecified, multicast, or IPv4 limited broadcast, including the IPv4-mapped IPv6 form of each"
     )]
     bmc_ip_address: Option<IpAddr>,
 
@@ -258,6 +258,7 @@ impl TryFrom<Args> for rpc::forge::ExpectedMachine {
                     disable_lockdown: Some(dl),
                 }
             }),
+            server_name: None,
         })
     }
 }

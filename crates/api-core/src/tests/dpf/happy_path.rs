@@ -32,7 +32,7 @@ use tonic::Request;
 
 const TEST_TIMEOUT: Duration = Duration::from_secs(30);
 
-use super::{dpf_config, expect_dpf_service_inventory};
+use super::{dpf_config, expect_dpf_service_inventory, phase_observation};
 use crate::tests::common::api_fixtures::{
     TestEnvOverrides, create_managed_host_with_dpf, create_managed_host_with_dpf_bf4,
     create_test_env_with_overrides, get_config,
@@ -40,12 +40,13 @@ use crate::tests::common::api_fixtures::{
 
 fn default_mock(deployment_type: DpuDeploymentType) -> MockDpfOperations {
     let mut mock = MockDpfOperations::new();
-    mock.expect_register_dpu_device().returning(|_, _| Ok(()));
+    mock.expect_register_dpu_device()
+        .returning(|_, _, _| Ok(()));
     mock.expect_register_dpu_node().returning(|_| Ok(()));
     mock.expect_release_maintenance_hold().returning(|_| Ok(()));
     mock.expect_is_reboot_required().returning(|_| Ok(false));
-    mock.expect_get_dpu_phase()
-        .returning(|_, _| Ok(DpuPhase::Ready));
+    mock.expect_get_dpu_phase_observation()
+        .returning(|_, _| Ok(phase_observation(DpuPhase::Ready)));
     mock.expect_deployment_type_for_dpu()
         .returning(move |__, _| Ok(deployment_type));
     mock.expect_verify_node_labels().returning(|_, _| Ok(true));
@@ -227,14 +228,14 @@ async fn test_dpf_inventory_uses_host_context_and_preserves_last_good_value(pool
             .is_some_and(|dpf| dpf.used_for_ingestion)
     );
     let host_node_id = host
-        .bmc_info
+        .bmc
         .as_ref()
         .and_then(|bmc| bmc.mac.as_deref())
         .expect("host BMC MAC must exist")
         .to_ascii_lowercase()
         .replace(':', "-");
     let dpu_device_id = dpu
-        .bmc_info
+        .bmc
         .as_ref()
         .and_then(|bmc| bmc.mac.as_deref())
         .expect("DPU BMC MAC must exist")

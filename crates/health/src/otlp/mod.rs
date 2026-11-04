@@ -19,12 +19,14 @@ pub mod convert;
 pub mod drain;
 pub mod metrics_drain;
 
+use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::hash::Hash;
 use std::ops::Range;
 use std::sync::Arc;
 use std::time::Duration;
 
-use carbide_instrument::{LabelValue, emit};
+use carbide_instrument::{LabelValue, emit, emit_count};
 use opentelemetry::StringValue;
 use tokio::task::JoinSet;
 use tonic::transport::{Channel, ClientTlsConfig, Endpoint};
@@ -70,6 +72,92 @@ pub(crate) struct OtlpQueueEntryDropped {
     pub(crate) target: ConfiguredOtlpTarget,
     #[label]
     pub(crate) signal: OtlpSignal,
+}
+
+/// A target queue accepted a log record or metric sample, including when the
+/// insertion replaces an existing entry or evicts an older entry.
+#[derive(carbide_instrument::Event)]
+#[event(
+    event_name = "otlp_record_accepted",
+    metric_name = "carbide_health_otlp_ingress_records_total",
+    component = "nico-hardware-health",
+    log = off,
+    metric = counter,
+    describe = "Number of log records or metric samples accepted into OTLP queues, including replacements and insertions that evict an older entry, by target and signal."
+)]
+pub(crate) struct OtlpRecordAccepted {
+    #[label]
+    pub(crate) target: ConfiguredOtlpTarget,
+    #[label]
+    pub(crate) signal: OtlpSignal,
+}
+
+/// A receiver acknowledged log records or metric data points.
+#[derive(carbide_instrument::Event)]
+#[event(
+    event_name = "otlp_records_exported",
+    metric_name = "carbide_health_otlp_egress_records_total",
+    component = "nico-hardware-health",
+    log = off,
+    metric = counter,
+    describe = "Number of OTLP log records or metric data points acknowledged by the receiver, excluding explicit partial-success rejections, by target and signal."
+)]
+pub(crate) struct OtlpRecordsExported {
+    #[label]
+    pub(crate) target: ConfiguredOtlpTarget,
+    #[label]
+    pub(crate) signal: OtlpSignal,
+}
+
+/// Receiver rejection details shared by the log and metric export paths.
+#[derive(Default)]
+pub(crate) struct OtlpExportResponse {
+    /// Rejected log records or metric data points, as reported by the receiver.
+    pub(crate) rejected_records: i64,
+
+    /// Receiver warning or explanation; an empty message carries no detail.
+    pub(crate) error_message: String,
+}
+
+impl OtlpExportResponse {
+    /// Counts acknowledged records, excluding rejections reported by the receiver.
+    /// Invalid rejection counts produce a warning and no counter increment.
+    fn record(&self, target: &OtlpTargetConfig, signal: OtlpSignal, record_count: usize) {
+        let accepted = usize::try_from(self.rejected_records)
+            .ok()
+            .and_then(|rejected| record_count.checked_sub(rejected));
+
+        let Some(accepted) = accepted else {
+            tracing::warn!(
+                endpoint = %target.endpoint,
+                ?signal,
+                record_count,
+                rejected_records = self.rejected_records,
+                error = %self.error_message,
+                "otlp receiver returned an invalid rejection count; export count omitted"
+            );
+
+            return;
+        };
+
+        if self.rejected_records > 0 || !self.error_message.is_empty() {
+            tracing::warn!(
+                endpoint = %target.endpoint,
+                ?signal,
+                rejected_records = self.rejected_records,
+                error = %self.error_message,
+                "otlp receiver reported partial success"
+            );
+        }
+
+        emit_count(
+            OtlpRecordsExported {
+                target: ConfiguredOtlpTarget(target.endpoint.clone()),
+                signal,
+            },
+            accepted as u64,
+        );
+    }
 }
 
 /// Builds an OTLP endpoint with the target's current TLS or mTLS policy.
@@ -240,10 +328,12 @@ pub(crate) trait OtlpExport {
     /// Encoded size of `request` in bytes.
     fn encoded_len(request: &Self::Request) -> usize;
 
+    /// Sends the request and returns the receiver's rejection details.
+    /// A response without partial-success details means zero rejections.
     fn send(
         &mut self,
         request: Self::Request,
-    ) -> impl Future<Output = Result<(), tonic::Status>> + Send;
+    ) -> impl Future<Output = Result<OtlpExportResponse, tonic::Status>> + Send;
 }
 
 const MAX_EXPORT_RETRIES: usize = 5;
@@ -258,6 +348,9 @@ const MAX_EXPORT_RETRIES: usize = 5;
 /// the same export time, up to five times with a backoff that starts over for
 /// each range. A range that still fails is dropped and reported with
 /// [`OtlpExportFailed`].
+///
+/// Successful responses increment the egress counter by the acknowledged record
+/// count. Partial-success responses exclude rejected records and are not retried.
 pub(crate) async fn export_items<E: OtlpExport>(
     export: &mut E,
     items: &[E::Item],
@@ -290,8 +383,11 @@ pub(crate) async fn export_items<E: OtlpExport>(
             let request = request
                 .take()
                 .unwrap_or_else(|| export.build(&items[range.clone()], observed_nanos));
+
             match export.send(request).await {
-                Ok(()) => {
+                Ok(response) => {
+                    response.record(target, signal, record_count);
+
                     tracing::debug!(
                         endpoint = %target.endpoint,
                         ?signal,
@@ -349,6 +445,9 @@ pub(crate) async fn export_items<E: OtlpExport>(
 /// fewer than `max_concurrent_exports` are in flight. Each export runs as its
 /// own task, so building and encoding requests uses several worker threads. A
 /// partial batch is sent when `flush_interval` elapses without a full one.
+/// Metric keys keep their latest complete observation until that batch is sent;
+/// logs retain every staged event. Each queue pass consumes at most `batch_size`
+/// entries so repeated replacements cannot prevent a return to the select loop.
 /// Exports share one connection, which is replaced when the target's TLS
 /// material is reloaded. Queue storage is converted to export items after
 /// removal, so compact metric entries do not change batching or retries.
@@ -366,6 +465,7 @@ async fn run_drain<K, Q, E>(
     let target = Arc::new(target);
     let mut export = make_export(connect(&target, signal).await);
     let mut batch = Vec::with_capacity(target.batch_size);
+    let mut metric_indices = HashMap::new();
     let mut interval = tokio::time::interval(target.flush_interval);
 
     // Non-TLS targets use the default only to construct a dormant interval;
@@ -418,13 +518,19 @@ async fn run_drain<K, Q, E>(
         }
 
         while in_flight.len() < target.max_concurrent_exports {
-            drain_batch(&queue, &mut batch, target.batch_size);
+            drain_batch(
+                std::iter::from_fn(|| queue.pop()),
+                &mut batch,
+                (signal == OtlpSignal::Metrics).then_some(&mut metric_indices),
+                target.batch_size,
+            );
             let full = batch.len() >= target.batch_size;
             let send_partial = flush_partial && !batch.is_empty();
             if !full && !send_partial {
                 break;
             }
             let ready = std::mem::replace(&mut batch, Vec::with_capacity(target.batch_size));
+            metric_indices.clear();
             in_flight.spawn(export_batch(export.clone(), ready, target.clone(), signal));
             if !full {
                 break;
@@ -443,15 +549,37 @@ async fn export_batch<E: OtlpExport>(
     export_items(&mut export, &batch, &target, signal).await;
 }
 
-/// Tops `batch` up to `batch_size` from the queue.
-fn drain_batch<K: Eq + Hash + Clone, Q: IntoExportItem<V>, V>(
-    queue: &DedupQueue<K, Q>,
+/// Tops `batch` up to `batch_size`, consuming at most that many queue entries.
+///
+/// With `metric_indices`, an existing key replaces its complete observation;
+/// `None` preserves the order and multiplicity of staged logs. The caller keeps
+/// the index across partial drains and clears it when taking the batch to export.
+fn drain_batch<K: Eq + Hash, Q: IntoExportItem<V>, V>(
+    entries: impl Iterator<Item = (K, Q)>,
     batch: &mut Vec<V>,
+    mut metric_indices: Option<&mut HashMap<K, usize>>,
     batch_size: usize,
 ) {
+    let mut entries = entries.take(batch_size);
     while batch.len() < batch_size {
-        match queue.pop() {
-            Some((_key, value)) => batch.push(value.into_export_item()),
+        match entries.next() {
+            Some((key, value)) => {
+                let value = value.into_export_item();
+                // Two staged readings for one metric would become two points
+                // with the same export timestamp.
+                if let Some(indices) = metric_indices.as_deref_mut() {
+                    match indices.entry(key) {
+                        Entry::Occupied(index) => {
+                            batch[*index.get()] = value;
+                            continue;
+                        }
+                        Entry::Vacant(index) => {
+                            index.insert(batch.len());
+                        }
+                    }
+                }
+                batch.push(value);
+            }
             None => break,
         }
     }
@@ -545,12 +673,13 @@ pub use opentelemetry_proto::tonic::resource::v1 as resource;
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
+    use std::collections::HashMap;
+    use std::time::{Duration, SystemTime};
 
     use carbide_instrument::emit;
     use carbide_instrument::testing::{MetricsCapture, capture_logs};
     use carbide_test_support::Outcome::Yields;
-    use carbide_test_support::{Case, check_cases_async};
+    use carbide_test_support::{Case, check_cases_async, value_scenarios};
     use tokio::io::AsyncReadExt;
     use tokio::net::TcpListener;
     use tokio::sync::oneshot;
@@ -558,10 +687,144 @@ mod tests {
 
     use super::{
         OtlpExport, OtlpExportFailed, OtlpSignal, connect_replacement_target_with_timeout,
-        export_items, target_endpoint,
+        drain_batch, export_items, target_endpoint,
     };
     use crate::HealthError;
     use crate::config::OtlpTargetConfig;
+    use crate::endpoint::BmcAddr;
+    use crate::otlp::common::any_value;
+    use crate::otlp::convert::build_queued_metrics_export_request;
+    use crate::otlp::metrics::{metric, number_data_point};
+    use crate::sink::otlp::QueuedMetric;
+    use crate::sink::{EventContext, MetricSample, MetricSemantics};
+
+    #[test]
+    fn partial_metric_batch_request_keeps_latest_complete_observation() {
+        let context = EventContext {
+            endpoint_key: "switch".to_string(),
+            addr: BmcAddr {
+                ip: "192.0.2.1".parse().unwrap(),
+                port: None,
+                mac: None,
+            },
+            collector_type: "nvue_gnmi",
+            metadata: None,
+            rack_id: None,
+            labels: Default::default(),
+        };
+        let sample = |key: &str, value, semantics| {
+            (
+                key.to_string(),
+                QueuedMetric::Owned(Box::new((
+                    context.clone(),
+                    MetricSample {
+                        key: key.to_string(),
+                        name: "nvue_gnmi".to_string(),
+                        metric_type: "packets".to_string(),
+                        unit: "count".to_string(),
+                        value,
+                        semantics,
+                        labels: vec![("interface_name".into(), key.to_string())],
+                        context: None,
+                    },
+                ))),
+            )
+        };
+        let counter = |start| MetricSemantics::CumulativeCounter {
+            description: "Number of packets reported by the interface",
+            start_time: Some(SystemTime::UNIX_EPOCH + Duration::from_nanos(start)),
+        };
+        let mut batch = Vec::new();
+        let mut metric_indices = HashMap::new();
+
+        drain_batch(
+            [
+                sample("swp1", 100.0, counter(100)),
+                sample("swp2", 20.0, MetricSemantics::Gauge),
+            ]
+            .into_iter(),
+            &mut batch,
+            Some(&mut metric_indices),
+            3,
+        );
+        assert_eq!(batch.len(), 2);
+
+        // The first reading has left the queue, but its batch has not flushed.
+        // A device reset supplies a lower value and a newer accumulation start.
+        let mut replacements = [
+            sample("swp1", 3.0, counter(200)),
+            sample("swp3", 30.0, MetricSemantics::Gauge),
+            sample("swp4", 40.0, MetricSemantics::Gauge),
+        ]
+        .into_iter();
+        drain_batch(
+            replacements.by_ref(),
+            &mut batch,
+            Some(&mut metric_indices),
+            3,
+        );
+        assert_eq!(replacements.next().unwrap().0, "swp4");
+
+        let request = build_queued_metrics_export_request(&batch, 300, "health");
+        assert_eq!(request.resource_metrics.len(), 1);
+        let metrics = &request.resource_metrics[0].scope_metrics[0].metrics;
+        assert_eq!(metrics.len(), 2);
+
+        let exported_points = |(name, expected_counter): (&str, bool)| {
+            let metric = metrics.iter().find(|metric| metric.name == name).unwrap();
+            let points = match (expected_counter, metric.data.as_ref()) {
+                (false, Some(metric::Data::Gauge(gauge))) => &gauge.data_points,
+                (true, Some(metric::Data::Sum(sum))) => &sum.data_points,
+                _ => panic!("unexpected metric type for {name}"),
+            };
+            points
+                .iter()
+                .map(|point| {
+                    let interface = point
+                        .attributes
+                        .iter()
+                        .find(|attribute| attribute.key == "interface_name")
+                        .unwrap();
+                    let Some(any_value::Value::StringValue(key)) =
+                        &interface.value.as_ref().unwrap().value
+                    else {
+                        panic!("interface label must be a string");
+                    };
+                    let Some(number_data_point::Value::AsDouble(value)) = point.value else {
+                        panic!("metric point must contain a double");
+                    };
+                    (
+                        key.as_str(),
+                        value,
+                        point.start_time_unix_nano,
+                        point.time_unix_nano,
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        value_scenarios!(run = exported_points;
+            "legacy gauge keeps latest reading and unrelated series" {
+                ("health_nvue_gnmi_packets_count", false) =>
+                    vec![("swp1", 3.0, 0, 300), ("swp2", 20.0, 0, 300), ("swp3", 30.0, 0, 300)]
+            }
+            "counter alias keeps the replacement accumulation start" {
+                ("health_nvue_gnmi_packets_count_total", true) =>
+                    vec![("swp1", 3.0, 200, 300)]
+            }
+        );
+    }
+
+    #[test]
+    fn metric_batch_limits_replacement_work_per_drain() {
+        let mut queue = (1..=5).map(|value| ("metric", value));
+        let mut batch = Vec::new();
+        let mut metric_indices = HashMap::new();
+
+        drain_batch(queue.by_ref(), &mut batch, Some(&mut metric_indices), 3);
+
+        assert_eq!(batch, [3]);
+        assert_eq!(queue.next(), Some(("metric", 4)));
+    }
 
     #[tokio::test]
     async fn https_target_without_tls_profile_starts_tls_handshake()
@@ -713,6 +976,7 @@ mod tests {
         reject_multi_item_requests: bool,
         /// Answer the first attempt of every distinct request `UNAVAILABLE`.
         fail_first_attempt: bool,
+        failure: Option<tonic::Code>,
         sent: Vec<Vec<usize>>,
     }
 
@@ -732,17 +996,27 @@ mod tests {
             request.iter().sum()
         }
 
-        async fn send(&mut self, request: Vec<usize>) -> Result<(), tonic::Status> {
+        async fn send(
+            &mut self,
+            request: Vec<usize>,
+        ) -> Result<super::OtlpExportResponse, tonic::Status> {
             let rejected = self.reject_multi_item_requests && request.len() > 1;
             let first_attempt = !self.sent.contains(&request);
+
             self.sent.push(request);
+
+            if let Some(code) = self.failure {
+                return Err(tonic::Status::new(code, "collector rejected export"));
+            }
+
             if rejected {
                 return Err(tonic::Status::resource_exhausted("message too large"));
             }
             if self.fail_first_attempt && first_attempt {
                 return Err(tonic::Status::unavailable("collector restarting"));
             }
-            Ok(())
+
+            Ok(super::OtlpExportResponse::default())
         }
     }
 
@@ -759,9 +1033,12 @@ mod tests {
     /// Runs `export_items` against a fake target that accepts at most 10
     /// bytes, returning every request it saw and the (virtual) time it took.
     async fn run_export(case: ExportCase) -> (Vec<Vec<usize>>, Duration) {
+        let metrics = MetricsCapture::start();
+
         let mut export = FakeExport {
             reject_multi_item_requests: case.reject_multi_item_requests,
             fail_first_attempt: case.fail_first_attempt,
+            failure: None,
             sent: Vec::new(),
         };
         let target = OtlpTargetConfig {
@@ -777,7 +1054,104 @@ mod tests {
         };
         let started = tokio::time::Instant::now();
         export_items(&mut export, &case.items, &target, OtlpSignal::Logs).await;
+
+        assert_eq!(
+            metrics.counter_delta(
+                "carbide_health_otlp_egress_records_total",
+                &[("target", &target.endpoint), ("signal", "logs")],
+            ),
+            case.items.len() as f64,
+            "splitting and retries must count each acknowledged record once",
+        );
+
         (export.sent, started.elapsed())
+    }
+
+    #[test]
+    fn export_response_counts_only_acknowledged_records() {
+        let metrics = MetricsCapture::start();
+
+        let target = OtlpTargetConfig {
+            endpoint: "http://response-accounting.example:4317".to_string(),
+            tls: None,
+            batch_size: 512,
+            queue_capacity: OtlpTargetConfig::DEFAULT_QUEUE_CAPACITY,
+            max_request_bytes: OtlpTargetConfig::DEFAULT_MAX_REQUEST_BYTES,
+            max_concurrent_exports: 1,
+            flush_interval: Duration::from_secs(2),
+            include_diagnostics: false,
+            include_alert_details: false,
+        };
+
+        for (scenario, rejected_records, error_message, accepted, warning) in [
+            ("full success", 0, "", 3.0, false),
+            ("warning only", 0, "receiver warning", 3.0, true),
+            ("partial rejection", 1, "rejected one", 2.0, true),
+            ("full rejection", 3, "rejected all", 0.0, true),
+            ("negative count", -1, "invalid", 0.0, true),
+            ("excess count", 4, "invalid", 0.0, true),
+        ] {
+            let labels = [("target", target.endpoint.as_str()), ("signal", "logs")];
+
+            let before = metrics.counter_delta("carbide_health_otlp_egress_records_total", &labels);
+
+            let response = super::OtlpExportResponse {
+                rejected_records,
+                error_message: error_message.to_string(),
+            };
+
+            let logs = capture_logs(|| response.record(&target, OtlpSignal::Logs, 3));
+
+            assert_eq!(
+                metrics.counter_delta("carbide_health_otlp_egress_records_total", &labels) - before,
+                accepted,
+                "{scenario}",
+            );
+
+            assert_eq!(!logs.is_empty(), warning, "{scenario}");
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn failed_exports_do_not_count_as_acknowledged() {
+        let metrics = MetricsCapture::start();
+
+        let target = OtlpTargetConfig {
+            endpoint: "http://failed-export.example:4317".to_string(),
+            tls: None,
+            batch_size: 512,
+            queue_capacity: OtlpTargetConfig::DEFAULT_QUEUE_CAPACITY,
+            max_request_bytes: OtlpTargetConfig::DEFAULT_MAX_REQUEST_BYTES,
+            max_concurrent_exports: 1,
+            flush_interval: Duration::from_secs(2),
+            include_diagnostics: false,
+            include_alert_details: false,
+        };
+
+        for (code, attempts) in [
+            (tonic::Code::InvalidArgument, 1),
+            (tonic::Code::Unavailable, 6),
+        ] {
+            let mut export = FakeExport {
+                reject_multi_item_requests: false,
+                fail_first_attempt: false,
+                failure: Some(code),
+                sent: Vec::new(),
+            };
+
+            export_items(&mut export, &[1, 2, 3], &target, OtlpSignal::Logs).await;
+
+            assert_eq!(export.sent.len(), attempts, "{code:?}");
+
+            assert_eq!(
+                metrics.counter_delta(
+                    "carbide_health_otlp_egress_records_total",
+                    &[("target", &target.endpoint), ("signal", "logs")],
+                ),
+                0.0,
+                "{code:?}",
+            );
+        }
     }
 
     #[tokio::test(start_paused = true)]

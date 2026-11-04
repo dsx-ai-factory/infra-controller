@@ -15,7 +15,7 @@
  * limitations under the License.
  */
 
-//! Re-encryption must not overwrite credentials replaced during remote key access.
+//! Identity writes must preserve concurrent changes made during remote key access.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -36,8 +36,11 @@ use model::tenant::{
     TokenDelegationAuthMethodConfig,
 };
 use p256::pkcs8::{EncodePrivateKey, EncodePublicKey, LineEnding};
-use rpc::forge::ReencryptTenantIdentitySecretsRequest;
 use rpc::forge::forge_server::Forge;
+use rpc::forge::{
+    ReencryptTenantIdentitySecretsRequest, SetTenantIdentityConfigRequest,
+    TenantIdentityConfig as ProtoTenantIdentityConfig,
+};
 use tokio::sync::Notify;
 use tonic::Request;
 
@@ -130,6 +133,178 @@ async fn set_delegation(pool: &sqlx::PgPool, org_id: &TenantOrganizationId, clie
     .await
     .unwrap();
     txn.commit().await.unwrap();
+}
+
+#[crate::sqlx_test]
+async fn set_configuration_preserves_initial_creation_winner(pool: sqlx::PgPool) {
+    // Pause initial key preparation after the absent-config read. A competing
+    // creation must survive the resumed RPC, including its tenant version.
+    let env = create_test_env(pool.clone()).await;
+    let org_id: TenantOrganizationId = "creation-collision".parse().unwrap();
+    let mut txn = pool.begin().await.unwrap();
+    db::tenant::create_and_persist(
+        org_id.to_string(),
+        Metadata {
+            name: org_id.to_string(),
+            ..Default::default()
+        },
+        None,
+        &mut txn,
+    )
+    .await
+    .unwrap();
+    txn.commit().await.unwrap();
+
+    let credentials = Arc::new(TestCredentialManager::default());
+    credentials
+        .set_credentials(
+            &CredentialKey::MachineIdentityEncryptionKey {
+                key_id: "old".to_string(),
+            },
+            &Credentials::UsernamePassword {
+                username: String::new(),
+                password: base64::engine::general_purpose::STANDARD.encode([1; 32]),
+            },
+        )
+        .await
+        .unwrap();
+    let reader = Arc::new(PausedKeyReader {
+        credentials: credentials.clone(),
+        pause_once: AtomicBool::new(true),
+        paused: Notify::new(),
+        resume: Notify::new(),
+    });
+    let mut config = env.config.as_ref().clone();
+    config.machine_identity.enabled = true;
+    config.machine_identity.current_encryption_key_id = Some("old".to_string());
+    let api = TestApiBuilder::new(
+        pool.clone(),
+        env.common_pools.clone(),
+        env.api.work_lock_manager_handle.clone(),
+    )
+    .with_runtime_config(Arc::new(config))
+    .with_credential_manager(Arc::new(CompositeCredentialManager::new(
+        reader.clone(),
+        credentials,
+    )))
+    .build();
+    let request = || {
+        Request::new(SetTenantIdentityConfigRequest {
+            organization_id: org_id.to_string(),
+            config: Some(ProtoTenantIdentityConfig {
+                enabled: true,
+                issuer: "https://issuer.example.com".to_string(),
+                default_audience: "competing".to_string(),
+                allowed_audiences: vec!["competing".to_string()],
+                token_ttl_sec: 3600,
+                subject_prefix: None,
+                rotate_key: false,
+                signing_key_overlap_sec: None,
+            }),
+        })
+    };
+    let create_winner = async {
+        reader.paused.notified().await;
+        let mut txn = pool.begin().await.unwrap();
+        let winner = tenant_identity_config::set(
+            &org_id,
+            &identity_config(),
+            Some(signing_key(1, "old", &[1; 32])),
+            &mut txn,
+        )
+        .await
+        .unwrap();
+        db::tenant::increment_version(org_id.as_str(), &mut txn)
+            .await
+            .unwrap();
+        let version = db::tenant::find(org_id.as_str(), false, &mut txn)
+            .await
+            .unwrap()
+            .unwrap()
+            .version;
+        txn.commit().await.unwrap();
+        reader.resume.notify_one();
+        (winner, version)
+    };
+    let (result, (winner, version)) = tokio::time::timeout(Duration::from_secs(30), async {
+        tokio::join!(
+            api.set_tenant_identity_configuration(request()),
+            create_winner
+        )
+    })
+    .await
+    .expect("initial creation and its competing setter must finish");
+    assert_eq!(result.unwrap_err().code(), tonic::Code::AlreadyExists);
+
+    let mut connection = pool.acquire().await.unwrap();
+    let persisted = tenant_identity_config::find(&org_id, &mut *connection)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(persisted.issuer, winner.issuer);
+    assert_eq!(persisted.default_audience, winner.default_audience);
+    assert_eq!(persisted.allowed_audiences, winner.allowed_audiences);
+    assert_eq!(persisted.token_ttl_sec, winner.token_ttl_sec);
+    assert_eq!(persisted.subject_prefix, winner.subject_prefix);
+    assert_eq!(persisted.enabled, winner.enabled);
+    assert_eq!(persisted.created_at, winner.created_at);
+    assert_eq!(persisted.updated_at, winner.updated_at);
+    assert_eq!(
+        persisted.encrypted_signing_key_1,
+        winner.encrypted_signing_key_1
+    );
+    assert_eq!(
+        persisted.encrypted_signing_key_2,
+        winner.encrypted_signing_key_2
+    );
+    assert_eq!(persisted.signing_key_public_1, winner.signing_key_public_1);
+    assert_eq!(persisted.signing_key_public_2, winner.signing_key_public_2);
+    assert_eq!(
+        persisted.current_signing_key_slot,
+        winner.current_signing_key_slot
+    );
+    assert_eq!(
+        persisted.non_active_slot_expires_at,
+        winner.non_active_slot_expires_at
+    );
+    assert_eq!(
+        db::tenant::find(org_id.as_str(), false, &mut connection)
+            .await
+            .unwrap()
+            .unwrap()
+            .version,
+        version,
+    );
+    drop(connection);
+
+    // A fresh preflight sees the winner and applies only the requested configuration.
+    let response = api
+        .set_tenant_identity_configuration(request())
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(response.config.unwrap().default_audience, "competing");
+    let mut connection = pool.acquire().await.unwrap();
+    let persisted = tenant_identity_config::find(&org_id, &mut *connection)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(persisted.default_audience, "competing");
+    assert_eq!(persisted.allowed_audiences.0, ["competing"]);
+    assert_eq!(
+        persisted.encrypted_signing_key_1,
+        winner.encrypted_signing_key_1
+    );
+    assert_eq!(persisted.signing_key_public_1, winner.signing_key_public_1);
+    assert_eq!(
+        db::tenant::find(org_id.as_str(), false, &mut connection)
+            .await
+            .unwrap()
+            .unwrap()
+            .version
+            .version_nr(),
+        version.version_nr() + 1,
+    );
 }
 
 #[crate::sqlx_test]

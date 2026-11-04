@@ -76,7 +76,7 @@ func (d WorkflowDescriptor) validate() error {
 
 		if d.Unmarshal == nil {
 			return fmt.Errorf(
-				"Unmarshal is required for task-dispatched workflow %q",
+				"missing Unmarshal for task-dispatched workflow %q",
 				d.WorkflowName,
 			)
 		}

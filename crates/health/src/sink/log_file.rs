@@ -573,8 +573,9 @@ mod tests {
         let mut ctx = test_context();
 
         ctx.metadata = Some(EndpointMetadata::Switch(SwitchData {
+            log_checkpoint_identity: None,
             id: None,
-            serial: "SN-SWITCH-001".to_string(),
+            serial: Some("SN-SWITCH-001".to_string()),
             slot_number: Some(7),
             tray_index: Some(3),
             nvlink_domain_uuid: Some(nvlink_domain_uuid),

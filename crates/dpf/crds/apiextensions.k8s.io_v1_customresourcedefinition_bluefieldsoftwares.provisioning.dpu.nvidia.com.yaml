@@ -241,8 +241,6 @@ spec:
                       taken from the ISO filename
                     type: string
                 type: object
-            required:
-            - phase
             type: object
             x-kubernetes-validations:
             - message: versions cannot be removed once set

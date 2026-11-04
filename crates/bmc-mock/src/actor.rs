@@ -75,6 +75,17 @@ impl<Message> Clone for ActorMailbox<Message> {
 }
 
 impl<Message> ActorMailbox<Message> {
+    /// A mailbox with no actor behind it; sends fail and alarms never fire.
+    /// For handles that tests build without running the actor.
+    pub fn detached() -> Self {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        Self {
+            tx,
+            next_alarm_id: Arc::new(AtomicU64::new(0)),
+            cancelled_alarms: Arc::new(Mutex::new(HashSet::new())),
+        }
+    }
+
     /// Enqueues a message without waiting for its processing; fails if the actor has stopped.
     pub fn send(&self, message: Message) -> Result<(), ActorMailboxClosed> {
         self.tx

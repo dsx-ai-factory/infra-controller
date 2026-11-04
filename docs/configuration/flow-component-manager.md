@@ -1,4 +1,4 @@
-# Flow Component Managers
+# Flow Component Managers <Badge intent="info">v2.2</Badge> <Badge intent="launch" minimal>New</Badge>
 
 This page configures Flow’s component-manager implementations and API providers. Configure Core’s downstream hardware backends separately in [RMS Configuration](rms.md).
 
@@ -179,8 +179,17 @@ Compute has two NICo-backed implementations:
 
 | Implementation | RPC path | Notes |
 |----------------|----------|-------|
-| `nico` (default) | `ComponentPowerControl`, `GetComponentInventory`, `UpdateComponentFirmware`, `GetComponentFirmwareStatus` | Component Manager dispatch path, identical to `nvswitch/nico` and `powershelf/nico`. Honours `info.SubTargets` (BMC, BIOS, ...) and forwards `target_version` verbatim to Core. Direct RMS updates require the complete SoT firmware-object JSON serialized as a string, not a bare object ID (see [firmware input](../operations/firmware-updates/rack-component-firmware.md#sot-firmware-object-json)). Does **not** consume the firmware time window — Core dispatches immediately. Requires Core to be configured with `compute_tray_use_state_controller=true` (see `crates/component-manager/src/config.rs`). |
+| `nico` (default) | `ComponentPowerControl`, `GetComponentInventory`, `UpdateComponentFirmware`, `GetComponentFirmwareStatus` | Component Manager dispatch path, identical to `nvswitch/nico` and `powershelf/nico`. Honours `info.SubTargets` (BMC, BIOS, ...) and forwards the component-specific `target_version` selected by Flow to Core. Does **not** consume the firmware time window; Core dispatches immediately. Requires Core to be configured with `compute_tray_use_state_controller=true` (see `crates/component-manager/src/config.rs`). |
 | `nicolegacy` | `AdminPowerControl`, `UpdatePowerOption`, `SetMachineAutoUpdate`, `SetFirmwareUpdateTimeWindow` | Legacy machine-centric path. Honours `manager_configs.compute.nicolegacy.compute_power_delay` and the legacy `start_time` / `end_time` firmware window. Opt-in via `COMPONENT_MANAGER_COMPUTE=nicolegacy`. |
+
+Flow extracts component-specific values from layered firmware input before
+calling the `nico` manager. For rack-scale RMS updates, an explicit firmware
+override must contain the complete SOT firmware-object JSON serialized as a
+string, not a bare object ID. An omitted, null, empty, or whitespace-only REST
+`version` instead uses the owning rack profile's `firmware_object.url`;
+resolution requires each Core firmware request to target a single rack. See
+[Firmware input and rack scope](../operations/firmware-updates/rack-component-firmware.md#describe-the-update)
+for the input contract, batch-request behavior, and failure behavior.
 
 To flip a deployment back to the legacy machine-centric path without shipping
 a separate component manager YAML, set the `COMPONENT_MANAGER_COMPUTE`

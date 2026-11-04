@@ -24,9 +24,9 @@ use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
 use crate::config::IterationConfig;
-use crate::controller::StateController;
 use crate::controller::periodic_enqueuer::{EnqueuerMetricsEmitter, PeriodicEnqueuer};
 use crate::controller::processor::{ProcessorMetricsEmitter, StateProcessor};
+use crate::controller::{ObjectIdsFromDatabase, StateController};
 use crate::io::StateControllerIO;
 use crate::metrics::MetricHolder;
 use crate::per_object::PerObjectStateRecorder;
@@ -68,6 +68,7 @@ pub struct Builder<IO: StateControllerIO> {
     state_change_emitter: Arc<StateChangeEmitter<IO::ObjectId, IO::ControllerState>>,
     processor_id: Option<String>,
     per_object_state_metrics: Option<PerObjectStateRecorder>,
+    filter_metrics_by_existing_object_ids_enabled: bool,
 }
 
 impl<IO: StateControllerIO> Default for Builder<IO> {
@@ -90,6 +91,7 @@ impl<IO: StateControllerIO> Default for Builder<IO> {
             state_change_emitter: Arc::new(StateChangeEmitter::default()),
             processor_id: None,
             per_object_state_metrics: None,
+            filter_metrics_by_existing_object_ids_enabled: false,
         }
     }
 }
@@ -184,6 +186,17 @@ impl<IO: StateControllerIO> Builder<IO> {
 
         let per_object_state_metrics = self.per_object_state_metrics.take();
 
+        // Filtering uses a latest-value channel because only the newest complete
+        // database object-ID list is relevant to aggregate metric emission.
+        let (object_ids_from_database_sender, object_ids_from_database_receiver) = self
+            .filter_metrics_by_existing_object_ids_enabled
+            .then(|| {
+                tokio::sync::watch::channel::<Option<ObjectIdsFromDatabase<IO::ObjectId>>>(None)
+            })
+            .map_or((None, None), |(sender, receiver)| {
+                (Some(sender), Some(receiver))
+            });
+
         let enqueuer = PeriodicEnqueuer::<IO> {
             pool: database.clone(),
             work_lock_manager_handle,
@@ -194,6 +207,7 @@ impl<IO: StateControllerIO> Builder<IO> {
             per_object_state: per_object_state_metrics.clone(),
             known_object_ids: Default::default(),
             pending_clears: Default::default(),
+            object_ids_from_database: object_ids_from_database_sender,
         };
 
         let processor_metric_emitter =
@@ -218,6 +232,7 @@ impl<IO: StateControllerIO> Builder<IO> {
             stats_since_last_log: Default::default(),
             last_metric_emission_time: std::time::Instant::now(),
             processor_id,
+            object_ids_from_database: object_ids_from_database_receiver,
         };
 
         let controller = StateController::<IO> {
@@ -303,6 +318,20 @@ impl<IO: StateControllerIO> Builder<IO> {
         self
     }
 
+    /// Filters retained aggregate measurements to object IDs from the last
+    /// successful database read, so an identity change cannot count both IDs.
+    ///
+    /// Excluded measurements remain cached. Until the first successful read,
+    /// all cached measurements contribute as before.
+    ///
+    /// This is opt-in because every enabled controller replica reads the
+    /// complete ID list, including replicas that do not acquire the global
+    /// queue lock.
+    pub fn filter_metrics_by_existing_object_ids(mut self) -> Self {
+        self.filter_metrics_by_existing_object_ids_enabled = true;
+        self
+    }
+
     /// Sets the state change emitter for broadcasting state transitions to hooks
     pub fn state_change_emitter(
         mut self,
@@ -310,5 +339,25 @@ impl<IO: StateControllerIO> Builder<IO> {
     ) -> Self {
         self.state_change_emitter = Arc::new(emitter);
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Builder;
+    use crate::tests::TestStateControllerIO;
+
+    /// Verifies that filtering aggregate metrics by database object IDs changes
+    /// controller behavior only when a caller explicitly opts in.
+    #[test]
+    fn filter_metrics_by_existing_object_ids_is_opt_in() {
+        // Assertion: the generic builder preserves the existing default.
+        let default_builder = Builder::<TestStateControllerIO>::default();
+        assert!(!default_builder.filter_metrics_by_existing_object_ids_enabled);
+
+        // Action and assertion: the dedicated method enables filtering.
+        let opted_in_builder =
+            Builder::<TestStateControllerIO>::default().filter_metrics_by_existing_object_ids();
+        assert!(opted_in_builder.filter_metrics_by_existing_object_ids_enabled);
     }
 }

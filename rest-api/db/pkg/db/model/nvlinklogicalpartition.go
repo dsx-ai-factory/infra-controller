@@ -15,10 +15,11 @@ import (
 	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
 	"github.com/uptrace/bun"
+	"go.opentelemetry.io/otel/attribute"
 
+	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
-	stracer "github.com/NVIDIA/infra-controller/rest-api/db/pkg/tracer"
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 )
 
@@ -53,6 +54,11 @@ const (
 
 	// NVLinkLogicalPartitionOrderByDefault default field to be used for ordering when none specified
 	NVLinkLogicalPartitionOrderByDefault = "created"
+
+	// NVLinkLogicalPartitionNameMinLength is the minimum supported NVLink Logical Partition name length.
+	NVLinkLogicalPartitionNameMinLength = 2
+	// NVLinkLogicalPartitionNameMaxLength is the maximum supported NVLink Logical Partition name length.
+	NVLinkLogicalPartitionNameMaxLength = 256
 )
 
 var (
@@ -145,7 +151,7 @@ func (nvllp *NVLinkLogicalPartition) Validate() error {
 	return validation.ValidateStruct(nvllp,
 		validation.Field(&nvllp.Name,
 			validation.Required.Error("NVLinkLogicalPartition Name must be specified"),
-			validation.Length(2, 256).Error("NVLinkLogicalPartition Name must be at least 2 characters and maximum 256 characters"),
+			validation.Length(NVLinkLogicalPartitionNameMinLength, NVLinkLogicalPartitionNameMaxLength).Error("NVLinkLogicalPartition Name must be at least 2 characters and maximum 256 characters"),
 			validation.By(validateNVLinkLogicalPartitionNameWhitespace)),
 		validation.Field(&nvllp.Status,
 			validation.Required.Error("NVLinkLogicalPartition Status must be specified"),
@@ -196,12 +202,8 @@ func (nvllp *NVLinkLogicalPartition) ToProto() *corev1.NVLinkLogicalPartition {
 }
 
 // FromProto populates this NVLink Logical Partition from its workflow
-// proto representation. A nil proto is a no-op. This is the inverse of
-// `ToProto` and exists for convention symmetry — currently no code
-// path on the cloud side reconstructs a full entity from the workflow
-// proto (the site is the destination, not the source), but the method
-// is provided so future reconciliation flows have a single canonical
-// entry point.
+// proto representation. A nil proto is a no-op. Inventory reconciliation
+// uses this as the canonical translation when recovering Site-only records.
 //
 // Field-level contract:
 //   - `nvllp.ID` is preserved on a missing or unparseable `proto.Id`,
@@ -274,6 +276,8 @@ type NVLinkLogicalPartitionUpdateInput struct {
 type NVLinkLogicalPartitionClearInput struct {
 	NVLinkLogicalPartitionID uuid.UUID
 	Description              bool
+	// Deleted clears the soft-delete timestamp.
+	Deleted bool
 }
 
 // NVLinkLogicalPartitionFilterInput input parameters for Filter method
@@ -285,6 +289,8 @@ type NVLinkLogicalPartitionFilterInput struct {
 	TenantIDs                 []uuid.UUID
 	Statuses                  []string
 	SearchQuery               *string
+	// IncludeDeleted returns soft-deleted rows in addition to active rows.
+	IncludeDeleted bool
 }
 
 var _ bun.BeforeAppendModelHook = (*NVLinkLogicalPartition)(nil)
@@ -328,19 +334,15 @@ type NVLinkLogicalPartitionDAO interface {
 
 // NVLinkLogicalPartitionSQLDAO is an implementation of the NVLinkLogicalPartitionDAO interface
 type NVLinkLogicalPartitionSQLDAO struct {
-	dbSession  *db.Session
-	tracerSpan *stracer.TracerSpan
+	dbSession *db.Session
 }
 
 // GetByID returns a NVLinkLogicalPartition by ID
-func (nvllpsd NVLinkLogicalPartitionSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, includeRelations []string) (*NVLinkLogicalPartition, error) {
+func (nvllpsd NVLinkLogicalPartitionSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, includeRelations []string) (_ *NVLinkLogicalPartition, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, NVLinkLogicalPartitionDAOSpan := nvllpsd.tracerSpan.CreateChildInCurrentContext(ctx, "NVLinkLogicalPartitionDAO.GetByID")
-	if NVLinkLogicalPartitionDAOSpan != nil {
-		defer NVLinkLogicalPartitionDAOSpan.End()
-
-		nvllpsd.tracerSpan.SetAttribute(NVLinkLogicalPartitionDAOSpan, "id", id.String())
-	}
+	ctx, NVLinkLogicalPartitionDAOSpan := cotel.StartSpan(ctx, "NVLinkLogicalPartitionDAO.GetByID")
+	defer func() { cotel.EndSpan(NVLinkLogicalPartitionDAOSpan, retErr) }()
+	cotel.SetAttribute(NVLinkLogicalPartitionDAOSpan, attribute.String("id", id.String()))
 
 	nvllp := &NVLinkLogicalPartition{}
 
@@ -365,39 +367,34 @@ func (nvllpsd NVLinkLogicalPartitionSQLDAO) GetByID(ctx context.Context, tx *db.
 // Errors are returned only when there is a db related error
 // if records not found, then error is nil, but length of returned slice is 0
 // if orderBy is nil, then records are ordered by column specified in NVLinkLogicalPartitionOrderByDefault in ascending order
-func (nvllpsd NVLinkLogicalPartitionSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter NVLinkLogicalPartitionFilterInput, page paginator.PageInput, includeRelations []string) ([]NVLinkLogicalPartition, int, error) {
+func (nvllpsd NVLinkLogicalPartitionSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter NVLinkLogicalPartitionFilterInput, page paginator.PageInput, includeRelations []string) (_ []NVLinkLogicalPartition, _ int, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, NVLinkLogicalPartitionDAOSpan := nvllpsd.tracerSpan.CreateChildInCurrentContext(ctx, "NVLinkLogicalPartitionDAO.GetAll")
-	if NVLinkLogicalPartitionDAOSpan != nil {
-		defer NVLinkLogicalPartitionDAOSpan.End()
-	}
+	ctx, NVLinkLogicalPartitionDAOSpan := cotel.StartSpan(ctx, "NVLinkLogicalPartitionDAO.GetAll")
+	defer func() { cotel.EndSpan(NVLinkLogicalPartitionDAOSpan, retErr) }()
 
 	nvllps := []NVLinkLogicalPartition{}
 
 	query := db.GetIDB(tx, nvllpsd.dbSession).NewSelect().Model(&nvllps)
+	if filter.IncludeDeleted {
+		query = query.WhereAllWithDeleted()
+	}
 	if filter.Names != nil {
 		query = query.Where("nvllp.name IN (?)", bun.In(filter.Names))
-		nvllpsd.tracerSpan.SetAttribute(NVLinkLogicalPartitionDAOSpan, "name", filter.Names)
 	}
 	if filter.SiteIDs != nil {
 		query = query.Where("nvllp.site_id IN (?)", bun.In(filter.SiteIDs))
-		nvllpsd.tracerSpan.SetAttribute(NVLinkLogicalPartitionDAOSpan, "site_id", filter.SiteIDs)
 	}
 	if filter.TenantIDs != nil {
 		query = query.Where("nvllp.tenant_id IN (?)", bun.In(filter.TenantIDs))
-		nvllpsd.tracerSpan.SetAttribute(NVLinkLogicalPartitionDAOSpan, "tenant_id", filter.TenantIDs)
 	}
 	if filter.TenantOrgs != nil {
 		query = query.Where("nvllp.org IN (?)", bun.In(filter.TenantOrgs))
-		nvllpsd.tracerSpan.SetAttribute(NVLinkLogicalPartitionDAOSpan, "org", filter.TenantOrgs)
 	}
 	if filter.Statuses != nil {
 		query = query.Where("nvllp.status IN (?)", bun.In(filter.Statuses))
-		nvllpsd.tracerSpan.SetAttribute(NVLinkLogicalPartitionDAOSpan, "status", filter.Statuses)
 	}
 	if filter.NVLinkLogicalPartitionIDs != nil {
 		query = query.Where("nvllp.id IN (?)", bun.In(filter.NVLinkLogicalPartitionIDs))
-		nvllpsd.tracerSpan.SetAttribute(NVLinkLogicalPartitionDAOSpan, "id", filter.NVLinkLogicalPartitionIDs)
 	}
 	searchQuery, searchTokens, ok := db.NormalizeSearchQuery(filter.SearchQuery)
 	if ok {
@@ -408,7 +405,7 @@ func (nvllpsd NVLinkLogicalPartitionSQLDAO) GetAll(ctx context.Context, tx *db.T
 				WhereOr("nvllp.description ILIKE ?", "%"+searchQuery+"%").
 				WhereOr("nvllp.status ILIKE ?", "%"+searchQuery+"%")
 		})
-		nvllpsd.tracerSpan.SetAttribute(NVLinkLogicalPartitionDAOSpan, "search_query", searchQuery)
+		cotel.SetAttribute(NVLinkLogicalPartitionDAOSpan, attribute.String("search_query", searchQuery))
 	}
 
 	for _, relation := range includeRelations {
@@ -434,14 +431,11 @@ func (nvllpsd NVLinkLogicalPartitionSQLDAO) GetAll(ctx context.Context, tx *db.T
 }
 
 // Create creates a new NVLinkLogicalPartition from the given parameters
-func (nvllpsd NVLinkLogicalPartitionSQLDAO) Create(ctx context.Context, tx *db.Tx, input NVLinkLogicalPartitionCreateInput) (*NVLinkLogicalPartition, error) {
+func (nvllpsd NVLinkLogicalPartitionSQLDAO) Create(ctx context.Context, tx *db.Tx, input NVLinkLogicalPartitionCreateInput) (_ *NVLinkLogicalPartition, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, NVLinkLogicalPartitionDAOSpan := nvllpsd.tracerSpan.CreateChildInCurrentContext(ctx, "NVLinkLogicalPartitionDAO.Create")
-	if NVLinkLogicalPartitionDAOSpan != nil {
-		defer NVLinkLogicalPartitionDAOSpan.End()
-
-		nvllpsd.tracerSpan.SetAttribute(NVLinkLogicalPartitionDAOSpan, "name", input.Name)
-	}
+	ctx, NVLinkLogicalPartitionDAOSpan := cotel.StartSpan(ctx, "NVLinkLogicalPartitionDAO.Create")
+	defer func() { cotel.EndSpan(NVLinkLogicalPartitionDAOSpan, retErr) }()
+	cotel.SetAttribute(NVLinkLogicalPartitionDAOSpan, attribute.String("name", input.Name))
 
 	id := uuid.New()
 
@@ -479,14 +473,10 @@ func (nvllpsd NVLinkLogicalPartitionSQLDAO) Create(ctx context.Context, tx *db.T
 }
 
 // Update updates an existing NVLinkLogicalPartition from the given parameters
-func (nvllpsd NVLinkLogicalPartitionSQLDAO) Update(ctx context.Context, tx *db.Tx, input NVLinkLogicalPartitionUpdateInput) (*NVLinkLogicalPartition, error) {
+func (nvllpsd NVLinkLogicalPartitionSQLDAO) Update(ctx context.Context, tx *db.Tx, input NVLinkLogicalPartitionUpdateInput) (_ *NVLinkLogicalPartition, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, NVLinkLogicalPartitionDAOSpan := nvllpsd.tracerSpan.CreateChildInCurrentContext(ctx, "NVLinkLogicalPartitionDAO.Update")
-	if NVLinkLogicalPartitionDAOSpan != nil {
-		defer NVLinkLogicalPartitionDAOSpan.End()
-
-		nvllpsd.tracerSpan.SetAttribute(NVLinkLogicalPartitionDAOSpan, "id", input.NVLinkLogicalPartitionID)
-	}
+	ctx, NVLinkLogicalPartitionDAOSpan := cotel.StartSpan(ctx, "NVLinkLogicalPartitionDAO.Update")
+	defer func() { cotel.EndSpan(NVLinkLogicalPartitionDAOSpan, retErr) }()
 
 	nvllp := &NVLinkLogicalPartition{
 		ID: input.NVLinkLogicalPartitionID,
@@ -495,20 +485,21 @@ func (nvllpsd NVLinkLogicalPartitionSQLDAO) Update(ctx context.Context, tx *db.T
 	updatedFields := []string{}
 
 	if input.Name != nil {
-		if err := validation.Validate(*input.Name,
+		err := validation.Validate(*input.Name,
 			validation.Required.Error("NVLinkLogicalPartition Name must be specified"),
-			validation.Length(2, 256).Error("NVLinkLogicalPartition Name must be at least 2 characters and maximum 256 characters"),
-			validation.By(validateNVLinkLogicalPartitionNameWhitespace)); err != nil {
+			validation.Length(NVLinkLogicalPartitionNameMinLength, NVLinkLogicalPartitionNameMaxLength).Error("NVLinkLogicalPartition Name must be at least 2 characters and maximum 256 characters"),
+			validation.By(validateNVLinkLogicalPartitionNameWhitespace))
+		if err != nil {
 			return nil, err
 		}
 		nvllp.Name = *input.Name
 		updatedFields = append(updatedFields, "name")
-		nvllpsd.tracerSpan.SetAttribute(NVLinkLogicalPartitionDAOSpan, "name", *input.Name)
+		cotel.SetAttribute(NVLinkLogicalPartitionDAOSpan, attribute.String("name", *input.Name))
 	}
 	if input.Description != nil {
 		nvllp.Description = input.Description
 		updatedFields = append(updatedFields, "description")
-		nvllpsd.tracerSpan.SetAttribute(NVLinkLogicalPartitionDAOSpan, "description", *input.Description)
+		cotel.SetAttribute(NVLinkLogicalPartitionDAOSpan, attribute.String("description", *input.Description))
 	}
 	if input.Status != nil {
 		if !NVLinkLogicalPartitionStatusMap[*input.Status] {
@@ -516,12 +507,10 @@ func (nvllpsd NVLinkLogicalPartitionSQLDAO) Update(ctx context.Context, tx *db.T
 		}
 		nvllp.Status = *input.Status
 		updatedFields = append(updatedFields, "status")
-		nvllpsd.tracerSpan.SetAttribute(NVLinkLogicalPartitionDAOSpan, "status", *input.Status)
 	}
 	if input.IsMissingOnSite != nil {
 		nvllp.IsMissingOnSite = *input.IsMissingOnSite
 		updatedFields = append(updatedFields, "is_missing_on_site")
-		nvllpsd.tracerSpan.SetAttribute(NVLinkLogicalPartitionDAOSpan, "is_missing_on_site", *input.IsMissingOnSite)
 	}
 
 	if len(updatedFields) > 0 {
@@ -541,14 +530,10 @@ func (nvllpsd NVLinkLogicalPartitionSQLDAO) Update(ctx context.Context, tx *db.T
 }
 
 // Clear clears NVLinkLogicalPartition attributes based on provided arguments
-func (nvllpsd NVLinkLogicalPartitionSQLDAO) Clear(ctx context.Context, tx *db.Tx, input NVLinkLogicalPartitionClearInput) (*NVLinkLogicalPartition, error) {
+func (nvllpsd NVLinkLogicalPartitionSQLDAO) Clear(ctx context.Context, tx *db.Tx, input NVLinkLogicalPartitionClearInput) (_ *NVLinkLogicalPartition, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, NVLinkLogicalPartitionDAOSpan := nvllpsd.tracerSpan.CreateChildInCurrentContext(ctx, "NVLinkLogicalPartitionDAO.Clear")
-	if NVLinkLogicalPartitionDAOSpan != nil {
-		defer NVLinkLogicalPartitionDAOSpan.End()
-
-		nvllpsd.tracerSpan.SetAttribute(NVLinkLogicalPartitionDAOSpan, "id", input.NVLinkLogicalPartitionID)
-	}
+	ctx, NVLinkLogicalPartitionDAOSpan := cotel.StartSpan(ctx, "NVLinkLogicalPartitionDAO.Clear")
+	defer func() { cotel.EndSpan(NVLinkLogicalPartitionDAOSpan, retErr) }()
 
 	nvllp := &NVLinkLogicalPartition{
 		ID: input.NVLinkLogicalPartitionID,
@@ -561,10 +546,21 @@ func (nvllpsd NVLinkLogicalPartitionSQLDAO) Clear(ctx context.Context, tx *db.Tx
 		updatedFields = append(updatedFields, "description")
 	}
 
+	if input.Deleted {
+		nvllp.Deleted = nil
+		updatedFields = append(updatedFields, "deleted")
+	}
+
 	if len(updatedFields) > 0 {
 		updatedFields = append(updatedFields, "updated")
 
-		_, err := db.GetIDB(tx, nvllpsd.dbSession).NewUpdate().Model(nvllp).Column(updatedFields...).Where("id = ?", nvllp.ID).Exec(ctx)
+		query := db.GetIDB(tx, nvllpsd.dbSession).NewUpdate().Model(nvllp).Column(updatedFields...).Where("id = ?", nvllp.ID)
+		// Soft-deleted rows are excluded by default; include them when undeleting.
+		if input.Deleted {
+			query = query.WhereAllWithDeleted()
+		}
+
+		_, err := query.Exec(ctx)
 		if err != nil {
 			return nil, err
 		}
@@ -579,14 +575,11 @@ func (nvllpsd NVLinkLogicalPartitionSQLDAO) Clear(ctx context.Context, tx *db.Tx
 }
 
 // Delete deletes a NVLinkLogicalPartition by ID
-func (nvllpsd NVLinkLogicalPartitionSQLDAO) Delete(ctx context.Context, tx *db.Tx, id uuid.UUID) error {
+func (nvllpsd NVLinkLogicalPartitionSQLDAO) Delete(ctx context.Context, tx *db.Tx, id uuid.UUID) (retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, NVLinkLogicalPartitionDAOSpan := nvllpsd.tracerSpan.CreateChildInCurrentContext(ctx, "NVLinkLogicalPartitionDAO.Delete")
-	if NVLinkLogicalPartitionDAOSpan != nil {
-		defer NVLinkLogicalPartitionDAOSpan.End()
-
-		nvllpsd.tracerSpan.SetAttribute(NVLinkLogicalPartitionDAOSpan, "id", id.String())
-	}
+	ctx, NVLinkLogicalPartitionDAOSpan := cotel.StartSpan(ctx, "NVLinkLogicalPartitionDAO.Delete")
+	defer func() { cotel.EndSpan(NVLinkLogicalPartitionDAOSpan, retErr) }()
+	cotel.SetAttribute(NVLinkLogicalPartitionDAOSpan, attribute.String("id", id.String()))
 
 	nvllp := &NVLinkLogicalPartition{
 		ID: id,
@@ -603,7 +596,6 @@ func (nvllpsd NVLinkLogicalPartitionSQLDAO) Delete(ctx context.Context, tx *db.T
 // NewNVLinkLogicalPartitionDAO returns a new NVLinkLogicalPartitionDAO
 func NewNVLinkLogicalPartitionDAO(dbSession *db.Session) NVLinkLogicalPartitionDAO {
 	return &NVLinkLogicalPartitionSQLDAO{
-		dbSession:  dbSession,
-		tracerSpan: stracer.NewTracerSpan(),
+		dbSession: dbSession,
 	}
 }

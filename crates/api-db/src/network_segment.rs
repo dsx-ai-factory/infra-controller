@@ -36,11 +36,14 @@ use crate::config_drift::{ConfigDefinitionDrifted, ConfigDriftKind, ConfigResour
 use crate::db_read::DbReader;
 use crate::instance_address::UsedOverlayNetworkIpResolver;
 use crate::ip_allocator::{IpAllocator, UsedIpResolver};
-use crate::machine_interface::UsedAdminNetworkIpResolver;
+use crate::machine_interface::{UsedAdminNetworkIpResolver, num_free_host_addresses};
 use crate::{
     ColumnInfo, ConditionalWrite, ControllerStateNotCurrent, DatabaseError, DatabaseResult,
     FilterableQueryBuilder, ObjectColumnFilter,
 };
+
+#[cfg(test)]
+mod test_explicit_columns;
 
 #[derive(Copy, Clone)]
 pub struct IdColumn;
@@ -68,7 +71,11 @@ macro_rules! network_segment_snapshot_query {
     () => {
         r#"
      SELECT
-        ns.*,
+        ns.id, ns.name, ns.subdomain_id, ns.vpc_id, ns.mtu, ns.version,
+        ns.controller_state, ns.controller_state_version, ns.controller_state_outcome,
+        ns.vlan_id, ns.vni_id, ns.network_segment_type, ns.can_stretch,
+        ns.allocation_strategy, ns.infer_slaac_eui64_addresses,
+        ns.created, ns.updated, ns.deleted,
         COALESCE(prefixes_agg.json, '[]'::json) AS prefixes
      FROM network_segments ns
      LEFT JOIN LATERAL (
@@ -86,7 +93,11 @@ macro_rules! network_segment_snapshot_with_history_query {
     () => {
         r#"
      SELECT
-        ns.*,
+        ns.id, ns.name, ns.subdomain_id, ns.vpc_id, ns.mtu, ns.version,
+        ns.controller_state, ns.controller_state_version, ns.controller_state_outcome,
+        ns.vlan_id, ns.vni_id, ns.network_segment_type, ns.can_stretch,
+        ns.allocation_strategy, ns.infer_slaac_eui64_addresses,
+        ns.created, ns.updated, ns.deleted,
         COALESCE(prefixes_agg.json, '[]'::json) AS prefixes,
         COALESCE(history_agg.json, '[]'::json) AS history
      FROM network_segments ns
@@ -113,6 +124,19 @@ pub async fn persist(
     txn: &mut PgConnection,
     initial_state: NetworkSegmentControllerState,
 ) -> Result<NetworkSegment, DatabaseError> {
+    // The DNS views publish records under the segment's subdomain_id. VPC
+    // domains only record ownership, so reject them here even when the
+    // segment belongs to the same VPC.
+    if let Some(domain_id) = value.subdomain_id
+        && crate::dns::domain::find_by_uuid(&mut *txn, domain_id)
+            .await?
+            .is_some_and(|domain| domain.vpc_id.is_some())
+    {
+        return Err(DatabaseError::InvalidArgument(format!(
+            "domain {domain_id} is VPC-owned and cannot be used by a network segment"
+        )));
+    }
+
     let version = ConfigVersion::initial();
 
     let query = "INSERT INTO network_segments (
@@ -723,49 +747,36 @@ where
     for<'db> &'db mut DB: DbReader<'db>,
 {
     for record in all_records.iter_mut().filter(|s| !s.prefixes.is_empty()) {
+        // Admin, Underlay, and HostInband capacity follows host address ownership.
+        // HostInband instances reuse host NIC addresses; their stored instance
+        // prefixes describe the shared subnet, not exclusive allocations.
+        if record.config.segment_type != NetworkSegmentType::Tenant {
+            let used_ips = UsedAdminNetworkIpResolver {
+                segment_id: record.id,
+            }
+            .used_ips(&mut *conn)
+            .await?;
+            for prefix in &mut record.prefixes {
+                prefix.num_free_ips = Some(num_free_host_addresses(prefix, &used_ips)?);
+            }
+            continue;
+        }
+
         let mut busy_ips = vec![];
         for prefix in &record.prefixes {
             if let Some(svi_ip) = prefix.svi_ip {
                 busy_ips.push(svi_ip);
             }
         }
-        let dhcp_handler: Box<dyn UsedIpResolver<DB> + Send> =
-            if record.config.segment_type.is_tenant() {
-                // Note on UsedOverlayNetworkIpResolver:
-                // In this case, the IpAllocator isn't being used to iterate to get
-                // the next available prefix_length allocation -- it's actually just
-                // being used to get the number of free IPs left in a given tenant
-                // network segment, so just hard-code a /32 prefix_length. NOW.. on
-                // one hand, you could say the prefix_length doesn't matter here,
-                // because this is really just here to get the number of free IPs left
-                // in a network segment. BUT, on the other hand, do we care about the
-                // number of free IPs left, or the number of free instance allocations
-                // left? For example, if we're allocating /30's, we might be more
-                // interested in knowing we can allocate 4 more machines (and not 16
-                // more IPs).
-                Box::new(UsedOverlayNetworkIpResolver {
-                    segment_id: record.id,
-                    busy_ips,
-                })
-            } else {
-                // Note on UsedAdminNetworkIpResolver:
-                // In this case, the IpAllocator isn't being used to iterate to get
-                // the next available prefix_length allocation -- it's actually just
-                // being used to get the number of free IPs left in a given admin
-                // network segment, so just hard-code a /32 prefix_length. Unlike the
-                // tenant segments, the admin segments are always (at least for the
-                // foreseeable future) just going to allocate a /32 for the machine
-                // interface.
-                Box::new(UsedAdminNetworkIpResolver {
-                    segment_id: record.id,
-                    busy_ips,
-                })
-            };
-
+        // Tenant counts use `instance_addresses.prefix`, which can reserve
+        // more than one host address per allocation.
         let allocator = IpAllocator::new(
             &mut *conn,
             record,
-            dhcp_handler,
+            Box::new(UsedOverlayNetworkIpResolver {
+                segment_id: record.id,
+                busy_ips,
+            }),
             AddressSelectionStrategy::NextAvailableIp,
         )
         .await
@@ -1119,6 +1130,47 @@ mod tests {
 
     use super::*;
 
+    #[crate::sqlx_test]
+    async fn rejects_vpc_owned_subdomain_before_inserting_segment(pool: sqlx::PgPool) {
+        let mut txn = pool.begin().await.expect("begin fixture transaction");
+        let vpc_id = crate::test_support::vpc::insert_vpc(txn.as_mut(), "dns-owner").await;
+        let domain = crate::dns::domain::persist(
+            model::dns::NewDomain {
+                vpc_id: Some(vpc_id),
+                ..model::dns::NewDomain::new("tenant.example")
+            },
+            txn.as_mut(),
+        )
+        .await
+        .expect("create VPC-owned domain");
+        let segment = NewNetworkSegment {
+            subdomain_id: Some(domain.id),
+            vpc_id: Some(vpc_id),
+            segment_type: NetworkSegmentType::Tenant,
+            ..crate::test_support::network_segment::admin_segment(
+                "tenant-dns",
+                "192.0.2.0/24",
+                "192.0.2.1",
+                1,
+            )
+        };
+        let segment_id = segment.id;
+
+        let result = persist(segment, txn.as_mut(), NetworkSegmentControllerState::Ready).await;
+        assert!(
+            matches!(result, Err(DatabaseError::InvalidArgument(ref message)) if message.contains("VPC-owned")),
+            "{result:?}"
+        );
+        let segments = find_by(
+            txn.as_mut(),
+            ObjectColumnFilter::One(IdColumn, &segment_id),
+            NetworkSegmentSearchConfig::default(),
+        )
+        .await
+        .expect("the rejected creation leaves the transaction usable");
+        assert!(segments.is_empty(), "the rejected segment was not inserted");
+    }
+
     // Insert just enough into `network_segments` to make
     // `segment_exists(name)` return true;
     async fn minimum_segment_data(
@@ -1169,7 +1221,7 @@ mod tests {
     }
 
     #[crate::sqlx_test]
-    async fn free_ip_counts_are_populated_for_every_dual_stack_prefix(
+    async fn admin_dual_stack_free_counts_follow_host_allocation(
         pool: sqlx::PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let mut txn = pool.begin().await?;
@@ -1246,8 +1298,241 @@ mod tests {
             .iter()
             .find(|prefix| prefix.prefix.is_ipv6())
             .expect("IPv6 prefix should be returned");
-        assert_eq!(ipv4.num_free_ips, Some(2));
+        assert_eq!(ipv4.num_free_ips, Some(1));
         assert_eq!(ipv6.num_free_ips, Some(u64::MAX as u128 - 1));
+
+        let interface = crate::machine_interface::create(
+            txn.as_mut(),
+            std::slice::from_ref(&segment),
+            &"aa:bb:cc:dd:49:20".parse()?,
+            true,
+            AddressSelectionStrategy::NextAvailableIp,
+            None,
+        )
+        .await?;
+        assert_eq!(interface.addresses.len(), 2);
+        assert!(interface.addresses.contains(&"192.0.2.2".parse()?));
+        txn.commit().await?;
+
+        let mut conn = pool.acquire().await?;
+        let found = find_by(
+            conn.as_mut(),
+            ObjectColumnFilter::One(IdColumn, &segment.id),
+            NetworkSegmentSearchConfig {
+                include_num_free_ips: true,
+                ..Default::default()
+            },
+        )
+        .await?;
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].prefixes.len(), 2);
+        for prefix in &found[0].prefixes {
+            let expected_count = if prefix.prefix.is_ipv4() {
+                0
+            } else {
+                u64::MAX as u128 - 2
+            };
+            assert_eq!(prefix.num_free_ips, Some(expected_count));
+        }
+
+        Ok(())
+    }
+
+    #[crate::sqlx_test]
+    async fn narrow_prefix_free_counts_follow_segment_allocation_policy(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        for (segment_type, expected_count) in [
+            (NetworkSegmentType::Admin, 0),
+            (NetworkSegmentType::Underlay, 0),
+            (NetworkSegmentType::Tenant, 1),
+            (NetworkSegmentType::HostInband, 0),
+        ] {
+            let mut txn = pool.begin().await?;
+            let segment = persist(
+                NewNetworkSegment {
+                    segment_type,
+                    ..crate::test_support::network_segment::admin_segment(
+                        "narrow-prefix-free-counts",
+                        "192.0.2.0/31",
+                        "192.0.2.0",
+                        0,
+                    )
+                },
+                &mut txn,
+                NetworkSegmentControllerState::Ready,
+            )
+            .await?;
+            let found = find_by(
+                txn.as_mut(),
+                ObjectColumnFilter::One(IdColumn, &segment.id),
+                NetworkSegmentSearchConfig {
+                    include_num_free_ips: true,
+                    ..Default::default()
+                },
+            )
+            .await?;
+            assert_eq!(found.len(), 1);
+            assert_eq!(found[0].prefixes.len(), 1);
+            assert_eq!(
+                found[0].prefixes[0].num_free_ips,
+                Some(expected_count),
+                "{segment_type}"
+            );
+            txn.rollback().await?;
+        }
+
+        Ok(())
+    }
+
+    #[crate::sqlx_test]
+    async fn tenant_free_counts_preserve_allocated_prefix_width(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut txn = pool.begin().await?;
+        let vpc_id = crate::test_support::vpc::insert_vpc(txn.as_mut(), "tenant-free-counts").await;
+        let segment = persist(
+            NewNetworkSegment {
+                vpc_id: Some(vpc_id),
+                segment_type: NetworkSegmentType::Tenant,
+                ..crate::test_support::network_segment::admin_segment(
+                    "tenant-free-counts",
+                    "192.0.2.0/29",
+                    "192.0.2.1",
+                    1,
+                )
+            },
+            &mut txn,
+            NetworkSegmentControllerState::Ready,
+        )
+        .await?;
+        let machine_id = uuid::Uuid::new_v4();
+        sqlx::query("INSERT INTO machines (id, dpf) VALUES ($1, '{}'::jsonb)")
+            .bind(machine_id)
+            .execute(txn.as_mut())
+            .await?;
+        let instance_id: uuid::Uuid =
+            sqlx::query_scalar("INSERT INTO instances (machine_id) VALUES ($1) RETURNING id")
+                .bind(machine_id)
+                .fetch_one(txn.as_mut())
+                .await?;
+        sqlx::query(
+            "INSERT INTO instance_addresses (instance_id, address, prefix, segment_id, vpc_id) \
+             VALUES ($1, '192.0.2.2'::inet, '192.0.2.0/30'::cidr, $2, $3)",
+        )
+        .bind(instance_id)
+        .bind(segment.id)
+        .bind(vpc_id)
+        .execute(txn.as_mut())
+        .await?;
+
+        let found = find_by(
+            txn.as_mut(),
+            ObjectColumnFilter::One(IdColumn, &segment.id),
+            NetworkSegmentSearchConfig {
+                include_num_free_ips: true,
+                ..Default::default()
+            },
+        )
+        .await?;
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].prefixes.len(), 1);
+        // The stored /30 includes the reserved .0 and gateway .1. Only
+        // .4 through .6 remain free; .7 is the broadcast address.
+        assert_eq!(found[0].prefixes[0].num_free_ips, Some(3));
+
+        Ok(())
+    }
+
+    #[crate::sqlx_test]
+    async fn admin_free_counts_include_parked_and_other_segment_owners(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut txn = pool.begin().await?;
+        let static_assignments = persist(
+            NewNetworkSegment {
+                name: STATIC_ASSIGNMENTS_SEGMENT_NAME.to_string(),
+                subdomain_id: None,
+                vpc_id: None,
+                mtu: 1500,
+                prefixes: vec![NewNetworkPrefix {
+                    prefix: "169.254.254.254/32".parse()?,
+                    gateway: None,
+                    dhcpv6_link_address: None,
+                    num_reserved: 1,
+                }],
+                vlan_id: None,
+                vni: None,
+                segment_type: NetworkSegmentType::Underlay,
+                id: uuid::Uuid::new_v4().into(),
+                can_stretch: Some(false),
+                allocation_strategy: model::network_segment::AllocationStrategy::Reserved,
+                infer_slaac_eui64_addresses: false,
+            },
+            &mut txn,
+            NetworkSegmentControllerState::Ready,
+        )
+        .await?;
+        let active_address: IpAddr = "192.0.2.2".parse()?;
+        let parked_address: IpAddr = "192.0.2.3".parse()?;
+        crate::machine_interface::preallocate_machine_interface(
+            txn.as_mut(),
+            "aa:bb:cc:dd:49:21".parse()?,
+            active_address,
+            None,
+        )
+        .await?;
+        crate::machine_interface_address::insert_reserved(
+            txn.as_mut(),
+            "aa:bb:cc:dd:49:22".parse()?,
+            parked_address,
+            model::allocation_type::AllocationType::Static,
+        )
+        .await?;
+
+        // Add the managed prefix after the static assignment so its owner
+        // remains on `static-assignments` while using an address in this prefix.
+        let segment = persist(
+            crate::test_support::network_segment::admin_segment(
+                "globally-owned-free-counts",
+                "192.0.2.0/29",
+                "192.0.2.1",
+                2,
+            ),
+            &mut txn,
+            NetworkSegmentControllerState::Ready,
+        )
+        .await?;
+        txn.commit().await?;
+
+        let mut conn = pool.acquire().await?;
+        let owner =
+            crate::machine_interface_address::find_by_address(conn.as_mut(), active_address)
+                .await?
+                .expect("the static assignment should remain active");
+        assert_eq!(owner.segment_id, static_assignments.id);
+        let parked = crate::machine_interface_address::find_reserved(
+            conn.as_mut(),
+            None,
+            Some(parked_address),
+        )
+        .await?;
+        assert_eq!(parked.len(), 1);
+        assert_eq!(parked[0].address, parked_address);
+
+        let found = find_by(
+            conn.as_mut(),
+            ObjectColumnFilter::One(IdColumn, &segment.id),
+            NetworkSegmentSearchConfig {
+                include_num_free_ips: true,
+                ..Default::default()
+            },
+        )
+        .await?;
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].prefixes.len(), 1);
+        // Five eligible hosts (.2 through .6), minus the active and parked owners.
+        assert_eq!(found[0].prefixes[0].num_free_ips, Some(3));
 
         Ok(())
     }

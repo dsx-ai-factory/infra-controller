@@ -327,10 +327,14 @@ the following:
   VXLAN overhead of about fifty bytes, end to end across the fabric ([Network
   Prerequisites → General Guidance](../../docs/getting-started/prerequisites/network.md#general-guidance)).
 - The filters of 1.2.2 apply.
-- **No BGP session password is configured.** The site controller DPU is configured from the
-  install ISO, before any NICo service exists, and the configuration built into the ISO
-  has no password field; a ToR that demands one leaves those sessions down and the
-  provisioning procedure in `scripts/control-plane-dpu/README.md` fails.
+- **A BGP session password is optional.** When the datacenter enforces TCP MD5
+  authentication on the DPU-facing ToR ports, set `installWithLeafPassword: true` in the DPU
+  site file: the ISO build asks for the password (or reads `BGP_LEAF_SESSION_PASSWORD`),
+  renders it into both leaf-facing sessions and requires `--encrypt-artifacts`. The ToR must
+  be configured with the same password on both uplink ports, and when the same ToRs also
+  serve managed hosts it must equal the site-wide password of those ports (worksheet row
+  1.2.1). Length and character constraints: [README Step
+  1](README.md#step-1--prepare-the-site-config).
 
 Both uplinks must be cabled and configured. The site controller DPU peers on both. The
 site controller DPU runs no agent and has no health check, so nothing reports a down
@@ -613,7 +617,7 @@ file has no field for the item.
 |---|---|---|---|---|
 | 1.1.1 | datacenter ASN | `4200000100` | `datacenterAsn` | `datacenter_asn` |
 | 1.1.3 | ASN range | `4200100000–4200100999` | `bgpAsnStart: 4200100000` (site controllers use `…000`–`…003`), `siteControllerRoutesAsn: 4200100000` | `[pools.fnn-asn]` `4200100100–4200100999` |
-| 1.2.1 | BGP session password on DPU-facing ToR ports | **none on site controller ports** (required); optional site-wide secret on managed-host ports | — (no field; the ISO-built configuration cannot carry one) | `bgp_leaf_session_password = "site_wide"` + [`nico-admin-cli credential bgp set-sitewide --password <secret>`](../../docs/manuals/nico-admin-cli/commands/credential/credential-bgp-set-sitewide.md) (managed hosts only) |
+| 1.2.1 | BGP session password on DPU-facing ToR ports | optional; one secret per site, the same on the site controller ports and on the managed-host ports served by the same ToRs | `installWithLeafPassword: true` (the password is entered at build time, never written to the file) | `bgp_leaf_session_password = "site_wide"` + [`nico-admin-cli credential bgp set-sitewide --password <secret>`](../../docs/manuals/nico-admin-cli/commands/credential/credential-bgp-set-sitewide.md) (managed hosts) |
 | 1.1.2 | NICo VNI block (example layout); no other VNI in it, and no datacenter route target `<datacenterAsn>:<n>` with `n` in it other than the common tags | `50000–65000` | `fnn.controlPlaneVni: 60000` | `[fnn.admin_vpc].vpc_vni = 60100`; `[pools.vpc-vni]` `60101–60199`; `[pools.vni]` `56000–56009` (L2VNIs, admin segments); `[pools.vlan-id]` any ten values, DPU-internal |
 | 1.1.4 | DPU loopbacks | `10.10.0.0/26` | `forgeDpuLoopbackPrefix: 10.10.0.0/28` | `[pools.lo-ip]` `10.10.0.16–10.10.0.62`; `[pools.vpc-dpu-lo]` disjoint from the optional `fnn.vpcVrfLoopbackPrefix` |
 | 1.1.4 | site controller host `/31`s (DPU design) | `10.10.1.0/29` | `forgeControlPlanePrefix` | MetalLB peers `10.10.1.0`, `.2`, `.4` (without DPUs: the ToR addresses, 1.3) |

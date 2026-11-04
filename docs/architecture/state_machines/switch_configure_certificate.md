@@ -9,21 +9,32 @@ Service (RMS)** asynchronously and polls job status until completion.
 
 - Install or rotate the switch NVOS certificate as part of initial switch
   bring-up, before NVOS admin credentials are stored (`RotateOsPassword`).
+- Reset existing mTLS bindings before installing certificates during initial
+  bring-up, so stale client-CA trust cannot block installation.
 - Keep RMS-specific protobuf and job semantics behind the CM `NvSwitchManager`
   abstraction so the state handler stays backend-agnostic (RMS, NSM, mock).
 - Persist the async **job ID** in controller state so restarts can resume polling.
 
 ## Placement in the Switch FSM
 
-`ConfigureCertificate` is a sub-state of `SwitchControllerState::Configuring`,
-before `RotateOsPassword`, `FetchInfo`, and `Validating`.
+`DisableMtls` and `ConfigureCertificate` are sub-states of
+`SwitchControllerState::Configuring`, before `RotateOsPassword`, `FetchInfo`,
+and `Validating`. Initial ingestion enters `DisableMtls` first; maintenance
+`ReconfigureCertificate` does not run it.
 
 ```mermaid
 stateDiagram-v2
 direction TB
 
 state Configuring {
-    [*] --> ConfigureCertificate
+    [*] --> DisableMtls
+    state DisableMtls {
+        [*] --> DisableStart
+        DisableStart --> DisableWaitForComplete : job submitted
+        DisableStart --> DisableStart : CM start error (retry next iteration)
+        DisableWaitForComplete --> DisableWaitForComplete : in progress or CM poll error (retry next iteration)
+    }
+    DisableMtls --> ConfigureCertificate : job Completed or skipped
     state ConfigureCertificate {
         [*] --> Start
         Start --> WaitForComplete : job submitted
@@ -36,13 +47,68 @@ state Configuring {
 
 FetchInfo --> Validating : slot and tray lookup complete
 
+DisableMtls --> Error : job Failed, outcome unknown, or unobservable
 ConfigureCertificate --> Error : job Failed
 ```
 
-Transient CM or transport failures during `Start` or `WaitForComplete` return
-`StateHandlerError` and leave the switch in the same sub-state for retry on the
-next handler iteration. Only a terminal RMS job status of `Failed` (or missing
-component manager while polling) transitions to `Error`.
+`DisableStart` and `DisableWaitForComplete` are the `Start` and
+`WaitForComplete { job_id }` values of `DisableMtlsState`. Persisted states from
+before `DisableMtls` existed deserialize unchanged; a switch already in
+`ConfigureCertificate` continues there without running the disable step.
+
+In `Start` and `WaitForComplete` of both `DisableMtls` and
+`ConfigureCertificate`, a generic CM or transport error returns
+`StateHandlerError` and leaves the switch in the same sub-state for retry on the
+next handler iteration. Failures that retrying cannot resolve transition to
+`Error` instead. Examples are a missing prerequisite, an unresolved endpoint, a
+job that can no longer be observed, and a terminal job failure. `DisableMtls`
+also moves to `Error` on an unknown submission outcome, because a retry could
+submit the operation twice. The condition tables for
+[`DisableMtls`](#sub-states-disablemtlsstate) and
+[`ConfigureCertificate`](#sub-states-configurecertificatestate) list each case.
+
+### Disable mTLS before certificate installation
+
+RMS checks NVUE connectivity with its current client certificate before it
+installs replacement certificates. A switch whose existing mTLS bindings trust
+a different CA rejects that certificate, so the install never starts and
+re-ingestion repeats the failure. Initial ingestion therefore calls RMS
+`BatchDisableSwitchMtls` for the switch first, and submits
+`ConfigureSwitchCertificate` only after the disable job completes. RMS removes
+the bindings over SSH, which does not depend on a working NVUE endpoint.
+
+The disable request uses the same service selection as certificate
+installation, including the primary-switch filtering described below.
+
+### Sub-states (`DisableMtlsState`)
+
+| Sub-state | Purpose |
+|-----------|---------|
+| `Start` | Resolve credentials and the switch endpoint, call CM to start the RMS disable job. |
+| `WaitForComplete { job_id }` | Poll CM, which reads RMS `GetJobStatus` with child jobs, until terminal. |
+
+The disable parent job and every child job RMS declares must complete before
+the state advances to `ConfigureCertificate` `Start`.
+
+| Condition | Behavior |
+|-----------|----------|
+| `rack_id` is `None`, no component manager, or no services remain | Skip; advance to `ConfigureCertificate` `Start`, which skips as well. |
+| Backend returns `Unsupported` (for example NSM, or RMS without the RPC) | Log a warning, skip; advance to `ConfigureCertificate` `Start`. |
+| `rack_id`, a component manager, and `bmc_mac_address` are all present, and the per-switch NVOS admin credential is absent with no seed source, or its source data is invalid | Wait in `Start`; the next iteration retries after the credential is imported or corrected. This check runs before the services check, so it applies even when no services remain. |
+| The credential store or database fails during that credential check | `StateHandlerError`; remain in `Start` and retry. |
+| `bmc_mac_address` is `None`, or the endpoint cannot be resolved | Transition to `Error`. |
+| CM returns `OperationOutcomeUnknown` on submission | Transition to `Error`; the submission is not retried. |
+| CM returns `RejectedBeforeDispatch` or another error on submission | `StateHandlerError`; remain in `Start` and retry. `RejectedBeforeDispatch` establishes that RMS received nothing. |
+| CM returns `NotFound`, `OperationOutcomeUnknown`, or `Unsupported` on status | Transition to `Error`; certificate configuration is not submitted. |
+| CM returns another error on status | `StateHandlerError`; remain in `WaitForComplete` and retry. |
+| Component manager not configured while polling | Transition to `Error` because the persisted job ID cannot be polled without a component manager; certificate configuration is not submitted. |
+| RMS job is pending | Wait; poll again on the next iteration. |
+| RMS job and every child it declares `Completed` | Advance to `ConfigureCertificate` `Start`. |
+| RMS job (or any child) `Failed` | Transition to `Error`; certificate configuration is not submitted. |
+
+If certificate installation fails during bring-up, the `Error` cause states
+that mTLS restoration is incomplete. The cause includes this text even when the
+disable step was skipped.
 
 ### Sub-states (`ConfigureCertificateState`)
 
@@ -120,15 +186,19 @@ The target switch build must support each selected binding.
 | Condition | Behavior |
 |-----------|----------|
 | `rack_id` is `None` | Bring-up skips certificate configuration and advances to `RotateOsPassword`. Maintenance `ReconfigureCertificate` transitions to `Error`. |
+| No services remain after primary-switch filtering | Bring-up advances to `RotateOsPassword` without an RMS job. Maintenance `ReconfigureCertificate` returns to `Ready`. This is checked before the component manager check. |
 | Component manager not configured | Bring-up skips certificate configuration. Maintenance `ReconfigureCertificate` transitions to `Error`. |
+| Bring-up only: `rack_id`, a component manager, and `bmc_mac_address` are all present, and the per-switch NVOS admin credential is absent with no seed source, or its source data is invalid | Wait in `Start`; the next iteration retries after the credential is imported or corrected. Maintenance does not run this check. |
+| Bring-up only: the credential store or database fails during that credential check | `StateHandlerError`; remain in `Start` and retry. |
 | `bmc_mac_address` is `None` | Transition to `Error`. |
-| Missing NVOS MAC/IP, credentials, or endpoint row | Transition to `Error` with a descriptive cause (no `0.0.0.0` placeholder). |
+| Missing NVOS MAC/IP, missing NVOS admin credential (maintenance, or bring-up after the check above), or missing endpoint row | Transition to `Error` with a descriptive cause (no `0.0.0.0` placeholder). |
 | CM returns error on `configure_switch_certificate` | `StateHandlerError`; remain in `Start` and retry on the next iteration. |
 | CM returns `NotFound` on `get_configure_switch_certificate_job_status` | Transition to `Error` because the persisted job can no longer be observed. |
 | CM returns another error on `get_configure_switch_certificate_job_status` | `StateHandlerError`; remain in `WaitForComplete` and retry on the next iteration. |
 | RMS job status is `Started` or `InProgress` | Wait; poll again on the next iteration. |
-| RMS job status is `Failed` | Transition to `Error` with the job error message. |
-| Component manager not configured while polling | Transition to `Error` (no job ID to resume). |
+| RMS job status is `Completed` | Bring-up advances to `RotateOsPassword`. Maintenance returns to `Ready`. |
+| RMS job status is `Failed` | Transition to `Error` with the job error message. Bring-up's cause also states that mTLS restoration is incomplete. |
+| Component manager not configured while polling | Transition to `Error` because the persisted job ID cannot be polled without a component manager. |
 
 ## Component Manager API
 
@@ -140,6 +210,8 @@ for rack maintenance, and a shared status method:
 | `configure_switch_certificate` | `SwitchEndpoint`, `domain_name: Option<&str>`, `services: Option<&[i32]>` | `job_id: String` |
 | `batch_configure_switch_certificate` | `&[SwitchCertificateEndpoint]`, `domain_name: Option<&str>`, `services: Option<&[i32]>` | parent `job_id: String` |
 | `get_configure_switch_certificate_job_status` | `job_id: &str` | `ConfigureSwitchCertificateJobStatus { state, error }` |
+| `batch_disable_switch_mtls` | `&[SwitchEndpoint]`, `services: &[i32]` | parent `job_id: String` |
+| `get_disable_switch_mtls_job_status` | `job_id: &str` | `SwitchMtlsDisableJobStatus { state, error }` |
 
 The single-switch `SwitchEndpoint` is built from:
 
@@ -165,6 +237,10 @@ The subsequent V2 phase keeps its existing full-endpoint requirements.
 Rack-wide batch submission is implemented by the RMS backend. Other backends
 return `Unsupported` through the default implementation.
 
+`batch_disable_switch_mtls` and `get_disable_switch_mtls_job_status` are
+implemented by the RMS backend. Other backends return `Unsupported` through the
+default implementation, which the switch handler treats as a skipped step.
+
 ## RMS integration
 
 ### Identity resolution (RMS backend only)
@@ -185,10 +261,102 @@ returns an internal error (the state handler normally skips earlier when
 |-----|----------------------|-----------------------|
 | `configure_switch_certificate` | Device (`NodeInfo`), optional `domain`, `services[]` | per-node `job_id`, batch status |
 | `get_configure_switch_certificate_job_status` | `job_id` | RMS job state (`queued`, `running`, `completed`, `failed`, ...) |
+| `batch_disable_switch_mtls` | `NodeSet` of `NodeInfo`, `services[]` | batch status, parent `job_id` |
+| `get_job_status` | `job_id`, `include_child_job_states = true` | `JobStatus` list for the parent and child jobs, each with `execution_state` |
 
 RMS job states are mapped in `map_rms_configure_switch_certificate_job_state`.
 
+The mTLS-disable path uses the last two RPCs:
+
+- **Submission:** before the RPC, an empty endpoint or service list, or a
+  failure to resolve the switch identity, hostname, or node, returns
+  `RejectedBeforeDispatch` and sends nothing to RMS. The RPC must then return a
+  successful batch status and a non-empty parent `job_id`. A gRPC
+  `Unimplemented` status maps to `Unsupported`. Any other RPC error, a missing response, a failed batch, or an
+  empty `job_id` maps to `OperationOutcomeUnknown`. A failed batch that carries a
+  job ID keeps that ID in the error message for reconciliation.
+- **Status:** `summarize_rms_switch_job_tree` reduces the `get_job_status`
+  response to `Pending`, `Completed`, or `Failed`. `Completed` requires the
+  parent and every child it declares to be `Completed`. A child that RMS has not
+  yet reported keeps the job `Pending`. A failed child or parent is `Failed`,
+  and the child's error is preferred. A missing parent or an unspecified
+  execution state maps to `OperationOutcomeUnknown`. RMS `NotFound` and
+  `InvalidArgument` observations also map to `OperationOutcomeUnknown`.
+  `Unimplemented` maps to `Unsupported`. Unavailability, transport errors, and
+  other RMS errors surface as generic CM errors, which the switch handler
+  retries.
+
 ## Sequence diagrams
+
+### Disable mTLS (RMS backend)
+
+Initial ingestion enters `DisableMtls(Start)` from `Initializing` once an NVOS
+interface is associated. One state-controller iteration runs `Start`; later
+iterations run `WaitForComplete` until the RMS job tree reaches a terminal
+state. The skip conditions in the
+[`DisableMtls` condition table](#sub-states-disablemtlsstate) apply before
+`Start` calls CM and are not repeated here.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant SCH as Switch State Handler<br/>(configuring.rs)
+    participant Creds as Credential Manager
+    participant DB as PostgreSQL
+    participant CM as Component Manager
+    participant RMS as RmsBackend
+    participant RPC as RMS (librms)
+
+    Note over SCH: State = Configuring::<br/>DisableMtls(Start)
+
+    SCH->>Creds: get SwitchNvosAdmin credentials
+    alt credentials absent or invalid
+        SCH->>SCH: wait in Start (retry next iteration)
+    end
+
+    SCH->>DB: find machine interfaces for switch
+    SCH->>CM: batch_disable_switch_mtls([endpoint], services)
+    CM->>RMS: NvSwitchManager::batch_disable_switch_mtls
+    RMS->>DB: find_rms_identities_by_macs(bmc_mac)
+    DB-->>RMS: node_id, rack_id
+    RMS->>RMS: build_switch_node_info(endpoint, identity)
+    RMS->>RPC: batch_disable_switch_mtls(nodes, services)
+    RPC-->>RMS: batch status, job_id
+    RMS-->>CM: job_id or error
+    CM-->>SCH: job_id or error
+
+    alt job_id returned
+        SCH->>SCH: transition to DisableMtls<br/>(WaitForComplete { job_id })
+    else Unsupported
+        SCH->>SCH: skip, transition to ConfigureCertificate(Start)
+    else OperationOutcomeUnknown
+        SCH->>SCH: transition to Error (never resubmitted)
+    else RejectedBeforeDispatch or other CM error
+        SCH->>SCH: StateHandlerError (retry next iteration in Start)
+    end
+
+    Note over SCH: Next iteration(s)
+
+    SCH->>CM: get_disable_switch_mtls_job_status(job_id)
+    CM->>RMS: NvSwitchManager::get_disable_switch_mtls_job_status
+    RMS->>RPC: get_job_status(job_id, include_child_job_states = true)
+    RPC-->>RMS: parent and child JobStatus list
+    RMS->>RMS: summarize_rms_switch_job_tree
+    RMS-->>CM: SwitchMtlsDisableJobStatus or error
+    CM-->>SCH: status or error
+
+    alt state = Pending
+        SCH->>SCH: wait (retry next iteration)
+    else state = Completed (parent and every child)
+        SCH->>SCH: transition to ConfigureCertificate(Start)
+    else state = Failed
+        SCH->>SCH: transition to Error (certificates not submitted)
+    else NotFound, OperationOutcomeUnknown, or Unsupported
+        SCH->>SCH: transition to Error (certificates not submitted)
+    else other CM error
+        SCH->>SCH: StateHandlerError (retry next iteration in WaitForComplete)
+    end
+```
 
 ### Happy path (RMS backend)
 
@@ -332,8 +500,9 @@ single-switch, single-job certificate operation.
 
 | Layer | Location |
 |-------|----------|
-| State types | `crates/api-model/src/switch/mod.rs` — `ConfigureCertificateState`, `ConfiguringState` |
+| State types | `crates/api-model/src/switch/mod.rs` — `DisableMtlsState`, `ConfigureCertificateState`, `ConfiguringState` |
 | Job status enum | `crates/api-model/src/component_manager.rs` — `ConfigureSwitchCertificateState` |
+| mTLS-disable job status enum | `crates/component-manager/src/nv_switch_manager.rs` — `SwitchMtlsDisableState` |
 | Shared certificate logic | `crates/switch-controller/src/certificate.rs` |
 | Bring-up handler | `crates/switch-controller/src/configuring.rs` |
 | Maintenance handler | `crates/switch-controller/src/maintenance.rs` |

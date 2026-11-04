@@ -18,8 +18,11 @@
 use mac_address::MacAddress;
 use sqlx::types::chrono::{DateTime, Utc};
 
-/// A row in the `bmc_redfish_sessions` table.
-#[derive(Debug, Clone, sqlx::FromRow)]
+/// `StoredSession` is a 1:1 modeling of the underlying
+/// `bmc_redfish_sessions` table structure. Its fields map directly to columns
+/// for `FromRow` decoding and `DbTable` query projections.
+#[derive(Debug, Clone, sqlx::FromRow, carbide_macros::DbTable)]
+#[db_table(name = "bmc_redfish_sessions")]
 pub struct StoredSession {
     pub spiffe_service_id: String,
     pub bmc_mac_address: MacAddress,

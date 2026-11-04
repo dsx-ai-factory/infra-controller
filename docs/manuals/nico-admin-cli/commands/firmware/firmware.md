@@ -45,6 +45,7 @@ Print help (see a summary with -h)
 
 | Subcommand | Description |
 |---|---|
+| [`nic`](./firmware-nic.md) | Manage NIC firmware |
 | [`show`](./firmware-show.md) | Show available firmware |
 
 ---

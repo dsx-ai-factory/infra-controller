@@ -21,6 +21,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"os/exec"
 	"strconv"
@@ -142,23 +143,32 @@ func scrapePuntStats(
 		// Read directly from DPU filesystem
 		args = []string{"cat", filePath}
 	} else {
-		// 1. Get list of containers
-		psCmd := exec.CommandContext(ctx, "crictl", "ps")
+		// 1. Get list of containers (as structured JSON, so the name match
+		//    below is scoped to the container's name field)
+		psCmd := exec.CommandContext(ctx, "crictl", "ps", "-o", "json")
 		out, err := psCmd.Output()
 		if err != nil {
 			return "", fmt.Errorf("crictl ps failed: %w", err)
 		}
 
-		// 2. Find the container ID by name (grep + awk '{print $1}')
+		// 2. Find the container ID by exact name match
+		var psResult struct {
+			Containers []struct {
+				ID       string `json:"id"`
+				Metadata struct {
+					Name string `json:"name"`
+				} `json:"metadata"`
+			} `json:"containers"`
+		}
+		if err := json.Unmarshal(out, &psResult); err != nil {
+			return "", fmt.Errorf("failed to parse crictl ps output: %w", err)
+		}
+
 		var containerID string
-		lines := strings.Split(string(out), "\n")
-		for _, line := range lines {
-			if strings.Contains(line, containerName) {
-				fields := strings.Fields(line)
-				if len(fields) > 0 {
-					containerID = fields[0]
-					break
-				}
+		for _, c := range psResult.Containers {
+			if c.Metadata.Name == containerName {
+				containerID = c.ID
+				break
 			}
 		}
 		if containerID == "" {

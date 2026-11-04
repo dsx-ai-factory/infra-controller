@@ -39,9 +39,8 @@ const (
 )
 
 type trayHealthReportHandler struct {
-	dbSession  *cdb.Session
-	scp        *sc.ClientPool
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	scp       *sc.ClientPool
 }
 
 // GetAllTrayHealthReportHandler lists Tray health reports.
@@ -61,9 +60,8 @@ type DeleteTrayHealthReportHandler struct {
 
 func newTrayHealthReportHandler(dbSession *cdb.Session, scp *sc.ClientPool) trayHealthReportHandler {
 	return trayHealthReportHandler{
-		dbSession:  dbSession,
-		scp:        scp,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		scp:       scp,
 	}
 }
 
@@ -134,7 +132,7 @@ func (h DeleteTrayHealthReportHandler) Handle(c echo.Context) error {
 }
 
 func handleTrayHealthReport(c echo.Context, h trayHealthReportHandler, action trayHealthReportAction) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("TrayHealthReport", string(action), c, h.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("TrayHealthReport", string(action), c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
