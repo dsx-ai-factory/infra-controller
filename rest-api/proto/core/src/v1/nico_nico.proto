@@ -5665,6 +5665,11 @@ message ManagedHostServiceInterfaceConfig {
   string mac_address = 15;
   // Stable identity used to correlate this service interface across reconciliation.
   common.UUID internal_uuid = 16;
+  // Administrative loopback assigned to the selected VPC's tenant VRF on this DPU.
+  // Unlike ManagedHostNetworkConfig.loopback_ip, this address is not the DPU VXLAN VTEP.
+  // Host and service interfaces selecting the same VPC on this DPU reuse this address.
+  // Omitted when fnn.use_vpc_vrf_loopback is false.
+  optional string tenant_vrf_loopback_ip = 17;
 }
 
 // Complete fixed service-slot inventory for one DPU deployment.

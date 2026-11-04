@@ -32,7 +32,7 @@ use tonic::Request;
 
 const TEST_TIMEOUT: Duration = Duration::from_secs(30);
 
-use super::{dpf_config, expect_dpf_service_inventory, phase_observation};
+use super::{bf4_deployment_config, dpf_config, expect_dpf_service_inventory, phase_observation};
 use crate::tests::common::api_fixtures::{
     TestEnvOverrides, create_managed_host_with_dpf, create_managed_host_with_dpf_bf4,
     create_test_env_with_overrides, get_config,
@@ -95,6 +95,8 @@ async fn assert_bf4_skips_platform_configuration(pool: sqlx::PgPool, enable_secu
 
     let mut config = get_config();
     config.dpf = dpf_config();
+    // Configure the BF4 deployment to match the Bf4Generic provisioning reported by the mock.
+    config.dpf.deployments.bf4_generic = Some(bf4_deployment_config("bf4-generic"));
     config.dpu_config.dpu_enable_secure_boot = enable_secure_boot;
 
     let env = create_test_env_with_overrides(

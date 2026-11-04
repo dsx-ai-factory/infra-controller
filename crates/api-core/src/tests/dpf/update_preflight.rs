@@ -47,7 +47,7 @@ use state_controller::controller::StateController;
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 
-use super::{dpf_config, expect_dpf_service_inventory, phase_observation};
+use super::{bf4_deployment_config, dpf_config, expect_dpf_service_inventory, phase_observation};
 use crate::cfg::file::CarbideConfig;
 use crate::machine_update_manager::dpu_nic_firmware::DpuNicFirmwareUpdate;
 use crate::machine_update_manager::machine_update_module::MachineUpdateModule;
@@ -170,6 +170,13 @@ async fn fixture_with_config(
     expect_dpf_service_inventory(&mut mock);
     let dpf: Arc<dyn DpfOperations> = Arc::new(mock);
     config.dpf = dpf_config();
+    // Configure both BF4 classes because preflight tests can add CX9 inventory after Generic provisioning.
+    if deployment == DpuDeploymentType::Bf4Generic {
+        // Enable deployment-scoped ServiceInterfaces because configuring bf4_astra requires them.
+        config.dpf.deployment_scoped_service_interfaces = true;
+        config.dpf.deployments.bf4_generic = Some(bf4_deployment_config("bf4-generic"));
+        config.dpf.deployments.bf4_astra = Some(bf4_deployment_config("bf4-astra"));
+    }
     let env = create_test_env_with_overrides(
         pool,
         TestEnvOverrides::with_config(config).with_dpf_sdk(dpf.clone()),
