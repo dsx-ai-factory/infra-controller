@@ -17,6 +17,8 @@
 
 //! Handler for RackState::Maintenance.
 
+use std::collections::HashSet;
+
 use carbide_instrument::{Event, emit};
 use carbide_rack::firmware_object::{
     ANY_RACK_HARDWARE_TYPE, profile_hardware_type_wire_value, rack_maintenance_access_token_key,
@@ -24,7 +26,8 @@ use carbide_rack::firmware_object::{
 };
 use carbide_rack::firmware_update::{
     RackFirmwareInventory, RackSwitchFirmwareInventory, firmware_type_for_profile,
-    load_rack_firmware_inventory, load_rack_switch_firmware_inventory,
+    load_compute_firmware_inventory, load_rack_firmware_inventory,
+    load_rack_switch_firmware_inventory,
 };
 use carbide_rack::rms_node_type::switch_node_identity_for_profile;
 use carbide_rack_controller::context::RackStateHandlerContextObjects;
@@ -52,13 +55,14 @@ use db::{
     power_shelf as db_power_shelf, rack as db_rack, switch as db_switch,
 };
 use model::component_manager::ConfigureSwitchCertificateState;
-use model::machine::{HostMachine, MachineMaintenanceOperation};
+use model::machine::{HostMachine, MachineMaintenanceOperation, ManagedHostState};
 use model::rack::{
     ConfigureNmxClusterState, FirmwareProgressState, FirmwareUpgradeDeviceStatus,
-    FirmwareUpgradeState, MaintenanceActivity, MaintenanceScope, NvosPasswordUpdateState,
-    NvosUpdateState, NvosUpdateSwitchStatus, Rack, RackErrorRecoveryPolicy,
-    RackFirmwareUpgradeState, RackFirmwareUpgradeStatus, RackMaintenanceState, RackPowerState,
-    RackState, RackValidationState, SwitchNvosUpdateState, SwitchNvosUpdateStatus,
+    FirmwareUpgradeJob, FirmwareUpgradeState, MaintenanceActivity, MaintenanceScope,
+    NvosPasswordUpdateState, NvosUpdateState, NvosUpdateSwitchStatus, Rack,
+    RackErrorRecoveryPolicy, RackFirmwareUpgradeState, RackFirmwareUpgradeStatus,
+    RackMaintenanceState, RackPowerState, RackState, RackValidationState, SwitchNvosUpdateState,
+    SwitchNvosUpdateStatus,
 };
 use model::rack_type::RackProfile;
 use state_controller::state_handler::{
@@ -666,6 +670,167 @@ async fn resolve_power_shelf_id_for_firmware_device(
     .copied())
 }
 
+fn firmware_device_status(
+    job: &FirmwareUpgradeJob,
+    device: &FirmwareUpgradeDeviceStatus,
+) -> RackFirmwareUpgradeStatus {
+    let state = match &device.status {
+        FirmwareProgressState::Completed => RackFirmwareUpgradeState::Completed,
+        FirmwareProgressState::Failed => RackFirmwareUpgradeState::Failed {
+            cause: device
+                .error_message
+                .clone()
+                .filter(|message| !message.trim().is_empty())
+                .unwrap_or_else(|| format!("RMS reported failure for {}", device.mac)),
+        },
+        FirmwareProgressState::InProgress => RackFirmwareUpgradeState::InProgress,
+        FirmwareProgressState::Pending | FirmwareProgressState::Unknown(_) => {
+            RackFirmwareUpgradeState::Started
+        }
+    };
+    RackFirmwareUpgradeStatus {
+        task_id: device
+            .job_id
+            .clone()
+            .or_else(|| device.parent_job_id.clone())
+            .or_else(|| job.job_id.clone())
+            .unwrap_or_else(|| "unknown".to_string()),
+        status: state,
+        started_at: job.started_at,
+        ended_at: if device.status.is_terminal() {
+            job.completed_at.or(Some(chrono::Utc::now()))
+        } else {
+            None
+        },
+    }
+}
+
+async fn submitted_firmware_machine_ids(
+    txn: &mut sqlx::PgConnection,
+    job: &FirmwareUpgradeJob,
+) -> Result<HashSet<HostMachineId>, StateHandlerError> {
+    let mut ids = HashSet::new();
+    for device in &job.machines {
+        if let Some(id) = resolve_machine_id_for_firmware_device(txn, device).await? {
+            ids.insert(id);
+        }
+    }
+    Ok(ids)
+}
+
+/// Adds ready compute hosts that arrived after the ingestion firmware snapshot.
+/// Existing child handles remain in the job so subsequent iterations and restarts
+/// poll them without resubmitting devices. Explicit maintenance keeps its scope.
+async fn reconcile_ingestion_firmware_machines(
+    state: &Rack,
+    rack_profile_id: Option<&RackProfileId>,
+    job: &mut FirmwareUpgradeJob,
+    ctx: &mut StateHandlerContext<'_, RackStateHandlerContextObjects>,
+) -> Result<bool, StateHandlerError> {
+    if !state.config.ingestion_in_progress || state.config.maintenance_requested.is_some() {
+        return Ok(false);
+    }
+    let mut conn = ctx.services.db_pool.acquire().await?;
+    let submitted = submitted_firmware_machine_ids(conn.as_mut(), job).await?;
+    let missing = load_scoped_machines(conn.as_mut(), &state.id, &MaintenanceScope::default())
+        .await?
+        .into_iter()
+        .filter(|machine| !submitted.contains(&machine.id))
+        .collect::<Vec<_>>();
+    let ready_ids = missing
+        .iter()
+        .filter(|machine| {
+            matches!(machine.state.value, ManagedHostState::Ready)
+                && machine.host_reprovision_requested.is_none()
+                && machine.machine_maintenance_requested.is_none()
+        })
+        .map(|machine| machine.id)
+        .collect::<Vec<_>>();
+    if ready_ids.is_empty() {
+        return Ok(!missing.is_empty());
+    }
+    let desired_off = desired_off_machine_ids(conn.as_mut(), &ready_ids).await?;
+    if !desired_off.is_empty() {
+        return Err(StateHandlerError::GenericError(eyre::eyre!(
+            "ingestion firmware cannot target newly discovered machines whose desired power state is Off: {}",
+            format_machine_ids(&desired_off),
+        )));
+    }
+    drop(conn);
+
+    let config_json = configured_profile_firmware_object_json(&state.id, rack_profile_id, ctx)
+        .await
+        .map_err(|error| StateHandlerError::GenericError(eyre::eyre!(error)))?
+        .ok_or_else(|| {
+            StateHandlerError::GenericError(eyre::eyre!(
+                "rack profile firmware object is unavailable for newly discovered compute hosts"
+            ))
+        })?;
+    let machines = load_compute_firmware_inventory(
+        &ctx.services.db_pool,
+        ctx.services.credential_manager.as_ref(),
+        &ready_ids,
+    )
+    .await
+    .map_err(|error| StateHandlerError::GenericError(eyre::eyre!(error)))?;
+    let profile = super::resolve_profile(&state.id, rack_profile_id, ctx).ok_or_else(|| {
+        StateHandlerError::GenericError(eyre::eyre!(
+            "rack profile is missing or unknown for ingestion firmware reconciliation"
+        ))
+    })?;
+    let manager = ctx
+        .services
+        .rack_firmware_update_manager
+        .as_deref()
+        .ok_or_else(|| {
+            StateHandlerError::GenericError(eyre::eyre!(
+                "rack firmware update manager not configured"
+            ))
+        })?;
+    let additional = manager
+        .start_firmware_update(RackFirmwareUpdateRequest {
+            rack_id: &state.id,
+            profile,
+            config_json: &config_json,
+            access_token: None,
+            force_update: false,
+            components: &[],
+            machines,
+            switches: Vec::new(),
+        })
+        .await
+        .map_err(|error| StateHandlerError::GenericError(eyre::eyre!(error)))?;
+
+    let mut txn = ctx.services.db_pool.begin().await?;
+    trigger_rack_firmware_reprovisioning_requests(
+        txn.as_mut(),
+        &state.id,
+        &ready_ids,
+        &[],
+        &[],
+        &[],
+    )
+    .await?;
+    for device in &additional.machines {
+        if let Some(machine_id) =
+            resolve_machine_id_for_firmware_device(txn.as_mut(), device).await?
+        {
+            let mut status = firmware_device_status(&additional, device);
+            // The request and status belong to the same newly admitted batch,
+            // rather than the original rack job's earlier start timestamp.
+            status.started_at = Some(chrono::Utc::now());
+            db_machine::update_rack_fw_details(txn.as_mut(), &machine_id, Some(&status)).await?;
+        }
+    }
+    job.machines.extend(additional.machines);
+    job.batch_job_ids.extend(additional.batch_job_ids);
+    job.completed_at = None;
+    job.status = Some(FirmwareProgressState::InProgress);
+    db_rack::update_firmware_upgrade_job(txn.as_mut(), &state.id, Some(job)).await?;
+    txn.commit().await?;
+    Ok(true)
+}
+
 fn machine_firmware_outcome(machine: &HostMachine) -> DeviceFirmwareOutcome {
     match &machine.state.value {
         model::machine::ManagedHostState::HostReprovision {
@@ -816,6 +981,7 @@ async fn evaluate_firmware_progress_from_devices(
     txn: &mut sqlx::PgConnection,
     rack_id: &RackId,
     scope: &MaintenanceScope,
+    ingestion_job: Option<&FirmwareUpgradeJob>,
 ) -> Result<(DeviceFirmwareProgress, Vec<String>), StateHandlerError> {
     let machines = load_scoped_machines(txn, rack_id, scope).await?;
 
@@ -841,10 +1007,21 @@ async fn evaluate_firmware_progress_from_devices(
     };
     let power_shelves = filter_power_shelves_by_scope(power_shelves, scope);
 
+    let submitted = match ingestion_job {
+        Some(job) => Some(submitted_firmware_machine_ids(txn, job).await?),
+        None => None,
+    };
     let mut outcomes = Vec::with_capacity(machines.len() + switches.len() + power_shelves.len());
     let mut pending_device_ids = Vec::new();
     for machine in &machines {
-        let outcome = machine_firmware_outcome(machine);
+        let mut outcome = machine_firmware_outcome(machine);
+        if outcome != DeviceFirmwareOutcome::Failed
+            && submitted
+                .as_ref()
+                .is_some_and(|ids| !ids.contains(&machine.id))
+        {
+            outcome = DeviceFirmwareOutcome::Waiting;
+        }
         if outcome == DeviceFirmwareOutcome::Waiting {
             pending_device_ids.push(machine.id.to_string());
         }
@@ -2567,50 +2744,27 @@ pub async fn handle_maintenance(
                     .await
                     .map_err(|error| StateHandlerError::GenericError(eyre::eyre!(error)))?;
 
-                let mut txn = ctx.services.db_pool.begin().await?;
+                reconcile_ingestion_firmware_machines(state, rack_profile_id, &mut job, ctx)
+                    .await?;
 
-                let build_status =
-                    |device: &FirmwareUpgradeDeviceStatus| -> RackFirmwareUpgradeStatus {
-                        let state = match &device.status {
-                            FirmwareProgressState::Completed => RackFirmwareUpgradeState::Completed,
-                            FirmwareProgressState::Failed => RackFirmwareUpgradeState::Failed {
-                                cause: device
-                                    .error_message
-                                    .clone()
-                                    .filter(|message| !message.trim().is_empty())
-                                    .unwrap_or_else(|| {
-                                        format!("RMS reported failure for {}", device.mac)
-                                    }),
-                            },
-                            FirmwareProgressState::InProgress => {
-                                RackFirmwareUpgradeState::InProgress
-                            }
-                            FirmwareProgressState::Pending | FirmwareProgressState::Unknown(_) => {
-                                RackFirmwareUpgradeState::Started
-                            }
-                        };
-                        RackFirmwareUpgradeStatus {
-                            task_id: device
-                                .job_id
-                                .clone()
-                                .or_else(|| device.parent_job_id.clone())
-                                .or_else(|| job.job_id.clone())
-                                .unwrap_or_else(|| "unknown".to_string()),
-                            status: state,
-                            started_at: job.started_at,
-                            ended_at: if device.status.is_terminal() {
-                                job.completed_at.or(Some(chrono::Utc::now()))
-                            } else {
-                                None
-                            },
-                        }
-                    };
+                let mut txn = ctx.services.db_pool.begin().await?;
 
                 for device in job.machines.iter() {
                     if let Some(machine_id) =
                         resolve_machine_id_for_firmware_device(txn.as_mut(), device).await?
                     {
-                        let fw_status = build_status(device);
+                        let mut fw_status = firmware_device_status(&job, device);
+                        if let Some(previous) = db_machine::find_one(
+                            txn.as_mut(),
+                            &machine_id,
+                            model::machine::machine_search_config::MachineSearchConfig::default(),
+                        )
+                        .await?
+                        .and_then(|machine| machine.rack_fw_details)
+                        .filter(|previous| previous.task_id == fw_status.task_id)
+                        {
+                            fw_status.started_at = previous.started_at;
+                        }
                         db_machine::update_rack_fw_details(
                             txn.as_mut(),
                             &machine_id,
@@ -2624,7 +2778,7 @@ pub async fn handle_maintenance(
                     if let Some(switch_id) =
                         resolve_switch_id_for_firmware_device(txn.as_mut(), id, device).await?
                     {
-                        let fw_status = build_status(device);
+                        let fw_status = firmware_device_status(&job, device);
                         db_switch::update_firmware_upgrade_status(
                             txn.as_mut(),
                             switch_id,
@@ -2638,7 +2792,7 @@ pub async fn handle_maintenance(
                     if let Some(power_shelf_id) =
                         resolve_power_shelf_id_for_firmware_device(txn.as_mut(), id, device).await?
                     {
-                        let fw_status = build_status(device);
+                        let fw_status = firmware_device_status(&job, device);
                         db_power_shelf::update_firmware_upgrade_status(
                             txn.as_mut(),
                             power_shelf_id,
@@ -2683,8 +2837,15 @@ pub async fn handle_maintenance(
                 // Advancement is driven by machine/switch/power-shelf controller
                 // states for devices in this rack that are selected by the
                 // maintenance scope.
-                let (progress, pending_device_ids) =
-                    evaluate_firmware_progress_from_devices(txn.as_mut(), id, scope).await?;
+                let (progress, pending_device_ids) = evaluate_firmware_progress_from_devices(
+                    txn.as_mut(),
+                    id,
+                    scope,
+                    (state.config.ingestion_in_progress
+                        && state.config.maintenance_requested.is_none())
+                    .then_some(&job),
+                )
+                .await?;
 
                 match progress {
                     DeviceFirmwareProgress::Waiting {
@@ -3403,6 +3564,26 @@ pub async fn handle_maintenance(
             },
         },
         RackMaintenanceState::Completed => {
+            if state.config.ingestion_in_progress
+                && state.config.maintenance_requested.is_none()
+                && let Some(mut job) = state.firmware_upgrade_job.clone()
+            {
+                let added =
+                    reconcile_ingestion_firmware_machines(state, rack_profile_id, &mut job, ctx)
+                        .await?;
+                let pending = job
+                    .status
+                    .as_ref()
+                    .is_some_and(|status| !status.is_terminal());
+                state.firmware_upgrade_job = Some(job);
+                if added || pending {
+                    return Ok(StateHandlerOutcome::transition(RackState::Maintenance {
+                        maintenance_state: RackMaintenanceState::FirmwareUpgrade {
+                            rack_firmware_upgrade: FirmwareUpgradeState::WaitForComplete,
+                        },
+                    }));
+                }
+            }
             tracing::info!(
                 rack_id = %id,
                 "Maintenance completed, clearing rv.* labels and entering Validating(Pending)"

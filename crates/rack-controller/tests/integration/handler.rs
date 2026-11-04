@@ -3529,6 +3529,409 @@ async fn test_rack_maintenance_termination_fails_current_nvos_job(
     Ok(())
 }
 
+async fn queue_ingestion_firmware_batch(env: &TestEnv, batch: &str, node_id: &str) {
+    env.rms_sim
+        .queue_apply_firmware_object_response(rms::ApplyFirmwareObjectResponse {
+            response: Some(rms::NodeBatchResponse {
+                status: rms::ReturnCode::Success as i32,
+                job_id: batch.to_string(),
+                ..Default::default()
+            }),
+            object_id: "ingestion".to_string(),
+            jobs: vec![rms::NodeFirmwareJobInfo {
+                node_id: node_id.to_string(),
+                job_id: format!("{batch}-child"),
+            }],
+        })
+        .await;
+}
+
+/// A late compute host stays pending until ready, is submitted once, and keeps
+/// its child job and timestamps across controller reloads and retries.
+// This multi-host controller fixture needs the same local stack allowance as
+// the firmware completion and maintenance termination fixtures below.
+#[test]
+fn test_ingestion_reconciles_late_compute_firmware() {
+    let mut args = ::sqlx::testing::TestArgs::new(concat!(
+        module_path!(),
+        "::test_ingestion_reconciles_late_compute_firmware"
+    ));
+    args.fixtures(Box::leak(Box::new(vec![])));
+    let test_fn: fn(sqlx::PgPool) -> _ = test_ingestion_reconciles_late_compute_firmware_body;
+    std::thread::Builder::new()
+        .stack_size(16 * 1024 * 1024)
+        .spawn(move || {
+            sqlx_testing::TestFn::run_test(test_fn, args)
+                .expect("late compute firmware reconciliation test failed")
+        })
+        .expect("failed to spawn late compute firmware test thread")
+        .join()
+        .expect("late compute firmware test thread panicked");
+}
+
+async fn test_ingestion_reconciles_late_compute_firmware_body(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut config = config_with_rack_profiles();
+    config
+        .rack_profiles
+        .rack_profiles
+        .get_mut("Single")
+        .unwrap()
+        .firmware_object = Some(RackFirmwareObjectConfig {
+        url: url::Url::parse("https://firmware.example.invalid/ingestion.json")?,
+        access_token_credential: None,
+        fetch_timeout: std::time::Duration::from_secs(10),
+    });
+    let fetcher = Arc::new(StaticFirmwareObjectFetcher {
+        response: Mutex::new(Ok(r#"{"Id":"ingestion"}"#.to_string())),
+        requested_urls: Mutex::new(Vec::new()),
+        requested_timeouts: Mutex::new(Vec::new()),
+    });
+    let env = create_test_env_with_overrides(
+        pool.clone(),
+        TestEnvOverrides {
+            config: Some(config),
+            firmware_object_fetcher: Some(fetcher),
+            ..Default::default()
+        },
+    )
+    .await;
+    let (rack_id, original) = create_single_compute_rack(&env, &pool).await?;
+    let start = RackState::Maintenance {
+        maintenance_state: RackMaintenanceState::FirmwareUpgrade {
+            rack_firmware_upgrade: FirmwareUpgradeState::Start,
+        },
+    };
+    let waiting = RackState::Maintenance {
+        maintenance_state: RackMaintenanceState::FirmwareUpgrade {
+            rack_firmware_upgrade: FirmwareUpgradeState::WaitForComplete,
+        },
+    };
+    let mut conn = pool.acquire().await?;
+    db_rack::update(
+        conn.as_mut(),
+        &rack_id,
+        &RackConfig {
+            ingestion_in_progress: true,
+            ..Default::default()
+        },
+    )
+    .await?;
+    crate::fixtures::rack::set_rack_controller_state(conn.as_mut(), &rack_id, start).await?;
+    drop(conn);
+    queue_ingestion_firmware_batch(&env, "original", &original.host_snapshot.id.to_string()).await;
+    env.run_rack_controller_iteration().await;
+    let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    assert_eq!(rack.controller_state.value, waiting);
+    let mut original_job = rack.firmware_upgrade_job.unwrap();
+    // Persist the predecessor's MAC-only device representation as well.
+    original_job.machines[0].node_id.clear();
+    db_rack::update_firmware_upgrade_job(
+        pool.acquire().await?.as_mut(),
+        &rack_id,
+        Some(&original_job),
+    )
+    .await?;
+    env.rms_sim
+        .set_firmware_job_status(rms::GetFirmwareJobStatusResponse {
+            status: rms::ReturnCode::Success as i32,
+            job_id: "original-child".to_string(),
+            job_state: rms::FirmwareJobState::Completed as i32,
+            ..Default::default()
+        })
+        .await;
+    set_machine_host_reprovision_state(
+        &pool,
+        &original.host_snapshot.id,
+        completed_rack_firmware_upgrade_state(),
+    )
+    .await?;
+
+    let late = new_host(
+        &env,
+        ManagedHostConfig::default().with_expected_machine_data(ExpectedMachineData {
+            rack_id: Some(rack_id.clone()),
+            ..Default::default()
+        }),
+    )
+    .await?;
+    set_machine_host_reprovision_state(
+        &pool,
+        &late.host_snapshot.id,
+        model::machine::HostReprovisionState::CheckingFirmware,
+    )
+    .await?;
+    env.run_rack_controller_iteration().await;
+    let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    assert_eq!(rack.controller_state.value, waiting);
+    assert!(matches!(rack.controller_state_outcome,
+        Some(model::controller_outcome::PersistentStateHandlerOutcome::Wait { ref reason, .. })
+        if reason.contains(&late.host_snapshot.id.to_string()) && reason.contains("pending=1")
+    ));
+    assert_eq!(
+        env.rms_sim
+            .submitted_apply_firmware_object_requests()
+            .await
+            .len(),
+        1
+    );
+
+    let mut conn = pool.acquire().await?;
+    let machine = db::machine::find_one(
+        conn.as_mut(),
+        &late.host_snapshot.id,
+        model::machine::machine_search_config::MachineSearchConfig::default(),
+    )
+    .await?
+    .unwrap();
+    db::machine::advance(
+        &machine,
+        conn.as_mut(),
+        &model::machine::ManagedHostState::Ready,
+        None,
+    )
+    .await?;
+    drop(conn);
+    set_machine_power_states(
+        &pool,
+        &late.host_snapshot.id,
+        model::power_manager::PowerState::Off,
+        model::power_manager::PowerState::On,
+    )
+    .await?;
+    env.run_rack_controller_iteration().await;
+    let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    assert!(matches!(rack.controller_state_outcome,
+        Some(model::controller_outcome::PersistentStateHandlerOutcome::Error { ref err, .. })
+        if err.contains("desired power state is Off")
+    ));
+    assert_eq!(
+        env.rms_sim
+            .submitted_apply_firmware_object_requests()
+            .await
+            .len(),
+        1
+    );
+    set_machine_power_states(
+        &pool,
+        &late.host_snapshot.id,
+        model::power_manager::PowerState::On,
+        model::power_manager::PowerState::On,
+    )
+    .await?;
+
+    env.rms_sim
+        .queue_apply_firmware_object_response(rms::ApplyFirmwareObjectResponse {
+            response: Some(rms::NodeBatchResponse {
+                status: rms::ReturnCode::Failure as i32,
+                message: "temporary dispatch failure".to_string(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        })
+        .await;
+    env.run_rack_controller_iteration().await;
+    let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    assert_eq!(rack.controller_state.value, waiting);
+    assert!(matches!(rack.controller_state_outcome,
+        Some(model::controller_outcome::PersistentStateHandlerOutcome::Error { ref err, .. })
+        if err.contains("temporary dispatch failure")
+    ));
+    assert_eq!(rack.firmware_upgrade_job.unwrap().machines.len(), 1);
+    let machine = db::machine::find_one(
+        &pool,
+        &late.host_snapshot.id,
+        model::machine::machine_search_config::MachineSearchConfig::default(),
+    )
+    .await?
+    .unwrap();
+    assert!(machine.host_reprovision_requested.is_none());
+
+    queue_ingestion_firmware_batch(&env, "late", &late.host_snapshot.id.to_string()).await;
+    env.run_rack_controller_iteration().await;
+    let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    assert_eq!(rack.controller_state.value, waiting);
+    let job = rack.firmware_upgrade_job.unwrap();
+    assert_eq!(job.job_id.as_deref(), Some("original"));
+    assert_eq!(job.batch_job_ids, vec!["original", "late"]);
+    assert_eq!(job.machines.len(), 2);
+    assert_eq!(job.machines[0].job_id.as_deref(), Some("original-child"));
+    assert_eq!(job.machines[1].job_id.as_deref(), Some("late-child"));
+    assert!(job.completed_at.is_none());
+    let requests = env.rms_sim.submitted_apply_firmware_object_requests().await;
+    assert_eq!(requests.len(), 3); // original, rejected late dispatch, accepted retry
+    let nodes = &requests[2].nodes.as_ref().unwrap().nodes;
+    assert_eq!(nodes.len(), 1);
+    assert_eq!(nodes[0].node_id, late.host_snapshot.id.to_string());
+    let machine = db::machine::find_one(
+        &pool,
+        &late.host_snapshot.id,
+        model::machine::machine_search_config::MachineSearchConfig::default(),
+    )
+    .await?
+    .unwrap();
+    let requested_at = machine.host_reprovision_requested.unwrap().requested_at;
+    let status = machine.rack_fw_details.unwrap();
+    assert!(status.is_current_for(requested_at));
+    let admitted_at = status.started_at;
+
+    env.rms_sim
+        .set_firmware_job_status(rms::GetFirmwareJobStatusResponse {
+            status: rms::ReturnCode::Success as i32,
+            job_id: "late-child".to_string(),
+            job_state: rms::FirmwareJobState::Running as i32,
+            ..Default::default()
+        })
+        .await;
+    // Each iteration reloads the durable rack job and constructs fresh handlers.
+    env.run_rack_controller_iteration().await;
+    assert_eq!(
+        env.rms_sim
+            .submitted_apply_firmware_object_requests()
+            .await
+            .len(),
+        3
+    );
+    let machine = db::machine::find_one(
+        &pool,
+        &late.host_snapshot.id,
+        model::machine::machine_search_config::MachineSearchConfig::default(),
+    )
+    .await?
+    .unwrap();
+    let status = machine.rack_fw_details.unwrap();
+    assert_eq!(status.task_id, "late-child");
+    assert_eq!(status.status, RackFirmwareUpgradeState::InProgress);
+    assert_eq!(status.started_at, admitted_at);
+    assert!(status.is_current_for(requested_at));
+
+    env.rms_sim
+        .set_firmware_job_status(rms::GetFirmwareJobStatusResponse {
+            status: rms::ReturnCode::Success as i32,
+            job_id: "late-child".to_string(),
+            job_state: rms::FirmwareJobState::Completed as i32,
+            ..Default::default()
+        })
+        .await;
+    set_machine_host_reprovision_state(
+        &pool,
+        &late.host_snapshot.id,
+        completed_rack_firmware_upgrade_state(),
+    )
+    .await?;
+    env.run_rack_controller_iteration().await;
+    let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    assert_ne!(rack.controller_state.value, waiting);
+    assert!(
+        rack.firmware_upgrade_job
+            .unwrap()
+            .machines
+            .iter()
+            .all(|device| device.status == FirmwareProgressState::Completed)
+    );
+    Ok(())
+}
+
+/// Admission is checked once more before automatic maintenance clears its
+/// ingestion flag, including recovery after a newly accepted batch was persisted.
+#[sqlx_test]
+async fn test_ingestion_reopens_firmware_for_compute_arriving_during_later_maintenance(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut config = config_with_rack_profiles();
+    config
+        .rack_profiles
+        .rack_profiles
+        .get_mut("Single")
+        .unwrap()
+        .firmware_object = Some(RackFirmwareObjectConfig {
+        url: url::Url::parse("https://firmware.example.invalid/ingestion.json")?,
+        access_token_credential: None,
+        fetch_timeout: std::time::Duration::from_secs(10),
+    });
+    let env = create_test_env_with_overrides(
+        pool.clone(),
+        TestEnvOverrides {
+            config: Some(config),
+            firmware_object_fetcher: Some(Arc::new(StaticFirmwareObjectFetcher {
+                response: Mutex::new(Ok(r#"{"Id":"ingestion"}"#.to_string())),
+                requested_urls: Mutex::new(Vec::new()),
+                requested_timeouts: Mutex::new(Vec::new()),
+            })),
+            ..Default::default()
+        },
+    )
+    .await;
+    let (rack_id, late) = create_single_compute_rack(&env, &pool).await?;
+    let completed = RackState::Maintenance {
+        maintenance_state: RackMaintenanceState::Completed,
+    };
+    let mut txn = pool.begin().await?;
+    db_rack::update(
+        txn.as_mut(),
+        &rack_id,
+        &RackConfig {
+            ingestion_in_progress: true,
+            ..Default::default()
+        },
+    )
+    .await?;
+    db_rack::update_firmware_upgrade_job(
+        txn.as_mut(),
+        &rack_id,
+        Some(&FirmwareUpgradeJob {
+            status: Some(FirmwareProgressState::Completed),
+            ..Default::default()
+        }),
+    )
+    .await?;
+    crate::fixtures::rack::set_rack_controller_state(txn.as_mut(), &rack_id, completed.clone())
+        .await?;
+    txn.commit().await?;
+    queue_ingestion_firmware_batch(&env, "late", &late.host_snapshot.id.to_string()).await;
+    env.run_rack_controller_iteration().await;
+    let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    assert!(matches!(
+        rack.controller_state.value,
+        RackState::Maintenance {
+            maintenance_state: RackMaintenanceState::FirmwareUpgrade {
+                rack_firmware_upgrade: FirmwareUpgradeState::WaitForComplete,
+            }
+        }
+    ));
+    assert!(rack.config.ingestion_in_progress);
+    let job = rack.firmware_upgrade_job.unwrap();
+    assert_eq!(job.machines.len(), 1);
+    assert_eq!(job.machines[0].job_id.as_deref(), Some("late-child"));
+
+    // Recover from an interruption between committing the new batch and the
+    // controller's state transition out of Completed.
+    crate::fixtures::rack::set_rack_controller_state(
+        pool.acquire().await?.as_mut(),
+        &rack_id,
+        completed,
+    )
+    .await?;
+    env.run_rack_controller_iteration().await;
+    let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    assert!(matches!(
+        rack.controller_state.value,
+        RackState::Maintenance {
+            maintenance_state: RackMaintenanceState::FirmwareUpgrade { .. }
+        }
+    ));
+    assert!(rack.config.ingestion_in_progress);
+    assert_eq!(
+        env.rms_sim
+            .submitted_apply_firmware_object_requests()
+            .await
+            .len(),
+        1
+    );
+    Ok(())
+}
+
 /// test_firmware_upgrade_wait_for_complete_waits_while_jobs_running verifies
 /// that WaitForComplete remains in a wait state while machines are still in
 /// WaitingForRackFirmwareUpgrade and writes in-progress rack firmware status
