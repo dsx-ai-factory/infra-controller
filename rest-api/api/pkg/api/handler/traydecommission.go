@@ -36,7 +36,7 @@ func NewDecommissionTrayHandler(dbSession *cdb.Session, scp *sc.ClientPool) Deco
 // @Security ApiKeyAuth
 // @Param org path string true "Name of the Org"
 // @Param id path string true "Core inventory ID of Tray"
-// @Param request body model.APITrayDecommissionRequest true "Site and type of the tray"
+// @Param request body model.APITrayDecommissionRequest true "Site containing the tray"
 // @Success 202 {object} model.APIMessageResponse
 // @Router /v2/org/{org}/nico/tray/{id}/decommission [post]
 func (h DecommissionTrayHandler) Handle(c echo.Context) error {
@@ -55,11 +55,6 @@ func (h DecommissionTrayHandler) Handle(c echo.Context) error {
 	}
 	request.TrayID = c.Param("id")
 	err = request.Validate()
-	if err != nil {
-		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, err.Error(), nil)
-	}
-
-	err = validateKnownTrayIDNamespace(request.TrayID, request.Type)
 	if err != nil {
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, err.Error(), nil)
 	}

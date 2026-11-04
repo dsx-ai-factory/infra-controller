@@ -221,13 +221,14 @@ func (r ApiDecommissionTrayRequest) Execute() (*MessageResponse, *http.Response,
 DecommissionTray Decommission a Tray
 
 Start decommissioning a managed Tray in the specified Site's Core inventory.
-`type` selects `Compute` (managed host), `NVSwitch`, or `PowerShelf`.
-The ID must identify a component of that type. A recognized ID namespace
-that conflicts with `type` returns 400; an absent component returns 404.
+The component type is derived from its Core ID: `fm100` identifies a
+`Compute` Tray (managed host), `sw100` identifies an `NVSwitch`, and
+`ps100` identifies a `PowerShelf`. An unsupported ID namespace returns
+400; an absent component returns 404.
 
 You must be a Provider Admin in the Org that owns the Site, and the Site
 must be Registered. Core requires the component to be `Ready`.
-For `Compute`, the host must be unassigned and every attached DPU must
+For `Compute`, the host must not be assigned to an Instance, and every attached DPU must
 support BFB installation through Redfish. For `NVSwitch` and `PowerShelf`,
 no managed host in the component's rack may be assigned to an instance.
 `NVSwitch` also requires Core's RMS component-manager backend.

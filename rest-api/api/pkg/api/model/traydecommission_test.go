@@ -14,21 +14,20 @@ import (
 
 func TestAPITrayDecommissionRequest_Validate(t *testing.T) {
 	cases := []struct {
-		name, siteID, componentID, trayType string
-		valid                               bool
+		name, siteID, componentID string
+		valid                     bool
 	}{
-		{"compute", "11111111-1111-4111-8111-111111111111", "component-id", "Compute", true},
-		{"switch", "11111111-1111-4111-8111-111111111111", "component-id", "NVSwitch", true},
-		{"power shelf", "11111111-1111-4111-8111-111111111111", "component-id", "PowerShelf", true},
-		{"missing site", "", "component-id", "NVSwitch", false},
-		{"invalid site", "invalid", "component-id", "NVSwitch", false},
-		{"missing component", "11111111-1111-4111-8111-111111111111", "", "NVSwitch", false},
-		{"missing type", "11111111-1111-4111-8111-111111111111", "component-id", "", false},
-		{"unsupported type", "11111111-1111-4111-8111-111111111111", "component-id", "Switch", false},
+		{"compute", "11111111-1111-4111-8111-111111111111", "fm100-host", true},
+		{"switch", "11111111-1111-4111-8111-111111111111", "sw100-switch", true},
+		{"power shelf", "11111111-1111-4111-8111-111111111111", "ps100-shelf", true},
+		{"missing site", "", "sw100-switch", false},
+		{"invalid site", "invalid", "sw100-switch", false},
+		{"missing component", "11111111-1111-4111-8111-111111111111", "", false},
+		{"unsupported namespace", "11111111-1111-4111-8111-111111111111", "component-id", false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			request := APITrayDecommissionRequest{SiteID: tc.siteID, TrayID: tc.componentID, Type: tc.trayType}
+			request := APITrayDecommissionRequest{SiteID: tc.siteID, TrayID: tc.componentID}
 			if tc.valid {
 				assert.NoError(t, request.Validate())
 			} else {
@@ -40,16 +39,16 @@ func TestAPITrayDecommissionRequest_Validate(t *testing.T) {
 
 func TestAPITrayDecommissionRequest_ToProto(t *testing.T) {
 	cases := []struct {
-		trayType string
-		expected proto.Message
+		componentID string
+		expected    proto.Message
 	}{
-		{"Compute", &corev1.DecommissionManagedHostRequest{MachineId: &corev1.MachineId{Id: "component-id"}}},
-		{"NVSwitch", &corev1.DecommissionSwitchRequest{SwitchId: &corev1.SwitchId{Id: "component-id"}}},
-		{"PowerShelf", &corev1.DecommissionPowerShelfRequest{PowerShelfId: &corev1.PowerShelfId{Id: "component-id"}}},
+		{"fm100-host", &corev1.DecommissionManagedHostRequest{MachineId: &corev1.MachineId{Id: "fm100-host"}}},
+		{"sw100-switch", &corev1.DecommissionSwitchRequest{SwitchId: &corev1.SwitchId{Id: "sw100-switch"}}},
+		{"ps100-shelf", &corev1.DecommissionPowerShelfRequest{PowerShelfId: &corev1.PowerShelfId{Id: "ps100-shelf"}}},
 	}
 	for _, tc := range cases {
-		t.Run(tc.trayType, func(t *testing.T) {
-			request := APITrayDecommissionRequest{Type: tc.trayType, TrayID: "component-id"}
+		t.Run(tc.componentID, func(t *testing.T) {
+			request := APITrayDecommissionRequest{TrayID: tc.componentID}
 			assert.True(t, proto.Equal(tc.expected, request.ToProto()))
 		})
 	}

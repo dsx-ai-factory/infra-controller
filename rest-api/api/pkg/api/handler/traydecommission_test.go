@@ -52,7 +52,7 @@ func TestDecommissionTrayHandler_Handle(t *testing.T) {
 	otherUser := common.TestBuildUser(t, db, uuid.NewString(), otherOrg, []string{authz.ProviderAdminRole})
 	otherProvider := common.TestBuildInfrastructureProvider(t, db, "Other Provider", otherOrg, otherUser)
 	otherSite := common.TestBuildSite(t, db, otherProvider, "Other Site", otherUser)
-	body := `{"siteId":"` + site.ID.String() + `","type":"NVSwitch"}`
+	body := `{"siteId":"` + site.ID.String() + `"}`
 	cases := []struct {
 		name        string
 		body        string
@@ -65,23 +65,21 @@ func TestDecommissionTrayHandler_Handle(t *testing.T) {
 		expected    proto.Message
 	}{
 		{name: "accepted switch", wantStatus: http.StatusAccepted, proxied: true},
-		{name: "accepted compute", body: `{"siteId":"` + site.ID.String() + `","type":"Compute"}`, wantStatus: http.StatusAccepted, proxied: true,
-			method: corev1.Forge_DecommissionManagedHost_FullMethodName, expected: &corev1.DecommissionManagedHostRequest{MachineId: &corev1.MachineId{Id: "component-id"}}},
-		{name: "accepted power shelf", body: `{"siteId":"` + site.ID.String() + `","type":"PowerShelf"}`, wantStatus: http.StatusAccepted, proxied: true,
-			method: corev1.Forge_DecommissionPowerShelf_FullMethodName, expected: &corev1.DecommissionPowerShelfRequest{PowerShelfId: &corev1.PowerShelfId{Id: "component-id"}}},
-		{name: "missing type", body: `{"siteId":"` + site.ID.String() + `"}`, wantStatus: http.StatusBadRequest},
-		{name: "unsupported type", body: `{"siteId":"` + site.ID.String() + `","type":"Switch"}`, wantStatus: http.StatusBadRequest},
-		{name: "mismatched namespace", id: "ps100-component", wantStatus: http.StatusBadRequest},
+		{name: "accepted compute", id: "fm100ht038bg3qsho433vkg684heguv282qaggmrsh2ugn1qk096n2c6hcg", wantStatus: http.StatusAccepted, proxied: true,
+			method: corev1.Forge_DecommissionManagedHost_FullMethodName, expected: &corev1.DecommissionManagedHostRequest{MachineId: &corev1.MachineId{Id: "fm100ht038bg3qsho433vkg684heguv282qaggmrsh2ugn1qk096n2c6hcg"}}},
+		{name: "accepted power shelf", id: testPowerShelfID, wantStatus: http.StatusAccepted, proxied: true,
+			method: corev1.Forge_DecommissionPowerShelf_FullMethodName, expected: &corev1.DecommissionPowerShelfRequest{PowerShelfId: &corev1.PowerShelfId{Id: testPowerShelfID}}},
+		{name: "unsupported namespace", id: "component-id", wantStatus: http.StatusBadRequest},
 		{name: "missing user", wantStatus: http.StatusInternalServerError},
 		{name: "provider viewer", user: &cdbm.User{OrgData: cdbm.OrgData{org: cdbm.Org{Name: org, Roles: []string{authz.ProviderViewerRole}}}}, wantStatus: http.StatusForbidden},
 		{name: "tenant admin", user: &cdbm.User{OrgData: cdbm.OrgData{org: cdbm.Org{Name: org, Roles: []string{authz.TenantAdminRole}}}}, wantStatus: http.StatusForbidden},
 		{name: "wrong org", user: otherUser, wantStatus: http.StatusForbidden},
 		{name: "malformed body", body: "{", wantStatus: http.StatusBadRequest},
 		{name: "missing site", body: "{}", wantStatus: http.StatusBadRequest},
-		{name: "invalid site", body: `{"siteId":"invalid","type":"NVSwitch"}`, wantStatus: http.StatusBadRequest},
-		{name: "unknown site", body: `{"siteId":"` + uuid.NewString() + `","type":"NVSwitch"}`, wantStatus: http.StatusBadRequest},
-		{name: "other provider site", body: `{"siteId":"` + otherSite.ID.String() + `","type":"NVSwitch"}`, wantStatus: http.StatusForbidden},
-		{name: "unregistered site", body: `{"siteId":"` + unregistered.ID.String() + `","type":"NVSwitch"}`, wantStatus: http.StatusBadRequest},
+		{name: "invalid site", body: `{"siteId":"invalid"}`, wantStatus: http.StatusBadRequest},
+		{name: "unknown site", body: `{"siteId":"` + uuid.NewString() + `"}`, wantStatus: http.StatusBadRequest},
+		{name: "other provider site", body: `{"siteId":"` + otherSite.ID.String() + `"}`, wantStatus: http.StatusForbidden},
+		{name: "unregistered site", body: `{"siteId":"` + unregistered.ID.String() + `"}`, wantStatus: http.StatusBadRequest},
 		{name: "missing component", id: "empty", wantStatus: http.StatusBadRequest},
 		{name: "Core rejects assigned rack or unsupported backend", resultError: swe.WrapErr(status.Error(codes.FailedPrecondition, "decommission precondition failed")), wantStatus: http.StatusPreconditionFailed, proxied: true},
 		{name: "Core component absent", resultError: swe.WrapErr(status.Error(codes.NotFound, "component not found")), wantStatus: http.StatusNotFound, proxied: true},
@@ -118,7 +116,7 @@ func TestDecommissionTrayHandler_Handle(t *testing.T) {
 			c.SetParamNames("orgName", "id")
 			id := tc.id
 			if id == "" {
-				id = "component-id"
+				id = testSwitchID
 			}
 			if tc.id == "empty" {
 				id = ""

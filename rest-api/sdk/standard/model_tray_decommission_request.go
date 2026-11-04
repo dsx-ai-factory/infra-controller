@@ -22,12 +22,10 @@ import (
 // checks if the TrayDecommissionRequest type satisfies the MappedNullable interface at compile time
 var _ MappedNullable = &TrayDecommissionRequest{}
 
-// TrayDecommissionRequest Site and component type of the managed Tray to decommission in Core inventory.
+// TrayDecommissionRequest Site containing the managed Tray to decommission in Core inventory.
 type TrayDecommissionRequest struct {
-	// ID of the Registered Site owned by the Org's Infrastructure Provider.
+	// ID of the Site that owns the Tray. The Site must be in Registered status and owned by the requesting provider org.
 	SiteId string `json:"siteId"`
-	// Component type used to select the decommission operation for the Tray ID.
-	Type string `json:"type"`
 }
 
 type _TrayDecommissionRequest TrayDecommissionRequest
@@ -36,10 +34,9 @@ type _TrayDecommissionRequest TrayDecommissionRequest
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewTrayDecommissionRequest(siteId string, type_ string) *TrayDecommissionRequest {
+func NewTrayDecommissionRequest(siteId string) *TrayDecommissionRequest {
 	this := TrayDecommissionRequest{}
 	this.SiteId = siteId
-	this.Type = type_
 	return &this
 }
 
@@ -75,30 +72,6 @@ func (o *TrayDecommissionRequest) SetSiteId(v string) {
 	o.SiteId = v
 }
 
-// GetType returns the Type field value
-func (o *TrayDecommissionRequest) GetType() string {
-	if o == nil {
-		var ret string
-		return ret
-	}
-
-	return o.Type
-}
-
-// GetTypeOk returns a tuple with the Type field value
-// and a boolean to check if the value has been set.
-func (o *TrayDecommissionRequest) GetTypeOk() (*string, bool) {
-	if o == nil {
-		return nil, false
-	}
-	return &o.Type, true
-}
-
-// SetType sets field value
-func (o *TrayDecommissionRequest) SetType(v string) {
-	o.Type = v
-}
-
 func (o TrayDecommissionRequest) MarshalJSON() ([]byte, error) {
 	toSerialize, err := o.ToMap()
 	if err != nil {
@@ -110,7 +83,6 @@ func (o TrayDecommissionRequest) MarshalJSON() ([]byte, error) {
 func (o TrayDecommissionRequest) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
 	toSerialize["siteId"] = o.SiteId
-	toSerialize["type"] = o.Type
 	return toSerialize, nil
 }
 
@@ -120,7 +92,6 @@ func (o *TrayDecommissionRequest) UnmarshalJSON(data []byte) (err error) {
 	// that every required field exists as a key in the generic map.
 	requiredProperties := []string{
 		"siteId",
-		"type",
 	}
 
 	allProperties := make(map[string]interface{})

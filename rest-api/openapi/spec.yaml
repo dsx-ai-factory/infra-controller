@@ -12581,7 +12581,8 @@ paths:
                 $ref: '#/components/schemas/NICoAPIError'
       operationId: decommission-machine
       description: |-
-        Start decommissioning an unassigned Machine. The Machine must be in Core's `Ready`
+        Start decommissioning a Machine that is not assigned to an Instance.
+        The Machine must be in Core's `Ready`
         state, and every attached DPU must support BFB installation through
         Redfish. The operation is asynchronous; use the Machine status to
         observe workflow progress.
@@ -16191,13 +16192,14 @@ paths:
         - Tray
       description: |-
         Start decommissioning a managed Tray in the specified Site's Core inventory.
-        `type` selects `Compute` (managed host), `NVSwitch`, or `PowerShelf`.
-        The ID must identify a component of that type. A recognized ID namespace
-        that conflicts with `type` returns 400; an absent component returns 404.
+        The component type is derived from its Core ID: `fm100` identifies a
+        `Compute` Tray (managed host), `sw100` identifies an `NVSwitch`, and
+        `ps100` identifies a `PowerShelf`. An unsupported ID namespace returns
+        400; an absent component returns 404.
 
         You must be a Provider Admin in the Org that owns the Site, and the Site
         must be Registered. Core requires the component to be `Ready`.
-        For `Compute`, the host must be unassigned and every attached DPU must
+        For `Compute`, the host must not be assigned to an Instance, and every attached DPU must
         support BFB installation through Redfish. For `NVSwitch` and `PowerShelf`,
         no managed host in the component's rack may be assigned to an instance.
         `NVSwitch` also requires Core's RMS component-manager backend.
@@ -18906,25 +18908,16 @@ components:
     TrayDecommissionRequest:
       title: TrayDecommissionRequest
       type: object
-      description: Site and component type of the managed Tray to decommission in Core inventory.
+      description: Site containing the managed Tray to decommission in Core inventory.
       examples:
         - siteId: 11111111-1111-4111-8111-111111111111
-          type: NVSwitch
       required:
         - siteId
-        - type
       properties:
         siteId:
           type: string
           format: uuid
-          description: ID of the Registered Site owned by the Org's Infrastructure Provider.
-        type:
-          type: string
-          enum:
-            - Compute
-            - NVSwitch
-            - PowerShelf
-          description: Component type used to select the decommission operation for the Tray ID.
+          description: ID of the Site that owns the Tray. The Site must be in Registered status and owned by the requesting provider org.
     PageNumber:
       title: PageNumber
       type: integer
