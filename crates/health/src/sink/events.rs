@@ -537,6 +537,15 @@ impl RedfishResourceType {
     }
 }
 
+/// Source-owned Redfish resource offered to the resource-status processor.
+#[derive(Clone, Debug)]
+pub enum ResourceStatusObservation {
+    System(Arc<nv_redfish::schema::computer_system::ComputerSystem>),
+    Manager(Arc<nv_redfish::schema::manager::Manager>),
+    Chassis(Arc<nv_redfish::schema::chassis::Chassis>),
+    Firmware(Arc<nv_redfish::schema::software_inventory::SoftwareInventory>),
+}
+
 /// One periodically observed top-level Redfish resource and its status.
 #[derive(Clone, Debug)]
 pub struct ResourceStatusInfo {
@@ -551,7 +560,7 @@ pub struct ResourceStatusInfo {
 }
 
 impl ResourceStatusInfo {
-    /// Builds a source observation from one decoded Redfish resource.
+    /// Normalizes one raw Redfish resource for downstream sinks.
     pub(crate) fn from_redfish(
         resource_type: RedfishResourceType,
         id: &str,
@@ -684,7 +693,7 @@ pub enum CollectorEvent {
     Log(Box<LogRecord>),
     Firmware(FirmwareInfo),
     /// Source observation offered to the resource-status processor.
-    ResourceStatusObservation(Box<ResourceStatusInfo>),
+    ResourceStatusObservation(Box<ResourceStatusObservation>),
     /// Processed status record ready for log sinks.
     ResourceStatus(Box<ResourceStatusInfo>),
     HealthReport(Arc<HealthReport>),

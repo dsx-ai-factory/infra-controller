@@ -16,6 +16,7 @@
  */
 
 use super::{CollectorEvent, EventContext, EventProcessor};
+use crate::sink::{RedfishResourceType, ResourceStatusInfo, ResourceStatusObservation};
 
 /// Projects source-owned Redfish observations into resource-status log events.
 #[derive(Default)]
@@ -38,11 +39,38 @@ impl EventProcessor for ResourceStatusProcessor {
         _context: &EventContext,
         event: &CollectorEvent,
     ) -> Vec<CollectorEvent> {
-        let CollectorEvent::ResourceStatusObservation(info) = event else {
+        let CollectorEvent::ResourceStatusObservation(observation) = event else {
             return Vec::new();
         };
 
-        vec![CollectorEvent::ResourceStatus(info.clone())]
+        let info = match observation.as_ref() {
+            ResourceStatusObservation::System(resource) => ResourceStatusInfo::from_redfish(
+                RedfishResourceType::System,
+                &resource.id,
+                &resource.name,
+                resource.status.as_ref(),
+            ),
+            ResourceStatusObservation::Manager(resource) => ResourceStatusInfo::from_redfish(
+                RedfishResourceType::Manager,
+                &resource.id,
+                &resource.name,
+                resource.status.as_ref(),
+            ),
+            ResourceStatusObservation::Chassis(resource) => ResourceStatusInfo::from_redfish(
+                RedfishResourceType::Chassis,
+                &resource.id,
+                &resource.name,
+                resource.status.as_ref(),
+            ),
+            ResourceStatusObservation::Firmware(resource) => ResourceStatusInfo::from_redfish(
+                RedfishResourceType::Firmware,
+                &resource.id,
+                &resource.name,
+                resource.status.as_ref(),
+            ),
+        };
+
+        vec![CollectorEvent::ResourceStatus(Box::new(info))]
     }
 }
 
@@ -50,13 +78,12 @@ impl EventProcessor for ResourceStatusProcessor {
 mod tests {
     use std::net::{IpAddr, Ipv4Addr};
     use std::str::FromStr;
+    use std::sync::Arc;
 
     use mac_address::MacAddress;
 
     use super::*;
     use crate::endpoint::BmcAddr;
-    use crate::sink::{RedfishResourceType, ResourceStatusInfo};
-
     fn context() -> EventContext {
         EventContext {
             endpoint_key: "42:9e:b1:bd:9d:dd".to_string(),
@@ -75,22 +102,28 @@ mod tests {
     #[test]
     fn projects_only_resource_status_observations() {
         let processor = ResourceStatusProcessor::new();
-        let info = ResourceStatusInfo {
-            resource_type: RedfishResourceType::Firmware,
-            id: "BMC".to_string(),
-            name: "Baseboard Management Controller".to_string(),
-            status: None,
-        };
+        let resource = serde_json::from_value(serde_json::json!({
+            "@odata.id": "/redfish/v1/UpdateService/FirmwareInventory/BMC",
+            "Id": "BMC",
+            "Name": "Baseboard Management Controller",
+            "Status": {
+                "State": "Enabled",
+                "Health": "Warning"
+            }
+        }))
+        .expect("firmware resource");
+        let observation = ResourceStatusObservation::Firmware(Arc::new(resource));
 
         let projected = processor.process_event(
             &context(),
-            &CollectorEvent::ResourceStatusObservation(Box::new(info.clone())),
+            &CollectorEvent::ResourceStatusObservation(Box::new(observation)),
         );
         assert!(matches!(
             projected.as_slice(),
-            [CollectorEvent::ResourceStatus(projected)] if projected.id == info.id
-                && projected.resource_type == info.resource_type
-                && projected.status == info.status
+            [CollectorEvent::ResourceStatus(projected)] if projected.id == "BMC"
+                && projected.resource_type == RedfishResourceType::Firmware
+                && projected.status.as_ref().and_then(|status| status.health.as_deref())
+                    == Some("Warning")
         ));
         assert!(
             processor

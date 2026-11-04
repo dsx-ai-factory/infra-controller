@@ -39,7 +39,8 @@ pub use events::{
     Classification, CollectorEvent, DiagnosticLogRecord, EventContext, FirmwareInfo, HealthReport,
     HealthReportAlert, HealthReportSuccess, HealthReportTarget, LogRecord, LogSeverity,
     MetricSample, MetricSemantics, Probe, RedfishCondition, RedfishResourceType, RedfishStatus,
-    ReportSource, ResourceStatusInfo, SensorAttribution, SensorThresholdContext,
+    ReportSource, ResourceStatusInfo, ResourceStatusObservation, SensorAttribution,
+    SensorThresholdContext,
 };
 pub use health_report::HealthReportSink;
 pub use log_file::LogFileSink;

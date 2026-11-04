@@ -25,7 +25,7 @@ use crate::HealthError;
 use crate::collectors::{IterationResult, PeriodicCollector};
 use crate::endpoint::BmcEndpoint;
 use crate::sink::{
-    CollectorEvent, DataSink, EventContext, FirmwareInfo, RedfishResourceType, ResourceStatusInfo,
+    CollectorEvent, DataSink, EventContext, FirmwareInfo, ResourceStatusObservation,
 };
 
 pub struct FirmwareCollectorConfig {
@@ -96,12 +96,7 @@ impl<B: Bmc + 'static> FirmwareCollector<B> {
 
             if self.emit_resource_status {
                 self.emit_event(CollectorEvent::ResourceStatusObservation(Box::new(
-                    ResourceStatusInfo::from_redfish(
-                        RedfishResourceType::Firmware,
-                        &firmware_data.id,
-                        &firmware_data.name,
-                        firmware_data.status.as_ref(),
-                    ),
+                    ResourceStatusObservation::Firmware(Arc::clone(&firmware_data)),
                 )));
             }
 
