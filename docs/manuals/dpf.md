@@ -1355,10 +1355,7 @@ defaults, and fails each iteration with `MissingCredentials` until all three are
 present.
 
 <Note>
-This is a site secret that must survive at all costs — it is also the input to
-SuperNIC lockdown key derivation. Refer to
-[SuperNIC Lockdown Key Management](../architecture/supernic_lockdown_key_management.md)
-for the backup and recovery requirements.
+The BMC site-wide root seeds SuperNIC lockdown IKM version 0 only when that lockdown credential is absent. Lockdown IKM and BMC credentials then remain independent. Before locking a card, follow the [IKM security requirements](../architecture/supernic_lockdown_key_management.md#key-derivation-function-kdf). Preserve the [credential and Core database backups required for recovery](../architecture/supernic_lockdown_key_management.md#backup-and-recovery).
 </Note>
 
 ### 3.7. Mark hosts as DPF-managed in expected machines

@@ -28,6 +28,7 @@ use std::time::{Duration, Instant};
 use carbide_instrument::{Event, LabelValue, MetricFamily, emit};
 use eyre::{Report, WrapErr, eyre};
 use futures_util::StreamExt;
+use model::firmware::loggable_url;
 use reqwest_middleware::ClientWithMiddleware as Client;
 use reqwest_tracing::ReqwestOtelSpanBackend;
 use sha2::{Digest, Sha256};
@@ -216,19 +217,6 @@ pub(crate) enum DownloadFinished {
         #[context]
         error: String,
     },
-}
-
-/// `loggable_url` removes userinfo, query parameters, and fragments from
-/// artifact URLs before they reach logs or operator-visible errors.
-pub(crate) fn loggable_url(url: &str) -> String {
-    let Ok(url) = url::Url::parse(url) else {
-        return "<invalid firmware URL>".to_string();
-    };
-    format!(
-        "{}{}",
-        &url[..url::Position::BeforeUsername],
-        &url[url::Position::BeforeHost..url::Position::AfterPath],
-    )
 }
 
 /// `redacted_error_chain` formats diagnostic sources without changing the typed

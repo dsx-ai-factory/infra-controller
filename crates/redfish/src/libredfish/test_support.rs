@@ -72,6 +72,12 @@ struct RedfishSimState {
     next_onboard_nics_error: Option<String>,
     /// Fail the next matching power action before changing the host's power.
     next_power_action_error: Option<(SystemPowerControl, RedfishError)>,
+    /// Delay one matching power action before applying or recording it.
+    next_power_action_delay: Option<(
+        SystemPowerControl,
+        Duration,
+        tokio::sync::oneshot::Sender<()>,
+    )>,
     /// Value of `ac_powercycle_supported_by_power`. Defaults to `false`.
     ac_powercycle_supported: bool,
     next_chassis_reset_error: Option<RedfishError>,
@@ -489,6 +495,19 @@ impl RedfishSim {
     /// Fail the next matching power action with the supplied error.
     pub fn fail_next_power_action_with(&self, action: SystemPowerControl, error: RedfishError) {
         self.state.lock().unwrap().next_power_action_error = Some((action, error));
+    }
+
+    /// Delay the next matching power action before applying or recording it.
+    /// The receiver is notified after its sleep is constructed; cancellation
+    /// during that sleep leaves the simulated power unchanged.
+    pub fn delay_next_power_action(
+        &self,
+        action: SystemPowerControl,
+        delay: Duration,
+    ) -> tokio::sync::oneshot::Receiver<()> {
+        let (started, receiver) = tokio::sync::oneshot::channel();
+        self.state.lock().unwrap().next_power_action_delay = Some((action, delay, started));
+        receiver
     }
 
     /// Set whether clients report AC power cycle support through `power`.
@@ -962,6 +981,17 @@ impl Redfish for RedfishSimClient {
         action: libredfish::SystemPowerControl,
     ) -> libredfish::RedfishFuture<'a, Result<(), RedfishError>> {
         Box::pin(async move {
+            let delay = {
+                let mut state = self.state.lock().unwrap();
+                state
+                    .next_power_action_delay
+                    .take_if(|(delayed_action, _, _)| *delayed_action == action)
+            };
+            if let Some((_, delay, started)) = delay {
+                let sleep = tokio::time::sleep(delay);
+                started.send(()).ok();
+                sleep.await;
+            }
             let power_state = match action {
                 libredfish::SystemPowerControl::ForceOff
                 | libredfish::SystemPowerControl::GracefulShutdown => PowerState::Off,

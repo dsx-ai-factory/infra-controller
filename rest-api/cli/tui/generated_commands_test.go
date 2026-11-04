@@ -459,7 +459,7 @@ func testGeneratedCommand_CancelledMutationDoesNotCallAPI(t *testing.T) {
 	session := &Session{Client: client, Cache: cache}
 	command := requireTUICommand(t, "machine delete")
 
-	output, err := withStdin(t, "n\n", func() (string, error) {
+	output, err := withStdin(t, "n\nn\n", func() (string, error) {
 		var runErr error
 		out := captureStdout(func() {
 			runErr = command.Run(session, []string{"machine-1"})
@@ -469,7 +469,98 @@ func testGeneratedCommand_CancelledMutationDoesNotCallAPI(t *testing.T) {
 	require.NoError(t, err)
 	assert.Zero(t, calls.Load())
 	assert.NotNil(t, cache.Get("machine"), "cancelled mutations must preserve the cache")
+	assert.Contains(t, output, "Force delete Machine machine-1?")
+	assert.Contains(t, output, "Allocation capacity would be insufficient")
+	assert.Contains(t, output, "Attached Instances require --allow-delete-with-instance")
+	assert.Contains(t, output, "without a graceful workload shutdown; cleanup may forcibly restart the host")
+	assert.Contains(t, output, "REST records are retained")
+	assert.Contains(t, output, "Machines marked missing on Site can be force deleted without waiting 24 hours")
 	assert.NotContains(t, output, "INFO:")
+}
+
+func testGeneratedCommand_MachineDeleteOffersForceMode(t *testing.T) {
+	t.Helper()
+	for _, tc := range []struct {
+		name            string
+		args            []string
+		input           string
+		wantQuery       string
+		wantForcePrompt bool
+		wantIncomplete  bool
+		cancel          bool
+	}{
+		{name: "incomplete Site cleanup returns retry instructions", args: []string{"--force", "machine-1"}, input: "y\ny\n", wantQuery: "force=true", wantForcePrompt: true, wantIncomplete: true},
+		{name: "guided force delete", args: []string{"machine-1"}, input: "y\ny\n", wantQuery: "force=true", wantForcePrompt: true},
+		{name: "guided standard delete", args: []string{"machine-1"}, input: "n\ny\n", wantForcePrompt: true},
+		{name: "explicit force flag", args: []string{"--force", "machine-1"}, input: "y\ny\n", wantQuery: "force=true", wantForcePrompt: true},
+		{name: "explicit Instance and Allocation overrides", args: []string{"--force", "--allow-delete-with-instance", "--allow-delete-with-allocation", "machine-1"}, input: "y\ny\n", wantQuery: "allowDeleteWithAllocation=true&allowDeleteWithInstance=true&force=true", wantForcePrompt: true},
+		{name: "explicit Instance Type override", args: []string{"--force", "--allow-delete-with-instance-type", "machine-1"}, input: "y\ny\n", wantQuery: "allowDeleteWithInstanceType=true&force=true", wantForcePrompt: true},
+		{name: "explicit true value", args: []string{"--force=true", "machine-1"}, input: "y\ny\n", wantQuery: "force=true", wantForcePrompt: true},
+		{name: "explicit false value", args: []string{"--force=false", "machine-1"}, input: "y\n", wantQuery: "force=false"},
+		{name: "decline explicit force", args: []string{"--force", "machine-1"}, input: "n\n", wantForcePrompt: true, cancel: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			queries := make(chan string, 1)
+			var calls atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls.Add(1)
+				queries <- r.URL.RawQuery
+				w.Header().Set("Content-Type", "application/json")
+				if tc.wantIncomplete {
+					w.Header().Set("Retry-After", "5")
+					w.WriteHeader(http.StatusConflict)
+					_, _ = io.WriteString(w, `{"message":"Machine deletion is incomplete; after 5 seconds repeat this DELETE request with the same options until it returns 202. Cleanup is not automatically retried"}`)
+					return
+				}
+				w.WriteHeader(http.StatusAccepted)
+				_, _ = io.WriteString(w, `{"message":"Deletion request was accepted"}`)
+			}))
+			defer server.Close()
+
+			cache := NewCache()
+			cache.Set("machine", []NamedItem{{Name: "host-one", ID: "machine-1"}})
+			session := &Session{
+				Client: appcli.NewClient(server.URL, "acme", "token", nil, false),
+				Cache:  cache,
+			}
+			command := requireTUICommand(t, "machine delete")
+			output, err := withStdin(t, tc.input, func() (string, error) {
+				var runErr error
+				out := captureStdout(func() {
+					runErr = command.Run(session, tc.args)
+				})
+				return out, runErr
+			})
+			if tc.wantIncomplete {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), "repeat this DELETE request with the same options")
+				assert.Equal(t, int32(1), calls.Load())
+				assert.Equal(t, tc.wantQuery, <-queries)
+				assert.NotContains(t, output, "Deletion request was accepted")
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tc.wantForcePrompt, strings.Contains(output, "Force delete Machine machine-1?"))
+			if tc.wantForcePrompt {
+				assert.Contains(t, output, "Allocation capacity would be insufficient")
+				assert.Contains(t, output, "Attached Instances require --allow-delete-with-instance")
+				assert.Contains(t, output, "without a graceful workload shutdown; cleanup may forcibly restart the host")
+				assert.Contains(t, output, "REST records are retained")
+				assert.Contains(t, output, "Machines marked missing on Site can be force deleted without waiting 24 hours")
+			}
+			if tc.cancel {
+				assert.Zero(t, calls.Load())
+				assert.NotNil(t, cache.Get("machine"), "cancelled mutations must preserve the cache")
+				assert.NotContains(t, output, "Run machine delete (DELETE)?")
+				assert.NotContains(t, output, "INFO:")
+				return
+			}
+			assert.Equal(t, int32(1), calls.Load())
+			assert.Equal(t, tc.wantQuery, <-queries)
+			assert.Contains(t, output, "Run machine delete (DELETE)?")
+			assert.Contains(t, output, "Deletion request was accepted")
+		})
+	}
 }
 
 func testGeneratedCommand_HelpLikeValuesDoNotBypassConfirmation(t *testing.T) {
@@ -1260,6 +1351,7 @@ func TestRunGeneratedTUICommand(t *testing.T) {
 		{name: "required query", run: testGeneratedCommand_PromptsForRequiredQuery},
 		{name: "mutation confirmation and cache invalidation", run: testGeneratedCommand_MutationConfirmsRedactsAndInvalidatesCache},
 		{name: "cancelled mutation", run: testGeneratedCommand_CancelledMutationDoesNotCallAPI},
+		{name: "machine force deletion", run: testGeneratedCommand_MachineDeleteOffersForceMode},
 		{name: "help-like values", run: testGeneratedCommand_HelpLikeValuesDoNotBypassConfirmation},
 		{name: "data-file array scope", run: testGeneratedCommand_DataFileArrayInheritsSiteScope},
 		{name: "unpaginated list", run: testGeneratedCommand_UnpaginatedListDoesNotFetchAll},

@@ -144,11 +144,10 @@ pub const PROCESS_START: Gauge = Gauge {
 };
 pub const HOST_READ_MODE: Gauge = Gauge {
     name: "host_read_mode",
-    help: "How host details are read (full, compact), one-hot.",
+    help: "How the current host snapshot was read (full, compact), one-hot.",
     labels: &["mode"],
 };
-/// Published with the compact host read. Until then it is absent, and an
-/// absent capability is unavailable.
+/// Published with every host snapshot. An absent capability is unavailable.
 pub const HOST_PREDICATES_KNOWN: Gauge = Gauge {
     name: "host_predicates_known",
     help: "1 when the current host snapshot has the predicate for every host (allocatable, updateEligible), else 0.",
@@ -173,13 +172,13 @@ pub const GAUGES: &[Gauge] = &[
     LAST_ATTEMPT_FAILED,
     PROCESS_START,
     HOST_READ_MODE,
+    HOST_PREDICATES_KNOWN,
 ];
 
 /// The label names of the gauge `name`, empty for an unknown gauge.
 pub fn gauge_labels(name: &str) -> &'static [&'static str] {
     GAUGES
         .iter()
-        .chain([&HOST_PREDICATES_KNOWN])
         .find(|gauge| gauge.name == name)
         .map_or(&[], |gauge| gauge.labels)
 }
@@ -228,7 +227,6 @@ pub const TIME_DIMS: [&str; 3] = ["reader", "family", "result"];
 pub fn series_labels() -> BTreeSet<&'static str> {
     GAUGES
         .iter()
-        .chain([&HOST_PREDICATES_KNOWN])
         .flat_map(|gauge| gauge.labels.iter().copied())
         .chain(
             [SWEEPS, UNKNOWN_STATES]
@@ -1028,7 +1026,7 @@ mod tests {
                 && !s.starts_with("__")
         };
         let mut names = std::collections::BTreeSet::new();
-        for gauge in GAUGES.iter().chain([&HOST_PREDICATES_KNOWN]) {
+        for gauge in GAUGES {
             assert!(valid(gauge.name), "{}", gauge.name);
             assert!(names.insert(gauge.metric_name()), "{} twice", gauge.name);
             let labels: std::collections::BTreeSet<_> = gauge.labels.iter().collect();
@@ -1075,7 +1073,7 @@ carbide_site_health_probe_unknown_states_total [metric,type]
     #[test]
     fn contract_golden() {
         let mut got = vec![format!("version {CONTRACT_VERSION}")];
-        for gauge in GAUGES.iter().chain([&HOST_PREDICATES_KNOWN]) {
+        for gauge in GAUGES {
             got.push(format!("{} [{}]", gauge.name, gauge.labels.join(",")));
         }
         for counter in [SWEEPS, UNKNOWN_STATES] {

@@ -385,6 +385,9 @@ service Forge {
 
   // Force deletes a Machine and the associated DPU from NICo databases,
   // with the intention of rediscovering the host later on.
+  // The attached-Instance override removes the attached Instance control-plane
+  // record without first requesting a graceful workload shutdown. Force-delete
+  // cleanup may forcibly restart the host.
   // By default, cleanup does not wait for DPU network acknowledgement. Set
   // wait_for_instance_dpu to request Admin networking when an Instance exists
   // and retain the records until every attached DPU acknowledges it. While
@@ -2913,6 +2916,8 @@ message ExpectedPowerShelf {
   string bmc_password = 3;
   string shelf_serial_number = 4;
   // BMC IPv4 or IPv6 address; malformed values fail INVALID_ARGUMENT when applied.
+  // Unspecified, multicast, and IPv4 limited-broadcast addresses, including
+  // their IPv4-mapped IPv6 forms, also fail INVALID_ARGUMENT.
   // Empty or omitted means no inventory address on add, full update, or
   // replace-all. Masked updates apply this field only when selected.
   // Clearing the inventory address does not remove existing interface addresses.
@@ -3174,6 +3179,8 @@ message ExpectedSwitch {
   reserved 10;
   reserved "nvos_mac_addresses";
   // BMC IPv4 or IPv6 address; malformed values fail INVALID_ARGUMENT when applied.
+  // Unspecified, multicast, and IPv4 limited-broadcast addresses, including
+  // their IPv4-mapped IPv6 forms, also fail INVALID_ARGUMENT.
   // Empty or omitted means no inventory address on add, full update, or
   // replace-all. Masked updates apply this field only when selected.
   // Clearing the inventory address does not remove existing interface addresses.
@@ -3182,7 +3189,9 @@ message ExpectedSwitch {
   // factory-default credentials in Vault as-is.
   optional bool bmc_retain_credentials = 12;
   // Static IP reservation for the single wired NVOS port. Only meaningful
-  // when `nvos_interfaces` has exactly one entry.
+  // when `nvos_interfaces` has exactly one entry. Unspecified, multicast, and
+  // IPv4 limited-broadcast addresses, including their IPv4-mapped IPv6 forms,
+  // fail INVALID_ARGUMENT.
   optional string nvos_ip_address = 13;
   // The switch's NVOS ethernet ports. Create and replace-all entries require
   // at least one port. Exactly one entry must be flagged
@@ -5928,6 +5937,17 @@ message AdminForceDeleteMachineRequest {
   // so a retry during a rolling upgrade or after a downgrade can delete without
   // acknowledgement.
   bool wait_for_instance_dpu = 9;
+
+  // False or omitted rejects deletion while the Machine is associated with an
+  // Instance Type. True permits deletion and removes that association with the
+  // Machine.
+  bool allow_delete_with_instance_type = 10;
+
+  // False or omitted rejects deletion while an Instance is attached to the
+  // Machine. True permits deletion and removes the attached Instance
+  // control-plane record without first requesting a graceful workload
+  // shutdown; later cleanup may forcibly restart the host.
+  bool allow_delete_with_instance = 11;
 }
 
 // A parked address reservation owned by its MAC with no active interface row.
@@ -7516,6 +7536,9 @@ message ExpectedHostNic {
   // Legacy free-form segment hint (bf3, onboard, oob, ...). Kept for backward
   // compatibility; declare `network_segment_type` instead, which wins.
   optional string nic_type = 2;
+  // Address that NICo reserves for this interface. Unspecified, multicast, and
+  // IPv4 limited-broadcast addresses, including their IPv4-mapped IPv6 forms,
+  // fail INVALID_ARGUMENT.
   optional string fixed_ip = 3;
   optional string fixed_mask = 4;
   optional string fixed_gateway = 5;
@@ -7639,7 +7662,9 @@ message ExpectedMachine {
   // switches and power shelves; external IPs use the static-assignments
   // segment. Single and batch update omission preserves the effective Host BMC
   // setting; an explicit empty string clears it. Replace-all keeps its earlier
-  // replacement semantics for legacy-only rows.
+  // replacement semantics for legacy-only rows. Unspecified, multicast, and
+  // IPv4 limited-broadcast addresses, including their IPv4-mapped IPv6 forms,
+  // fail INVALID_ARGUMENT.
   optional string bmc_ip_address = 14;
   // When true, site-explorer skips BMC password rotation and stores the
   // factory-default credentials in Vault as-is.
@@ -10929,6 +10954,10 @@ message ComponentPowerControlRequest {
   // When true, bypass the state controller and dispatch directly to the
   // configured HAL backend (NSM, PSM, Redfish, etc.).
   bool bypass_state_controller = 5;
+  // Used only for directly dispatched targets; ignored for targets queued
+  // through the state controller. Does not change routing. Use
+  // bypass_state_controller to dispatch ingested targets directly when needed.
+  optional ComponentCredentialOverrides credential_overrides = 9;
 }
 
 message ComponentPowerControlResponse {
@@ -11054,6 +11083,12 @@ message UpdateComponentFirmwareRequest {
   // configured HAL backend (NSM, PSM, Redfish, etc.).
   // Not supported for rack-level firmware updates.
   bool bypass_state_controller = 8;
+  // Used only for directly dispatched targets; ignored for state-controller
+  // operations, rack updates, and standalone compute reprovisioning.
+  // Does not change routing. Use bypass_state_controller for
+  // ingested component targets that support direct firmware dispatch.
+  // Status/version requests use their existing credential lookup.
+  optional ComponentCredentialOverrides credential_overrides = 9;
 }
 
 message UpdateComponentFirmwareResponse {
@@ -12932,4 +12967,17 @@ message NamedRoutingProfileConfig {
 message NamedRoutingProfileList {
   repeated NamedRoutingProfile profiles = 1;
 
+}
+
+// Device credentials for direct dispatch. Each supplied pair applies to every
+// directly dispatched target and takes precedence over Vault and expected inventory. Core
+// does not write these credentials; backend registration may persist them (NSM/PSM
+// store them in Vault). Omitted pairs retain the existing lookup. Authentication
+// failures never fall back to stored credentials. At least one pair is required;
+// each supplied pair must have a nonempty username and password.
+message ComponentCredentialOverrides {
+  // Compute BMC, switch BMC, or power-shelf PMC credentials.
+  optional UsernamePassword bmc = 1;
+  // Switch NVOS credentials. Ignored for compute and power-shelf targets.
+  optional UsernamePassword nvos = 2;
 }

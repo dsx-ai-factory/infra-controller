@@ -55,6 +55,7 @@ tracing-subscriber = { features = ["env-filter"], workspace = true }
 url = { workspace = true }
 
 # [local-dependencies]
+bmc-vendor = { path = "../bmc-vendor" }
 carbide-rpc = { path = "../rpc" }
 carbide-site-health-probe-api = { path = "../site-health-probe-api" }
 carbide-tls = { path = "../tls" }

@@ -26,6 +26,7 @@ pub mod metadata;
 pub mod network;
 pub mod network_segment;
 pub mod redfish;
+pub mod switch;
 
 use std::sync::Arc;
 use std::time::Duration;
