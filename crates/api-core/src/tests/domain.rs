@@ -70,7 +70,7 @@ async fn assert_domain_is_live(env: &TestEnv, domain_id: DomainId) {
 }
 
 #[crate::sqlx_test]
-async fn test_domain_delete_rejects_live_network_segment_reference(pool: PgPool) {
+async fn test_domain_delete_tracks_network_segment_lifecycle(pool: PgPool) {
     let env = create_test_env_with_overrides(pool, TestEnvOverrides::no_network_segments()).await;
     let domain_id = create_domain(&env, "segment-reference.example").await;
     let segment_id = NetworkSegmentId::new();
@@ -95,6 +95,39 @@ async fn test_domain_delete_rejects_live_network_segment_reference(pool: PgPool)
 
     assert_eq!(error.code(), Code::FailedPrecondition);
     assert_domain_is_live(&env, domain_id).await;
+
+    env.api
+        .delete_network_segment(Request::new(rpc::forge::NetworkSegmentDeletionRequest {
+            id: Some(segment_id),
+        }))
+        .await
+        .unwrap();
+
+    // The reference remains stored, so success must depend on its liveness.
+    let deleted_reference: bool = sqlx::query_scalar(
+        "SELECT EXISTS (
+             SELECT 1 FROM network_segments
+             WHERE id = $1 AND subdomain_id = $2 AND deleted IS NOT NULL
+         )",
+    )
+    .bind(segment_id)
+    .bind(domain_id)
+    .fetch_one(&env.pool)
+    .await
+    .unwrap();
+    assert!(deleted_reference);
+
+    env.api
+        .delete_domain(Request::new(DomainDeletionRequest {
+            id: Some(domain_id),
+        }))
+        .await
+        .expect("a soft-deleted Network Segment must not block Domain deletion");
+    let domain = db::dns::domain::find_by_uuid(&env.pool, domain_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(domain.deleted.is_some());
 }
 
 #[crate::sqlx_test]
@@ -160,6 +193,44 @@ async fn test_unreferenced_domain_delete_is_idempotent(pool: PgPool) {
         .unwrap();
     assert_eq!(second_delete.updated, first_delete.updated);
     assert_eq!(second_delete.deleted, first_delete.deleted);
+}
+
+#[crate::sqlx_test]
+async fn test_domain_update_rejects_deleted_domain(pool: PgPool) {
+    let env = create_test_env_with_overrides(pool, TestEnvOverrides::no_network_segments()).await;
+    let domain_id = create_domain(&env, "deleted-update.example").await;
+    env.api
+        .delete_domain(Request::new(DomainDeletionRequest {
+            id: Some(domain_id),
+        }))
+        .await
+        .unwrap();
+    let deleted = db::dns::domain::find_by_uuid(&env.pool, domain_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(deleted.deleted.is_some());
+
+    let error = env
+        .api
+        .update_domain(Request::new(UpdateDomainRequest {
+            domain: Some(rpc::protos::dns::Domain {
+                id: Some(domain_id),
+                default_ttl: Some(600),
+                ..Default::default()
+            }),
+        }))
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), Code::NotFound);
+
+    let unchanged = db::dns::domain::find_by_uuid(&env.pool, domain_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(unchanged.default_ttl, deleted.default_ttl);
+    assert_eq!(unchanged.updated, deleted.updated);
+    assert_eq!(unchanged.deleted, deleted.deleted);
 }
 
 #[crate::sqlx_test]
