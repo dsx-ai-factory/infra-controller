@@ -264,8 +264,8 @@ allow_insecure = false
 | Field | Purpose |
 | ----- | ------- |
 | `nmx_c_tls_ca_cert_path` | PEM containing the CAs that verify NMX-C over HTTPS. It is the only trust source: neither the partition monitor nor the certificate monitor uses the system trust store |
-| `nmx_c_tls_client_cert_path` | Optional client certificate for mTLS to NMX-C. Set it together with `nmx_c_tls_client_key_path`; `nico-api` refuses to start when only one of them is set |
-| `nmx_c_tls_client_key_path` | Optional client key matching the certificate above. Set it together with `nmx_c_tls_client_cert_path`; `nico-api` refuses to start when only one of them is set |
+| `nmx_c_tls_client_cert_path` | Optional client certificate for mTLS to NMX-C. Set it together with `nmx_c_tls_client_key_path`. `nico-api` rejects a configuration with only one of these paths during configuration loading, even when `nvlink_config.enabled = false`. |
+| `nmx_c_tls_client_key_path` | Optional client key matching the certificate above. Set it together with `nmx_c_tls_client_cert_path`. `nico-api` rejects a configuration with only one of these paths during configuration loading, even when `nvlink_config.enabled = false`. |
 | `nmx_c_tls_authority` | Optional override for the expected server name during certificate verification (SNI / hostname check) |
 | `nmx_c_endpoint_port` | Optional gRPC port used when deriving an endpoint from a switch NVOS IP; defaults to `9370` |
 | `allow_insecure` | Development option that can select plaintext HTTP for rack-derived endpoints when no client certificate and key are configured. It does not disable certificate-monitor TLS verification |
