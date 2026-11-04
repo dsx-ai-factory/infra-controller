@@ -507,30 +507,21 @@ func (s *RebootInstanceTestSuite) AfterTest(suiteName, testName string) {
 }
 
 func (s *RebootInstanceTestSuite) Test_RebootInstance_Success() {
-	for _, operation := range []corev1.InstancePowerRequest_Operation{
-		corev1.InstancePowerRequest_POWER_RESET,
-		corev1.InstancePowerRequest_POWER_GRACEFUL_RESTART,
-	} {
-		s.Run(operation.String(), func() {
-			s.env = s.NewTestWorkflowEnvironment()
-			defer s.env.AssertExpectations(s.T())
-			var machineManager iActivity.ManageInstance
+	var machineManager iActivity.ManageInstance
 
-			request := &corev1.InstancePowerRequest{
-				InstanceId: &corev1.InstanceId{Value: uuid.NewString()},
-				Operation:  operation,
-			}
-
-			// Mock RebootInstanceOnSiteActivity activity
-			s.env.RegisterActivity(machineManager.RebootInstanceOnSite)
-			s.env.OnActivity(machineManager.RebootInstanceOnSite, mock.Anything, request).Return(nil)
-
-			// execute workflow
-			s.env.ExecuteWorkflow(RebootInstance, request)
-			s.True(s.env.IsWorkflowCompleted())
-			s.NoError(s.env.GetWorkflowError())
-		})
+	request := &corev1.InstancePowerRequest{
+		InstanceId: &corev1.InstanceId{Value: uuid.NewString()},
+		Operation:  corev1.InstancePowerRequest_POWER_RESET,
 	}
+
+	// Mock RebootInstanceOnSiteActivity activity
+	s.env.RegisterActivity(machineManager.RebootInstanceOnSite)
+	s.env.OnActivity(machineManager.RebootInstanceOnSite, mock.Anything, request).Return(nil)
+
+	// execute workflow
+	s.env.ExecuteWorkflow(RebootInstance, request)
+	s.True(s.env.IsWorkflowCompleted())
+	s.NoError(s.env.GetWorkflowError())
 }
 
 func (s *RebootInstanceTestSuite) Test_RebootInstance_Failure() {

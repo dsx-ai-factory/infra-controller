@@ -124,6 +124,7 @@ const (
 	Forge_GetAllDomains_FullMethodName                                      = "/forge.Forge/GetAllDomains"
 	Forge_GetAllDomainMetadata_FullMethodName                               = "/forge.Forge/GetAllDomainMetadata"
 	Forge_InvokeInstancePower_FullMethodName                                = "/forge.Forge/InvokeInstancePower"
+	Forge_GracefulRestartInstance_FullMethodName                            = "/forge.Forge/GracefulRestartInstance"
 	Forge_ForgeAgentControl_FullMethodName                                  = "/forge.Forge/ForgeAgentControl"
 	Forge_DiscoverMachine_FullMethodName                                    = "/forge.Forge/DiscoverMachine"
 	Forge_RenewMachineCertificate_FullMethodName                            = "/forge.Forge/RenewMachineCertificate"
@@ -787,6 +788,9 @@ type ForgeClient interface {
 	GetAllDomainMetadata(ctx context.Context, in *DomainMetadataRequest, opts ...grpc.CallOption) (*DomainMetadataResponse, error)
 	// Power Control
 	InvokeInstancePower(ctx context.Context, in *InstancePowerRequest, opts ...grpc.CallOption) (*InstancePowerResult, error)
+	// Requests an OS-coordinated instance restart without a hard-reset fallback.
+	// Older builds reject this method rather than interpreting it as a hard reset.
+	GracefulRestartInstance(ctx context.Context, in *InstanceGracefulRestartRequest, opts ...grpc.CallOption) (*InstancePowerResult, error)
 	ForgeAgentControl(ctx context.Context, in *ForgeAgentControlRequest, opts ...grpc.CallOption) (*ForgeAgentControlResponse, error)
 	// PRIVILEGED: Creates a new machine from nothing
 	DiscoverMachine(ctx context.Context, in *MachineDiscoveryInfo, opts ...grpc.CallOption) (*MachineDiscoveryResult, error)
@@ -2741,6 +2745,16 @@ func (c *forgeClient) InvokeInstancePower(ctx context.Context, in *InstancePower
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(InstancePowerResult)
 	err := c.cc.Invoke(ctx, Forge_InvokeInstancePower_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *forgeClient) GracefulRestartInstance(ctx context.Context, in *InstanceGracefulRestartRequest, opts ...grpc.CallOption) (*InstancePowerResult, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(InstancePowerResult)
+	err := c.cc.Invoke(ctx, Forge_GracefulRestartInstance_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -7497,6 +7511,9 @@ type ForgeServer interface {
 	GetAllDomainMetadata(context.Context, *DomainMetadataRequest) (*DomainMetadataResponse, error)
 	// Power Control
 	InvokeInstancePower(context.Context, *InstancePowerRequest) (*InstancePowerResult, error)
+	// Requests an OS-coordinated instance restart without a hard-reset fallback.
+	// Older builds reject this method rather than interpreting it as a hard reset.
+	GracefulRestartInstance(context.Context, *InstanceGracefulRestartRequest) (*InstancePowerResult, error)
 	ForgeAgentControl(context.Context, *ForgeAgentControlRequest) (*ForgeAgentControlResponse, error)
 	// PRIVILEGED: Creates a new machine from nothing
 	DiscoverMachine(context.Context, *MachineDiscoveryInfo) (*MachineDiscoveryResult, error)
@@ -8732,6 +8749,9 @@ func (UnimplementedForgeServer) GetAllDomainMetadata(context.Context, *DomainMet
 }
 func (UnimplementedForgeServer) InvokeInstancePower(context.Context, *InstancePowerRequest) (*InstancePowerResult, error) {
 	return nil, status.Error(codes.Unimplemented, "method InvokeInstancePower not implemented")
+}
+func (UnimplementedForgeServer) GracefulRestartInstance(context.Context, *InstanceGracefulRestartRequest) (*InstancePowerResult, error) {
+	return nil, status.Error(codes.Unimplemented, "method GracefulRestartInstance not implemented")
 }
 func (UnimplementedForgeServer) ForgeAgentControl(context.Context, *ForgeAgentControlRequest) (*ForgeAgentControlResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ForgeAgentControl not implemented")
@@ -11922,6 +11942,24 @@ func _Forge_InvokeInstancePower_Handler(srv interface{}, ctx context.Context, de
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(ForgeServer).InvokeInstancePower(ctx, req.(*InstancePowerRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Forge_GracefulRestartInstance_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(InstanceGracefulRestartRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ForgeServer).GracefulRestartInstance(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Forge_GracefulRestartInstance_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ForgeServer).GracefulRestartInstance(ctx, req.(*InstanceGracefulRestartRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -20493,6 +20531,10 @@ var Forge_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "InvokeInstancePower",
 			Handler:    _Forge_InvokeInstancePower_Handler,
+		},
+		{
+			MethodName: "GracefulRestartInstance",
+			Handler:    _Forge_GracefulRestartInstance_Handler,
 		},
 		{
 			MethodName: "ForgeAgentControl",

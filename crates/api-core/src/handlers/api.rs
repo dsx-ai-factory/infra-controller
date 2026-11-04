@@ -26,13 +26,10 @@ use tonic::{Request, Response, Status};
 use crate::CarbideError;
 use crate::api::{Api, log_request_data};
 
-/// Lists the capabilities returned by Version so callers can check support
-/// before requesting operations such as graceful instance restart.
 fn advertised_build_capabilities() -> Vec<i32> {
     vec![
         rpc::BuildCapability::VpcSlaac as i32,
         rpc::BuildCapability::ReplaceSkuComponents as i32,
-        rpc::BuildCapability::InstanceGracefulRestart as i32,
     ]
 }
 
@@ -232,7 +229,6 @@ mod tests {
         for capability in [
             rpc::BuildCapability::VpcSlaac,
             rpc::BuildCapability::ReplaceSkuComponents,
-            rpc::BuildCapability::InstanceGracefulRestart,
         ] {
             assert!(capabilities.contains(&(capability as i32)));
         }

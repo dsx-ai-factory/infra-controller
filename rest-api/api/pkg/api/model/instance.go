@@ -1722,7 +1722,8 @@ func (iur *APIInstanceUpdateRequest) IsUpdateRequest() bool {
 		iur.NVLinkInterfaces != nil ||
 		iur.SSHKeyGroupIDs != nil ||
 		iur.NetworkSecurityGroupID != nil ||
-		iur.PowerProfile != nil
+		iur.PowerProfile != nil ||
+		iur.DpuExtensionServiceDeployments != nil
 }
 
 // IsInterfaceUpdateRequest checks if the request is an instance interface update request

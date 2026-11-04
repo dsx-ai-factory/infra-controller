@@ -258,6 +258,7 @@ impl InternalRBACRules {
         x.perm("GetAllDomainMetadata", vec![Dns]);
         x.perm("GetAllDomains", vec![Dns]);
         x.perm("InvokeInstancePower", vec![ForgeAdminCLI, SiteAgent]);
+        x.perm("GracefulRestartInstance", vec![ForgeAdminCLI, SiteAgent]);
         x.perm("ForgeAgentControl", vec![Machineatron, Scout]);
         x.perm("DiscoverMachine", vec![Anonymous]);
         x.perm("RenewMachineCertificate", vec![Agent]);

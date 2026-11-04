@@ -2242,10 +2242,10 @@ func NewUpdateInstanceHandler(dbSession *cdb.Session, tc temporalClient.Client, 
 	}
 }
 
-// handleReboot checks Core support for graceful mode before changing instance
-// status, then records Rebooting and waits for the RebootInstanceV2 workflow.
-// Workflow success confirms acceptance, not completion of the guest OS restart;
-// subsequent inventory updates determine the instance's power status.
+// handleReboot records Rebooting and waits for the selected restart request.
+// Graceful mode uses a dedicated Core RPC through the generic proxy so older
+// agents and Core builds cannot interpret it as a hard reset. Proxy errors roll
+// back the status update. Success confirms acceptance, not completion of the OS restart.
 func (uih UpdateInstanceHandler) handleReboot(c echo.Context, logger *zerolog.Logger, apiRequest *model.APIInstanceUpdateRequest, instance *cdbm.Instance) error {
 	ctx := c.Request().Context()
 
@@ -2256,20 +2256,7 @@ func (uih UpdateInstanceHandler) handleReboot(c echo.Context, logger *zerolog.Lo
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve client for Site", nil)
 	}
 
-	operation := corev1.InstancePowerRequest_POWER_RESET
-	if apiRequest.RebootMode != nil && *apiRequest.RebootMode == model.InstanceRebootModeGraceful {
-		// Older Core builds ignore the operation enum and hard-reset the host.
-		// Check the live capability before changing status or starting the reboot.
-		buildInfo := &corev1.BuildInfo{}
-		apiErr := common.ExecuteCoreGRPC(ctx, stc, corev1.Forge_Version_FullMethodName, &corev1.VersionRequest{}, buildInfo, instance.SiteID.String())
-		if apiErr != nil {
-			return cutil.NewAPIErrorResponse(c, apiErr.Code, apiErr.Message, nil)
-		}
-		if !slices.Contains(buildInfo.Capabilities, corev1.BuildCapability_BUILD_CAPABILITY_INSTANCE_GRACEFUL_RESTART) {
-			return cutil.NewAPIErrorResponse(c, http.StatusConflict, "Site does not support graceful Instance reboot", nil)
-		}
-		operation = corev1.InstancePowerRequest_POWER_GRACEFUL_RESTART
-	}
+	graceful := apiRequest.RebootMode != nil && *apiRequest.RebootMode == model.InstanceRebootModeGraceful
 
 	// Values populated inside the transaction closure that are needed for the response.
 	var ui *cdbm.Instance
@@ -2356,10 +2343,27 @@ func (uih UpdateInstanceHandler) handleReboot(c echo.Context, logger *zerolog.Lo
 			return cutil.NewAPIError(http.StatusInternalServerError, "Failed to retrieve Status Details for Instance", nil)
 		}
 
+		if graceful {
+			// The method name is the compatibility boundary. Never send a graceful
+			// mode through RebootInstanceV2, where an older worker can default to reset.
+			request := &corev1.InstanceGracefulRestartRequest{
+				InstanceId: &corev1.InstanceId{Value: instance.GetSiteID().String()},
+			}
+			apiErr := common.ExecuteCoreGRPC(ctx, stc, corev1.Forge_GracefulRestartInstance_FullMethodName, request, nil, instance.SiteID.String())
+			if apiErr != nil && apiErr.Code == http.StatusNotImplemented {
+				apiErr.Code = http.StatusConflict
+				apiErr.Message = "Site does not support graceful Instance reboot"
+			}
+			if apiErr != nil {
+				return apiErr
+			}
+			return nil
+		}
+
 		// Prepare the config update request workflow object
 		rebootInstanceRequest := &corev1.InstancePowerRequest{
 			InstanceId:           &corev1.InstanceId{Value: instance.GetSiteID().String()},
-			Operation:            operation,
+			Operation:            corev1.InstancePowerRequest_POWER_RESET,
 			BootWithCustomIpxe:   rebootWithCustomIpxe,
 			ApplyUpdatesOnReboot: applyUpdatesOnReboot,
 		}

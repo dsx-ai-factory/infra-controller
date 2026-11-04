@@ -184,19 +184,30 @@ async fn test_instance_uses_custom_ipxe_only_once(pool: sqlx::PgPool) {
 }
 
 #[crate::sqlx_test]
-async fn invoke_instance_power_requires_instance_id(pool: sqlx::PgPool) {
+async fn instance_restart_requires_instance_id(pool: sqlx::PgPool) {
     let env = create_test_env(pool).await;
-
-    let err = env
-        .api
-        .invoke_instance_power(tonic::Request::new(
-            rpc::forge::InstancePowerRequest::default(),
-        ))
-        .await
-        .unwrap_err();
-
-    assert_eq!(err.code(), tonic::Code::InvalidArgument);
-    assert!(err.message().contains("instance_id"));
+    for (name, result) in [
+        (
+            "hard",
+            env.api
+                .invoke_instance_power(tonic::Request::new(
+                    rpc::forge::InstancePowerRequest::default(),
+                ))
+                .await,
+        ),
+        (
+            "graceful",
+            env.api
+                .graceful_restart_instance(tonic::Request::new(
+                    rpc::forge::InstanceGracefulRestartRequest::default(),
+                ))
+                .await,
+        ),
+    ] {
+        let err = result.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument, "{name}");
+        assert!(err.message().contains("instance_id"), "{name}");
+    }
 }
 
 #[crate::sqlx_test]
@@ -232,11 +243,11 @@ async fn test_instance_always_boot_with_custom_ipxe(pool: sqlx::PgPool) {
     let checkpoint = env.redfish_sim.timepoint();
     let err = env
         .api
-        .invoke_instance_power(tonic::Request::new(rpc::forge::InstancePowerRequest {
-            instance_id: Some(tinstance.id),
-            operation: rpc::forge::instance_power_request::Operation::PowerGracefulRestart as i32,
-            ..Default::default()
-        }))
+        .graceful_restart_instance(tonic::Request::new(
+            rpc::forge::InstanceGracefulRestartRequest {
+                instance_id: Some(tinstance.id),
+            },
+        ))
         .await
         .unwrap_err();
     assert_eq!(err.code(), tonic::Code::FailedPrecondition);
@@ -272,11 +283,14 @@ async fn test_instance_power_modes(pool: sqlx::PgPool) {
     let host_ip = mh.host().bmc_ip(&mut txn).await.unwrap();
     txn.rollback().await.unwrap();
 
+    enum PowerCall {
+        Hard(i32),
+        Graceful,
+    }
+
     struct Case {
         name: &'static str,
-        operation: i32,
-        boot_with_custom_ipxe: bool,
-        apply_updates_on_reboot: bool,
+        call: PowerCall,
         inject_failure: bool,
         error: Option<tonic::Code>,
         expected: Vec<RedfishSimAction>,
@@ -285,54 +299,28 @@ async fn test_instance_power_modes(pool: sqlx::PgPool) {
     let cases = [
         Case {
             name: "hard default",
-            operation: Operation::PowerReset as i32,
-            boot_with_custom_ipxe: false,
-            apply_updates_on_reboot: false,
+            call: PowerCall::Hard(Operation::PowerReset as i32),
             inject_failure: false,
             error: None,
             expected: vec![RedfishSimAction::Power(SystemPowerControl::ForceRestart)],
         },
         Case {
             name: "graceful host restart",
-            operation: Operation::PowerGracefulRestart as i32,
-            boot_with_custom_ipxe: false,
-            apply_updates_on_reboot: false,
+            call: PowerCall::Graceful,
             inject_failure: false,
             error: None,
             expected: vec![RedfishSimAction::Power(SystemPowerControl::GracefulRestart)],
         },
         Case {
             name: "unknown operation",
-            operation: 99,
-            boot_with_custom_ipxe: false,
-            apply_updates_on_reboot: false,
-            inject_failure: false,
-            error: Some(tonic::Code::InvalidArgument),
-            expected: vec![],
-        },
-        Case {
-            name: "custom ipxe",
-            operation: Operation::PowerGracefulRestart as i32,
-            boot_with_custom_ipxe: true,
-            apply_updates_on_reboot: false,
-            inject_failure: false,
-            error: Some(tonic::Code::InvalidArgument),
-            expected: vec![],
-        },
-        Case {
-            name: "update approval",
-            operation: Operation::PowerGracefulRestart as i32,
-            boot_with_custom_ipxe: false,
-            apply_updates_on_reboot: true,
+            call: PowerCall::Hard(99),
             inject_failure: false,
             error: Some(tonic::Code::InvalidArgument),
             expected: vec![],
         },
         Case {
             name: "no hard fallback",
-            operation: Operation::PowerGracefulRestart as i32,
-            boot_with_custom_ipxe: false,
-            apply_updates_on_reboot: false,
+            call: PowerCall::Graceful,
             inject_failure: true,
             error: Some(tonic::Code::Internal),
             expected: vec![RedfishSimAction::PowerFailed(
@@ -342,9 +330,7 @@ async fn test_instance_power_modes(pool: sqlx::PgPool) {
     ];
     for Case {
         name,
-        operation,
-        boot_with_custom_ipxe,
-        apply_updates_on_reboot,
+        call,
         inject_failure,
         error,
         expected,
@@ -355,15 +341,26 @@ async fn test_instance_power_modes(pool: sqlx::PgPool) {
             env.redfish_sim
                 .fail_next_power_action(SystemPowerControl::GracefulRestart, "injected failure");
         }
-        let result = env
-            .api
-            .invoke_instance_power(tonic::Request::new(rpc::forge::InstancePowerRequest {
-                instance_id: Some(instance.id),
-                operation,
-                boot_with_custom_ipxe,
-                apply_updates_on_reboot,
-            }))
-            .await;
+        let result = match call {
+            PowerCall::Hard(operation) => {
+                env.api
+                    .invoke_instance_power(tonic::Request::new(rpc::forge::InstancePowerRequest {
+                        instance_id: Some(instance.id),
+                        operation,
+                        ..Default::default()
+                    }))
+                    .await
+            }
+            PowerCall::Graceful => {
+                env.api
+                    .graceful_restart_instance(tonic::Request::new(
+                        rpc::forge::InstanceGracefulRestartRequest {
+                            instance_id: Some(instance.id),
+                        },
+                    ))
+                    .await
+            }
+        };
         assert_eq!(result.err().map(|err| err.code()), error, "{name}");
         let actions = env.redfish_sim.actions_since(&checkpoint);
         // The exact action and endpoint assertions also exclude DPU power operations.
@@ -412,11 +409,11 @@ async fn test_instance_power_modes(pool: sqlx::PgPool) {
         let checkpoint = env.redfish_sim.timepoint();
         let err = env
             .api
-            .invoke_instance_power(tonic::Request::new(rpc::forge::InstancePowerRequest {
-                instance_id: Some(instance.id),
-                operation: Operation::PowerGracefulRestart as i32,
-                ..Default::default()
-            }))
+            .graceful_restart_instance(tonic::Request::new(
+                rpc::forge::InstanceGracefulRestartRequest {
+                    instance_id: Some(instance.id),
+                },
+            ))
             .await
             .unwrap_err();
         assert_eq!(err.code(), tonic::Code::FailedPrecondition, "{name}");

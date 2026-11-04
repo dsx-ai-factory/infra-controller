@@ -2417,25 +2417,26 @@ phone_home:
 
 func TestAPIInstanceUpdateRequest_Validate(t *testing.T) {
 	type fields struct {
-		Name                     *string
-		Description              *string
-		Labels                   map[string]string
-		TriggerReboot            *bool
-		RebootMode               *string
-		RebootWithCustomIpxe     *bool
-		ApplyUpdatesOnReboot     *bool
-		OperatingSystemID        *string
-		IpxeScript               *string
-		UserData                 *string
-		PhoneHomeEnabled         *bool
-		AlwaysBootWithCustomIpxe *bool
-		SecondaryVpcIDs          []string
-		Interfaces               []APIInterfaceCreateOrUpdateRequest
-		InfiniBandInterfaces     []APIInfiniBandInterfaceCreateOrUpdateRequest
-		SpectrumXAttachments     []APISpectrumXAttachmentCreateOrUpdateRequest
-		NVLinkInterfaces         []APINVLinkInterfaceCreateOrUpdateRequest
-		SSHKeyGroupIDs           []string
-		NetworkSecurityGroupID   *string
+		Name                           *string
+		Description                    *string
+		Labels                         map[string]string
+		TriggerReboot                  *bool
+		RebootMode                     *string
+		RebootWithCustomIpxe           *bool
+		ApplyUpdatesOnReboot           *bool
+		OperatingSystemID              *string
+		IpxeScript                     *string
+		UserData                       *string
+		PhoneHomeEnabled               *bool
+		AlwaysBootWithCustomIpxe       *bool
+		SecondaryVpcIDs                []string
+		Interfaces                     []APIInterfaceCreateOrUpdateRequest
+		InfiniBandInterfaces           []APIInfiniBandInterfaceCreateOrUpdateRequest
+		SpectrumXAttachments           []APISpectrumXAttachmentCreateOrUpdateRequest
+		NVLinkInterfaces               []APINVLinkInterfaceCreateOrUpdateRequest
+		SSHKeyGroupIDs                 []string
+		NetworkSecurityGroupID         *string
+		DpuExtensionServiceDeployments []APIDpuExtensionServiceDeploymentRequest
 	}
 	tests := []struct {
 		name              string
@@ -2444,7 +2445,11 @@ func TestAPIInstanceUpdateRequest_Validate(t *testing.T) {
 		wantUpdateRequest *bool
 		wantErrMessage    string
 	}{
-		{name: "graceful reboot", fields: fields{TriggerReboot: cutil.GetPtr(true), RebootMode: cutil.GetPtr(InstanceRebootModeGraceful)}, wantErr: false},
+		{name: "graceful reboot", fields: fields{TriggerReboot: cutil.GetPtr(true), RebootMode: cutil.GetPtr(InstanceRebootModeGraceful)}, wantErr: false, wantUpdateRequest: cutil.GetPtr(false)},
+		{name: "empty DPU deployment replacement is an update", fields: fields{DpuExtensionServiceDeployments: []APIDpuExtensionServiceDeploymentRequest{}}, wantUpdateRequest: cutil.GetPtr(true)},
+		{name: "DPU deployment replacement is an update", fields: fields{DpuExtensionServiceDeployments: []APIDpuExtensionServiceDeploymentRequest{{DpuExtensionServiceID: uuid.NewString(), Version: "V1-T1234"}}}, wantUpdateRequest: cutil.GetPtr(true)},
+		{name: "hard reboot rejects empty DPU deployment replacement", fields: fields{TriggerReboot: cutil.GetPtr(true), RebootMode: cutil.GetPtr(InstanceRebootModeHard), DpuExtensionServiceDeployments: []APIDpuExtensionServiceDeploymentRequest{}}, wantErr: true, wantUpdateRequest: cutil.GetPtr(true)},
+		{name: "graceful reboot rejects DPU deployment replacement", fields: fields{TriggerReboot: cutil.GetPtr(true), RebootMode: cutil.GetPtr(InstanceRebootModeGraceful), DpuExtensionServiceDeployments: []APIDpuExtensionServiceDeploymentRequest{{DpuExtensionServiceID: uuid.NewString(), Version: "V1-T1234"}}}, wantErr: true, wantUpdateRequest: cutil.GetPtr(true)},
 		{name: "explicit hard reboot with updates", fields: fields{TriggerReboot: cutil.GetPtr(true), RebootMode: cutil.GetPtr(InstanceRebootModeHard), ApplyUpdatesOnReboot: cutil.GetPtr(true)}, wantErr: false},
 		{name: "unknown reboot mode", fields: fields{TriggerReboot: cutil.GetPtr(true), RebootMode: cutil.GetPtr("graceful")}, wantErr: true, wantErrMessage: "`rebootMode` must be Hard or Graceful"},
 		{name: "mode without reboot", fields: fields{RebootMode: cutil.GetPtr(InstanceRebootModeGraceful)}, wantErr: true, wantErrMessage: "`rebootMode` requires `triggerReboot: true`"},
@@ -2670,25 +2675,29 @@ func TestAPIInstanceUpdateRequest_Validate(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			itur := APIInstanceUpdateRequest{
-				Name:                     tt.fields.Name,
-				Description:              tt.fields.Description,
-				Labels:                   tt.fields.Labels,
-				TriggerReboot:            tt.fields.TriggerReboot,
-				RebootMode:               tt.fields.RebootMode,
-				RebootWithCustomIpxe:     tt.fields.RebootWithCustomIpxe,
-				ApplyUpdatesOnReboot:     tt.fields.ApplyUpdatesOnReboot,
-				OperatingSystemID:        tt.fields.OperatingSystemID,
-				IpxeScript:               tt.fields.IpxeScript,
-				UserData:                 tt.fields.UserData,
-				PhoneHomeEnabled:         tt.fields.PhoneHomeEnabled,
-				AlwaysBootWithCustomIpxe: tt.fields.AlwaysBootWithCustomIpxe,
-				SecondaryVpcIDs:          tt.fields.SecondaryVpcIDs,
-				Interfaces:               tt.fields.Interfaces,
-				InfiniBandInterfaces:     tt.fields.InfiniBandInterfaces,
-				SpectrumXAttachments:     tt.fields.SpectrumXAttachments,
-				NVLinkInterfaces:         tt.fields.NVLinkInterfaces,
-				SSHKeyGroupIDs:           tt.fields.SSHKeyGroupIDs,
-				NetworkSecurityGroupID:   tt.fields.NetworkSecurityGroupID,
+				Name:                           tt.fields.Name,
+				Description:                    tt.fields.Description,
+				Labels:                         tt.fields.Labels,
+				TriggerReboot:                  tt.fields.TriggerReboot,
+				RebootMode:                     tt.fields.RebootMode,
+				RebootWithCustomIpxe:           tt.fields.RebootWithCustomIpxe,
+				ApplyUpdatesOnReboot:           tt.fields.ApplyUpdatesOnReboot,
+				OperatingSystemID:              tt.fields.OperatingSystemID,
+				IpxeScript:                     tt.fields.IpxeScript,
+				UserData:                       tt.fields.UserData,
+				PhoneHomeEnabled:               tt.fields.PhoneHomeEnabled,
+				AlwaysBootWithCustomIpxe:       tt.fields.AlwaysBootWithCustomIpxe,
+				SecondaryVpcIDs:                tt.fields.SecondaryVpcIDs,
+				Interfaces:                     tt.fields.Interfaces,
+				InfiniBandInterfaces:           tt.fields.InfiniBandInterfaces,
+				SpectrumXAttachments:           tt.fields.SpectrumXAttachments,
+				NVLinkInterfaces:               tt.fields.NVLinkInterfaces,
+				SSHKeyGroupIDs:                 tt.fields.SSHKeyGroupIDs,
+				NetworkSecurityGroupID:         tt.fields.NetworkSecurityGroupID,
+				DpuExtensionServiceDeployments: tt.fields.DpuExtensionServiceDeployments,
+			}
+			if tt.wantUpdateRequest != nil {
+				assert.Equal(t, *tt.wantUpdateRequest, itur.IsUpdateRequest())
 			}
 			err := itur.Validate()
 			if tt.wantErr {
@@ -2697,9 +2706,6 @@ func TestAPIInstanceUpdateRequest_Validate(t *testing.T) {
 					var fieldErrors validation.Errors
 					require.ErrorAs(t, err, &fieldErrors)
 					assert.EqualError(t, fieldErrors["rebootMode"], tt.wantErrMessage)
-				}
-				if tt.wantUpdateRequest != nil {
-					assert.Equal(t, *tt.wantUpdateRequest, itur.IsUpdateRequest())
 				}
 			} else {
 				assert.NoError(t, err)

@@ -936,6 +936,13 @@ impl Forge for Api {
         crate::handlers::dns::lookup_record(self, request).await
     }
 
+    async fn graceful_restart_instance(
+        &self,
+        request: Request<rpc::InstanceGracefulRestartRequest>,
+    ) -> Result<Response<rpc::InstancePowerResult>, Status> {
+        crate::handlers::instance::graceful_restart(self, request).await
+    }
+
     async fn invoke_instance_power(
         &self,
         request: Request<rpc::InstancePowerRequest>,

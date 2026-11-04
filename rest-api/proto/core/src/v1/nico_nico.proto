@@ -262,6 +262,9 @@ service Forge {
 
   /* Power Control */
   rpc InvokeInstancePower(InstancePowerRequest) returns (InstancePowerResult);
+  // Requests an OS-coordinated instance restart without a hard-reset fallback.
+  // Older builds reject this method rather than interpreting it as a hard reset.
+  rpc GracefulRestartInstance(InstanceGracefulRestartRequest) returns (InstancePowerResult);
 
   rpc ForgeAgentControl(ForgeAgentControlRequest) returns (ForgeAgentControlResponse);
   // PRIVILEGED: Creates a new machine from nothing
@@ -2000,8 +2003,6 @@ enum BuildCapability {
   BUILD_CAPABILITY_VPC_SLAAC = 1;
   // ReplaceSkuComponents preserves metadata omitted by the caller.
   BUILD_CAPABILITY_REPLACE_SKU_COMPONENTS = 2;
-  // InvokeInstancePower supports POWER_GRACEFUL_RESTART without a hard-reset fallback.
-  BUILD_CAPABILITY_INSTANCE_GRACEFUL_RESTART = 3;
 }
 
 message BuildInfo {
@@ -3538,12 +3539,6 @@ message InstancePowerRequest {
 
   enum Operation {
     POWER_RESET = 0;
-    // Request an OS-coordinated host restart. Callers must first check for
-    // BUILD_CAPABILITY_INSTANCE_GRACEFUL_RESTART: older Core builds ignore
-    // operation and perform a hard reset. Requires an Assigned/Ready instance,
-    // no custom-iPXE boot or pending-update approval, and a supported platform.
-    // Failure never falls back to POWER_RESET.
-    POWER_GRACEFUL_RESTART = 1;
   }
   Operation operation = 2;
 
@@ -13034,4 +13029,12 @@ message ComponentCredentialOverrides {
   optional UsernamePassword bmc = 1;
   // Switch NVOS credentials. Ignored for compute and power-shelf targets.
   optional UsernamePassword nvos = 2;
+}
+
+// Graceful restart requires an Assigned/Ready instance without always-on custom
+// iPXE, and discovery data excluding known platforms that require an IPMI reset.
+// It cannot request custom iPXE or approve pending updates. Success means the
+// request was accepted, not that the OS restarted. Failure never triggers a hard reset.
+message InstanceGracefulRestartRequest {
+  common.InstanceId instance_id = 1;
 }

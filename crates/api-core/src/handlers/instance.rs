@@ -1073,30 +1073,51 @@ pub(crate) async fn update_phone_home_last_contact(
     }))
 }
 
-/// Requests a hard or graceful host restart for an instance.
-///
-/// Graceful restart requires an Assigned/Ready instance, no custom iPXE or
-/// update request, and discovery data excluding known restart workarounds.
-/// Success means the request was accepted, not that the guest OS restarted.
-/// A failed graceful restart never falls back to a hard reset.
+/// Requests a hard restart, preserving custom-iPXE and pending-update behavior.
 pub(crate) async fn invoke_power(
     api: &Api,
     request: Request<rpc::InstancePowerRequest>,
 ) -> Result<Response<rpc::InstancePowerResult>, Status> {
     log_request_data(&request);
-
-    let mut txn = api.txn_begin().await?;
-
     let request = request.into_inner();
-    let operation = rpc::instance_power_request::Operation::try_from(request.operation)
+    rpc::instance_power_request::Operation::try_from(request.operation)
         .map_err(|_| CarbideError::InvalidArgument("unknown instance power operation".into()))?;
-    let graceful = operation == rpc::instance_power_request::Operation::PowerGracefulRestart;
-    if graceful && (request.boot_with_custom_ipxe || request.apply_updates_on_reboot) {
-        return Err(CarbideError::InvalidArgument(
-            "graceful restart cannot request custom iPXE or apply updates".into(),
-        )
-        .into());
-    }
+    restart_instance(api, request, RestartMode::Hard).await
+}
+
+/// Requests an OS-coordinated restart for an Assigned/Ready instance.
+///
+/// Always-on custom iPXE and platforms with known restart workarounds are rejected.
+/// Success means acceptance, not completion; failure never falls back to a hard reset.
+pub(crate) async fn graceful_restart(
+    api: &Api,
+    request: Request<rpc::InstanceGracefulRestartRequest>,
+) -> Result<Response<rpc::InstancePowerResult>, Status> {
+    log_request_data(&request);
+    restart_instance(
+        api,
+        rpc::InstancePowerRequest {
+            instance_id: request.into_inner().instance_id,
+            ..Default::default()
+        },
+        RestartMode::Graceful,
+    )
+    .await
+}
+
+#[derive(Clone, Copy)]
+enum RestartMode {
+    Hard,
+    Graceful,
+}
+
+async fn restart_instance(
+    api: &Api,
+    request: rpc::InstancePowerRequest,
+    mode: RestartMode,
+) -> Result<Response<rpc::InstancePowerResult>, Status> {
+    let mut txn = api.txn_begin().await?;
+    let graceful = matches!(mode, RestartMode::Graceful);
     let instance_id = request
         .instance_id
         .ok_or(CarbideError::MissingArgument("instance_id"))?;
@@ -1345,13 +1366,9 @@ pub(crate) async fn invoke_power(
         .await
         .map_err(|e| CarbideError::internal(e.to_string()))?;
 
-    let action = match operation {
-        rpc::instance_power_request::Operation::PowerReset => {
-            libredfish::SystemPowerControl::ForceRestart
-        }
-        rpc::instance_power_request::Operation::PowerGracefulRestart => {
-            libredfish::SystemPowerControl::GracefulRestart
-        }
+    let action = match mode {
+        RestartMode::Hard => libredfish::SystemPowerControl::ForceRestart,
+        RestartMode::Graceful => libredfish::SystemPowerControl::GracefulRestart,
     };
     client
         .power(action)

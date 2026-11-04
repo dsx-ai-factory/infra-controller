@@ -58,14 +58,7 @@ func TestInvokeInstancePower(t *testing.T) {
 			},
 			wantCode: codes.OK,
 		},
-		{
-			name: "graceful restart existing instance",
-			request: &corev1.InstancePowerRequest{
-				InstanceId: &corev1.InstanceId{Value: instanceID},
-				Operation:  corev1.InstancePowerRequest_POWER_GRACEFUL_RESTART,
-			},
-			wantCode: codes.OK,
-		},
+
 		{
 			name: "invalid operation for existing instance",
 			request: &corev1.InstancePowerRequest{
@@ -209,6 +202,27 @@ func TestJwksDocumentForKeys(t *testing.T) {
 				"kty": "EC", "crv": "P-256", "alg": jwtESAlg, "use": keyUse, "kid": keyID,
 				"x": "mGriUG8f8QTQQjCGHY9LSY9LxMbQCbMPdUTcEpuC0o0", "y": "ADzMwKZGDgrjKKTZfTx7YdhvxiicGJ8lJREMRBuwfpc",
 			}, decoded.Keys[0])
+		})
+	}
+}
+
+func TestGracefulRestartInstance(t *testing.T) {
+	const instanceID = "12345678-1234-5678-90ab-cdef01234567"
+	server := &NICoServerImpl{ins: map[string]*corev1.Instance{instanceID: {Id: &corev1.InstanceId{Value: instanceID}}}}
+	for _, tc := range []struct {
+		name     string
+		request  *corev1.InstanceGracefulRestartRequest
+		wantCode codes.Code
+	}{
+		{name: "nil request", wantCode: codes.InvalidArgument},
+		{name: "missing instance ID", request: &corev1.InstanceGracefulRestartRequest{}, wantCode: codes.InvalidArgument},
+		{name: "existing instance", request: &corev1.InstanceGracefulRestartRequest{InstanceId: &corev1.InstanceId{Value: instanceID}}, wantCode: codes.OK},
+		{name: "unknown instance", request: &corev1.InstanceGracefulRestartRequest{InstanceId: &corev1.InstanceId{Value: "unknown"}}, wantCode: codes.NotFound},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			result, err := server.GracefulRestartInstance(context.Background(), tc.request)
+			assert.Equal(t, tc.wantCode, status.Code(err))
+			assert.Equal(t, tc.wantCode != codes.OK, result == nil)
 		})
 	}
 }

@@ -475,7 +475,7 @@ func (f *NICoServerImpl) InvokeInstancePower(c context.Context, req *corev1.Inst
 	instanceID := req.GetInstanceId().GetValue()
 	_, ok := f.ins[instanceID]
 	if ok {
-		if req.Operation == corev1.InstancePowerRequest_POWER_RESET || req.Operation == corev1.InstancePowerRequest_POWER_GRACEFUL_RESTART {
+		if req.Operation == corev1.InstancePowerRequest_POWER_RESET {
 			return &corev1.InstancePowerResult{}, nil
 		}
 
@@ -483,6 +483,16 @@ func (f *NICoServerImpl) InvokeInstancePower(c context.Context, req *corev1.Inst
 	}
 
 	return nil, status.Errorf(codes.NotFound, "Instance with ID %q not found", instanceID)
+}
+
+func (f *NICoServerImpl) GracefulRestartInstance(ctx context.Context, req *corev1.InstanceGracefulRestartRequest) (*corev1.InstancePowerResult, error) {
+	if req == nil || req.GetInstanceId().GetValue() == "" {
+		return nil, status.Errorf(codes.InvalidArgument, "Invalid request argument")
+	}
+	if _, ok := f.ins[req.GetInstanceId().GetValue()]; !ok {
+		return nil, status.Errorf(codes.NotFound, "Instance with ID %q not found", req.GetInstanceId().GetValue())
+	}
+	return &corev1.InstancePowerResult{}, nil
 }
 
 func (f *NICoServerImpl) FindMachineIds(ctx context.Context, req *corev1.MachineSearchConfig) (*corev1.MachineIdList, error) {
