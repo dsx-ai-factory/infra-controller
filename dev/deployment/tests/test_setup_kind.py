@@ -56,7 +56,7 @@ elif name == "kind":
             print("fixture" if os.environ.get("TEST_EXISTING") == "true" else "")
         elif args[:2] == ["get", "nodes"]:
             print(os.environ.get("TEST_NODES", "fixture-control-plane"))
-        elif args[:2] == ["export", "kubeconfig"]:
+        elif args[:2] in (["create", "cluster"], ["export", "kubeconfig"]):
             Path(args[args.index("--kubeconfig") + 1]).write_text("selected cluster\n")
 elif name == "kubectl":
     assert args[args.index("--context") + 1] == "kind-fixture"
@@ -129,20 +129,23 @@ else:
         self.assertFalse(any(call["args"][0] in ("pull", "create", "delete") for call in calls))
         self.assertEqual(output, "selected cluster\n")
 
-    def test_incompatible_existing_cluster_preserves_output_and_cluster(self):
+    def test_failed_validation_preserves_output_and_cluster(self):
         cases = [
             ({"TEST_CIDRS": '["fd00:10:244::/64"]'}, "uses ipv6, requested ipv4"),
             ({"TEST_CIDRS": "[]"}, "invalid pod CIDRs"),
             ({"TEST_NODE_ARCH": "arm64"}, "node architecture arm64"),
             ({"TEST_NODES": "fixture-control-plane\nfixture-worker"}, "one control-plane node"),
+            ({"TEST_EXISTING": "false", "TEST_NODE_ARCH": "arm64"}, "node architecture arm64"),
         ]
         for settings, message in cases:
             with self.subTest(message=message):
-                result, calls, output = self.run_setup(TEST_EXISTING="true", **settings)
+                existing = settings.get("TEST_EXISTING", "true")
+                result, calls, output = self.run_setup(**{"TEST_EXISTING": existing, **settings})
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn(message, result.stderr)
                 self.assertEqual(output, "original config\n")
-                self.assertFalse(any(call["args"][0] in ("pull", "create", "delete") for call in calls))
+                forbidden = ("pull", "create", "delete") if existing == "true" else ("delete",)
+                self.assertFalse(any(call["args"][0] in forbidden for call in calls))
 
     def test_preflight_rejects_remote_or_non_native_daemon(self):
         for settings in ({"TEST_ENDPOINT": "ssh://another-host"},
@@ -166,7 +169,7 @@ else:
                 self.assertFalse(any(call["args"][:2] == ["export", "kubeconfig"] for call in calls))
 
     def test_invalid_options_fail_before_host_commands(self):
-        for args in (["--ip-family", "bad"], ["--name", "../elsewhere"], ["--name"]):
+        for args in (["--ip-family", "bad"], ["--name", "../elsewhere"], ["--name"], ["--kubeconfig", ""]):
             with self.subTest(args=args):
                 result, calls, output = self.run_setup(args)
                 self.assertNotEqual(result.returncode, 0)
