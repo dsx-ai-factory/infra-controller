@@ -3288,7 +3288,7 @@ phone_home:
 			cfg:      cfg1,
 			instance: instance1,
 			os:       os1,
-			userDataExactMatch: cutil.GetPtr("#cloud-config\nphone_home:\n  post: all\n  url: " +
+			userDataExactMatch: cutil.GetPtr("#cloud-config\nphone_home:\n  post: all\n  tries: 10\n  url: " +
 				cfg1.GetSitePhoneHomeUrl() + "\n"),
 		},
 		{
