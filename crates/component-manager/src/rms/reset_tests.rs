@@ -35,6 +35,15 @@ fn reset_batch_response(
 
 #[carbide_macros::sqlx_test]
 async fn component_reset_replaces_only_accepted_references(pool: sqlx::PgPool) {
+    #[derive(Debug, PartialEq, Eq)]
+    enum Outcome {
+        Accepted,
+        Rejected,
+        Unknown,
+        Unsupported,
+    }
+    use Outcome::{Accepted, Rejected, Unknown, Unsupported};
+
     let (mock, backend, _, _, _, sw1, sw2) = make_backend(&pool).await;
     let endpoints = [make_sw_endpoint(SW_MAC_2), make_sw_endpoint(SW_MAC_1)];
     let kind = RmsJobKind::SwitchSdnFactoryReset;
@@ -59,19 +68,19 @@ async fn component_reset_replaces_only_accepted_references(pool: sqlx::PgPool) {
             // Only SW1 is named by RMS, despite SW2 being submitted first.
             "partial acceptance correlates the named rejection",
             Ok(reset_batch_response("new-reset", 2, &[&sw1.to_string()])),
-            [true, false],
+            [Accepted, Rejected],
             [None, Some("reset already in progress")],
         ),
         (
             "whole batch rejected without individual records",
             Ok(all_rejected),
-            [false, false],
+            [Rejected, Rejected],
             [Some("batch rejected before admission"); 2],
         ),
         (
             "parent creation failed after one node was rejected",
             Ok(partly_reported_rejection),
-            [false, false],
+            [Rejected, Rejected],
             [
                 Some("parent job creation failed"),
                 Some("reset already in progress"),
@@ -80,7 +89,7 @@ async fn component_reset_replaces_only_accepted_references(pool: sqlx::PgPool) {
         (
             "missing accepted parent ID",
             Ok(reset_batch_response(" \t", 2, &[&sw1.to_string()])),
-            [false, false],
+            [Unknown, Rejected],
             [
                 Some("accepted the SDN reset but returned no job reference"),
                 Some("reset already in progress"),
@@ -91,12 +100,22 @@ async fn component_reset_replaces_only_accepted_references(pool: sqlx::PgPool) {
             Err(RackManagerError::ApiInvocationError(
                 tonic::Status::unavailable("reply lost after acceptance"),
             )),
-            [false, false],
+            [Unknown, Unknown],
             [Some("reply lost after acceptance"); 2],
+        ),
+        (
+            "unsupported RPC",
+            Err(RackManagerError::ApiInvocationError(
+                tonic::Status::unimplemented("unsupported"),
+            )),
+            [Unsupported, Unsupported],
+            [Some("RMS does not support switch SDN factory reset"); 2],
         ),
     ];
     let case_count = cases.len();
-    for (index, (scenario, response, accepted, expected_errors)) in cases.into_iter().enumerate() {
+    for (index, (scenario, response, expected_outcomes, expected_errors)) in
+        cases.into_iter().enumerate()
+    {
         mock.enqueue_batch_reset_switch_sdn_factory_default(response)
             .await;
         let results = NvSwitchManager::batch_reset_sdn_factory_default(&backend, &endpoints, None)
@@ -110,16 +129,30 @@ async fn component_reset_replaces_only_accepted_references(pool: sqlx::PgPool) {
         assert_eq!(
             endpoints
                 .iter()
-                .map(|endpoint| results[&endpoint.bmc_mac].success)
+                .map(|endpoint| {
+                    let result = &results[&endpoint.bmc_mac];
+                    match (result.success, &result.error) {
+                        (true, None) => Accepted,
+                        (false, Some(ComponentManagerError::RejectedBeforeDispatch(_))) => Rejected,
+                        (false, Some(ComponentManagerError::OperationOutcomeUnknown(_))) => Unknown,
+                        (false, Some(ComponentManagerError::Unsupported(_))) => Unsupported,
+                        _ => panic!("{scenario}: unexpected result {result:?}"),
+                    }
+                })
                 .collect::<Vec<_>>(),
-            accepted,
+            expected_outcomes,
             "{scenario}: {results:?}",
         );
         for (endpoint, expected_error) in endpoints.iter().zip(expected_errors) {
-            let error = results[&endpoint.bmc_mac].error.as_deref();
+            let error = results[&endpoint.bmc_mac]
+                .error
+                .as_ref()
+                .map(ToString::to_string);
             match expected_error {
                 Some(expected) => assert!(
-                    error.is_some_and(|error| error.contains(expected)),
+                    error
+                        .as_deref()
+                        .is_some_and(|error| error.contains(expected)),
                     "{scenario}: {}: {error:?}",
                     endpoint.bmc_mac,
                 ),
@@ -171,7 +204,11 @@ async fn component_reset_replaces_only_accepted_references(pool: sqlx::PgPool) {
         .map(|result| (result.bmc_mac, result))
         .collect();
     assert!(!results[&endpoints[0].bmc_mac].success);
-    let error = results[&endpoints[0].bmc_mac].error.as_deref().unwrap();
+    let Some(ComponentManagerError::OperationOutcomeUnknown(error)) =
+        &results[&endpoints[0].bmc_mac].error
+    else {
+        panic!("accepted reset must remain uncertain when persistence fails: {results:?}");
+    };
     assert!(error.contains("RMS accepted the reset but NICo could not record its reference"));
     assert!(error.contains("violates check constraint"));
     assert!(results[&endpoints[1].bmc_mac].success);
@@ -352,13 +389,11 @@ async fn component_reset_dispatches_valid_targets_in_one_batch(pool: sqlx::PgPoo
         .collect();
     assert!(results[&endpoints[0].bmc_mac].success);
     assert!(!results[&endpoints[1].bmc_mac].success);
-    assert!(
-        results[&endpoints[1].bmc_mac]
-            .error
-            .as_deref()
-            .unwrap()
-            .contains(RMS_IDENTITY_LOOKUP_ERROR)
-    );
+    assert!(matches!(
+        &results[&endpoints[1].bmc_mac].error,
+        Some(ComponentManagerError::RejectedBeforeDispatch(error))
+            if error.contains(RMS_IDENTITY_LOOKUP_ERROR)
+    ));
     assert!(results[&endpoints[2].bmc_mac].success);
     let calls = mock.batch_reset_switch_sdn_factory_default_calls().await;
     assert_eq!(calls.len(), 1);

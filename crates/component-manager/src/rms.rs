@@ -127,10 +127,8 @@ struct ResolvedRmsNode<'a> {
 /// One switch's RMS submission outcome before NICo stores its job reference.
 #[derive(Debug)]
 struct SwitchResetResponse {
-    bmc_mac_address: MacAddress,
+    result: SwitchComponentResult,
     parent_job_id: Option<String>,
-    success: bool,
-    error: Option<String>,
 }
 
 /// Role for MAC-keyed switch and power shelf lookups.
@@ -3583,7 +3581,7 @@ impl NvSwitchManager for RmsBackend {
                     results.push(SwitchComponentResult {
                         bmc_mac: ep.bmc_mac,
                         success: false,
-                        error: Some(error),
+                        error: Some(ComponentManagerError::Internal(error)),
                     });
                     continue;
                 }
@@ -3612,7 +3610,7 @@ impl NvSwitchManager for RmsBackend {
                     results.push(SwitchComponentResult {
                         bmc_mac: ep.bmc_mac,
                         success,
-                        error,
+                        error: error.map(ComponentManagerError::Internal),
                     });
                 }
                 Err(e) => {
@@ -3624,7 +3622,7 @@ impl NvSwitchManager for RmsBackend {
                     results.push(SwitchComponentResult {
                         bmc_mac: ep.bmc_mac,
                         success: false,
-                        error: Some(e.to_string()),
+                        error: Some(ComponentManagerError::Internal(e.to_string())),
                     });
                 }
             }
@@ -3678,7 +3676,7 @@ impl NvSwitchManager for RmsBackend {
                     results.push(SwitchComponentResult {
                         bmc_mac: ep.bmc_mac,
                         success: false,
-                        error: Some(error),
+                        error: Some(ComponentManagerError::Internal(error)),
                     });
                     continue;
                 }
@@ -3856,7 +3854,8 @@ impl NvSwitchManager for RmsBackend {
             results.push(SwitchComponentResult {
                 bmc_mac: ep.bmc_mac,
                 success,
-                error: (!errors.is_empty()).then(|| errors.join("; ")),
+                error: (!errors.is_empty())
+                    .then(|| ComponentManagerError::Internal(errors.join("; "))),
             });
         }
 
@@ -4205,7 +4204,7 @@ impl NvSwitchManager for RmsBackend {
                     results.push(SwitchComponentResult {
                         bmc_mac: endpoint.bmc_mac,
                         success: false,
-                        error: Some(error),
+                        error: Some(ComponentManagerError::RejectedBeforeDispatch(error)),
                     });
                     continue;
                 }
@@ -4225,29 +4224,23 @@ impl NvSwitchManager for RmsBackend {
         let submission =
             rms_batch_reset_switch_sdn_factory_default(self.client.as_ref(), switches, domain_name)
                 .await;
-        let responses =
-            match submission {
-                Ok(responses) => responses,
-                Err(error) => {
-                    let error = error.to_string();
-                    results.extend(submitted_macs.into_iter().map(|bmc_mac| {
-                        SwitchComponentResult {
-                            bmc_mac,
-                            success: false,
-                            error: Some(error.clone()),
-                        }
-                    }));
-                    return Ok(results);
+        let responses = match submission {
+            Ok(responses) => responses,
+            Err(error) => {
+                for bmc_mac in submitted_macs {
+                    results.push(SwitchComponentResult {
+                        bmc_mac,
+                        success: false,
+                        error: Some(error.clone()),
+                    });
                 }
-            };
+                return Ok(results);
+            }
+        };
         for response in responses {
-            let bmc_mac = response.bmc_mac_address;
-            let mut result = SwitchComponentResult {
-                bmc_mac,
-                success: response.success,
-                error: response.error,
-            };
-            if response.success {
+            let mut result = response.result;
+            let bmc_mac = result.bmc_mac;
+            if result.success {
                 // Only accepted switches replace their previous job references.
                 let saved = match response.parent_job_id {
                     Some(parent_job_id) => db::direct_dispatch_rms_job::save(
@@ -4274,7 +4267,7 @@ impl NvSwitchManager for RmsBackend {
                 };
                 if let Err(error) = saved {
                     result.success = false;
-                    result.error = Some(error.to_string());
+                    result.error = Some(error);
                 }
             }
             results.push(result);
@@ -4717,7 +4710,7 @@ async fn rms_batch_reset_switch_sdn_factory_default(
 
     Ok(submitted_switches
         .into_iter()
-        .map(|(node_id, bmc_mac_address)| {
+        .map(|(node_id, bmc_mac)| {
             let rejection = node_results_by_id
                 .get(node_id.as_str())
                 .filter(|result| result.status == rms::ReturnCode::Failure as i32);
@@ -4727,20 +4720,19 @@ async fn rms_batch_reset_switch_sdn_factory_default(
                     .map(|result| result.error_message.as_str())
                     .filter(|message| !message.is_empty())
                     .unwrap_or(&batch.message);
-                Some(
-                    ComponentManagerError::RejectedBeforeDispatch(format!(
-                        "RMS rejected SDN reset for node {node_id}: {reason}"
-                    ))
-                    .to_string(),
-                )
+                Some(ComponentManagerError::RejectedBeforeDispatch(format!(
+                    "RMS rejected SDN reset for node {node_id}: {reason}"
+                )))
             } else {
                 None
             };
             SwitchResetResponse {
-                bmc_mac_address,
+                result: SwitchComponentResult {
+                    bmc_mac,
+                    success: error.is_none(),
+                    error,
+                },
                 parent_job_id: parent_job_id.map(str::to_owned),
-                success: error.is_none(),
-                error,
             }
         })
         .collect())

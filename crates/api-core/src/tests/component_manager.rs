@@ -770,12 +770,12 @@ async fn component_reset_dispatches_valid_targets_and_polls_by_identity(pool: sq
         (
             unresolved_switch.id,
             Some(unresolved_mac),
-            rpc::ComponentManagerStatusCode::InternalError,
+            rpc::ComponentManagerStatusCode::InvalidArgument,
         ),
         (
             rejected_switch.id,
             Some(rejected_mac),
-            rpc::ComponentManagerStatusCode::InternalError,
+            rpc::ComponentManagerStatusCode::InvalidArgument,
         ),
         (
             second_switch.id,
@@ -787,11 +787,16 @@ async fn component_reset_dispatches_valid_targets_and_polls_by_identity(pool: sq
         assert_eq!(result.mac_address, mac.map(|mac| mac.to_string()));
         assert_eq!(result.status, status as i32, "{id}: {}", result.error);
     }
-    assert!(
-        submitted.results[3]
-            .error
-            .contains("certificate domain missing")
+    assert_eq!(
+        submitted.results[3].error,
+        format!(
+            "RMS rejected SDN reset for node {}: certificate domain missing",
+            rejected_switch.id
+        ),
     );
+    for result in [&submitted.results[0], &submitted.results[4]] {
+        assert!(result.error.is_empty());
+    }
     let calls = mock.batch_reset_switch_sdn_factory_default_calls().await;
     assert_eq!(calls.len(), 1);
     assert_eq!(calls[0].domain.as_deref(), Some("certificate-domain"));
@@ -836,7 +841,12 @@ async fn component_reset_dispatches_valid_targets_and_polls_by_identity(pool: sq
     let uncertain = api
         .component_reset(Request::new(rpc::ComponentResetRequest {
             target: Some(Target::SwitchIds(rpc::SwitchIdList {
-                ids: vec![switch.id, unknown_id, second_switch.id],
+                ids: vec![
+                    switch.id,
+                    unknown_id,
+                    unresolved_switch.id,
+                    second_switch.id,
+                ],
             })),
             action: rpc::ComponentResetAction::SdnFactoryReset as i32,
             domain_name: None,
@@ -851,12 +861,24 @@ async fn component_reset_dispatches_valid_targets_and_polls_by_identity(pool: sq
             .map(|result| result.status)
             .collect::<Vec<_>>(),
         [
-            rpc::ComponentManagerStatusCode::InternalError as i32,
+            rpc::ComponentManagerStatusCode::OutcomeUnknown as i32,
             rpc::ComponentManagerStatusCode::NotFound as i32,
-            rpc::ComponentManagerStatusCode::InternalError as i32,
+            rpc::ComponentManagerStatusCode::InvalidArgument as i32,
+            rpc::ComponentManagerStatusCode::OutcomeUnknown as i32,
         ]
     );
-    for result in [&uncertain[0], &uncertain[2]] {
+    for (result, (id, mac)) in uncertain.iter().zip([
+        (switch.id, Some(bmc_mac_address)),
+        (unknown_id, None),
+        (unresolved_switch.id, Some(unresolved_mac)),
+        (second_switch.id, Some(second_mac)),
+    ]) {
+        assert_eq!(result.component_id, Some(id.to_string()));
+        assert_eq!(result.mac_address, mac.map(|mac| mac.to_string()));
+    }
+    // A batch transport failure must preserve the backend's earlier local rejection.
+    assert_eq!(uncertain[2].error, submitted.results[2].error);
+    for result in [&uncertain[0], &uncertain[3]] {
         assert!(result.error.contains("reply lost"));
     }
     let calls = mock.batch_reset_switch_sdn_factory_default_calls().await;

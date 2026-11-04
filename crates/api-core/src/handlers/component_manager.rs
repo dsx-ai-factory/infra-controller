@@ -2539,7 +2539,7 @@ async fn dispatch_pre_ingestion_switch_power_control(
                     } else {
                         rpc::ComponentManagerStatusCode::InternalError
                     },
-                    r.error,
+                    r.error.map(|error| error.to_string()),
                 )
             }));
         }
@@ -3124,7 +3124,10 @@ async fn power_control_switch_ids(
             if r.success {
                 success_result(&id)
             } else {
-                error_result(&id, r.error.unwrap_or_default())
+                error_result(
+                    &id,
+                    r.error.map(|error| error.to_string()).unwrap_or_default(),
+                )
             }
         }));
 
@@ -3715,7 +3718,7 @@ async fn component_reset_switch_endpoint_by_id(
     api: &Api,
     id: SwitchId,
 ) -> Result<SwitchEndpoint, Status> {
-    let mut resolved = resolve_switch_endpoints(api, &[id]).await?;
+    let mut resolved = resolve_switch_endpoints(api, &[id], None).await?;
     if let Some(endpoint) = resolved.resolved.endpoints.pop() {
         Ok(endpoint)
     } else {
@@ -3748,7 +3751,7 @@ async fn component_reset_switch_endpoint_by_mac(
                 result
             })
     } else {
-        let (mut endpoints, mut errors) = build_pre_ingestion_switch_endpoints(api, &[mac])
+        let (mut endpoints, mut errors) = build_pre_ingestion_switch_endpoints(api, &[mac], None)
             .await
             .map_err(|error| mac_status_result(&mac, &error))?;
         endpoints
@@ -3791,15 +3794,18 @@ async fn dispatch_component_reset(
         Ok(outcomes) => outcomes
             .into_iter()
             .map(|outcome| {
-                let result = mac_result(
+                let mut result = mac_result(
                     &outcome.bmc_mac,
                     if outcome.success {
                         rpc::ComponentManagerStatusCode::Success
                     } else {
                         rpc::ComponentManagerStatusCode::InternalError
                     },
-                    outcome.error,
+                    None,
                 );
+                if let Some(error) = outcome.error {
+                    result = component_manager_error_to_result(result, error);
+                }
                 (outcome.bmc_mac, result)
             })
             .collect(),
@@ -4593,7 +4599,10 @@ async fn update_switch_firmware_by_ids(
             if r.success {
                 success_result(&id)
             } else {
-                error_result(&id, r.error.unwrap_or_default())
+                error_result(
+                    &id,
+                    r.error.map(|error| error.to_string()).unwrap_or_default(),
+                )
             }
         }));
 
@@ -4683,7 +4692,7 @@ async fn dispatch_pre_ingestion_switch_firmware(
             } else {
                 rpc::ComponentManagerStatusCode::InternalError
             },
-            r.error,
+            r.error.map(|error| error.to_string()),
         )
     }));
 
@@ -6805,7 +6814,7 @@ mod tests {
             },
             ErrorToStatusCase {
                 scenario: "transport maps to unavailable",
-                error: ComponentManagerError::Transport(transport_error()),
+                error: transport_error().into(),
                 expected_code: Code::Unavailable,
                 message_contains: Some("transport error"),
             },

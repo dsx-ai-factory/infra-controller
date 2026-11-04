@@ -119,11 +119,15 @@ pub struct SwitchCertificateEndpoint {
     pub nvos_host_name: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+/// A switch's operation result, retaining typed errors until the caller maps them.
+#[derive(Debug)]
 pub struct SwitchComponentResult {
+    /// Identifies the switch independently of the result's position in a batch.
     pub bmc_mac: MacAddress,
+    /// Whether this call succeeded for the switch; queued work may still be running.
     pub success: bool,
-    pub error: Option<String>,
+    /// Failure details, including whether submission may have accepted work.
+    pub error: Option<ComponentManagerError>,
 }
 
 #[derive(Debug, Clone)]
