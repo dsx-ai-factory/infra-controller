@@ -15,6 +15,7 @@ use model::switch::FabricManagerStatus;
 
 use crate::component_common::{ComponentPowerStateResult, PowerStateSource};
 use crate::error::ComponentManagerError;
+use crate::firmware_inventory::{ComponentFirmwareInventoryResult, FirmwareInventorySource};
 use crate::types::FirmwareUpdateOptions;
 
 /// Selects which `NvSwitchManager` backend is used
@@ -268,7 +269,7 @@ pub struct SwitchFactoryResetJobStatus {
 /// and handle registration with the backend service internally. The
 /// service-generated UUID is used for the actual operation and never exposed
 /// to the caller; results are keyed by the BMC MAC (`bmc_mac`, or `mac_address`
-/// for power observations).
+/// for power and firmware observations).
 ///
 /// Password rotation is split into capability discovery, submission, and
 /// observation. This keeps backend-specific job handling here while leaving
@@ -282,6 +283,30 @@ pub trait NvSwitchManager: Send + Sync + Debug + 'static {
     /// or invoking a getter without that capability, such as NSM or mock.
     fn power_state_source(&self) -> Option<PowerStateSource> {
         None
+    }
+
+    /// Identifies a backend that can read firmware inventory without registering
+    /// devices or advancing updates. `None` means callers must skip credential
+    /// lookup and report [`ComponentManagerError::Unsupported`]; existing update/status
+    /// methods are not substitutes.
+    fn firmware_inventory_source(&self) -> Option<FirmwareInventorySource> {
+        None
+    }
+
+    /// Reads each endpoint's firmware inventory in caller order, preserving repeated
+    /// endpoints and inventory members. Member errors must not discard healthy peers.
+    /// Versions describe backend observations, not proof of an active image.
+    /// Whole-call failures use [`ComponentManagerError`], including `Unsupported`
+    /// without I/O for backends lacking this capability and `InvalidArgument` for
+    /// oversized input. Collection/member failures stay nested in their endpoint result.
+    async fn get_firmware_inventory(
+        &self,
+        _endpoints: &[SwitchEndpoint],
+    ) -> Result<Vec<ComponentFirmwareInventoryResult>, ComponentManagerError> {
+        Err(ComponentManagerError::Unsupported(format!(
+            "firmware inventory is not supported by the {} backend",
+            self.name()
+        )))
     }
 
     /// Reports whether this backend supports OS password rotation.
