@@ -48,6 +48,8 @@ pub enum OperatingSystemVariant {
     /// Reference to any operating system definition by ID (any variant except OS image).
     /// On read, the actual type (iPXE / ipxe_os_definition) is resolved from the row.
     OperatingSystemId(Uuid),
+    /// Boots from the boot URL of the instance's or VPC's DHCP option set.
+    DhcpOptionSet,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -92,6 +94,7 @@ impl OperatingSystem {
             OperatingSystemVariant::Ipxe(ipxe) => ipxe.validate(),
             OperatingSystemVariant::OsImage(_id) => Ok(()),
             OperatingSystemVariant::OperatingSystemId(_id) => Ok(()),
+            OperatingSystemVariant::DhcpOptionSet => Ok(()),
         }
     }
 

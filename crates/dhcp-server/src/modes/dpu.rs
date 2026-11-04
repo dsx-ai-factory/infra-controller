@@ -56,9 +56,10 @@ fn from_host_conf(
         mtu: 0,
         prefix,
         gateway: Some(gateway.to_string()),
-        booturl: value.booturl.clone(),
+        booturl: value.booturl_v4.clone().or_else(|| value.booturl.clone()),
         last_invalidation_time: None,
         ntp_servers: vec![],
+        dns_servers: value.dns_servers_v4.clone(),
     })
 }
 
@@ -88,9 +89,10 @@ fn from_host_conf_v6(
         mtu,
         prefix: ipv6.prefix.clone(),
         gateway: None,
-        booturl: value.booturl.clone(),
+        booturl: value.booturl_v6.clone().or_else(|| value.booturl.clone()),
         last_invalidation_time: None,
         ntp_servers: vec![],
+        dns_servers: value.dns_servers_v6.clone(),
     })
 }
 
