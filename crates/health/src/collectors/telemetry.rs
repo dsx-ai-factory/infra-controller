@@ -35,6 +35,9 @@ use std::sync::Arc;
 
 use nv_redfish::ServiceRoot;
 use nv_redfish::core::Bmc;
+use nv_redfish::oem::nvidia::OEM_KEY;
+use nv_redfish::oem::nvidia::schema::nvidia_metric_report::NvidiaMetricReport;
+use nv_redfish::oem::oem_object;
 use nv_redfish::telemetry_service::MetricReport;
 
 use crate::HealthError;
@@ -254,7 +257,7 @@ impl<B: Bmc + 'static> TelemetryCollector<B> {
         // A stale report is republishing the previous interval's
         // numbers. Emitting them would flatten real gaps into a held
         // value, so the whole report is dropped instead.
-        if self.report_is_stale(report) {
+        if self.marked_stale(report.oem_nvidia()) {
             tracing::debug!(
                 report_id,
                 bmc_address = ?self.endpoint.addr,
@@ -274,25 +277,19 @@ impl<B: Bmc + 'static> TelemetryCollector<B> {
             let Some(name) = metric_id
                 .as_deref()
                 .or_else(|| property.as_deref().and_then(|p| p.rsplit('/').next()))
-                .filter(|name| !name.is_empty())
-                .map(str::to_string)
             else {
                 continue;
             };
+            let metric_type = metric_type_from_id(name);
             // Some BMCs mark staleness per value rather than per report.
-            let value_is_stale = value
+            let value_oem = value
                 .oem
                 .as_ref()
-                .and_then(|oem| {
-                    oem.additional_properties
-                        .pointer("/Nvidia/MetricValueStale")
-                        .and_then(serde_json::Value::as_bool)
-                })
-                .unwrap_or(false);
-            if value_is_stale {
+                .map_or(Ok(None), |oem| oem_object(oem, OEM_KEY));
+            if self.marked_stale(value_oem) {
                 tracing::debug!(
                     report_id,
-                    metric = name.as_str(),
+                    metric = name,
                     bmc_address = ?self.endpoint.addr,
                     rack_id = self.event_context.rack_id().map(tracing::field::display),
                     "Skipping metric value marked stale by the NVIDIA OEM extension"
@@ -314,7 +311,8 @@ impl<B: Bmc + 'static> TelemetryCollector<B> {
             if !reading.is_finite() {
                 tracing::debug!(
                     report_id,
-                    metric = name.as_str(),
+                    metric_id = metric_id.as_deref(),
+                    metric_property = property.as_deref(),
                     reading,
                     bmc_address = ?self.endpoint.addr,
                     rack_id = self.event_context.rack_id().map(tracing::field::display),
@@ -353,7 +351,7 @@ impl<B: Bmc + 'static> TelemetryCollector<B> {
                     semantics: crate::sink::MetricSemantics::Gauge,
                     key,
                     name: METRIC_NAME.to_string(),
-                    metric_type: metric_type_from_id(&name),
+                    metric_type,
                     unit: unit.to_string(),
                     value: reading,
                     labels,
@@ -367,10 +365,12 @@ impl<B: Bmc + 'static> TelemetryCollector<B> {
         count
     }
 
-    /// Whether the NVIDIA OEM extension marks this report's values as
-    /// carried over from a previous interval.
-    fn report_is_stale(&self, report: &MetricReport<B>) -> bool {
-        match report.oem_nvidia() {
+    /// Whether NVIDIA OEM data marks readings as carried over from a previous interval.
+    fn marked_stale(
+        &self,
+        oem: Result<Option<Arc<NvidiaMetricReport>>, nv_redfish::Error<B>>,
+    ) -> bool {
+        match oem {
             Ok(Some(oem)) => oem.metric_value_stale.flatten().unwrap_or(false),
             Ok(None) => false,
             Err(error) => {
@@ -391,6 +391,7 @@ mod tests {
     use std::convert::Infallible;
     use std::sync::Mutex as StdMutex;
 
+    use carbide_instrument::testing::capture_logs_async;
     use carbide_test_support::Outcome::Yields;
     use carbide_test_support::{Case, Check, check_cases_async, check_values};
 
@@ -595,6 +596,27 @@ mod tests {
             run,
         )
         .await;
+    }
+
+    #[tokio::test]
+    async fn malformed_metric_value_oem_is_logged_without_dropping_the_reading() {
+        let fixture = ProjectionFixture::with_malformed_metric_value_oem().await;
+        let (result, logs) = capture_logs_async(run(fixture.bmc())).await;
+        let result = result.expect("telemetry iteration should succeed");
+
+        assert!(result.metrics.contains(&metric(
+            "/redfish/v1/TelemetryService/MetricReports/PlatformEnvironmentMetrics/FanPWM",
+            "fan_pwm",
+            "unknown",
+            30.0,
+            &[("report_id", "PlatformEnvironmentMetrics")],
+        )));
+        let log = logs
+            .iter()
+            .find(|log| log.message == "Failed to read NVIDIA OEM extension on metric report")
+            .expect("malformed per-value OEM data should log its parse error");
+        assert_eq!(log.level, tracing::Level::DEBUG);
+        assert!(log.field("error").is_some_and(|error| !error.is_empty()));
     }
 
     /// One failed definitions fetch must not pin every later reading to

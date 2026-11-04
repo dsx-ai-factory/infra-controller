@@ -738,6 +738,23 @@ impl ProjectionFixture {
         Self::from_resources(resources).await
     }
 
+    pub(in crate::collectors) async fn with_malformed_metric_value_oem() -> Self {
+        let mut resources = mock_resources();
+        let Some(MockResponse::Json(report)) = resources
+            .get_mut("/redfish/v1/TelemetryService/MetricReports/PlatformEnvironmentMetrics")
+        else {
+            panic!("telemetry report should exist");
+        };
+        let reading = report["MetricValues"]
+            .as_array_mut()
+            .expect("report should contain readings")
+            .iter_mut()
+            .find(|reading| reading["MetricId"] == "FanPWM")
+            .expect("FanPWM reading should exist");
+        reading["Oem"] = json!({ "Nvidia": { "MetricValueStale": "true" } });
+        Self::from_resources(resources).await
+    }
+
     async fn from_resources(resources: HashMap<String, MockResponse>) -> Self {
         let resources = Arc::new(resources);
         let router = Router::new()
