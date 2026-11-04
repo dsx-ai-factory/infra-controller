@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -80,6 +81,30 @@ func TestClient_Do(t *testing.T) {
 		name string
 		run  func(*testing.T)
 	}{
+		// Multi-value requests must preserve every value at the HTTP boundary.
+		{
+			name: "preserves repeated query values",
+			run: func(t *testing.T) {
+				var observed url.Values
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+					observed = req.URL.Query()
+					w.WriteHeader(http.StatusNoContent)
+				}))
+				t.Cleanup(server.Close)
+
+				client := NewClient(server.URL, "test-org", "test-token", nil, false)
+				_, _, err := client.doWithQueryValues(
+					http.MethodGet,
+					"/v2/org/{org}/nico/vpc-peering",
+					nil,
+					url.Values{"status": {"Ready", "Error"}},
+					nil,
+				)
+
+				require.NoError(t, err)
+				assert.Equal(t, []string{"Ready", "Error"}, observed["status"])
+			},
+		},
 		{
 			name: "retries an HTTP/2 INTERNAL_ERROR once over HTTP/1.1",
 			run: func(t *testing.T) {

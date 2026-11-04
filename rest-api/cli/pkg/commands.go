@@ -71,6 +71,8 @@ func (operation resolvedOp) execute(client *Client, pathParams, queryParams map[
 	return client.Do(operation.method, operation.path, pathParams, queryParams, body)
 }
 
+// executeWithQueryValues preserves repeated generated query flags while using
+// the same resolved operation method and path as scalar callers.
 func (operation resolvedOp) executeWithQueryValues(client *Client, pathParams map[string]string, queryParams url.Values, body []byte) ([]byte, http.Header, error) {
 	return client.doWithQueryValues(operation.method, operation.path, pathParams, queryParams, body)
 }
@@ -122,6 +124,7 @@ type GeneratedCommandQueryParameter struct {
 	FlagName    string
 	Description string
 	Required    bool
+	Repeatable  bool
 	Type        SchemaType
 	Enum        []string
 }
@@ -287,8 +290,9 @@ func RunGeneratedCommand(spec *Spec, client *Client, name string, args []string)
 		},
 	})
 	app := &cli.App{
-		Name:     binaryName,
-		Commands: commands,
+		Name:                      binaryName,
+		Commands:                  commands,
+		DisableSliceFlagSeparator: true,
 	}
 	appArgs := []string{binaryName}
 	appArgs = append(appArgs, strings.Fields(name)...)
@@ -660,6 +664,7 @@ func buildActionCommandWithOptions(spec *Spec, ro resolvedOp, subResource string
 				FlagName:    flag.Names()[0],
 				Description: p.Description,
 				Required:    p.Required,
+				Repeatable:  isRepeatableQueryParameter(p),
 			}
 			if schema := spec.ResolveSchema(p.Schema); schema != nil {
 				queryParameter.Type = schema.Type
@@ -803,8 +808,10 @@ func buildActionCommandWithOptions(spec *Spec, ro resolvedOp, subResource string
 				if p.In != "query" {
 					continue
 				}
-				if v := readFlagValue(c, p); v != "" {
-					queryParams.Set(p.Name, v)
+				for _, value := range readFlagValues(c, p) {
+					if value != "" {
+						queryParams.Add(p.Name, value)
+					}
 				}
 			}
 
@@ -1078,24 +1085,49 @@ func detectMisorderedFlagsInArgs(args, argParams []string, usageText string) err
 	return fmt.Errorf("%s", strings.TrimRight(msg.String(), "\n"))
 }
 
-func readFlagValue(c *cli.Context, p Parameter) string {
+// readFlagValues returns every value supplied for a query flag while retaining
+// scalar omission and type-conversion behavior.
+func readFlagValues(c *cli.Context, p Parameter) []string {
 	flagName := toKebab(p.Name)
 	if p.Schema == nil {
-		return c.String(flagName)
+		if isRepeatableQueryParameter(p) {
+			return c.StringSlice(flagName)
+		}
+		return []string{c.String(flagName)}
 	}
-	switch p.Schema.Type {
+	// Array parameters use their item type when selecting and reading the flag.
+	schemaType := p.Schema.Type
+	if schemaType == "array" && p.Schema.Items != nil {
+		schemaType = p.Schema.Items.Type
+	}
+	// Typed slice access keeps integer validation while preserving all repeats.
+	switch {
+	case isRepeatableQueryParameter(p) && schemaType == "integer":
+		if !c.IsSet(flagName) {
+			return nil
+		}
+		values := c.IntSlice(flagName)
+		result := make([]string, 0, len(values))
+		for _, value := range values {
+			result = append(result, strconv.Itoa(value))
+		}
+		return result
+	case isRepeatableQueryParameter(p):
+		return c.StringSlice(flagName)
+	}
+	switch schemaType {
 	case "integer":
 		if c.IsSet(flagName) {
-			return fmt.Sprintf("%d", c.Int(flagName))
+			return []string{fmt.Sprintf("%d", c.Int(flagName))}
 		}
-		return ""
+		return nil
 	case "boolean":
 		if c.IsSet(flagName) {
-			return fmt.Sprintf("%t", c.Bool(flagName))
+			return []string{fmt.Sprintf("%t", c.Bool(flagName))}
 		}
-		return ""
+		return nil
 	default:
-		return c.String(flagName)
+		return []string{c.String(flagName)}
 	}
 }
 
@@ -1392,8 +1424,25 @@ func paramToFlag(p Parameter) cli.Flag {
 		usage += " [" + strings.Join(p.Schema.Enum, ", ") + "]"
 	}
 
+	if isRepeatableQueryParameter(p) {
+		if p.Schema != nil {
+			schemaType := p.Schema.Type
+			if schemaType == "array" && p.Schema.Items != nil {
+				schemaType = p.Schema.Items.Type
+			}
+			if schemaType == "integer" {
+				return &cli.IntSliceFlag{Name: flagName, Usage: usage}
+			}
+		}
+		return &cli.StringSliceFlag{Name: flagName, Usage: usage, KeepSpace: true}
+	}
+
 	if p.Schema != nil {
-		switch p.Schema.Type {
+		schemaType := p.Schema.Type
+		if schemaType == "array" && p.Schema.Items != nil {
+			schemaType = p.Schema.Items.Type
+		}
+		switch schemaType {
 		case "integer":
 			f := &cli.IntFlag{Name: flagName, Usage: usage}
 			if p.Schema.Default != nil {
@@ -1408,6 +1457,33 @@ func paramToFlag(p Parameter) cli.Flag {
 	}
 
 	return &cli.StringFlag{Name: flagName, Usage: usage}
+}
+
+// isRepeatableQueryParameter identifies parameters whose API contract accepts
+// repeated query keys so generated flags can preserve every supplied value.
+func isRepeatableQueryParameter(p Parameter) bool {
+	// Shared relation handlers consume includeRelation as a list even where
+	// older OpenAPI descriptions do not state the repeatability explicitly.
+	if p.Name == "includeRelation" {
+		return true
+	}
+	if p.Schema != nil && p.Schema.Type == "array" {
+		return true
+	}
+	// Legacy scalar schemas state repeatability in their descriptions.
+	description := strings.ToLower(p.Description)
+	for _, phrase := range []string{
+		"multiple times",
+		"repeat the parameter",
+		"repeated params",
+		"repeated values",
+		"may be repeated",
+	} {
+		if strings.Contains(description, phrase) {
+			return true
+		}
+	}
+	return false
 }
 
 func tagToCommand(tag string) string {

@@ -543,6 +543,78 @@ func TestGeneratedCommandInfos_ExpectedInventoryBatchPaths(t *testing.T) {
 	assert.False(t, hasRackGroupLegacy)
 }
 
+// TestGeneratedCommandInfos groups metadata scenarios under the production
+// function that exposes generated command information to alternate interfaces.
+func TestGeneratedCommandInfos(t *testing.T) {
+	t.Run("repeatable query parameters", func(t *testing.T) {
+		spec, err := ParseSpec(openapi.Spec)
+		require.NoError(t, err)
+
+		operations := make(map[string]GeneratedCommandInfo)
+		for _, info := range GeneratedCommandInfos(spec) {
+			operations[info.OperationID] = info
+		}
+
+		tests := []struct {
+			name        string
+			operationID string
+			parameter   string
+			repeatable  bool
+		}{
+			// A scalar description is the source of truth for legacy repeatable filters.
+			{name: "documented scalar", operationID: "get-all-vpc-peering", parameter: "status", repeatable: true},
+			// Array schemas carry repeatability structurally instead of through prose.
+			{name: "OpenAPI array", operationID: "get-all-ipxe-template", parameter: "siteId", repeatable: true},
+			// Relation handlers consume every repeated includeRelation value across endpoint families.
+			{name: "relation", operationID: "get-vpc-prefix", parameter: "includeRelation", repeatable: true},
+			// Pagination remains scalar even next to repeatable filters.
+			{name: "scalar pagination", operationID: "get-all-vpc-peering", parameter: "pageSize", repeatable: false},
+		}
+
+		for _, test := range tests {
+			t.Run(test.name, func(t *testing.T) {
+				operation, ok := operations[test.operationID]
+				require.True(t, ok, "missing operation %s", test.operationID)
+				for _, parameter := range operation.QueryParameters {
+					if parameter.Name == test.parameter {
+						assert.Equal(t, test.repeatable, parameter.Repeatable)
+						return
+					}
+				}
+				t.Fatalf("missing parameter %s on operation %s", test.parameter, test.operationID)
+			})
+		}
+	})
+}
+
+// TestRunGeneratedCommand groups request behavior for alternate interfaces
+// that execute the generated command tree with an existing client.
+func TestRunGeneratedCommand(t *testing.T) {
+	t.Run("repeated strings preserve exact values", func(t *testing.T) {
+		spec, err := ParseSpec(openapi.Spec)
+		require.NoError(t, err)
+
+		var observed url.Values
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+			observed = request.URL.Query()
+			w.WriteHeader(http.StatusNoContent)
+		}))
+		t.Cleanup(server.Close)
+		client := NewClient(server.URL, "test-org", "test-token", nil, false)
+
+		// Repeated flags remain separate while each occurrence preserves its
+		// comma and surrounding spaces through the alternate execution path.
+		err = RunGeneratedCommand(
+			spec,
+			client,
+			"vpc-peering list",
+			[]string{"--status", " Ready,Error ", "--status", "Pending"},
+		)
+		require.NoError(t, err)
+		assert.Equal(t, []string{" Ready,Error ", "Pending"}, observed["status"])
+	})
+}
+
 func TestNewApp_VpcRoutingProfileCommands(t *testing.T) {
 	tests := []struct {
 		action string
@@ -714,6 +786,67 @@ func TestNewApp_VpcPrefixCreateSelectorValidation(t *testing.T) {
 			assert.JSONEq(t, test.wantBody, requestBody)
 		})
 	}
+}
+
+// TestBuildActionCommandWithOptions groups flag, metadata, and execution
+// scenarios owned by the generated action-command builder.
+func TestBuildActionCommandWithOptions(t *testing.T) {
+	t.Run("repeatable parameter without schema", func(t *testing.T) {
+		parameter := Parameter{
+			Name:        "filter",
+			In:          "query",
+			Description: "Can be specified multiple times.",
+		}
+		operation := resolvedOp{
+			tag:    "Test",
+			action: "list",
+			method: http.MethodGet,
+			path:   "/items",
+			op: &Operation{
+				OperationID: "get-all-items",
+				Parameters:  []Parameter{parameter},
+			},
+		}
+
+		var info GeneratedCommandInfo
+		var observed url.Values
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+			observed = request.URL.Query()
+			w.WriteHeader(http.StatusNoContent)
+		}))
+		t.Cleanup(server.Close)
+		client := NewClient(server.URL, "test-org", "test-token", nil, false)
+
+		// Build once so the generated flag and metadata describe the same contract.
+		command := buildActionCommandWithOptions(&Spec{}, operation, "", commandBuildOptions{
+			clientFactory: func(*cli.Context) (*Client, error) {
+				return client, nil
+			},
+			record: func(generated GeneratedCommandInfo) {
+				info = generated
+			},
+		})
+		var filterFlag cli.Flag
+		for _, candidate := range command.Flags {
+			if candidate.Names()[0] == "filter" {
+				filterFlag = candidate
+				break
+			}
+		}
+		require.IsType(t, &cli.StringSliceFlag{}, filterFlag)
+		require.Len(t, info.QueryParameters, 1)
+		assert.True(t, info.QueryParameters[0].Repeatable)
+
+		// Execute both occurrences through readFlagValues and request encoding.
+		app := &cli.App{
+			Name:                      "test",
+			Commands:                  []*cli.Command{command},
+			DisableSliceFlagSeparator: true,
+		}
+		err := app.Run([]string{"test", "list", "--filter", " first,value ", "--filter", "second"})
+		require.NoError(t, err)
+		assert.Equal(t, []string{" first,value ", "second"}, observed["filter"])
+	})
 }
 
 // TestBuildActionCommand_BodyPropertyFlags verifies body-property flag naming
@@ -1527,6 +1660,146 @@ func TestNewApp_ListAllEmptyCollectionOutputsArray(t *testing.T) {
 	assert.JSONEq(t, `[]`, string(output))
 }
 
+// testNewAppPreservesRepeatedQueryFlags captures generated CLI requests to
+// prove each repeatable contract reaches HTTP as a separate query value.
+func testNewAppPreservesRepeatedQueryFlags(t *testing.T) {
+	const (
+		firstID  = "00000000-0000-4000-8000-000000000001"
+		secondID = "00000000-0000-4000-8000-000000000002"
+	)
+	tests := []struct {
+		name      string
+		command   []string
+		wantPath  string
+		wantQuery url.Values
+	}{
+		// Status is a scalar schema whose description promises repeatable filtering.
+		{
+			name:      "documented statuses",
+			command:   []string{"vpc-peering", "list", "--status", "Ready", "--status", "Error"},
+			wantPath:  "/v2/org/test-org/nico/vpc-peering",
+			wantQuery: url.Values{"status": {"Ready", "Error"}},
+		},
+		// One occurrence remains one exact value even when it contains spaces and a comma.
+		{
+			name:      "repeatable string contents",
+			command:   []string{"vpc-peering", "list", "--status", " Ready,Error "},
+			wantPath:  "/v2/org/test-org/nico/vpc-peering",
+			wantQuery: url.Values{"status": {" Ready,Error "}},
+		},
+		// UUID filters use the same documented scalar-repeat contract as status.
+		{
+			name:      "documented IDs",
+			command:   []string{"vpc-peering", "list", "--vpc-id", firstID, "--vpc-id", secondID},
+			wantPath:  "/v2/org/test-org/nico/vpc-peering",
+			wantQuery: url.Values{"vpcId": {firstID, secondID}},
+		},
+		// Relation expansion is repeatable in the shared handler contract.
+		{
+			name:      "relations",
+			command:   []string{"vpc-prefix", "get", "--include-relation", "Vpc", "--include-relation", "Site", firstID},
+			wantPath:  "/v2/org/test-org/nico/vpc-prefix/" + firstID,
+			wantQuery: url.Values{"includeRelation": {"Vpc", "Site"}},
+		},
+		// An OpenAPI array must serialize using the repeated-key convention consumed by Echo.
+		{
+			name:      "OpenAPI array",
+			command:   []string{"ipxe-template", "list", "--site-id", firstID, "--site-id", secondID},
+			wantPath:  "/v2/org/test-org/nico/ipxe-template",
+			wantQuery: url.Values{"siteId": {firstID, secondID}},
+		},
+		// Scalar values and omitted OpenAPI defaults retain their existing request shape.
+		{
+			name:      "scalar regression",
+			command:   []string{"vpc-peering", "list", "--site-id", firstID, "--page-size", "25"},
+			wantPath:  "/v2/org/test-org/nico/vpc-peering",
+			wantQuery: url.Values{"siteId": {firstID}, "pageSize": {"25"}},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var requestCount atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+				assert.Equal(t, http.MethodGet, request.Method)
+				assert.Equal(t, test.wantPath, request.URL.Path)
+				assert.Equal(t, test.wantQuery, request.URL.Query())
+				requestCount.Add(1)
+				w.WriteHeader(http.StatusNoContent)
+			}))
+			t.Cleanup(server.Close)
+
+			app, err := NewApp(openapi.Spec)
+			require.NoError(t, err)
+			args := []string{"nicocli", "--base-url", server.URL, "--org", "test-org", "--token", "test-token"}
+			args = append(args, test.command...)
+
+			require.NoError(t, app.Run(args))
+			assert.EqualValues(t, 1, requestCount.Load())
+		})
+	}
+}
+
+// testNewAppListAllPreservesRepeatedFilters captures every paginated request
+// so a filter cannot narrow silently after the first page.
+func testNewAppListAllPreservesRepeatedFilters(t *testing.T) {
+	var queries []url.Values
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		query := request.URL.Query()
+		queries = append(queries, query)
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("X-Pagination", fmt.Sprintf(
+			`{"pageNumber":%s,"pageSize":100,"total":101}`,
+			query.Get("pageNumber"),
+		))
+		if query.Get("pageNumber") == "1" {
+			items := "[" + strings.TrimSuffix(strings.Repeat(`{"id":"item"},`, 100), ",") + "]"
+			_, err := io.WriteString(w, items)
+			require.NoError(t, err)
+			return
+		}
+		_, err := io.WriteString(w, `[{"id":"last-item"}]`)
+		require.NoError(t, err)
+	}))
+	t.Cleanup(server.Close)
+
+	app, err := NewApp(openapi.Spec)
+	require.NoError(t, err)
+	previousStdout := os.Stdout
+	reader, writer, err := os.Pipe()
+	require.NoError(t, err)
+	os.Stdout = writer
+	t.Cleanup(func() {
+		os.Stdout = previousStdout
+	})
+
+	// Exercise the public --all path so both generated flag reading and page mutation are covered.
+	err = app.Run([]string{
+		"nicocli",
+		"--base-url", server.URL,
+		"--org", "test-org",
+		"--token", "test-token",
+		"vpc-peering", "list", "--all",
+		"--status", "Ready",
+		"--status", "Error",
+	})
+	require.NoError(t, err)
+	require.NoError(t, writer.Close())
+	os.Stdout = previousStdout
+	_, err = io.ReadAll(reader)
+	require.NoError(t, err)
+	require.NoError(t, reader.Close())
+
+	// Every page must retain both filters while only pagination values change.
+	require.Len(t, queries, 2)
+	assert.Equal(t, []string{"Ready", "Error"}, queries[0]["status"])
+	assert.Equal(t, []string{"Ready", "Error"}, queries[1]["status"])
+	assert.Equal(t, "100", queries[0].Get("pageSize"))
+	assert.Equal(t, "100", queries[1].Get("pageSize"))
+	assert.Equal(t, "1", queries[0].Get("pageNumber"))
+	assert.Equal(t, "2", queries[1].Get("pageNumber"))
+}
+
 func TestNewApp_VpcPeeringList(t *testing.T) {
 	const response = `[
 		{
@@ -1840,6 +2113,9 @@ func TestNewApp(t *testing.T) {
 	previousConfigPath := configOverridePath
 	SetConfigPath(filepath.Join(t.TempDir(), "config.yaml"))
 	t.Cleanup(func() { SetConfigPath(previousConfigPath) })
+
+	t.Run("preserves repeated query flags", testNewAppPreservesRepeatedQueryFlags)
+	t.Run("preserves repeated filters across pages", testNewAppListAllPreservesRepeatedFilters)
 
 	const siteID = "550e8400-e29b-41d4-a716-446655440000"
 	const trayID = "aa:bb:cc:dd:ee:ff"
