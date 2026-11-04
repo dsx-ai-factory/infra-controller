@@ -27,6 +27,7 @@ mod dpf;
 mod dpu_machine_update;
 mod dpu_nic_firmware;
 mod dpu_remediation;
+mod dpu_remote;
 mod dpu_reprovisioning;
 mod expected_component_patch;
 mod expected_machine;

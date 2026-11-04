@@ -282,6 +282,20 @@ pub enum CarbideError {
     #[error("service unavailable: {0}")]
     UnavailableError(String),
 
+    /// A caller cancelled a local pool preparation or admission step.
+    #[error("{operation} was cancelled")]
+    ResourcePoolCancelled {
+        /// The local step that stopped, such as `DPU loopback lookup`.
+        operation: &'static str,
+    },
+
+    /// A local pool preparation or admission step did not finish in time.
+    #[error("{operation} timed out")]
+    ResourcePoolDeadlineExceeded {
+        /// The local step whose wait budget expired, such as `DPU admin lock admission`.
+        operation: &'static str,
+    },
+
     #[error("permission denied: {0}")]
     PermissionDeniedError(String),
 
@@ -363,6 +377,12 @@ impl From<RemoteResourcePoolError> for CarbideError {
 impl From<ResourcePoolBackendError> for CarbideError {
     fn from(error: ResourcePoolBackendError) -> Self {
         match error {
+            ResourcePoolBackendError::Cancelled { operation } => {
+                Self::ResourcePoolCancelled { operation }
+            }
+            ResourcePoolBackendError::DeadlineExceeded { operation } => {
+                Self::ResourcePoolDeadlineExceeded { operation }
+            }
             ResourcePoolBackendError::Database(error) => error.into(),
             ResourcePoolBackendError::Integrated(error) => error.into(),
             ResourcePoolBackendError::Remote(error) => error.into(),
@@ -573,6 +593,8 @@ impl OperatorError for CarbideError {
             | CarbideError::SitePrefixIsolationLimitExceeded { .. }
             | CarbideError::DhcpError(_) => ErrorCode::nico(Api, 429),
             CarbideError::UnavailableError(_) => ErrorCode::nico(Api, 503),
+            CarbideError::ResourcePoolCancelled { .. } => ErrorCode::nico(Api, 499),
+            CarbideError::ResourcePoolDeadlineExceeded { .. } => ErrorCode::nico(Api, 504),
             CarbideError::RemoteResourcePool(error) => ErrorCode::nico(
                 Api,
                 match remote_resource_pool_status_code(error) {
@@ -777,6 +799,12 @@ impl From<CarbideError> for tonic::Status {
                 Status::unauthenticated(error.to_string())
             }
             CarbideError::UnavailableError(msg) => Status::unavailable(msg),
+            CarbideError::ResourcePoolCancelled { operation } => {
+                Status::cancelled(format!("{operation} was cancelled"))
+            }
+            CarbideError::ResourcePoolDeadlineExceeded { operation } => {
+                Status::deadline_exceeded(format!("{operation} timed out"))
+            }
             CarbideError::PermissionDeniedError(msg) => Status::permission_denied(msg),
             CarbideError::AlreadyInProgress(msg) => Status::already_exists(msg),
             other => Status::internal(other.to_string()),
@@ -1208,6 +1236,26 @@ fn resource_pool_errors_preserve_status() {
                     "missing request",
                 )),
                 expect: (tonic::Code::Internal, "NICO-API-500".to_owned(), None),
+            },
+            Check {
+                // Local cancellation keeps the caller's status without implying provider work.
+                scenario: "local pool lookup cancellation preserves cancelled status",
+                input: CarbideError::from(ResourcePoolBackendError::Cancelled {
+                    operation: "DPU loopback lookup",
+                }),
+                expect: (tonic::Code::Cancelled, "NICO-API-499".to_owned(), None),
+            },
+            Check {
+                // Admission exhaustion is a deadline, not unavailable remote capacity.
+                scenario: "local pool admission timeout preserves deadline status",
+                input: CarbideError::from(ResourcePoolBackendError::DeadlineExceeded {
+                    operation: "DPU admin lock admission",
+                }),
+                expect: (
+                    tonic::Code::DeadlineExceeded,
+                    "NICO-API-504".to_owned(),
+                    None,
+                ),
             },
         ],
         |error| {

@@ -21,6 +21,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
+use carbide_resource_pool::ResourcePoolRegistry;
 use component_manager::MachineInfoProvider;
 use mac_address::MacAddress;
 use model::rack_type::RackProfileConfig;
@@ -77,9 +78,19 @@ pub(super) struct InventoryCreator {
 }
 
 impl InventoryCreator {
+    /// Stop new provider preparation on Site Explorer shutdown while existing
+    /// exploration and creation transactions retain their normal drain behavior.
+    pub(super) fn set_preparation_cancel_token(
+        &mut self,
+        cancel_token: tokio_util::sync::CancellationToken,
+    ) {
+        self.machine_creator.preparation_cancel_token = cancel_token;
+    }
+
     pub(super) fn new(
         database_connection: PgPool,
         config: Config,
+        resource_pool_registry: ResourcePoolRegistry,
         common_pools: Arc<CommonPools>,
         rack_profiles: Arc<RackProfileConfig>,
         machine_info_provider: Option<Arc<dyn MachineInfoProvider>>,
@@ -89,6 +100,7 @@ impl InventoryCreator {
             machine_creator: MachineCreator::new(
                 database_connection.clone(),
                 config.clone(),
+                resource_pool_registry,
                 common_pools,
                 rack_profiles,
                 machine_info_provider,

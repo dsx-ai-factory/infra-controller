@@ -27,6 +27,7 @@ use std::time::{Duration, Instant};
 
 use carbide_firmware::FirmwareConfigSnapshot;
 use carbide_redfish::libredfish::conv::IntoModel;
+use carbide_resource_pool::ResourcePoolRegistry;
 use carbide_secrets::credentials::CredentialManager;
 use carbide_utils::periodic_timer::PeriodicTimer;
 use carbide_uuid::machine::MachineType;
@@ -85,6 +86,7 @@ mod host_reconciler;
 use host_reconciler::HostReconciler;
 mod boot_order_tracker;
 use boot_order_tracker::BootOrderTracker;
+pub mod dpu_loopback;
 mod inventory_creator;
 pub use inventory_creator::{
     Config as InventoryCreatorConfig, MachineCreator, PowerShelfCreator, SwitchCreator,
@@ -608,6 +610,10 @@ impl SiteExplorer {
     #[allow(clippy::too_many_arguments)]
     /// Creates a site explorer.
     ///
+    /// The registry selects each DPU's IPv4 loopback backend. Creation prepares
+    /// provider allocations before the machine transaction; `start` supplies
+    /// the shutdown token for that preparation.
+    ///
     /// When `dpf_enabled_at_site` is true, eligible hosts are marked for DPF-managed ingestion.
     /// Otherwise, hosts use the non-DPF ingestion path.
     pub fn new(
@@ -616,6 +622,7 @@ impl SiteExplorer {
         meter: opentelemetry::metrics::Meter,
         endpoint_exploration_service: Arc<EndpointExplorationService>,
         bmc_client: Arc<dyn AuthenticatedBmc>,
+        resource_pool_registry: ResourcePoolRegistry,
         common_pools: Arc<CommonPools>,
         work_lock_manager_handle: WorkLockManagerHandle,
         rack_profiles: RackProfileConfig,
@@ -638,6 +645,7 @@ impl SiteExplorer {
             inventory_creator: InventoryCreator::new(
                 database_connection.clone(),
                 (&explorer_config).into(),
+                resource_pool_registry,
                 common_pools,
                 rack_profiles,
                 machine_info_provider,
@@ -662,6 +670,8 @@ impl SiteExplorer {
         join_set: &mut JoinSet<()>,
         cancel_token: CancellationToken,
     ) -> io::Result<()> {
+        self.inventory_creator
+            .set_preparation_cancel_token(cancel_token.clone());
         join_set
             .build_task()
             .name("site_explorer")
@@ -733,6 +743,7 @@ impl SiteExplorer {
 
     fn run_failure_category(error: &SiteExplorerError) -> String {
         match error {
+            SiteExplorerError::ResourcePool(_) => "resource_pool",
             SiteExplorerError::DatabaseError(_) => "database_error",
             SiteExplorerError::ModelError(_) => "model_error",
             SiteExplorerError::AlreadyFoundError { .. } => "already_found",

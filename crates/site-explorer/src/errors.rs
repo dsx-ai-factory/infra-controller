@@ -14,13 +14,20 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+use carbide_resource_pool::registration::RegistrationError;
+use carbide_resource_pool::remote::RemoteResourcePoolError;
+use carbide_resource_pool::{ResourcePoolBackendError, ResourcePoolRegistryError};
 use carbide_uuid::machine::InvalidMachineType;
 use db::DatabaseError;
+use db::work_lock_manager::AcquireLockError;
 use model::errors::ModelError;
 use model::site_explorer::EndpointExplorationError;
 
 #[derive(thiserror::Error, Debug)]
 pub enum SiteExplorerError {
+    /// DPU loopback selection, allocation, or cleanup could not finish.
+    #[error(transparent)]
+    ResourcePool(Box<ResourcePoolBackendError>),
     #[error("database error: {0}")]
     DatabaseError(#[from] DatabaseError),
     #[error("model error: {0}")]
@@ -66,6 +73,27 @@ impl From<db::machine::DpuHostAssociationError> for SiteExplorerError {
     }
 }
 
+impl From<ResourcePoolBackendError> for SiteExplorerError {
+    /// Keep database failures in the same category as other Site Explorer writes.
+    fn from(error: ResourcePoolBackendError) -> Self {
+        match error {
+            ResourcePoolBackendError::Database(error)
+            | ResourcePoolBackendError::Remote(RemoteResourcePoolError::Database(error))
+            | ResourcePoolBackendError::Remote(RemoteResourcePoolError::Acquire(
+                AcquireLockError::Database(error),
+            ))
+            | ResourcePoolBackendError::Registry(ResourcePoolRegistryError::Database(error))
+            | ResourcePoolBackendError::Registration(RegistrationError::Database(error)) => {
+                Self::DatabaseError(error)
+            }
+            ResourcePoolBackendError::Integrated(
+                db::resource_pool::ResourcePoolDatabaseError::Database(error),
+            ) => Self::DatabaseError(*error),
+            error => Self::ResourcePool(Box::new(error)),
+        }
+    }
+}
+
 impl From<InvalidMachineType> for SiteExplorerError {
     #[track_caller]
     fn from(err: InvalidMachineType) -> Self {
@@ -87,3 +115,19 @@ impl SiteExplorerError {
 }
 
 pub type SiteExplorerResult<T> = Result<T, SiteExplorerError>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A failed work-lock write is still a database failure after it passes
+    /// through the remote allocator and Site Explorer's error conversion.
+    #[test]
+    fn resource_pool_work_lock_database_error_keeps_its_category() {
+        let database_error = DatabaseError::query("work-lock insert", sqlx::Error::PoolClosed);
+        let error = SiteExplorerError::from(ResourcePoolBackendError::Remote(
+            RemoteResourcePoolError::Acquire(AcquireLockError::Database(database_error)),
+        ));
+        assert!(matches!(error, SiteExplorerError::DatabaseError(_)));
+    }
+}

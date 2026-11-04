@@ -2545,6 +2545,7 @@ async fn initialize_and_start_controllers<'a>(
         meter.clone(),
         endpoint_exploration_service.clone(),
         api_service.bmc_client.clone(),
+        api_service.resource_pool_registry.clone(),
         common_pools.clone(),
         work_lock_manager_handle.clone(),
         carbide_config.rack_profiles.clone(),

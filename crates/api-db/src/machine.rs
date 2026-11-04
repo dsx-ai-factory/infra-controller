@@ -78,6 +78,9 @@ use super::{DatabaseError, ObjectFilter, Transaction, queries};
 use crate::db_read::DbReader;
 use crate::{ConditionalWrite, ControllerStateNotCurrent, DatabaseResult};
 
+mod creation_identity;
+pub use creation_identity::MachineCreationIdentity;
+
 #[derive(Serialize)]
 struct ReprovisionRequestRestart {
     pub update_firmware: bool,
@@ -348,6 +351,34 @@ pub async fn lock_by_id_for_update(
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
     Ok(())
+}
+
+/// `try_lock_group_for_update` tries a host and its DPUs in machine-row order.
+/// Some network writers already hold the host, so waiting here while holding
+/// a DPU could deadlock with their group version update.
+///
+/// Returns false if a member is missing or busy. Both outcomes retain any
+/// acquired locks; on false, roll back the whole transaction before retrying.
+/// Finish interface writes first and retain successful locks through commit.
+pub async fn try_lock_group_for_update(
+    txn: &mut PgConnection,
+    machine_id: &MachineId,
+) -> Result<bool, DatabaseError> {
+    let query = "SELECT id FROM machine_group_member_ids($1)";
+    let machine_ids: Vec<MachineId> = sqlx::query_scalar(query)
+        .bind(machine_id)
+        .fetch_all(&mut *txn)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))?;
+    if machine_ids.is_empty() {
+        return Ok(false);
+    }
+    for member_id in MachineRowLockOrderIter::new(machine_ids) {
+        if !try_lock_by_id_for_update(txn, &member_id).await? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 /// Locks a machine without waiting for another writer. Returns false when the
@@ -825,13 +856,23 @@ pub async fn find_machine_ids_by_mac_addresses(
 /// Finds the machine with this address in either loopback field.
 /// Both fields are serialized from typed IP addresses, so their stored text
 /// matches `IpAddr::to_string()`.
+/// Attached remote IPv4 ownership also identifies the machine while its
+/// configuration field needs repair. Pending provider reservations do not.
 pub async fn find_by_loopback_ip(
     txn: impl DbReader<'_>,
     loopback_ip: IpAddr,
 ) -> Result<Option<AnyMachine>, DatabaseError> {
     lazy_static! {
         static ref query: String = format!(
-            "{} WHERE m.network_config->>'loopback_ip' = $1 OR m.network_config->>'loopback_ip_v6' = $1",
+            "{} WHERE m.network_config->>'loopback_ip' = $1 OR m.network_config->>'loopback_ip_v6' = $1
+                OR m.id IN (
+                    SELECT owner_id FROM resource_pool_allocations
+                    WHERE pool_name = 'lo-ip' AND owner_type = 'machine'
+                      AND binding_id IS NOT NULL AND state = 'attached'
+                      AND result->>'status' = 'allocated'
+                      AND result->'result'->'value'->>'kind' = 'ip_address'
+                      AND result->'result'->'value'->>'value' = $1
+                )",
             JSON_MACHINE_SNAPSHOT_QUERY.deref()
         );
     }
@@ -2016,7 +2057,7 @@ pub async fn try_update_network_config(
     expected_version: ConfigVersion,
     new_state: &ManagedHostNetworkConfig,
 ) -> Result<ConditionalWrite<(), MachineNetworkConfigNotCurrent>, DatabaseError> {
-    try_update_network_config_inner(txn, machine_id, expected_version, new_state, false).await
+    try_update_network_config_inner(txn, machine_id, expected_version, new_state, false, None).await
 }
 
 async fn try_update_network_config_unless_force_deleting(
@@ -2025,7 +2066,30 @@ async fn try_update_network_config_unless_force_deleting(
     expected_version: ConfigVersion,
     new_state: &ManagedHostNetworkConfig,
 ) -> Result<ConditionalWrite<(), MachineNetworkConfigNotCurrent>, DatabaseError> {
-    try_update_network_config_inner(txn, machine_id, expected_version, new_state, true).await
+    try_update_network_config_inner(txn, machine_id, expected_version, new_state, true, None).await
+}
+
+/// `try_update_network_config_for_created` writes network configuration only
+/// to the same machine row and version. ForceDeletion, replacement rows,
+/// missing rows, and changed versions return `NotApplied`.
+/// The caller attaches allocations separately in the same transaction and
+/// rolls back both changes if this write does not apply.
+pub async fn try_update_network_config_for_created(
+    txn: &mut PgConnection,
+    machine_id: &MachineId,
+    created: DateTime<Utc>,
+    expected_version: ConfigVersion,
+    new_state: &ManagedHostNetworkConfig,
+) -> Result<ConditionalWrite<(), MachineNetworkConfigNotCurrent>, DatabaseError> {
+    try_update_network_config_inner(
+        txn,
+        machine_id,
+        expected_version,
+        new_state,
+        true,
+        Some(created),
+    )
+    .await
 }
 
 async fn is_force_deleting_or_deleted(
@@ -2048,6 +2112,7 @@ async fn try_update_network_config_inner(
     expected_version: ConfigVersion,
     new_state: &ManagedHostNetworkConfig,
     reject_force_deletion: bool,
+    expected_created: Option<DateTime<Utc>>,
 ) -> Result<ConditionalWrite<(), MachineNetworkConfigNotCurrent>, DatabaseError> {
     let next_version = expected_version.increment();
 
@@ -2057,6 +2122,7 @@ async fn try_update_network_config_inner(
     let target_query = "UPDATE machines SET network_config_version=$1, network_config=$2::json
             WHERE id=$3 AND network_config_version=$4
               AND (NOT $5 OR controller_state != $6::jsonb)
+              AND ($7::timestamptz IS NULL OR created = $7)
             RETURNING id";
     let target_result: Result<MachineId, _> = sqlx::query_as(target_query)
         .bind(next_version)
@@ -2065,6 +2131,7 @@ async fn try_update_network_config_inner(
         .bind(expected_version)
         .bind(reject_force_deletion)
         .bind(sqlx::types::Json(&ManagedHostState::ForceDeletion))
+        .bind(expected_created)
         .fetch_one(&mut *txn)
         .await;
 
@@ -3519,69 +3586,6 @@ pub async fn find_dpu_infos(txn: &mut PgConnection) -> Result<Vec<DpuInfo>, Data
             },
         )
         .collect()
-}
-
-/// Allocate a value from the loopback IP resource pool.
-///
-/// Reuses the DPU's existing reservation before allocating a new value, so a
-/// surviving pool ownership record and a missing `network_config.loopback_ip`
-/// field cannot give one DPU two `lo-ip` values. A duplicate reservation for
-/// the same owner is reported as inconsistent state rather than picking one.
-///
-/// If the pool exists but is empty or has en error, return that.
-pub async fn allocate_loopback_ip(
-    common_pools: &CommonPools,
-    txn: &mut PgConnection,
-    owner_id: &str,
-) -> Result<IpAddr, DatabaseError> {
-    let pool = &common_pools.ethernet.pool_loopback_ip;
-
-    if let Some(value) = crate::resource_pool::find_owned_allocation(
-        pool,
-        txn,
-        resource_pool::OwnerType::Machine,
-        owner_id,
-    )
-    .await?
-    {
-        return Ok(value);
-    }
-
-    match crate::resource_pool::allocate(
-        pool,
-        txn,
-        resource_pool::OwnerType::Machine,
-        owner_id,
-        None,
-    )
-    .await
-    {
-        Ok(val) => Ok(val),
-        Err(
-            error @ crate::resource_pool::ResourcePoolDatabaseError::ResourcePool(
-                ResourcePoolError::Empty,
-            ),
-        ) => {
-            crate::resource_pool::emit_allocation_failure(
-                pool.value_type,
-                owner_id,
-                false,
-                "lo-ip",
-                &error,
-            );
-            Err(DatabaseError::ResourceExhausted("pool lo-ip".to_string()))
-        }
-        Err(err) => {
-            crate::resource_pool::emit_allocation_failure(
-                pool.value_type,
-                owner_id,
-                false,
-                "lo-ip",
-                &err,
-            );
-            Err(err.into())
-        }
-    }
 }
 
 /// Allocates one IPv6 underlay loopback when `lo-ip-v6` is configured.
@@ -8813,65 +8817,6 @@ mod test {
         let stats = crate::resource_pool::stats(&pool, LOOPBACK_IP_V6).await?;
         assert_eq!(stats.used, 1);
         assert_eq!(stats.free, 0);
-        Ok(())
-    }
-
-    /// A surviving `lo-ip` pool reservation must satisfy the next allocation for
-    /// the same DPU. Otherwise a cleared `network_config.loopback_ip` field lets
-    /// one DPU consume a second IPv4 loopback, matching the IPv6 reuse contract.
-    #[crate::sqlx_test]
-    async fn ipv4_loopback_reservation_is_reused_and_leaves_one_owned_entry(
-        pool: sqlx::PgPool,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        let common_pools = common_pools(&pool, None).await?;
-        let dpu_id =
-            MachineId::from_str("fm100dskla0ihp0pn4tv7v1js2k2mo37sl0jjr8141okqg8pjpdpfihaa80")?;
-
-        let mut txn = pool.begin().await?;
-        let allocated =
-            super::allocate_loopback_ip(&common_pools, txn.as_mut(), &dpu_id.to_string()).await?;
-        let reused =
-            super::allocate_loopback_ip(&common_pools, txn.as_mut(), &dpu_id.to_string()).await?;
-        assert_eq!(allocated, reused);
-
-        let stats = crate::resource_pool::stats(txn.as_mut(), LOOPBACK_IP).await?;
-        assert_eq!(stats.used, 1);
-        txn.rollback().await?;
-        Ok(())
-    }
-
-    /// Two `lo-ip` rows owned by one DPU is corrupted state: allocation must
-    /// surface it as inconsistent rather than silently hand back one value and
-    /// leave the DPU still owning a second.
-    #[crate::sqlx_test]
-    async fn ipv4_loopback_rejects_multiple_reservations_for_one_dpu(
-        pool: sqlx::PgPool,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        let common_pools = common_pools(&pool, None).await?;
-        let dpu_id =
-            MachineId::from_str("fm100dskla0ihp0pn4tv7v1js2k2mo37sl0jjr8141okqg8pjpdpfihaa80")?;
-        let owner_id = dpu_id.to_string();
-
-        let mut txn = pool.begin().await?;
-        // Seed two reservations for the same owner so the ownership lookup sees
-        // more than one owned value.
-        for _ in 0..2 {
-            crate::resource_pool::allocate(
-                &common_pools.ethernet.pool_loopback_ip,
-                txn.as_mut(),
-                model::resource_pool::OwnerType::Machine,
-                &owner_id,
-                None,
-            )
-            .await?;
-        }
-
-        let error = super::allocate_loopback_ip(&common_pools, txn.as_mut(), &owner_id)
-            .await
-            .expect_err("two lo-ip values owned by one DPU must be rejected as inconsistent state");
-        assert!(matches!(error, crate::DatabaseError::FailedPrecondition(_)));
-
-        txn.rollback().await?;
         Ok(())
     }
 
