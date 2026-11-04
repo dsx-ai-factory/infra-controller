@@ -95,13 +95,33 @@ async fn clear_rv_labels(
 }
 
 async fn request_compute_host_restarts(
-    rack: &Rack,
+    rack: &mut Rack,
     ctx: &mut StateHandlerContext<'_, RackStateHandlerContextObjects>,
 ) -> Result<StateHandlerOutcome<RackState>, StateHandlerError> {
     let mut txn = ctx.services.db_pool.begin().await?;
     let mut machines = super::get_machines_from_rack(rack, txn.as_mut()).await?;
     // Match allocation's lock order when claiming multiple hosts.
     machines.sort_by_key(|machine| machine.id);
+
+    let machine_ids = machines
+        .iter()
+        .map(|machine| HostMachineId::from(machine.id))
+        .collect::<Vec<_>>();
+    let desired_off_ids = desired_off_machine_ids(txn.as_mut(), &machine_ids).await?;
+    if !desired_off_ids.is_empty() {
+        txn.rollback().await?;
+        let rack_id = rack.id.clone();
+        return transition_to_rack_error(
+            &rack_id,
+            rack,
+            format!(
+                "rack power sequence cannot target machines whose desired power state is Off: {}",
+                format_machine_ids(&desired_off_ids)
+            ),
+            ctx,
+        )
+        .await;
+    }
 
     let unavailable_machine_ids = machines
         .iter()
@@ -1327,7 +1347,6 @@ fn filter_switch_inventory_by_scope(
 fn skip_configure_nmx_cluster_outcome(
     rack_id: &RackId,
     reason: impl AsRef<str>,
-    _scope: &MaintenanceScope,
 ) -> StateHandlerOutcome<RackState> {
     let next = RackMaintenanceState::Completed;
     tracing::info!(
@@ -1483,8 +1502,8 @@ async fn load_nmx_certificate_endpoints(
     Ok(endpoints)
 }
 
-/// Validates prerequisites before resetting compute hosts, then revalidates
-/// endpoints to submit switch certificates after the reboot barrier passes.
+/// Validates NMX-C prerequisites and submits switch certificates when
+/// ConfigureNmxCluster starts, after any selected compute reboot barrier.
 /// Failures proven to occur before RMS dispatch retain the phase for retry. All
 /// other submission errors transition the rack to `Error` because no durable
 /// job ID proves whether RMS accepted all or part of the batch.
@@ -1499,7 +1518,6 @@ async fn start_configure_nmx_cluster(
         return Ok(skip_configure_nmx_cluster_outcome(
             id,
             "maintenance scope contains no switches",
-            scope,
         ));
     }
 
@@ -1526,7 +1544,6 @@ async fn start_configure_nmx_cluster(
         return Ok(skip_configure_nmx_cluster_outcome(
             id,
             "rack has no switches in inventory",
-            scope,
         ));
     }
 
@@ -1779,7 +1796,6 @@ async fn configure_scale_up_fabric_manager_v2(
         return Ok(skip_configure_nmx_cluster_outcome(
             id,
             "maintenance scope contains no switches",
-            scope,
         ));
     }
 
@@ -1801,7 +1817,6 @@ async fn configure_scale_up_fabric_manager_v2(
         return Ok(skip_configure_nmx_cluster_outcome(
             id,
             "rack has no switches in inventory",
-            scope,
         ));
     }
 
@@ -1972,7 +1987,6 @@ async fn wait_for_scale_up_fabric_manager_job(
                 ctx,
                 component_manager.as_ref(),
                 rack_profile_id,
-                scope,
             )
             .await
         }
@@ -2010,7 +2024,6 @@ async fn verify_scale_up_fabric_manager_v2(
     ctx: &mut StateHandlerContext<'_, RackStateHandlerContextObjects>,
     component_manager: &ComponentManager,
     rack_profile_id: Option<&RackProfileId>,
-    scope: &MaintenanceScope,
 ) -> Result<StateHandlerOutcome<RackState>, StateHandlerError> {
     // Re-resolve the complete fabric after the asynchronous job so status reads
     // use current switch endpoints without weakening the rack-wide contract.
@@ -2026,7 +2039,6 @@ async fn verify_scale_up_fabric_manager_v2(
         return Ok(skip_configure_nmx_cluster_outcome(
             id,
             "rack has no switches in inventory",
-            scope,
         ));
     }
 

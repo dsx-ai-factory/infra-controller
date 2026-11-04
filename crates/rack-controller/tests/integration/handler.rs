@@ -1466,7 +1466,92 @@ async fn test_maintenance_completed_transitions_to_validation(
 }
 
 #[sqlx_test]
-async fn test_compute_restart_preflight_skips_or_rejects_before_queueing(
+async fn test_compute_restart_rejects_desired_off_host_outside_scope(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = create_test_env_with_overrides(
+        pool.clone(),
+        TestEnvOverrides {
+            config: Some(config_with_rack_profiles()),
+            ..Default::default()
+        },
+    )
+    .await;
+    let (rack_id, host_a, host_b) = Box::pin(create_two_compute_rack(&env, &pool)).await?;
+    let off_id = host_b.host_snapshot.id;
+    set_machine_power_states(
+        &pool,
+        &off_id,
+        model::power_manager::PowerState::Off,
+        model::power_manager::PowerState::On,
+    )
+    .await?;
+    let mut txn = pool.begin().await?;
+    db_rack::update(
+        txn.as_mut(),
+        &rack_id,
+        &RackConfig {
+            maintenance_requested: Some(MaintenanceScope {
+                machine_ids: vec![host_a.host_snapshot.id],
+                activities: vec![MaintenanceActivity::PowerSequence],
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+    )
+    .await?;
+    crate::fixtures::rack::set_rack_controller_state(
+        txn.as_mut(),
+        &rack_id,
+        RackState::Maintenance {
+            maintenance_state: RackMaintenanceState::PowerSequence {
+                rack_power: RackPowerState::PowerReset,
+                restart_machine_ids: None,
+            },
+        },
+    )
+    .await?;
+    txn.commit().await?;
+
+    env.run_rack_controller_iteration().await;
+    let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    assert!(matches!(rack.controller_state.value,
+        RackState::Error { ref cause, recovery_policy: RackErrorRecoveryPolicy::MaintenanceRequestRequired, .. }
+            if cause.contains("desired power state is Off") && cause.contains(&off_id.to_string())
+    ));
+    assert!(rack.config.maintenance_requested.is_none());
+    for machine_id in [host_a.host_snapshot.id, off_id] {
+        let machine = db::machine::find_one(&pool, &machine_id, Default::default())
+            .await?
+            .unwrap();
+        assert!(machine.machine_maintenance_requested.is_none());
+    }
+    let options = db::power_options::get_by_ids(&[off_id], pool.acquire().await?.as_mut()).await?;
+    assert_eq!(
+        options[0].desired_power_state,
+        model::power_manager::PowerState::Off
+    );
+
+    // Correcting desired power alone must not silently restart maintenance.
+    set_machine_power_states(
+        &pool,
+        &off_id,
+        model::power_manager::PowerState::On,
+        model::power_manager::PowerState::On,
+    )
+    .await?;
+    env.run_rack_controller_iteration().await;
+    let resumed = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    assert_eq!(resumed.controller_state.value, rack.controller_state.value);
+    assert_eq!(
+        resumed.controller_state.version,
+        rack.controller_state.version
+    );
+    Ok(())
+}
+
+#[sqlx_test]
+async fn test_nmx_configuration_skips_empty_inventory_and_rejects_invalid_topology(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut config = config_with_rack_profiles();

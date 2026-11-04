@@ -79,7 +79,7 @@ pub async fn handle_ready(
 
     if let Some(scope) = &config.maintenance_requested {
         let activities_desc = if scope.activities.is_empty() {
-            "all".to_string()
+            "all non-power activities".to_string()
         } else {
             scope
                 .activities

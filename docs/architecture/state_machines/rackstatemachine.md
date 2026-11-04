@@ -213,6 +213,10 @@ any host has an instance or pending maintenance or is not in a state that accept
 maintenance requests. Saved target IDs let the batch resume after a controller
 restart.
 
+Before queuing a batch, any compute host with desired power `Off` causes rack
+maintenance to enter `Error` without queuing reboots or changing desired power.
+After correcting desired power, an operator must request maintenance again.
+
 The batch completes when every request is cleared and every host has a Scout
 reboot timestamp later than the persisted batch-state timestamp. Hosts do not
 need to reach `Ready`, and the timestamp does not prove that this request caused
