@@ -287,6 +287,48 @@ mod tests {
             .map_err(drop)
     }
 
+    /// Each family's record must use that family's tenant boot URL and DNS servers,
+    /// and keep NICo's shared boot URL when the tenant set none for the family.
+    #[test]
+    fn records_use_each_familys_tenant_dhcp_values() {
+        let interface_id = "11111111-1111-1111-1111-111111111111".parse().unwrap();
+        let ipv6 = InterfaceInfoV6 {
+            address: Some("2001:db8::10".parse().unwrap()),
+            prefix: "2001:db8::/64".to_string(),
+        };
+        let interface = InterfaceInfo {
+            address: Some(Ipv4Addr::new(192, 0, 2, 10)),
+            gateway: Some(Ipv4Addr::new(192, 0, 2, 1)),
+            prefix: Some("192.0.2.0/24".to_string()),
+            fqdn: "host.example.com".to_string(),
+            booturl: Some("http://nico.example.com/ipxe.efi".to_string()),
+            booturl_v4: Some("http://tenant.example.com/v4.efi".to_string()),
+            dns_servers_v4: vec!["10.0.0.53".to_string()],
+            dns_servers_v6: vec!["2001:db8::53".to_string()],
+            ipv6: Some(ipv6.clone()),
+            ..Default::default()
+        };
+
+        let v4 = from_host_conf(&interface, interface_id).unwrap();
+        assert_eq!(
+            (v4.booturl, v4.dns_servers),
+            (
+                Some("http://tenant.example.com/v4.efi".to_string()),
+                vec!["10.0.0.53".to_string()]
+            )
+        );
+
+        // No tenant IPv6 boot URL, so the IPv6 record keeps NICo's.
+        let v6 = from_host_conf_v6(&interface, &ipv6, interface_id).unwrap();
+        assert_eq!(
+            (v6.booturl, v6.dns_servers),
+            (
+                Some("http://nico.example.com/ipxe.efi".to_string()),
+                vec!["2001:db8::53".to_string()]
+            )
+        );
+    }
+
     fn validate_interface_presence(interface: InterfaceInfo) -> Result<(), ()> {
         let host_config = HostConfig {
             host_interface_id: "11111111-1111-1111-1111-111111111111".parse().unwrap(),
