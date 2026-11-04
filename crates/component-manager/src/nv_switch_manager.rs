@@ -119,11 +119,15 @@ pub struct SwitchCertificateEndpoint {
     pub nvos_host_name: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+/// A switch's operation result, retaining typed errors until the caller maps them.
+#[derive(Debug)]
 pub struct SwitchComponentResult {
+    /// Identifies the switch independently of the result's position in a batch.
     pub bmc_mac: MacAddress,
+    /// Whether this call succeeded for the switch; queued work may still be running.
     pub success: bool,
-    pub error: Option<String>,
+    /// Failure details, including whether submission may have accepted work.
+    pub error: Option<ComponentManagerError>,
 }
 
 #[derive(Debug, Clone)]
@@ -261,6 +265,28 @@ pub struct SwitchFactoryResetJobStatus {
     /// Backend-supplied failure details when [`SwitchFactoryResetState::Failed`] is returned.
     /// This is `None` for pending and successful jobs.
     pub error: Option<String>,
+}
+
+/// Observed lifecycle of a component reset, independent of backend job identifiers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ComponentResetState {
+    /// The backend accepted the reset but has not started executing it.
+    Queued,
+    /// The reset has started and has not completed.
+    InProgress,
+    /// All reset work completed successfully.
+    Completed,
+    /// The backend reports a terminal failure with its diagnostic details.
+    Failed(String),
+}
+
+/// Observed reset state for one device and action.
+#[derive(Debug)]
+pub struct ComponentResetStatus {
+    /// BMC MAC of the device whose reset was observed.
+    pub bmc_mac: MacAddress,
+    /// Observed state of this device's reset, or an error retrieving that state.
+    pub state: Result<ComponentResetState, ComponentManagerError>,
 }
 
 /// Backend trait for NV-Switch management operations.
@@ -439,6 +465,48 @@ pub trait NvSwitchManager: Send + Sync + Debug + 'static {
     ) -> Result<String, ComponentManagerError> {
         Err(ComponentManagerError::Unsupported(format!(
             "switch factory reset is not supported by the {} backend",
+            self.name()
+        )))
+    }
+
+    /// Directly dispatches SDN resets for valid endpoints in one backend batch.
+    ///
+    /// Returns one result per endpoint, identified by BMC MAC; result order is
+    /// unspecified. Success means the backend accepted that switch and its parent
+    /// job reference was recorded. Resolution or submission errors for one switch
+    /// do not prevent dispatching other switches.
+    /// `domain_name` selects the NVL certificate domain; omission uses the RMS default.
+    /// Empty endpoints are invalid. Rejected or ambiguous submissions preserve the
+    /// previous reference. Ambiguous submissions must not be retried automatically.
+    /// An outer error applies to every endpoint, such as an unavailable identity database.
+    async fn batch_reset_sdn_factory_default(
+        &self,
+        _endpoints: &[SwitchEndpoint],
+        _domain_name: Option<&str>,
+    ) -> Result<Vec<SwitchComponentResult>, ComponentManagerError> {
+        Err(ComponentManagerError::Unsupported(format!(
+            "component reset is not supported by the {} backend",
+            self.name()
+        )))
+    }
+
+    /// Observes stored SDN reset references by BMC MAC without credentials.
+    /// Returns one result per requested MAC; result order is unspecified.
+    /// This is the latest successfully recorded accepted job, which may precede a
+    /// failed or ambiguous submission attempt. No reference returns `NotFound`; a
+    /// missing RMS job returns `OperationOutcomeUnknown`. The switch's child job
+    /// determines its state independently of other targets in the same batch.
+    /// Ingested switches are matched by their current NICo IDs; pre-ingestion jobs
+    /// are matched by BMC MAC even after ingestion. A missing or ambiguous child is
+    /// `OperationOutcomeUnknown`, including when a replaced NICo ID no longer matches.
+    /// Per-device observation errors are returned in `state`; a shared identity
+    /// lookup failure is an outer error that applies to every requested MAC.
+    async fn get_sdn_factory_reset_status(
+        &self,
+        _bmc_macs: &[MacAddress],
+    ) -> Result<Vec<ComponentResetStatus>, ComponentManagerError> {
+        Err(ComponentManagerError::Unsupported(format!(
+            "component reset status is not supported by the {} backend",
             self.name()
         )))
     }

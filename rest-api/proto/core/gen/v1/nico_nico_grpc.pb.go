@@ -25,6 +25,7 @@ const _ = grpc.SupportPackageIsVersion9
 const (
 	Forge_Version_FullMethodName                                            = "/forge.Forge/Version"
 	Forge_GetRmsVersion_FullMethodName                                      = "/forge.Forge/GetRmsVersion"
+	Forge_GetRmsJobStatus_FullMethodName                                    = "/forge.Forge/GetRmsJobStatus"
 	Forge_StreamConsoleLogs_FullMethodName                                  = "/forge.Forge/StreamConsoleLogs"
 	Forge_CreateDomain_FullMethodName                                       = "/forge.Forge/CreateDomain"
 	Forge_UpdateDomain_FullMethodName                                       = "/forge.Forge/UpdateDomain"
@@ -556,6 +557,8 @@ const (
 	Forge_ReleaseDPUServiceSyncHold_FullMethodName                          = "/forge.Forge/ReleaseDPUServiceSyncHold"
 	Forge_ComponentPowerControl_FullMethodName                              = "/forge.Forge/ComponentPowerControl"
 	Forge_GetComponentPowerDetails_FullMethodName                           = "/forge.Forge/GetComponentPowerDetails"
+	Forge_ComponentReset_FullMethodName                                     = "/forge.Forge/ComponentReset"
+	Forge_GetComponentResetStatus_FullMethodName                            = "/forge.Forge/GetComponentResetStatus"
 	Forge_ComponentConfigureSwitchCertificate_FullMethodName                = "/forge.Forge/ComponentConfigureSwitchCertificate"
 	Forge_GetComponentInventory_FullMethodName                              = "/forge.Forge/GetComponentInventory"
 	Forge_UpdateComponentFirmware_FullMethodName                            = "/forge.Forge/UpdateComponentFirmware"
@@ -592,6 +595,8 @@ type ForgeClient interface {
 	// the RBAC middleware rejects unknown RPC names with HTTP 403 before gRPC
 	// dispatch, so Unimplemented is never reached on those servers.
 	GetRmsVersion(ctx context.Context, in *GetRmsVersionRequest, opts ...grpc.CallOption) (*GetRmsVersionResponse, error)
+	// Admin-only inspection of backend jobs; normal component callers query by device.
+	GetRmsJobStatus(ctx context.Context, in *GetRmsJobStatusRequest, opts ...grpc.CallOption) (*GetRmsJobStatusResponse, error)
 	// Stream recent and live machine console output.
 	StreamConsoleLogs(ctx context.Context, in *StreamConsoleLogsRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[ConsoleLogLine], error)
 	// Domain
@@ -1654,6 +1659,18 @@ type ForgeClient interface {
 	// read budgets, whose expiry reports ReadFailed. This method never registers
 	// devices, writes policy, or submits power operations.
 	GetComponentPowerDetails(ctx context.Context, in *GetComponentPowerDetailsRequest, opts ...grpc.CallOption) (*GetComponentPowerDetailsResponse, error)
+	// Dispatch a reset directly, without scheduling state-controller maintenance.
+	// Valid devices proceed even when other targets cannot be resolved or accepted.
+	// Only SDN factory reset is implemented; it disrupts fabric traffic and restores
+	// SDN defaults without reinstalling NVOS. SUCCESS means accepted and tracked,
+	// not completed. A submission error may follow dispatch: do not automatically resubmit.
+	ComponentReset(ctx context.Context, in *ComponentResetRequest, opts ...grpc.CallOption) (*ComponentResetResponse, error)
+	// Observe the latest successfully recorded accepted reset for each device/action.
+	// A failed or unknown submission attempt may leave an earlier reference in place.
+	// References survive NICo restarts, but RMS job state may be lost on restart.
+	// Missing/unobservable jobs never imply completion. Terminal observations are
+	// not persisted.
+	GetComponentResetStatus(ctx context.Context, in *GetComponentResetStatusRequest, opts ...grpc.CallOption) (*GetComponentResetStatusResponse, error)
 	ComponentConfigureSwitchCertificate(ctx context.Context, in *ComponentConfigureSwitchCertificateRequest, opts ...grpc.CallOption) (*ComponentConfigureSwitchCertificateResponse, error)
 	GetComponentInventory(ctx context.Context, in *GetComponentInventoryRequest, opts ...grpc.CallOption) (*GetComponentInventoryResponse, error)
 	UpdateComponentFirmware(ctx context.Context, in *UpdateComponentFirmwareRequest, opts ...grpc.CallOption) (*UpdateComponentFirmwareResponse, error)
@@ -1735,6 +1752,16 @@ func (c *forgeClient) GetRmsVersion(ctx context.Context, in *GetRmsVersionReques
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(GetRmsVersionResponse)
 	err := c.cc.Invoke(ctx, Forge_GetRmsVersion_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *forgeClient) GetRmsJobStatus(ctx context.Context, in *GetRmsJobStatusRequest, opts ...grpc.CallOption) (*GetRmsJobStatusResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetRmsJobStatusResponse)
+	err := c.cc.Invoke(ctx, Forge_GetRmsJobStatus_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -7070,6 +7097,26 @@ func (c *forgeClient) GetComponentPowerDetails(ctx context.Context, in *GetCompo
 	return out, nil
 }
 
+func (c *forgeClient) ComponentReset(ctx context.Context, in *ComponentResetRequest, opts ...grpc.CallOption) (*ComponentResetResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ComponentResetResponse)
+	err := c.cc.Invoke(ctx, Forge_ComponentReset_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *forgeClient) GetComponentResetStatus(ctx context.Context, in *GetComponentResetStatusRequest, opts ...grpc.CallOption) (*GetComponentResetStatusResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetComponentResetStatusResponse)
+	err := c.cc.Invoke(ctx, Forge_GetComponentResetStatus_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *forgeClient) ComponentConfigureSwitchCertificate(ctx context.Context, in *ComponentConfigureSwitchCertificateRequest, opts ...grpc.CallOption) (*ComponentConfigureSwitchCertificateResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(ComponentConfigureSwitchCertificateResponse)
@@ -7302,6 +7349,8 @@ type ForgeServer interface {
 	// the RBAC middleware rejects unknown RPC names with HTTP 403 before gRPC
 	// dispatch, so Unimplemented is never reached on those servers.
 	GetRmsVersion(context.Context, *GetRmsVersionRequest) (*GetRmsVersionResponse, error)
+	// Admin-only inspection of backend jobs; normal component callers query by device.
+	GetRmsJobStatus(context.Context, *GetRmsJobStatusRequest) (*GetRmsJobStatusResponse, error)
 	// Stream recent and live machine console output.
 	StreamConsoleLogs(*StreamConsoleLogsRequest, grpc.ServerStreamingServer[ConsoleLogLine]) error
 	// Domain
@@ -8364,6 +8413,18 @@ type ForgeServer interface {
 	// read budgets, whose expiry reports ReadFailed. This method never registers
 	// devices, writes policy, or submits power operations.
 	GetComponentPowerDetails(context.Context, *GetComponentPowerDetailsRequest) (*GetComponentPowerDetailsResponse, error)
+	// Dispatch a reset directly, without scheduling state-controller maintenance.
+	// Valid devices proceed even when other targets cannot be resolved or accepted.
+	// Only SDN factory reset is implemented; it disrupts fabric traffic and restores
+	// SDN defaults without reinstalling NVOS. SUCCESS means accepted and tracked,
+	// not completed. A submission error may follow dispatch: do not automatically resubmit.
+	ComponentReset(context.Context, *ComponentResetRequest) (*ComponentResetResponse, error)
+	// Observe the latest successfully recorded accepted reset for each device/action.
+	// A failed or unknown submission attempt may leave an earlier reference in place.
+	// References survive NICo restarts, but RMS job state may be lost on restart.
+	// Missing/unobservable jobs never imply completion. Terminal observations are
+	// not persisted.
+	GetComponentResetStatus(context.Context, *GetComponentResetStatusRequest) (*GetComponentResetStatusResponse, error)
 	ComponentConfigureSwitchCertificate(context.Context, *ComponentConfigureSwitchCertificateRequest) (*ComponentConfigureSwitchCertificateResponse, error)
 	GetComponentInventory(context.Context, *GetComponentInventoryRequest) (*GetComponentInventoryResponse, error)
 	UpdateComponentFirmware(context.Context, *UpdateComponentFirmwareRequest) (*UpdateComponentFirmwareResponse, error)
@@ -8435,6 +8496,9 @@ func (UnimplementedForgeServer) Version(context.Context, *VersionRequest) (*Buil
 }
 func (UnimplementedForgeServer) GetRmsVersion(context.Context, *GetRmsVersionRequest) (*GetRmsVersionResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetRmsVersion not implemented")
+}
+func (UnimplementedForgeServer) GetRmsJobStatus(context.Context, *GetRmsJobStatusRequest) (*GetRmsJobStatusResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetRmsJobStatus not implemented")
 }
 func (UnimplementedForgeServer) StreamConsoleLogs(*StreamConsoleLogsRequest, grpc.ServerStreamingServer[ConsoleLogLine]) error {
 	return status.Error(codes.Unimplemented, "method StreamConsoleLogs not implemented")
@@ -10029,6 +10093,12 @@ func (UnimplementedForgeServer) ComponentPowerControl(context.Context, *Componen
 func (UnimplementedForgeServer) GetComponentPowerDetails(context.Context, *GetComponentPowerDetailsRequest) (*GetComponentPowerDetailsResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetComponentPowerDetails not implemented")
 }
+func (UnimplementedForgeServer) ComponentReset(context.Context, *ComponentResetRequest) (*ComponentResetResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ComponentReset not implemented")
+}
+func (UnimplementedForgeServer) GetComponentResetStatus(context.Context, *GetComponentResetStatusRequest) (*GetComponentResetStatusResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetComponentResetStatus not implemented")
+}
 func (UnimplementedForgeServer) ComponentConfigureSwitchCertificate(context.Context, *ComponentConfigureSwitchCertificateRequest) (*ComponentConfigureSwitchCertificateResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ComponentConfigureSwitchCertificate not implemented")
 }
@@ -10147,6 +10217,24 @@ func _Forge_GetRmsVersion_Handler(srv interface{}, ctx context.Context, dec func
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(ForgeServer).GetRmsVersion(ctx, req.(*GetRmsVersionRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Forge_GetRmsJobStatus_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetRmsJobStatusRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ForgeServer).GetRmsJobStatus(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Forge_GetRmsJobStatus_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ForgeServer).GetRmsJobStatus(ctx, req.(*GetRmsJobStatusRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -19691,6 +19779,42 @@ func _Forge_GetComponentPowerDetails_Handler(srv interface{}, ctx context.Contex
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Forge_ComponentReset_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ComponentResetRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ForgeServer).ComponentReset(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Forge_ComponentReset_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ForgeServer).ComponentReset(ctx, req.(*ComponentResetRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Forge_GetComponentResetStatus_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetComponentResetStatusRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ForgeServer).GetComponentResetStatus(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Forge_GetComponentResetStatus_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ForgeServer).GetComponentResetStatus(ctx, req.(*GetComponentResetStatusRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _Forge_ComponentConfigureSwitchCertificate_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(ComponentConfigureSwitchCertificateRequest)
 	if err := dec(in); err != nil {
@@ -20101,6 +20225,10 @@ var Forge_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "GetRmsVersion",
 			Handler:    _Forge_GetRmsVersion_Handler,
+		},
+		{
+			MethodName: "GetRmsJobStatus",
+			Handler:    _Forge_GetRmsJobStatus_Handler,
 		},
 		{
 			MethodName: "CreateDomain",
@@ -22217,6 +22345,14 @@ var Forge_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "GetComponentPowerDetails",
 			Handler:    _Forge_GetComponentPowerDetails_Handler,
+		},
+		{
+			MethodName: "ComponentReset",
+			Handler:    _Forge_ComponentReset_Handler,
+		},
+		{
+			MethodName: "GetComponentResetStatus",
+			Handler:    _Forge_GetComponentResetStatus_Handler,
 		},
 		{
 			MethodName: "ComponentConfigureSwitchCertificate",
