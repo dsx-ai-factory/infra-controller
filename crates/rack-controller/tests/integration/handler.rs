@@ -3822,7 +3822,21 @@ async fn test_ingestion_reconciles_late_compute_firmware_body(
     .await?;
     env.run_rack_controller_iteration().await;
     let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
-    assert_ne!(rack.controller_state.value, waiting);
+    assert_eq!(
+        rack.controller_state.value,
+        RackState::Maintenance {
+            maintenance_state: RackMaintenanceState::NVOSUpdate {
+                nvos_update: NvosUpdateState::Start,
+            },
+        }
+    );
+    assert!(
+        !rack
+            .firmware_upgrade_job
+            .as_ref()
+            .unwrap()
+            .return_to_completed
+    );
     assert!(
         rack.firmware_upgrade_job
             .unwrap()
@@ -3902,6 +3916,7 @@ async fn test_ingestion_reopens_firmware_for_compute_arriving_during_later_maint
     ));
     assert!(rack.config.ingestion_in_progress);
     let job = rack.firmware_upgrade_job.unwrap();
+    assert!(job.return_to_completed);
     assert_eq!(job.machines.len(), 1);
     assert_eq!(job.machines[0].job_id.as_deref(), Some("late-child"));
 
@@ -3910,7 +3925,7 @@ async fn test_ingestion_reopens_firmware_for_compute_arriving_during_later_maint
     crate::fixtures::rack::set_rack_controller_state(
         pool.acquire().await?.as_mut(),
         &rack_id,
-        completed,
+        completed.clone(),
     )
     .await?;
     env.run_rack_controller_iteration().await;
@@ -3928,6 +3943,114 @@ async fn test_ingestion_reopens_firmware_for_compute_arriving_during_later_maint
             .await
             .len(),
         1
+    );
+    assert!(
+        rack.firmware_upgrade_job
+            .as_ref()
+            .unwrap()
+            .return_to_completed
+    );
+    env.rms_sim
+        .set_firmware_job_status(rms::GetFirmwareJobStatusResponse {
+            status: rms::ReturnCode::Success as i32,
+            job_id: "late-child".to_string(),
+            job_state: rms::FirmwareJobState::Running as i32,
+            ..Default::default()
+        })
+        .await;
+
+    // Another arrival during supplemental firmware joins the same continuation.
+    let later = Box::pin(new_host(
+        &env,
+        ManagedHostConfig::default().with_expected_machine_data(ExpectedMachineData {
+            rack_id: Some(rack_id.clone()),
+            ..Default::default()
+        }),
+    ))
+    .await?;
+    queue_ingestion_firmware_batch(&env, "later", &later.host_snapshot.id.to_string()).await;
+    env.run_rack_controller_iteration().await;
+    let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    let job = rack.firmware_upgrade_job.unwrap();
+    assert!(job.return_to_completed);
+    assert_eq!(job.machines.len(), 2);
+    assert_eq!(
+        env.rms_sim
+            .submitted_apply_firmware_object_requests()
+            .await
+            .len(),
+        2
+    );
+
+    for (host_id, child) in [
+        (late.host_snapshot.id, "late-child"),
+        (later.host_snapshot.id, "later-child"),
+    ] {
+        env.rms_sim
+            .set_firmware_job_status(rms::GetFirmwareJobStatusResponse {
+                status: rms::ReturnCode::Success as i32,
+                job_id: child.to_string(),
+                job_state: rms::FirmwareJobState::Completed as i32,
+                ..Default::default()
+            })
+            .await;
+        set_machine_host_reprovision_state(
+            &pool,
+            &host_id,
+            completed_rack_firmware_upgrade_state(),
+        )
+        .await?;
+    }
+    env.run_rack_controller_iteration().await;
+    let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    assert_eq!(rack.controller_state.value, completed);
+    assert!(rack.config.ingestion_in_progress);
+    assert!(
+        rack.firmware_upgrade_job
+            .as_ref()
+            .unwrap()
+            .return_to_completed
+    );
+    assert_eq!(
+        rack.firmware_upgrade_job.unwrap().status,
+        Some(FirmwareProgressState::Completed)
+    );
+    assert!(rack.nvos_update_job.is_none());
+
+    env.run_rack_controller_iteration().await;
+    let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    assert_eq!(
+        rack.controller_state.value,
+        RackState::Validating {
+            validating_state: RackValidationState::Pending,
+        }
+    );
+    assert!(!rack.config.ingestion_in_progress);
+    assert!(rack.nvos_update_job.is_none());
+    for host_id in [late.host_snapshot.id, later.host_snapshot.id] {
+        let machine = db::machine::find_one(&pool, &host_id, Default::default())
+            .await?
+            .unwrap();
+        assert!(machine.machine_maintenance_requested.is_none());
+    }
+    assert!(
+        env.rms_sim
+            .submitted_configure_switch_certificate_requests()
+            .await
+            .is_empty()
+    );
+    assert!(
+        env.rms_sim
+            .submitted_configure_scale_up_fabric_manager_v2_requests()
+            .await
+            .is_empty()
+    );
+    assert_eq!(
+        env.rms_sim
+            .submitted_apply_firmware_object_requests()
+            .await
+            .len(),
+        2
     );
     Ok(())
 }

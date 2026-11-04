@@ -90,6 +90,10 @@ pub struct FirmwareUpgradeJob {
     pub status: Option<FirmwareProgressState>,
     pub started_at: Option<DateTime<Utc>>,
     pub completed_at: Option<DateTime<Utc>>,
+    /// Supplemental ingestion firmware started after all rack maintenance finished.
+    /// Resume Completed instead of repeating NVOS, rack reboots, and NMX setup.
+    #[serde(default)]
+    pub return_to_completed: bool,
     #[serde(default)]
     pub batch_job_ids: Vec<String>,
     #[serde(default)]
@@ -1486,6 +1490,33 @@ mod tests {
                 state
             );
         }
+    }
+
+    #[test]
+    fn firmware_upgrade_job_preserves_completed_return_marker() {
+        scenarios!(
+            run = |marker: Option<bool>| -> Result<bool, serde_json::Error> {
+                // Predecessor job JSON has no return marker or device lists.
+                let mut wire = serde_json::json!({
+                    "job_id": "parent-job", "status": "in_progress",
+                    "started_at": null, "completed_at": null
+                });
+                if let Some(marker) = marker {
+                    wire["return_to_completed"] = serde_json::json!(marker);
+                }
+                let job: FirmwareUpgradeJob = serde_json::from_value(wire)?;
+                let resumed: FirmwareUpgradeJob =
+                    serde_json::from_str(&serde_json::to_string(&job)?)?;
+                Ok(resumed.return_to_completed)
+            };
+            "legacy and normal jobs retain the normal maintenance continuation" {
+                None => Yields(false),
+                Some(false) => Yields(false),
+            }
+            "supplemental jobs retain their continuation after reload" {
+                Some(true) => Yields(true),
+            }
+        );
     }
 
     #[test]

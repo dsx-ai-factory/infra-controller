@@ -2912,9 +2912,12 @@ pub async fn handle_maintenance(
                             job.completed_at = Some(now);
                         }
                         db_rack::update_firmware_upgrade_job(txn.as_mut(), id, Some(&job)).await?;
+                        let next_maintenance_state = if job.return_to_completed {
+                            RackMaintenanceState::Completed
+                        } else {
+                            next_state_after_firmware(scope)
+                        };
                         state.firmware_upgrade_job = Some(job);
-
-                        let next_maintenance_state = next_state_after_firmware(scope);
 
                         tracing::info!(
                             rack_id = %id,
@@ -3568,20 +3571,29 @@ pub async fn handle_maintenance(
                 && state.config.maintenance_requested.is_none()
                 && let Some(mut job) = state.firmware_upgrade_job.clone()
             {
-                let added =
+                // Set before reconciliation: an accepted batch is persisted there,
+                // and must retain its continuation if the controller stops before
+                // committing the transition below.
+                job.return_to_completed = true;
+                let needs_firmware_wait =
                     reconcile_ingestion_firmware_machines(state, rack_profile_id, &mut job, ctx)
                         .await?;
                 let pending = job
                     .status
                     .as_ref()
                     .is_some_and(|status| !status.is_terminal());
-                state.firmware_upgrade_job = Some(job);
-                if added || pending {
+                if needs_firmware_wait || pending {
+                    // Also persist the marker when late hosts are not ready and
+                    // reconciliation has not submitted a batch yet.
+                    let mut txn = ctx.services.db_pool.begin().await?;
+                    db_rack::update_firmware_upgrade_job(txn.as_mut(), id, Some(&job)).await?;
+                    state.firmware_upgrade_job = Some(job);
                     return Ok(StateHandlerOutcome::transition(RackState::Maintenance {
                         maintenance_state: RackMaintenanceState::FirmwareUpgrade {
                             rack_firmware_upgrade: FirmwareUpgradeState::WaitForComplete,
                         },
-                    }));
+                    })
+                    .with_txn(txn));
                 }
             }
             tracing::info!(

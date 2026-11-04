@@ -75,7 +75,8 @@ stateDiagram-v2
         R_Discovering --> R_Maintenance : profile switch count ready
         state R_Maintenance {
             [*] --> R_Maintenance_FirmwareUpgrade
-            R_Maintenance_FirmwareUpgrade --> R_Maintenance_NVOSUpdate
+            R_Maintenance_FirmwareUpgrade --> R_Maintenance_NVOSUpdate : normal maintenance
+            R_Maintenance_FirmwareUpgrade --> R_Maintenance_Completed : supplemental ingestion firmware complete
             R_Maintenance_NVOSUpdate --> R_Maintenance_ConfigureNmxCluster : no reboot required, NMX selected
             R_Maintenance_NVOSUpdate --> R_Maintenance_Completed : no reboot required, NMX not selected
             R_Maintenance_NVOSUpdate --> R_Maintenance_PowerSequence : ingestion update succeeded or explicit power activity
@@ -209,9 +210,13 @@ with a retryable handler error; its desired power is not changed.
 `Completed` repeats this membership check before clearing `ingestion_in_progress`
 and validation labels. Unsubmitted hosts or a pending firmware job return the
 rack to `FirmwareUpgrade(WaitForComplete)`, including after a restart between
-persisting a new batch and transitioning the rack. After firmware completes, the
-remaining maintenance activities run again. Explicit maintenance retains its
-selected device scope. If no firmware job was created, the existing skip path
+persisting a new batch and transitioning the rack. The firmware job persists
+`return_to_completed = true` with the supplemental batch, or with the transition
+to firmware waiting when hosts are not ready. Once that job completes, the rack returns directly to
+`Completed` and repeats the membership check. It does not repeat switch NVOS
+updates, rack-wide compute reboots, or NMX configuration. Predecessor jobs
+without the marker default to `false` and retain the normal firmware continuation.
+Explicit maintenance retains its selected device scope. If no firmware job was created, the existing skip path
 is unchanged; hosts arriving after ingestion ends are outside this check.
 
 Discovery persists `ingestion_in_progress` when entering maintenance. Only an
