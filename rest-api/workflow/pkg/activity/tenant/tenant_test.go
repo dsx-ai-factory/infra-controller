@@ -339,9 +339,14 @@ func TestManageTenant_UpdateTenantsInDB(t *testing.T) {
 			var logOutput bytes.Buffer
 			if tt.wantLogMessage != "" {
 				originalLogger := log.Logger
+				originalLevel := zerolog.GlobalLevel()
 				log.Logger = zerolog.New(&logOutput).Level(zerolog.DebugLevel)
+				// config.NewConfig sets the global level from config.yaml,
+				// which would otherwise filter the debug message.
+				zerolog.SetGlobalLevel(zerolog.DebugLevel)
 				t.Cleanup(func() {
 					log.Logger = originalLogger
+					zerolog.SetGlobalLevel(originalLevel)
 				})
 			}
 
