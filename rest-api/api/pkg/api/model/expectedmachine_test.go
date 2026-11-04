@@ -333,6 +333,45 @@ func TestAPIExpectedMachineCreateRequest_Validate(t *testing.T) {
 			},
 			expectErr: false,
 		},
+		{
+			desc: "ok with dpuPolicy ignore and hostNics",
+			obj: APIExpectedMachineCreateRequest{
+				BmcMacAddress:       "00:11:22:33:44:55",
+				DefaultBmcUsername:  &validUsername,
+				DefaultBmcPassword:  &validPassword,
+				ChassisSerialNumber: validChassisSerial,
+				DpuPolicy:           cutil.GetPtr(cdbm.ExpectedMachineDpuPolicyIgnore),
+				HostNics: []APIExpectedHostNic{
+					{MacAddress: "aa:bb:cc:dd:ee:01", Primary: cutil.GetPtr(true), NetworkSegmentType: cutil.GetPtr("hostInband")},
+				},
+			},
+			expectErr: false,
+		},
+		{
+			desc: "error when dpuPolicy is invalid",
+			obj: APIExpectedMachineCreateRequest{
+				BmcMacAddress:       "00:11:22:33:44:55",
+				DefaultBmcUsername:  &validUsername,
+				DefaultBmcPassword:  &validPassword,
+				ChassisSerialNumber: validChassisSerial,
+				DpuPolicy:           cutil.GetPtr("bogus"),
+			},
+			expectErr: true,
+		},
+		{
+			desc: "error when two hostNics set primary",
+			obj: APIExpectedMachineCreateRequest{
+				BmcMacAddress:       "00:11:22:33:44:55",
+				DefaultBmcUsername:  &validUsername,
+				DefaultBmcPassword:  &validPassword,
+				ChassisSerialNumber: validChassisSerial,
+				HostNics: []APIExpectedHostNic{
+					{MacAddress: "aa:bb:cc:dd:ee:01", Primary: cutil.GetPtr(true)},
+					{MacAddress: "aa:bb:cc:dd:ee:02", Primary: cutil.GetPtr(true)},
+				},
+			},
+			expectErr: true,
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.desc, func(t *testing.T) {

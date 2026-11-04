@@ -136,6 +136,8 @@ Where `expected-machines.json` is a JSON array of `ExpectedMachineCreateRequest`
 ]
 ```
 
+REST create/update also accepts **`dpuPolicy`** (`manage`, `nic`, `ignore`), **`bmcRetainCredentials`**, and **`hostNics`** (each entry: `macAddress`, optional `primary`, `networkSegmentType`, `role`, `ipAllocation`, `fixedIp`, optional legacy `nicType` / `fixedMask` / `fixedGateway`). PATCH may set **`replaceHostNics`** with `hostNics` to mark a full interface list replacement. These map to Forge `dpu_mode`, `bmc_retain_credentials`, and `host_nics`. **`isDpfEnabled`** is separate: it marks DPF provisioning eligibility, not the per-host DPU policy.
+
 Two constraints apply to every batch request, both enforced at the API gateway:
 
 - **Maximum 100 machines per request.** For sites with more than 100 machines, send multiple `batch-create` calls.
