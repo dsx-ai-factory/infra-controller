@@ -8218,6 +8218,29 @@ async fn handle_host_uefi_setup(
                     .lockdown_bmc(libredfish::EnabledDisabled::Disabled)
                     .await
                     .map_err(|e| redfish_error("lockdown", e))?;
+
+                if state.host_snapshot.bmc_vendor().is_lenovo() {
+                    let addr = state
+                        .host_snapshot
+                        .status
+                        .bmc_info
+                        .ip_addr()
+                        .map_err(StateHandlerError::GenericError)?;
+                    let endpoints = db::explored_endpoints::find_by_ips(
+                        &mut ctx.services.db_reader,
+                        vec![addr],
+                    )
+                    .await?;
+                    if endpoints.iter().any(|endpoint| {
+                        endpoint.report.vendor == Some(bmc_vendor::BMCVendor::LenovoAMI)
+                            && endpoint.report.model.as_deref() == Some("ThinkSystem HS350X V3")
+                    }) {
+                        // HS350 BIOS password operations remain unavailable until the
+                        // host boots with its Redfish host interface enabled.
+                        handler_host_power_control(state, ctx, SystemPowerControl::ForceRestart)
+                            .await?;
+                    }
+                }
             }
 
             Ok(StateHandlerOutcome::transition(
@@ -8828,7 +8851,17 @@ impl StateHandler for HostMachineStateHandler {
                                 uefi_setup_info: UefiSetupInfo {
                                     uefi_password_jid: None,
                                     credential_version: None,
-                                    uefi_setup_state: UefiSetupState::SetUefiPassword,
+                                    // Lenovo AMI's BMC-only lockdown disables the host
+                                    // interface needed for BIOS password changes.
+                                    uefi_setup_state: if mh_snapshot
+                                        .host_snapshot
+                                        .bmc_vendor()
+                                        .is_lenovo()
+                                    {
+                                        UefiSetupState::UnlockHost
+                                    } else {
+                                        UefiSetupState::SetUefiPassword
+                                    },
                                 },
                             },
                         },

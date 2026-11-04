@@ -19,6 +19,7 @@
 //! version selected before dispatch. Saved jobs use their persisted version;
 //! older jobs without one finish enrollment without claiming a site version.
 
+use carbide_redfish::libredfish::test_support::RedfishSimAction;
 use carbide_secrets::credentials::{CredentialKey, Credentials};
 use carbide_test_harness::prelude::*;
 use carbide_test_harness::test_support::fixture_config::FixtureDefault as _;
@@ -97,19 +98,117 @@ async fn lenovo_uefi_setup_unlocks_supported_bmc_controls(pool: PgPool) {
         bmc_vendor::BMCVendor::Lenovo
     );
 
-    // The legacy firmware's BMC-only unlock is a no-op. Both paths must
-    // advance, while firmware with the new controls actually unlocks.
-    for applies in [false, true] {
+    // Only the tested HS350 AMI platform needs a reboot after enabling its
+    // host interface. XCC retains its supported/no-op behavior without a reboot.
+    for (applies, vendor, model, reboot) in [
+        (
+            false,
+            bmc_vendor::BMCVendor::Lenovo,
+            "ThinkSystem SR650 V4",
+            false,
+        ),
+        (
+            true,
+            bmc_vendor::BMCVendor::Lenovo,
+            "ThinkSystem SR650 V4",
+            false,
+        ),
+        (
+            true,
+            bmc_vendor::BMCVendor::LenovoAMI,
+            "ThinkSystem HS350X V3",
+            true,
+        ),
+        (true, bmc_vendor::BMCVendor::LenovoAMI, "HG635N_V2", false),
+    ] {
+        let mut txn = pool.begin().await.unwrap();
+        let addr = mh.host.machine().await.status.bmc_info.ip_addr().unwrap();
+        let mut endpoint = db::explored_endpoints::find_by_ips(txn.as_mut(), vec![addr])
+            .await
+            .unwrap()
+            .pop()
+            .unwrap();
+        endpoint.report.vendor = Some(vendor);
+        endpoint.report.model = Some(model.to_string());
+        assert_eq!(
+            db::explored_endpoints::try_update(
+                endpoint.address,
+                endpoint.report_version,
+                &endpoint.report,
+                endpoint.waiting_for_explorer_refresh,
+                txn.as_mut(),
+            )
+            .await
+            .unwrap(),
+            db::ConditionalWrite::Applied(()),
+        );
+        txn.commit().await.unwrap();
+
         env.redfish_sim
             .set_lockdown(libredfish::EnabledDisabled::Enabled);
         env.redfish_sim.set_lockdown_bmc_applies(applies);
-        mh.advance_state(uefi_setup_state(UefiSetupState::UnlockHost))
-            .await;
+        mh.advance_state(ManagedHostState::HostInit {
+            machine_state: MachineState::WaitingForDiscovery,
+        })
+        .await;
+        let mut txn = pool.begin().await.unwrap();
+        db::machine::update_cleanup_time(&mh.host.machine().await, &mut txn)
+            .await
+            .unwrap();
+        db::machine::update_discovery_time(&mh.host.id.into(), &mut txn)
+            .await
+            .unwrap();
+        txn.commit().await.unwrap();
+
+        env.run_single_iteration().await;
+        assert!(at_uefi_step(
+            &mh.host.machine().await.state.value,
+            UefiSetupState::UnlockHost
+        ));
+
+        // A failed unlock must be retried before the password step.
+        env.redfish_sim
+            .fail_next_lockdown_bmc(libredfish::EnabledDisabled::Disabled, "BMC busy");
+        env.run_single_iteration().await;
+        assert!(at_uefi_step(
+            &mh.host.machine().await.state.value,
+            UefiSetupState::UnlockHost
+        ));
+        assert!(
+            env.redfish_sim
+                .lockdown_states()
+                .contains(&libredfish::EnabledDisabled::Enabled)
+        );
+
+        let timepoint = env.redfish_sim.timepoint();
+        if reboot {
+            env.redfish_sim
+                .fail_next_power_action(libredfish::SystemPowerControl::ForceRestart, "BMC busy");
+            env.run_single_iteration().await;
+            assert!(at_uefi_step(
+                &mh.host.machine().await.state.value,
+                UefiSetupState::UnlockHost
+            ));
+        }
+
         env.run_single_iteration().await;
         assert!(at_uefi_step(
             &mh.host.machine().await.state.value,
             UefiSetupState::SetUefiPassword
         ));
+        let actions = env.redfish_sim.actions_since(&timepoint).all_hosts();
+        assert_eq!(
+            actions.contains(&RedfishSimAction::Power(
+                libredfish::SystemPowerControl::ForceRestart
+            )),
+            reboot,
+            "unexpected unlock reboot for {model}",
+        );
+        if reboot {
+            assert!(actions.contains(&RedfishSimAction::PowerFailed(
+                libredfish::SystemPowerControl::ForceRestart
+            )));
+        }
         assert_eq!(
             env.redfish_sim
                 .lockdown_states()
