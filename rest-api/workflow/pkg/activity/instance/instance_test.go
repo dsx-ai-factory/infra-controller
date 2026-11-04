@@ -101,6 +101,62 @@ func TestResolvedVpcPrefixIDs(t *testing.T) {
 	}
 }
 
+func TestDpuExtensionServiceDeploymentStatusFromSite(t *testing.T) {
+	tests := []struct {
+		name            string
+		status          corev1.DpuExtensionServiceDeploymentStatus
+		wantStatus      string
+		wantRecoverable bool
+	}{
+		{
+			name:            "Pending",
+			status:          corev1.DpuExtensionServiceDeploymentStatus_DPU_EXTENSION_SERVICE_PENDING,
+			wantStatus:      cdbm.DpuExtensionServiceDeploymentStatusPending,
+			wantRecoverable: true,
+		},
+		{
+			name:            "Running",
+			status:          corev1.DpuExtensionServiceDeploymentStatus_DPU_EXTENSION_SERVICE_RUNNING,
+			wantStatus:      cdbm.DpuExtensionServiceDeploymentStatusRunning,
+			wantRecoverable: true,
+		},
+		{
+			name:       "Terminating",
+			status:     corev1.DpuExtensionServiceDeploymentStatus_DPU_EXTENSION_SERVICE_TERMINATING,
+			wantStatus: cdbm.DpuExtensionServiceDeploymentStatusTerminating,
+		},
+		{
+			name:       "Terminated",
+			status:     corev1.DpuExtensionServiceDeploymentStatus_DPU_EXTENSION_SERVICE_TERMINATED,
+			wantStatus: cdbm.DpuExtensionServiceDeploymentStatusTerminating,
+		},
+		{
+			name:            "Error",
+			status:          corev1.DpuExtensionServiceDeploymentStatus_DPU_EXTENSION_SERVICE_ERROR,
+			wantStatus:      cdbm.DpuExtensionServiceDeploymentStatusError,
+			wantRecoverable: true,
+		},
+		{
+			name:            "Failed",
+			status:          corev1.DpuExtensionServiceDeploymentStatus_DPU_EXTENSION_SERVICE_FAILED,
+			wantStatus:      cdbm.DpuExtensionServiceDeploymentStatusFailed,
+			wantRecoverable: true,
+		},
+		{
+			name:   "Unknown",
+			status: corev1.DpuExtensionServiceDeploymentStatus_DPU_EXTENSION_SERVICE_UNKNOWN,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			status, recoverable := dpuExtensionServiceDeploymentStatusFromSite(tc.status)
+			assert.Equal(t, tc.wantStatus, status)
+			assert.Equal(t, tc.wantRecoverable, recoverable)
+		})
+	}
+}
+
 func TestGetDevicelessInterfaceKey(t *testing.T) {
 	prefixID := uuid.NewString()
 	tests := []struct {
@@ -1579,6 +1635,9 @@ func TestManageInstance_UpdateInstancesInDB(t *testing.T) {
 	dpuExtensionService2 := util.TestBuildDpuExtensionService(t, dbSession, "test-dpu-ext-service-2", site, tenant, "ovs-offload", cutil.GetPtr("1"), nil, []string{}, cdbm.DpuExtensionServiceStatusReady, ipu)
 	assert.NotNil(t, dpuExtensionService2)
 
+	dpuExtensionService3 := util.TestBuildDpuExtensionService(t, dbSession, "test-dpu-ext-service-3", site, tenant, cdbm.DpuExtensionServiceServiceTypeKubernetesPod, cutil.GetPtr("1.0.0"), nil, []string{"1.0.0"}, cdbm.DpuExtensionServiceStatusReady, ipu)
+	assert.NotNil(t, dpuExtensionService3)
+
 	// Create DPU Extension Service Deployment for instance1 - will be updated to Running
 	dpuExtServiceDeployment1 := util.TestBuildDpuExtensionServiceDeployment(t, dbSession, dpuExtensionService1.ID, site.ID, tenant.ID, instance1.ID, "1.0.0", cdbm.DpuExtensionServiceDeploymentStatusPending, ipu)
 	assert.NotNil(t, dpuExtServiceDeployment1)
@@ -1640,6 +1699,10 @@ func TestManageInstance_UpdateInstancesInDB(t *testing.T) {
 								ServiceId: dpuExtensionService1.ID.String(),
 								Version:   "1.0.0",
 							},
+							{
+								ServiceId: dpuExtensionService3.ID.String(),
+								Version:   "1.0.0",
+							},
 						},
 					},
 					Nvlink: &corev1.InstanceNVLinkConfig{
@@ -1698,6 +1761,11 @@ func TestManageInstance_UpdateInstancesInDB(t *testing.T) {
 						DpuExtensionServices: []*corev1.InstanceDpuExtensionServiceStatus{
 							{
 								ServiceId:        dpuExtensionService1.ID.String(),
+								Version:          "1.0.0",
+								DeploymentStatus: corev1.DpuExtensionServiceDeploymentStatus_DPU_EXTENSION_SERVICE_RUNNING,
+							},
+							{
+								ServiceId:        dpuExtensionService3.ID.String(),
 								Version:          "1.0.0",
 								DeploymentStatus: corev1.DpuExtensionServiceDeploymentStatus_DPU_EXTENSION_SERVICE_RUNNING,
 							},
@@ -2413,6 +2481,13 @@ func TestManageInstance_UpdateInstancesInDB(t *testing.T) {
 
 	cfg := config.GetTestConfig()
 
+	type recoveredDpuExtensionServiceDeployment struct {
+		instanceID uuid.UUID
+		serviceID  uuid.UUID
+		version    string
+		status     string
+	}
+
 	tests := []struct {
 		name                                  string
 		siteID                                uuid.UUID
@@ -2446,6 +2521,7 @@ func TestManageInstance_UpdateInstancesInDB(t *testing.T) {
 		readyInfiniBandInterfaces             []*cdbm.InfiniBandInterface
 		updatedDpuExtServiceDeployments       []*cdbm.DpuExtensionServiceDeployment
 		deletedDpuExtServiceDeployments       []*cdbm.DpuExtensionServiceDeployment
+		recoveredDpuExtServiceDeployments     []recoveredDpuExtensionServiceDeployment
 		readyNVLinkInterfaces                 []*cdbm.NVLinkInterface
 		deletedNVLinkInterfaces               []*cdbm.NVLinkInterface
 		deletingNVLinkInterfaces              []*cdbm.NVLinkInterface
@@ -2488,10 +2564,16 @@ func TestManageInstance_UpdateInstancesInDB(t *testing.T) {
 			deviceLessFNNVirtualInterface:         deviceLessFNNVirtualInterface,
 			updatedDpuExtServiceDeployments:       []*cdbm.DpuExtensionServiceDeployment{dpuExtServiceDeployment1},
 			deletedDpuExtServiceDeployments:       []*cdbm.DpuExtensionServiceDeployment{dpuExtServiceDeployment2},
-			readyNVLinkInterfaces:                 []*cdbm.NVLinkInterface{nvlinkInterface1, nvlinkInterface2},
-			deletedNVLinkInterfaces:               []*cdbm.NVLinkInterface{nvlinkInterface3},
-			tpmCertificateUpdatedInstance:         instance16,
-			expectErr:                             false,
+			recoveredDpuExtServiceDeployments: []recoveredDpuExtensionServiceDeployment{{
+				instanceID: instance1.ID,
+				serviceID:  dpuExtensionService3.ID,
+				version:    "1.0.0",
+				status:     cdbm.DpuExtensionServiceDeploymentStatusRunning,
+			}},
+			readyNVLinkInterfaces:         []*cdbm.NVLinkInterface{nvlinkInterface1, nvlinkInterface2},
+			deletedNVLinkInterfaces:       []*cdbm.NVLinkInterface{nvlinkInterface3},
+			tpmCertificateUpdatedInstance: instance16,
+			expectErr:                     false,
 		},
 		{
 			name:             "test Instance inventory processing success with nil TPM certificate update",
@@ -2983,6 +3065,19 @@ func TestManageInstance_UpdateInstancesInDB(t *testing.T) {
 				}
 			}
 
+			for _, expected := range tc.recoveredDpuExtServiceDeployments {
+				desdDAO := cdbm.NewDpuExtensionServiceDeploymentDAO(dbSession)
+				deployments, count, err := desdDAO.GetAll(ctx, nil, cdbm.DpuExtensionServiceDeploymentFilterInput{
+					InstanceIDs:            []uuid.UUID{expected.instanceID},
+					DpuExtensionServiceIDs: []uuid.UUID{expected.serviceID},
+					Versions:               []string{expected.version},
+				}, cdbp.PageInput{}, nil)
+				require.NoError(t, err)
+				require.Equal(t, 1, count)
+				require.Len(t, deployments, 1)
+				assert.Equal(t, expected.status, deployments[0].Status)
+			}
+
 			if tc.readyNVLinkInterfaces != nil {
 				for _, nvIfc := range tc.readyNVLinkInterfaces {
 					unvIfc, err := nvifcDAO.GetByID(ctx, nil, nvIfc.ID, nil)
@@ -3005,6 +3100,201 @@ func TestManageInstance_UpdateInstancesInDB(t *testing.T) {
 					require.NoError(t, err, "NVLink Interface: %s for Instance: %s should still exist", nvIfc.ID.String(), nvIfc.Instance.Name)
 					assert.Equal(t, cdbm.NVLinkInterfaceStatusDeleting, unvIfc.Status)
 				}
+			}
+		})
+	}
+}
+
+func TestManageInstance_createOrUpdateDpuExtensionServiceDeploymentFromSite(t *testing.T) {
+	const version = "1.0.0"
+
+	tests := []struct {
+		name                  string
+		activeVersions        []string
+		serviceOnAnotherSite  bool
+		serviceForOtherTenant bool
+		deleted               bool
+		staleDelete           bool
+		wantDeployment        bool
+		wantActive            bool
+		wantIdempotent        bool
+	}{
+		{
+			name:           "creates missing deployment idempotently",
+			activeVersions: []string{version},
+			wantDeployment: true,
+			wantActive:     true,
+			wantIdempotent: true,
+		},
+		{
+			name:           "restores stale soft-deleted deployment",
+			activeVersions: []string{version},
+			deleted:        true,
+			staleDelete:    true,
+			wantDeployment: true,
+			wantActive:     true,
+		},
+		{
+			name:           "defers recently soft-deleted deployment",
+			activeVersions: []string{version},
+			deleted:        true,
+		},
+		{
+			name:                 "skips service on another Site",
+			activeVersions:       []string{version},
+			serviceOnAnotherSite: true,
+		},
+		{
+			name:                  "skips service owned by another Tenant",
+			activeVersions:        []string{version},
+			serviceForOtherTenant: true,
+		},
+		{
+			name:           "skips inactive version",
+			activeVersions: []string{"2.0.0"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			dbSession := util.TestInitDB(t)
+			t.Cleanup(func() {
+				dbSession.Close()
+			})
+			util.TestSetupSchema(t, dbSession)
+
+			user := util.TestBuildUser(t, dbSession, uuid.NewString(), []string{"test-org"}, []string{"admin"})
+			ip := util.TestBuildInfrastructureProvider(t, dbSession, "test-provider", "test-org", user)
+			site := util.TestBuildSite(t, dbSession, ip, "test-site", cdbm.SiteStatusRegistered, nil, user)
+			tenant := util.TestBuildTenant(t, dbSession, "test-tenant", "test-tenant-org", nil, user)
+			vpc := util.TestBuildVpc(t, dbSession, ip, site, tenant, "test-vpc")
+
+			instance := &cdbm.Instance{
+				ID:                       uuid.New(),
+				Name:                     "test-instance",
+				TenantID:                 tenant.ID,
+				InfrastructureProviderID: ip.ID,
+				SiteID:                   site.ID,
+				VpcID:                    vpc.ID,
+				Labels:                   map[string]string{},
+				Status:                   cdbm.InstanceStatusReady,
+				CreatedBy:                user.ID,
+			}
+			_, err := dbSession.DB.NewInsert().Model(instance).Exec(ctx)
+			require.NoError(t, err)
+
+			serviceSite := site
+			if tc.serviceOnAnotherSite {
+				serviceSite = util.TestBuildSite(t, dbSession, ip, "other-site", cdbm.SiteStatusRegistered, nil, user)
+			}
+			serviceTenant := tenant
+			if tc.serviceForOtherTenant {
+				serviceTenant = util.TestBuildTenant(t, dbSession, "other-tenant", "other-tenant-org", nil, user)
+			}
+			service := util.TestBuildDpuExtensionService(
+				t,
+				dbSession,
+				"test-service",
+				serviceSite,
+				serviceTenant,
+				cdbm.DpuExtensionServiceServiceTypeKubernetesPod,
+				cutil.GetPtr(version),
+				nil,
+				tc.activeVersions,
+				cdbm.DpuExtensionServiceStatusReady,
+				user,
+			)
+
+			var existing *cdbm.DpuExtensionServiceDeployment
+			deploymentDAO := cdbm.NewDpuExtensionServiceDeploymentDAO(dbSession)
+			if tc.deleted {
+				existing = util.TestBuildDpuExtensionServiceDeployment(
+					t,
+					dbSession,
+					service.ID,
+					site.ID,
+					tenant.ID,
+					instance.ID,
+					version,
+					cdbm.DpuExtensionServiceDeploymentStatusPending,
+					user,
+				)
+				require.NoError(t, deploymentDAO.Delete(ctx, nil, existing.ID))
+				if tc.staleDelete {
+					util.TestInventoryAgeDeletedTimestamp(
+						ctx,
+						t,
+						dbSession,
+						(*cdbm.DpuExtensionServiceDeployment)(nil),
+						existing.ID,
+					)
+				}
+			}
+
+			activity := ManageInstance{dbSession: dbSession}
+			reported := &corev1.InstanceDpuExtensionServiceStatus{
+				ServiceId:        service.ID.String(),
+				Version:          version,
+				DeploymentStatus: corev1.DpuExtensionServiceDeploymentStatus_DPU_EXTENSION_SERVICE_RUNNING,
+			}
+			deployment, err := activity.createOrUpdateDpuExtensionServiceDeploymentFromSite(
+				ctx,
+				site,
+				instance,
+				reported,
+				cdbm.DpuExtensionServiceDeploymentStatusRunning,
+			)
+			require.NoError(t, err)
+
+			if tc.wantDeployment {
+				require.NotNil(t, deployment)
+				assert.Equal(t, cdbm.DpuExtensionServiceDeploymentStatusRunning, deployment.Status)
+				assert.Equal(t, user.ID, deployment.CreatedBy)
+				if existing != nil {
+					assert.Equal(t, existing.ID, deployment.ID)
+				}
+				if tc.wantIdempotent {
+					repeated, repeatErr := activity.createOrUpdateDpuExtensionServiceDeploymentFromSite(
+						ctx,
+						site,
+						instance,
+						reported,
+						cdbm.DpuExtensionServiceDeploymentStatusRunning,
+					)
+					require.NoError(t, repeatErr)
+					require.NotNil(t, repeated)
+					assert.Equal(t, deployment.ID, repeated.ID)
+				}
+			} else {
+				assert.Nil(t, deployment)
+			}
+
+			deployments, count, err := deploymentDAO.GetAll(
+				ctx,
+				nil,
+				cdbm.DpuExtensionServiceDeploymentFilterInput{
+					InstanceIDs:            []uuid.UUID{instance.ID},
+					DpuExtensionServiceIDs: []uuid.UUID{service.ID},
+					Versions:               []string{version},
+					IncludeDeleted:         true,
+				},
+				cdbp.PageInput{},
+				nil,
+			)
+			require.NoError(t, err)
+
+			if tc.deleted || tc.wantDeployment {
+				require.Equal(t, 1, count)
+				require.Len(t, deployments, 1)
+				if tc.wantActive {
+					assert.Nil(t, deployments[0].Deleted)
+				} else {
+					assert.NotNil(t, deployments[0].Deleted)
+				}
+			} else {
+				assert.Zero(t, count)
+				assert.Empty(t, deployments)
 			}
 		})
 	}
