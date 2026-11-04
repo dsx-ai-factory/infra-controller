@@ -16,10 +16,12 @@
  */
 
 use std::collections::HashMap;
+use std::time::Duration;
 
 use ::rpc::admin_cli::OutputFormat;
 use ::rpc::forge as forgerpc;
 use eyre::WrapErr as _;
+use futures::{StreamExt, TryStreamExt, stream};
 use prettytable::{Table, row};
 use tokio::io::AsyncWrite;
 
@@ -31,11 +33,11 @@ pub(super) async fn handle_runs_show(
     args: ShowRunsOptions,
     output_format: OutputFormat,
     api_client: &ApiClient,
-    _page_size: usize,
+    request_timeout: Option<Duration>,
     output: &mut (dyn AsyncWrite + Unpin),
 ) -> CarbideCliResult<()> {
     let is_json = output_format == OutputFormat::Json;
-    show_runs(is_json, api_client, args, output).await?;
+    show_runs(is_json, api_client, args, request_timeout, output).await?;
     Ok(())
 }
 
@@ -43,6 +45,7 @@ async fn show_runs(
     json: bool,
     api_client: &ApiClient,
     args: ShowRunsOptions,
+    request_timeout: Option<Duration>,
     output: &mut (dyn AsyncWrite + Unpin),
 ) -> CarbideCliResult<()> {
     let runs = match api_client
@@ -60,18 +63,10 @@ async fn show_runs(
         )
         .wrap_err("write machine validation runs")?;
     } else {
-        let mut active_items = HashMap::new();
-        for run in &runs.runs {
-            if run.end_time.is_none()
-                && let Some(id) = run.validation_id
-            {
-                let items = api_client
-                    .find_machine_validation_run_items(id)
-                    .await
-                    .wrap_err_with(|| format!("load active tests for validation run {id}"))?;
-                active_items.insert(id, items);
-            }
-        }
+        // Match the transport's 300-second default, but cover the entire response,
+        // including body/trailers. The caller's request timeout overrides it per RPC.
+        let timeout = request_timeout.unwrap_or(Duration::from_secs(300));
+        let active_items = load_active_items(api_client, &runs, timeout).await?;
         crate::async_write!(
             output,
             "{}",
@@ -82,12 +77,80 @@ async fn show_runs(
     Ok(())
 }
 
+// Limit each lookup phase to eight RPCs. Finish ID discovery before loading
+// details so the phases cannot multiply concurrency across active runs.
+const LOOKUP_CONCURRENCY: usize = 8;
+
+type ActiveItems = HashMap<
+    carbide_uuid::machine_validation::MachineValidationId,
+    Vec<forgerpc::MachineValidationRunItem>,
+>;
+
+async fn load_active_items(
+    client: &ApiClient,
+    runs: &forgerpc::MachineValidationRunList,
+    timeout: Duration,
+) -> CarbideCliResult<ActiveItems> {
+    let ids: Vec<_> = stream::iter(
+        runs.runs
+            .iter()
+            .filter(|run| run.end_time.is_none())
+            .filter_map(|run| run.validation_id),
+    )
+    .map(|id| async move {
+        let response = tokio::time::timeout(
+            timeout,
+            client.0.find_machine_validation_run_item_ids(
+                forgerpc::MachineValidationRunItemSearchFilter {
+                    validation_id: Some(id),
+                },
+            ),
+        )
+        .await
+        .wrap_err_with(|| {
+            format!("finish run-item ID lookup for validation run {id} within {timeout:?}")
+        })?
+        .wrap_err_with(|| format!("load run-item IDs for validation run {id}"))?;
+        Ok::<_, crate::errors::CarbideCliError>((id, response.run_item_ids))
+    })
+    .buffered(LOOKUP_CONCURRENCY)
+    .try_collect()
+    .await?;
+
+    let details: Vec<_> = stream::iter(
+        ids.into_iter()
+            .flat_map(|(run_id, ids)| ids.into_iter().map(move |id| (run_id, id))),
+    )
+    .map(|(run_id, id)| async move {
+        let item_id = id.value.clone();
+        // One ID per request respects even the smallest site-configured limit.
+        let response = tokio::time::timeout(
+            timeout,
+            client.0.find_machine_validation_run_items_by_ids(
+                forgerpc::MachineValidationRunItemsByIdsRequest {
+                    run_item_ids: vec![id],
+                },
+            ),
+        )
+        .await
+        .wrap_err_with(|| format!("finish run-item {item_id} lookup within {timeout:?}"))?
+        .wrap_err_with(|| format!("load run-item {item_id} for validation run {run_id}"))?;
+        Ok::<_, crate::errors::CarbideCliError>((run_id, response.run_items))
+    })
+    .buffered(LOOKUP_CONCURRENCY)
+    .try_collect()
+    .await?;
+
+    let mut active_items = ActiveItems::new();
+    for (id, items) in details {
+        active_items.entry(id).or_default().extend(items);
+    }
+    Ok(active_items)
+}
+
 fn convert_runs_to_nice_table(
     runs: forgerpc::MachineValidationRunList,
-    active_items: &HashMap<
-        carbide_uuid::machine_validation::MachineValidationId,
-        Vec<forgerpc::MachineValidationRunItem>,
-    >,
+    active_items: &ActiveItems,
 ) -> Box<Table> {
     let mut table = Table::new();
 
@@ -156,6 +219,8 @@ fn convert_runs_to_nice_table(
 mod tests {
     use std::convert::Infallible;
     use std::panic::AssertUnwindSafe;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::time::Duration;
 
     use ::rpc::forge::*;
@@ -180,7 +245,31 @@ mod tests {
     use crate::cfg::runtime::{RuntimeConfig, RuntimeContext};
     use crate::rpc::ApiClient;
 
+    #[derive(Clone, Default)]
+    enum MockBehavior {
+        #[default]
+        Normal,
+        Stall(&'static str, Arc<AtomicBool>),
+        Concurrent(Arc<ConcurrencyProbe>),
+    }
+
+    struct ConcurrencyProbe {
+        active: AtomicUsize,
+        peak: AtomicUsize,
+        barrier: tokio::sync::Barrier,
+    }
+
     async fn public_runs_show_output(format: ::rpc::admin_cli::OutputFormat) -> String {
+        public_runs_show_result(format, MockBehavior::Normal, Duration::from_secs(5))
+            .await
+            .expect("runs show dispatch succeeds")
+    }
+
+    async fn public_runs_show_result(
+        format: ::rpc::admin_cli::OutputFormat,
+        behavior: MockBehavior,
+        request_timeout: Duration,
+    ) -> crate::errors::CarbideCliResult<String> {
         let command = parse_public_runs_show_command();
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
@@ -188,7 +277,6 @@ mod tests {
         let address = listener
             .local_addr()
             .expect("mock Machine Validation listener has an address");
-        let request_timeout = Duration::from_secs(5);
         let client_config = ForgeClientConfig {
             request_timeout: Some(request_timeout),
             ..Default::default()
@@ -216,24 +304,28 @@ mod tests {
             http2::Builder::new(TokioExecutor::new())
                 .serve_connection(
                     TokioIo::new(connection),
-                    service_fn(move |request| mock_runs_show_request(request, load_details)),
+                    service_fn(move |request| {
+                        mock_runs_show_request(request, load_details, behavior.clone())
+                    }),
                 )
                 .await
                 .expect("mock serves the CLI request");
         });
-        let result = AssertUnwindSafe(tokio::time::timeout(request_timeout, command.dispatch(ctx)))
-            .catch_unwind()
-            .await;
+        let result = AssertUnwindSafe(tokio::time::timeout(
+            Duration::from_secs(10),
+            command.dispatch(ctx),
+        ))
+        .catch_unwind()
+        .await;
         server.abort();
         if let Err(error) = server.await {
             assert!(error.is_cancelled(), "mock server failed: {error}");
         }
         result
             .expect("runs show dispatch does not panic")
-            .expect("runs show dispatch completes within the request timeout")
-            .expect("runs show dispatch succeeds");
+            .expect("runs show dispatch completes before the test guard")?;
 
-        String::from_utf8(captured.into_bytes().await).expect("CLI output is valid UTF-8")
+        Ok(String::from_utf8(captured.into_bytes().await).expect("CLI output is valid UTF-8"))
     }
 
     #[tokio::test]
@@ -282,6 +374,88 @@ mod tests {
         assert!(value["runs"][0].get("current_test").is_none());
     }
 
+    #[tokio::test]
+    async fn public_runs_show_bounds_stalled_lookup_response_bodies() {
+        for (path, context) in [
+            (
+                "/forge.Forge/FindMachineValidationRunItemIds",
+                "finish run-item ID lookup",
+            ),
+            (
+                "/forge.Forge/FindMachineValidationRunItemsByIds",
+                "finish run-item 44444444",
+            ),
+        ] {
+            let reached = Arc::new(AtomicBool::new(false));
+            let error = public_runs_show_result(
+                ::rpc::admin_cli::OutputFormat::AsciiTable,
+                MockBehavior::Stall(path, reached.clone()),
+                Duration::from_millis(500),
+            )
+            .await
+            .expect_err("stalled response must hit the configured deadline");
+            assert!(
+                reached.load(Ordering::SeqCst),
+                "lookup reached the stalled response"
+            );
+            let crate::errors::CarbideCliError::EyreReport(report) = error else {
+                panic!("expected contextual deadline error: {error}");
+            };
+            assert!(report.to_string().contains(context), "{report:?}");
+            assert!(
+                report
+                    .downcast_ref::<tokio::time::error::Elapsed>()
+                    .is_some(),
+                "{report:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn public_runs_show_bounds_concurrency_and_preserves_item_run_association() {
+        let probe = Arc::new(ConcurrencyProbe {
+            active: AtomicUsize::new(0),
+            peak: AtomicUsize::new(0),
+            barrier: tokio::sync::Barrier::new(super::LOOKUP_CONCURRENCY),
+        });
+        let display = public_runs_show_result(
+            ::rpc::admin_cli::OutputFormat::AsciiTable,
+            MockBehavior::Concurrent(probe.clone()),
+            Duration::from_secs(5),
+        )
+        .await
+        .expect("parallel lookups succeed");
+        assert_eq!(probe.peak.load(Ordering::SeqCst), super::LOOKUP_CONCURRENCY);
+        assert_eq!(probe.active.load(Ordering::SeqCst), 0);
+        let rows: Vec<Vec<_>> = display
+            .lines()
+            .filter(|line| line.starts_with('|'))
+            .map(|line| line.trim_matches('|').split('|').map(str::trim).collect())
+            .collect();
+        for (row, offset) in [(1, 0), (2, super::LOOKUP_CONCURRENCY)] {
+            let indices = offset..offset + super::LOOKUP_CONCURRENCY;
+            assert_eq!(
+                rows[row][7],
+                indices
+                    .clone()
+                    .map(|i| format!("test_{i:02}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+            assert_eq!(
+                rows[row][8],
+                indices
+                    .map(|i| format!("{} ({})", i + 1, mock_item_id(i)))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
+    }
+
+    fn mock_item_id(index: usize) -> String {
+        format!("44444444-4444-4444-8444-{index:012}")
+    }
+
     fn parse_public_runs_show_command() -> crate::machine_validation::Cmd {
         let options = CliOptions::try_parse_from([
             "nico-admin-cli",
@@ -301,7 +475,21 @@ mod tests {
     async fn mock_runs_show_request(
         request: hyper::Request<Incoming>,
         load_details: bool,
+        behavior: MockBehavior,
     ) -> Result<Response<UnsyncBoxBody<Bytes, Infallible>>, Infallible> {
+        if let MockBehavior::Stall(path, reached) = &behavior
+            && request.uri().path() == *path
+        {
+            reached.store(true, Ordering::SeqCst);
+            // Return HTTP/gRPC headers immediately, then never produce body or trailers.
+            return Ok(Response::builder()
+                .header(header::CONTENT_TYPE, "application/grpc+tonic")
+                .body(
+                    StreamBody::new(stream::pending::<Result<Frame<Bytes>, Infallible>>())
+                        .boxed_unsync(),
+                )
+                .unwrap());
+        }
         Ok(match request.uri().path() {
             "/forge.Forge/Version" => grpc_response(BuildInfo::default()),
             "/forge.Forge/GetMachineValidationRuns" => {
@@ -335,7 +523,11 @@ mod tests {
                                     .parse::<MachineValidationId>()
                                     .unwrap(),
                             ),
-                            end_time: Some(::rpc::Timestamp::default()),
+                            end_time: if matches!(behavior, MockBehavior::Concurrent(_)) {
+                                None
+                            } else {
+                                Some(::rpc::Timestamp::default())
+                            },
                             status: Some(MachineValidationStatus {
                                 total: 1,
                                 completed_tests: 1,
@@ -352,20 +544,65 @@ mod tests {
                 assert!(load_details, "JSON must not fetch additional run-item data");
                 let bytes = request.into_body().collect().await.unwrap().to_bytes();
                 let request = MachineValidationRunItemSearchFilter::decode(&bytes[5..]).unwrap();
-                assert_eq!(
-                    request.validation_id.unwrap().to_string(),
-                    "11111111-1111-4111-8111-111111111111"
-                );
+                let run_id = request.validation_id.unwrap().to_string();
+                let indices = match &behavior {
+                    MockBehavior::Concurrent(_) => {
+                        let offset = if run_id.starts_with("11111111") {
+                            0
+                        } else {
+                            super::LOOKUP_CONCURRENCY
+                        };
+                        offset..offset + super::LOOKUP_CONCURRENCY
+                    }
+                    _ => {
+                        assert!(run_id.starts_with("11111111"));
+                        // Retain the original fixture ID for the basic table test.
+                        return Ok(grpc_response(MachineValidationRunItemIdList {
+                            run_item_ids: vec![::rpc::common::Uuid {
+                                value: "44444444-4444-4444-8444-444444444444".into(),
+                            }],
+                        }));
+                    }
+                };
                 grpc_response(MachineValidationRunItemIdList {
-                    run_item_ids: vec![::rpc::common::Uuid {
-                        value: "44444444-4444-4444-8444-444444444444".into(),
-                    }],
+                    run_item_ids: indices
+                        .map(|i| ::rpc::common::Uuid {
+                            value: mock_item_id(i),
+                        })
+                        .collect(),
                 })
             }
             "/forge.Forge/FindMachineValidationRunItemsByIds" => {
                 assert!(load_details, "JSON must not fetch additional run-item data");
-                grpc_response(MachineValidationRunItemList {
-                    run_items: vec![MachineValidationRunItem {
+                let bytes = request.into_body().collect().await.unwrap().to_bytes();
+                let request = MachineValidationRunItemsByIdsRequest::decode(&bytes[5..]).unwrap();
+                assert_eq!(
+                    request.run_item_ids.len(),
+                    1,
+                    "respect a server limit of one ID"
+                );
+                let item = if let MockBehavior::Concurrent(probe) = &behavior {
+                    let id = &request.run_item_ids[0].value;
+                    let index: usize = id.rsplit('-').next().unwrap().parse().unwrap();
+                    let active = probe.active.fetch_add(1, Ordering::SeqCst) + 1;
+                    probe.peak.fetch_max(active, Ordering::SeqCst);
+                    assert!(active <= super::LOOKUP_CONCURRENCY);
+                    probe.barrier.wait().await;
+                    // Complete each window in reverse order to exercise ordered buffering.
+                    tokio::time::sleep(Duration::from_millis(
+                        (super::LOOKUP_CONCURRENCY - index % super::LOOKUP_CONCURRENCY) as u64 * 2,
+                    ))
+                    .await;
+                    probe.active.fetch_sub(1, Ordering::SeqCst);
+                    MachineValidationRunItem {
+                        test_id: format!("test_{index:02}"),
+                        state: "Running".into(),
+                        attempt: u32::try_from(index + 1).unwrap(),
+                        current_attempt_id: Some(request.run_item_ids[0].clone()),
+                        ..Default::default()
+                    }
+                } else {
+                    MachineValidationRunItem {
                         test_id: "forge_live_test".into(),
                         state: "Running".into(),
                         attempt: 2,
@@ -373,7 +610,10 @@ mod tests {
                             value: "33333333-3333-4333-8333-333333333333".into(),
                         }),
                         ..Default::default()
-                    }],
+                    }
+                };
+                grpc_response(MachineValidationRunItemList {
+                    run_items: vec![item],
                 })
             }
             path => panic!("unexpected mock Forge method: {path}"),
