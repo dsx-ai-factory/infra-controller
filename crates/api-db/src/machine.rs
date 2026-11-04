@@ -3710,9 +3710,9 @@ pub async fn try_set_machine_maintenance_requested(
     Ok(claimed)
 }
 
-/// Cancels only an unstarted Reset owned by the given rack initiator.
+/// Cancels only an unstarted Reboot or legacy Reset owned by the rack initiator.
 /// Requests already claimed by a machine controller or owned by others are preserved.
-pub async fn clear_unclaimed_machine_reset_request(
+pub async fn clear_unclaimed_machine_restart_request(
     txn: &mut PgConnection,
     machine_id: &HostMachineId,
     initiator: &str,
@@ -3723,12 +3723,13 @@ pub async fn clear_unclaimed_machine_reset_request(
     let query = r#"UPDATE machines SET machine_maintenance_requested = NULL
         WHERE id = $1 AND controller_state->>'state' <> 'maintenance'
           AND machine_maintenance_requested->>'initiator' = $2
-          AND machine_maintenance_requested->'operation' = $3
+          AND machine_maintenance_requested->'operation' IN ($3, $4)
         RETURNING id"#;
     Ok(sqlx::query_as::<_, MachineId>(query)
         .bind(machine_id)
         .bind(initiator)
         .bind(sqlx::types::Json(MachineMaintenanceOperation::Reset))
+        .bind(sqlx::types::Json(MachineMaintenanceOperation::Reboot))
         .fetch_optional(txn)
         .await
         .map_err(|error| DatabaseError::query(query, error))?
@@ -7408,7 +7409,7 @@ mod test {
                     txn.as_mut(),
                     machine_id,
                     "rack-test",
-                    super::MachineMaintenanceOperation::Reset
+                    super::MachineMaintenanceOperation::Reboot
                 )
                 .await?,
                 eligible,
@@ -7425,7 +7426,7 @@ mod test {
             );
             if eligible {
                 assert!(
-                    super::clear_unclaimed_machine_reset_request(
+                    super::clear_unclaimed_machine_restart_request(
                         txn.as_mut(),
                         &machine_id,
                         "rack-test"
@@ -7478,7 +7479,7 @@ mod test {
         };
         super::update_state(txn.as_mut(), &machine_id, &active).await?;
         assert!(
-            super::clear_unclaimed_machine_reset_request(txn.as_mut(), &machine_id, "rack-test")
+            super::clear_unclaimed_machine_restart_request(txn.as_mut(), &machine_id, "rack-test")
                 .await?
         );
         let stored = super::find_one(txn.as_mut(), &machine_id, Default::default())
@@ -7494,10 +7495,13 @@ mod test {
     async fn rack_reset_cancellation_preserves_claimed_and_foreign_requests(
         pool: sqlx::PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        use super::MachineMaintenanceOperation::{PowerOn, Reset};
+        use super::MachineMaintenanceOperation::{PowerOn, Reboot, Reset};
         let machine_id: HostMachineId =
             "fm100htes3rn1npvbtm5qd57dkilaag7ljugl1llmm7rfuq1ov50i0rpl30".parse()?;
         for (initiator, operation, started, should_clear) in [
+            ("rack-test", Reboot, false, true),
+            ("operator", Reboot, false, false),
+            ("rack-test", Reboot, true, false),
             ("rack-test", Reset, false, true),
             ("operator", Reset, false, false),
             ("rack-test", PowerOn, false, false),
@@ -7539,7 +7543,7 @@ mod test {
                 );
             }
             assert_eq!(
-                super::clear_unclaimed_machine_reset_request(
+                super::clear_unclaimed_machine_restart_request(
                     txn.as_mut(),
                     &machine_id,
                     "rack-test"

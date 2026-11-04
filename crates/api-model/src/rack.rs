@@ -680,7 +680,7 @@ impl Display for NvosUpdateState {
 pub enum RackPowerState {
     PoweringOn,
     PoweringOff,
-    /// Submits compute-host resets, or waits for the batch saved in PowerSequence.
+    /// Submits graceful compute-host reboots, or waits for the saved batch.
     PowerReset,
 }
 

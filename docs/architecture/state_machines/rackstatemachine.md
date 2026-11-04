@@ -206,8 +206,8 @@ all. Reprovision does not enable the ingestion flag. Predecessor rows without
 the flag do not gain an automatic reset.
 
 When an NVOS update triggers a reset, its completion commits the transition to
-`PowerReset` before any Reset request is queued. `PowerReset` then atomically
-queues asynchronous Reset requests for every compute host in the rack,
+`PowerReset` before any reboot request is queued. `PowerReset` then atomically
+queues asynchronous graceful `Reboot` requests for every compute host in the rack,
 regardless of device scope. The rack waits, without queuing any request, while
 any host has an instance or pending maintenance or is not in a state that accepts
 maintenance requests. Saved target IDs let the batch resume after a controller
@@ -215,23 +215,29 @@ restart.
 
 The batch completes when every request is cleared and every host has a Scout
 reboot timestamp later than the persisted batch-state timestamp. Hosts do not
-need to reach `Ready`, and the timestamp does not prove that this Reset caused
+need to reach `Ready`, and the timestamp does not prove that this request caused
 the reboot. The batch has no timeout; a host that never becomes eligible or never
 reports a newer reboot can leave maintenance waiting indefinitely
 ([timeout follow-up](https://github.com/dsx-ai-factory/infra-controller/issues/8461)).
 An operator can terminate maintenance, which cancels only saved, rack-owned
-Reset requests that no host has claimed. Membership changes start a fresh batch;
+restart requests that no host has claimed. Membership changes start a fresh batch;
 conflicting maintenance requests move the rack to `Error`. After the batch
 completes, maintenance runs NMX-C configuration if selected, or completes. A
 persisted `PoweringOn` state remains a no-op that completes maintenance without
 another reset.
+
+Graceful reboots do not fall back to forced restarts. Both direct Redfish and
+RMS compute backends receive `GracefulRestart`. Saved legacy `Reset` requests
+retain their existing forced-restart/power-cycle behavior and can still complete
+or be cancelled by the rack. All controllers reading machine maintenance must
+support the `Reboot` operation before a rack queues it.
 
 | Sub-state | Description |
 |-----------|-------------|
 | **FirmwareUpgrade** | Rack-level RMS firmware upgrade for scoped machines, switches, and power shelves. Sets per-device `firmware_upgrade_status` and drives switch `ReProvisioning::WaitingForRackFirmwareUpgrade` / machine `HostReprovision`. |
 | **NVOSUpdate** | NVOS image update and NVOS admin password recovery for scoped switches. Sets `nvos_update_status` and drives switch `ReProvisioning::WaitingForNVOSUpgrade`. |
 | **ConfigureNmxCluster** | Rotates switch-local certificates on every rack switch, submits the asynchronous RMS ScaleUpFabricManager job, then optionally binds nmx-telemetry on the selected primary. RMS V2 binds NMX-C. See sub-states below. |
-| **PowerSequence** | Compute-host Reset barrier before NMX-C configuration, under the ingestion or explicit-selection policy above. |
+| **PowerSequence** | Graceful compute-host reboot barrier before NMX-C configuration, under the ingestion or explicit-selection policy above. |
 | **Completed** | All requested maintenance activities finished; rack advances to validation. |
 
 #### ConfigureNmxCluster sub-states

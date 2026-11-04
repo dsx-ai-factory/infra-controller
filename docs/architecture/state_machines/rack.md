@@ -22,7 +22,7 @@ The request also carries an optional list of **maintenance activities** to perfo
 |----------|----------------------|---------------------|-------------|
 | Firmware Upgrade | `FirmwareUpgradeActivity` | `firmware_version`: SOT JSON (required for explicit selection). `components`: empty selects all. `access_token`: optional. `force_update`: defaults to false. | Reprovisioning and firmware upgrade via RMS. |
 | NVOS Update | `NvosUpdateActivity` | `config_json`: SOT JSON passed to RMS `ApplySwitchSystemImage` (required for explicit selection). `access_token`: optional. | NVOS image update for scoped switches through RMS. |
-| Power Sequence | `PowerSequenceActivity` | None | Explicitly reset all rack compute hosts before NMX-C configuration; device scope does not narrow this batch. |
+| Power Sequence | `PowerSequenceActivity` | None | Gracefully reboot all rack compute hosts before NMX-C configuration; device scope does not narrow this batch. |
 | Configure NMX Cluster | `ConfigureNmxClusterActivity` | None | NMX cluster configuration. |
 
 Each activity is represented as a `MaintenanceActivityConfig` message with a `oneof activity` field. The `oneof` discriminant identifies the activity type, and each variant carries only the configuration fields relevant to that activity.

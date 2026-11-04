@@ -5289,8 +5289,8 @@ const (
 	ComponentPowerActionOperation_COMPONENT_POWER_ACTION_OPERATION_POWER_ON ComponentPowerActionOperation = 1
 	// Power off the component; graceful identifies the saved shutdown mode.
 	ComponentPowerActionOperation_COMPONENT_POWER_ACTION_OPERATION_POWER_OFF ComponentPowerActionOperation = 2
-	// Reset the component. The saved state cannot distinguish original restart
-	// and AC-cycle requests, so no original power-control variant is inferred.
+	// Restart the component. graceful=true identifies an explicit graceful host
+	// reboot. Legacy Reset records do not distinguish restart and AC-cycle requests.
 	ComponentPowerActionOperation_COMPONENT_POWER_ACTION_OPERATION_RESET ComponentPowerActionOperation = 3
 	// Reset a specific Redfish chassis through a compute tray's BMC.
 	ComponentPowerActionOperation_COMPONENT_POWER_ACTION_OPERATION_CHASSIS_RESET ComponentPowerActionOperation = 4
@@ -63995,8 +63995,9 @@ type ComponentPowerAction struct {
 	// Saved initiator, including an explicitly stored empty string. Absent only
 	// when legacy active maintenance has no admitted request metadata.
 	Initiator *string `protobuf:"bytes,4,opt,name=initiator,proto3,oneof" json:"initiator,omitempty"`
-	// Present exactly for PowerOff. False means forced power off; true means
-	// graceful shutdown. Legacy operations without this flag default to false.
+	// Present for PowerOff (false: forced off, true: graceful shutdown) and for
+	// explicit graceful host reboots (operation Reset, true). Absent for legacy
+	// Reset records whose original restart mode was not preserved.
 	Graceful *bool `protobuf:"varint,5,opt,name=graceful,proto3,oneof" json:"graceful,omitempty"`
 	// Present exactly for ChassisReset; the recorded Redfish chassis identifier.
 	ChassisId     *string `protobuf:"bytes,6,opt,name=chassis_id,json=chassisId,proto3,oneof" json:"chassis_id,omitempty"`

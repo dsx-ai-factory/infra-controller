@@ -125,7 +125,7 @@ async fn request_compute_host_restarts(
             txn.as_mut(),
             machine.id,
             &initiator,
-            MachineMaintenanceOperation::Reset,
+            MachineMaintenanceOperation::Reboot,
         )
         .await?
         {
@@ -186,7 +186,10 @@ async fn wait_for_compute_host_restarts(
             .as_ref()
             .is_some_and(|request| {
                 request.initiator != initiator
-                    || request.operation != MachineMaintenanceOperation::Reset
+                    || !matches!(
+                        request.operation,
+                        MachineMaintenanceOperation::Reboot | MachineMaintenanceOperation::Reset
+                    )
             })
     }) {
         let rack_id = rack.id.clone();
@@ -434,10 +437,10 @@ async fn terminate_active_rack_maintenance(
             rack_power: RackPowerState::PowerReset,
             restart_machine_ids: Some(machine_ids),
         } => {
-            // Resets cover the saved batch, not the possibly narrower maintenance scope
+            // Restarts cover the saved batch, not the possibly narrower maintenance scope
             // or the rack's current membership.
             for machine_id in machine_ids {
-                db_machine::clear_unclaimed_machine_reset_request(
+                db_machine::clear_unclaimed_machine_restart_request(
                     txn.as_mut(),
                     machine_id,
                     &initiator,

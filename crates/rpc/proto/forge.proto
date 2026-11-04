@@ -8225,7 +8225,7 @@ message ConfigureNmxClusterActivity {
 }
 
 message PowerSequenceActivity {
-  // Explicitly reboot all rack compute hosts before NMX-C configuration.
+  // Explicitly gracefully reboot all rack compute hosts before NMX-C configuration.
   // Pending maintenance, instances, or ineligible hosts block the entire batch.
 }
 
@@ -11297,8 +11297,8 @@ enum ComponentPowerActionOperation {
   COMPONENT_POWER_ACTION_OPERATION_POWER_ON = 1;
   // Power off the component; graceful identifies the saved shutdown mode.
   COMPONENT_POWER_ACTION_OPERATION_POWER_OFF = 2;
-  // Reset the component. The saved state cannot distinguish original restart
-  // and AC-cycle requests, so no original power-control variant is inferred.
+  // Restart the component. graceful=true identifies an explicit graceful host
+  // reboot. Legacy Reset records do not distinguish restart and AC-cycle requests.
   COMPONENT_POWER_ACTION_OPERATION_RESET = 3;
   // Reset a specific Redfish chassis through a compute tray's BMC.
   COMPONENT_POWER_ACTION_OPERATION_CHASSIS_RESET = 4;
@@ -11317,8 +11317,9 @@ message ComponentPowerAction {
   // Saved initiator, including an explicitly stored empty string. Absent only
   // when legacy active maintenance has no admitted request metadata.
   optional string initiator = 4;
-  // Present exactly for PowerOff. False means forced power off; true means
-  // graceful shutdown. Legacy operations without this flag default to false.
+  // Present for PowerOff (false: forced off, true: graceful shutdown) and for
+  // explicit graceful host reboots (operation Reset, true). Absent for legacy
+  // Reset records whose original restart mode was not preserved.
   optional bool graceful = 5;
   // Present exactly for ChassisReset; the recorded Redfish chassis identifier.
   optional string chassis_id = 6;

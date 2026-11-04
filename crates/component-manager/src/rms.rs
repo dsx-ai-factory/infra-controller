@@ -5433,7 +5433,12 @@ impl ComputeTrayManager for RmsBackend {
             .resolve_pre_ingestion_compute_identities(&pre_ingestion_macs)
             .await?;
 
-        let operation = to_rms_power_operation(action);
+        // Preserve graceful compute reboots without changing switch, shelf, or
+        // legacy force-restart/power-cycle mappings.
+        let operation = match action {
+            PowerAction::GracefulRestart => rms::PowerOperation::GracefulRestart as i32,
+            _ => to_rms_power_operation(action),
+        };
         let mut results = Vec::with_capacity(endpoints.len());
 
         for ep in endpoints {
@@ -11295,36 +11300,80 @@ mod tests {
     #[carbide_macros::sqlx_test]
     async fn ct_power_control_success(pool: sqlx::PgPool) {
         let (mock, backend, rack_id, ct1, ct2) = make_compute_tray_backend(&pool).await;
-        mock.enqueue_batch_set_power_state(Ok(MockRmsApi::batch_set_power_state_ok(
-            &ct1.to_string(),
-        )))
-        .await;
-        mock.enqueue_batch_set_power_state(Ok(MockRmsApi::batch_set_power_state_ok(
-            &ct2.to_string(),
-        )))
-        .await;
-
         let eps = vec![
             make_ct_endpoint(CT_IP_1, CT_MAC_1),
             make_ct_endpoint(CT_IP_2, CT_MAC_2),
         ];
-        let results = ComputeTrayManager::power_control(&backend, &eps, PowerAction::On)
-            .await
-            .unwrap();
+        for (action, expected_operation) in [
+            (PowerAction::On, rms::PowerOperation::On),
+            (
+                PowerAction::GracefulRestart,
+                rms::PowerOperation::GracefulRestart,
+            ),
+            (PowerAction::ForceRestart, rms::PowerOperation::Reset),
+            (PowerAction::AcPowercycle, rms::PowerOperation::Reset),
+        ] {
+            let previous_calls = mock.batch_set_power_state_calls().await.len();
+            for id in [ct1, ct2] {
+                mock.enqueue_batch_set_power_state(Ok(MockRmsApi::batch_set_power_state_ok(
+                    &id.to_string(),
+                )))
+                .await;
+            }
 
-        assert_eq!(results.len(), 2);
-        assert!(results[0].success);
-        assert!(results[1].success);
+            let results = ComputeTrayManager::power_control(&backend, &eps, action)
+                .await
+                .unwrap();
 
+            assert_eq!(results.len(), 2, "{action:?}");
+            assert!(results.iter().all(|result| result.success), "{action:?}");
+
+            let calls = mock.batch_set_power_state_calls().await;
+            assert_eq!(calls.len(), previous_calls + 2, "{action:?}");
+            for (call, id) in calls[previous_calls..].iter().zip([ct1, ct2]) {
+                assert_eq!(call.operation, expected_operation as i32, "{action:?}");
+                let dev = &call.nodes.as_ref().unwrap().nodes[0];
+                assert_eq!(dev.node_id, id.to_string());
+                assert_eq!(dev.rack_id, rack_id.to_string());
+                assert_descriptor_node(dev, ROLE_COMPUTE);
+                assert!(dev.bmc_endpoint.is_some());
+                assert!(dev.host_endpoint.is_none());
+            }
+        }
+    }
+
+    #[carbide_macros::sqlx_test]
+    async fn ct_graceful_restart_failure_does_not_force_reset(pool: sqlx::PgPool) {
+        let (mock, backend, _, ct1, _) = make_compute_tray_backend(&pool).await;
+        mock.enqueue_batch_set_power_state(Ok(MockRmsApi::batch_set_power_state_fail(
+            &ct1.to_string(),
+            "graceful restart rejected",
+        )))
+        .await;
+
+        let results = ComputeTrayManager::power_control(
+            &backend,
+            &[make_ct_endpoint(CT_IP_1, CT_MAC_1)],
+            PowerAction::GracefulRestart,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(results.len(), 1);
+        assert!(!results[0].success);
+        assert!(
+            results[0]
+                .error
+                .as_deref()
+                .unwrap()
+                .contains("graceful restart rejected")
+        );
         let calls = mock.batch_set_power_state_calls().await;
-        assert_eq!(calls.len(), 2);
-        assert_eq!(calls[0].operation, rms::PowerOperation::On as i32);
-        let dev0 = &calls[0].nodes.as_ref().unwrap().nodes[0];
-        assert_eq!(dev0.node_id, ct1.to_string());
-        assert_eq!(dev0.rack_id, rack_id.to_string());
-        assert_descriptor_node(dev0, ROLE_COMPUTE);
-        assert!(dev0.bmc_endpoint.is_some());
-        assert!(dev0.host_endpoint.is_none());
+        assert_eq!(calls.len(), 1);
+        assert_eq!(
+            calls[0].operation,
+            rms::PowerOperation::GracefulRestart as i32
+        );
     }
 
     #[carbide_macros::sqlx_test]

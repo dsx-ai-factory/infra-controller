@@ -27834,7 +27834,7 @@ components:
           - Unknown
         operation:
           type: string
-          description: Recorded operation. `Reset` does not preserve the original graceful/forced/AC-cycle distinction.
+          description: Recorded operation. For `Reset`, graceful=true identifies an explicit graceful host reboot; legacy records do not preserve the original restart mode.
           enum:
           - PowerOn
           - PowerOff
@@ -27856,7 +27856,7 @@ components:
           type:
           - boolean
           - 'null'
-          description: 'Present for `PowerOff` only: true is graceful, false is forced. Null for other operations.'
+          description: 'For `PowerOff`, true is graceful and false is forced. For an explicit graceful host reboot, operation is `Reset` and graceful is true. Null for legacy Reset records and other operations.'
         chassisId:
           type:
           - string

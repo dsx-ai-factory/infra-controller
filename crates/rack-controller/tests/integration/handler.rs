@@ -1765,7 +1765,7 @@ async fn compute_hosts_restart_before_nmx_workflow(
             .machine_maintenance_requested
             .expect("rack restart request should be pending");
         assert_eq!(request.initiator, format!("rack-{rack_id}"));
-        assert_eq!(request.operation, MachineMaintenanceOperation::Reset);
+        assert_eq!(request.operation, MachineMaintenanceOperation::Reboot);
         assert_eq!(
             db::machine::clear_machine_maintenance_requested(txn.as_mut(), machine_id, &request,)
                 .await?,
@@ -2027,9 +2027,21 @@ async fn test_legacy_power_reset_submits_and_resumes_batch(
             .await?
             .unwrap();
         let request = machine.machine_maintenance_requested.unwrap();
-        assert_eq!(request.operation, MachineMaintenanceOperation::Reset);
+        assert_eq!(request.operation, MachineMaintenanceOperation::Reboot);
         requests.push(request);
     }
+    // A saved batch can contain a Reset queued before graceful reboots were
+    // introduced. Resume it without rejecting or rewriting that operation.
+    requests[0].operation = MachineMaintenanceOperation::Reset;
+    assert_eq!(
+        sqlx::query("UPDATE machines SET machine_maintenance_requested = $1 WHERE id = $2")
+            .bind(sqlx::types::Json(&requests[0]))
+            .bind(expected_ids[0])
+            .execute(&pool)
+            .await?
+            .rows_affected(),
+        1
+    );
     let mut responses = Vec::new();
     for id in [Some(rack_id.to_string()), None] {
         responses.push(
@@ -2116,7 +2128,7 @@ async fn test_terminate_compute_restarts_uses_saved_targets(
             txn.as_mut(),
             *id,
             &format!("rack-{rack_id}"),
-            MachineMaintenanceOperation::Reset,
+            MachineMaintenanceOperation::Reboot,
         )
         .await?;
     }
