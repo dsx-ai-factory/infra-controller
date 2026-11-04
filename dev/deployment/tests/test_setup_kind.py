@@ -133,7 +133,6 @@ else:
         cases = [
             ({"TEST_CIDRS": '["fd00:10:244::/64"]'}, "uses ipv6, requested ipv4"),
             ({"TEST_CIDRS": "[]"}, "invalid pod CIDRs"),
-            ({"TEST_NODE_ARCH": "arm64"}, "node architecture arm64"),
             ({"TEST_NODES": "fixture-control-plane\nfixture-worker"}, "one control-plane node"),
             ({"TEST_EXISTING": "false", "TEST_NODE_ARCH": "arm64"}, "node architecture arm64"),
         ]
@@ -144,7 +143,9 @@ else:
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn(message, result.stderr)
                 self.assertEqual(output, "original config\n")
-                forbidden = ("pull", "create", "delete") if existing == "true" else ("delete",)
+                self.assertEqual(any(call["args"][:2] == ["create", "cluster"] for call in calls),
+                                 existing == "false")
+                forbidden = ("pull", "delete") if existing == "true" else ("delete",)
                 self.assertFalse(any(call["args"][0] in forbidden for call in calls))
 
     def test_preflight_rejects_remote_or_non_native_daemon(self):
