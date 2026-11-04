@@ -30,9 +30,7 @@ use crate::collectors::inventory::{
 };
 use crate::collectors::runtime::{IterationResult, PeriodicCollector};
 use crate::endpoint::BmcEndpoint;
-use crate::sink::{
-    CollectorEvent, DataSink, EventContext, RedfishResourceType, ResourceStatusInfo,
-};
+use crate::sink::{CollectorEvent, DataSink, EventContext, ResourceStatusObservation};
 
 /// Configuration for the entity discovery collector
 pub struct EntityDiscoveryCollectorConfig<B: Bmc> {
@@ -127,11 +125,11 @@ impl<B: Bmc + 'static> PeriodicCollector<B> for EntityDiscoveryCollector<B> {
 }
 
 impl<B: Bmc + 'static> EntityDiscoveryCollector<B> {
-    fn emit_resource_status(&self, info: ResourceStatusInfo) {
+    fn emit_resource_status(&self, observation: ResourceStatusObservation) {
         if let Some(sink) = &self.resource_status_sink {
             sink.handle_event(
                 &self.event_context,
-                &CollectorEvent::ResourceStatusObservation(Box::new(info)),
+                &CollectorEvent::ResourceStatusObservation(Box::new(observation)),
             );
         }
     }
@@ -181,12 +179,7 @@ impl<B: Bmc + 'static> EntityDiscoveryCollector<B> {
             for system in systems.members().await? {
                 let system = Arc::new(system);
                 let raw = system.raw();
-                self.emit_resource_status(ResourceStatusInfo::from_redfish(
-                    RedfishResourceType::System,
-                    &raw.id,
-                    &raw.name,
-                    raw.status.as_ref(),
-                ));
+                self.emit_resource_status(ResourceStatusObservation::System(raw));
 
                 self.discover_processors(&system, fetch_failures, &mut entities, &mut sensor_ids)
                     .await;
@@ -210,12 +203,7 @@ impl<B: Bmc + 'static> EntityDiscoveryCollector<B> {
             for chassis in chassis_list.members().await? {
                 let chassis = Arc::new(chassis);
                 let raw = chassis.raw();
-                self.emit_resource_status(ResourceStatusInfo::from_redfish(
-                    RedfishResourceType::Chassis,
-                    &raw.id,
-                    &raw.name,
-                    raw.status.as_ref(),
-                ));
+                self.emit_resource_status(ResourceStatusObservation::Chassis(raw));
 
                 self.discover_power_supplies(
                     &chassis,

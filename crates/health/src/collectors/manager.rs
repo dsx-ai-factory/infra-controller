@@ -35,7 +35,7 @@ use crate::collectors::{IterationResult, PeriodicCollector};
 use crate::endpoint::BmcEndpoint;
 use crate::metrics::MetricLabel;
 use crate::sink::{
-    CollectorEvent, DataSink, EventContext, MetricSample, RedfishResourceType, ResourceStatusInfo,
+    CollectorEvent, DataSink, EventContext, MetricSample, ResourceStatusObservation,
 };
 
 /// Configuration for the manager collector.
@@ -93,12 +93,7 @@ where
             let raw = manager.raw();
             if self.emit_resource_status {
                 self.emit_event(CollectorEvent::ResourceStatusObservation(Box::new(
-                    ResourceStatusInfo::from_redfish(
-                        RedfishResourceType::Manager,
-                        &raw.id,
-                        &raw.name,
-                        raw.status.as_ref(),
-                    ),
+                    ResourceStatusObservation::Manager(Arc::clone(&raw)),
                 )));
             }
             for sample in manager_metrics(&raw, &raw.odata_id.to_string()) {
