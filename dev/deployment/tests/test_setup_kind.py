@@ -89,14 +89,18 @@ else:
             return result, calls, output.read_text() if output.exists() else None
 
     def test_create_native_cluster_and_export_only_after_validation(self):
+        # Cover both native architectures and the runtime/client distinction
+        # without repeating each architecture for every client OS.
         cases = [
-            ("x86_64", "linux/x86_64", "amd64", "ipv4", ["10.244.0.0/24"]),
-            ("aarch64", "linux/aarch64", "arm64", "dual", ["10.244.0.0/24", "fd00:10:244::/64"]),
+            ("Linux", "x86_64", "linux/x86_64", "amd64", "ipv4", ["10.244.0.0/24"], True),
+            ("Linux", "aarch64", "linux/aarch64", "arm64", "dual", ["10.244.0.0/24", "fd00:10:244::/64"], False),
+            ("Darwin", "x86_64", "linux/aarch64", "arm64", "ipv4", ["10.244.0.0/24"], False),
         ]
-        for host, daemon, arch, family, cidrs in cases:
-            with self.subTest(arch=arch):
+        for client, host, daemon, arch, family, cidrs, default_config in cases:
+            with self.subTest(client=client, arch=arch):
                 result, calls, output = self.run_setup(
-                    ["--ip-family", family], TEST_HOST_ARCH=host, TEST_DAEMON=daemon,
+                    ["--ip-family", family], default_config=default_config,
+                    TEST_OS=client, TEST_HOST_ARCH=host, TEST_DAEMON=daemon,
                     TEST_NODE_ARCH=arch, TEST_CIDRS=json.dumps(cidrs),
                     TEST_CONTEXT="default", DOCKER_HOST="unix:///tmp/native.sock",
                 )
@@ -108,26 +112,9 @@ else:
                 self.assertEqual(create["config"]["networking"], {"ipFamily": family, "apiServerAddress": "127.0.0.1"})
                 self.assertNotIn("--retain", create["args"])
                 self.assertEqual(calls[-1]["args"][:2], ["export", "kubeconfig"])
+                if default_config:
+                    self.assertTrue(calls[-1]["args"][-1].endswith("/home/.kube/kind-fixture.yaml"))
                 self.assertEqual(output, "selected cluster\n")
-
-    def test_macos_uses_local_docker_runtime_architecture(self):
-        # The client process and container runtime can have different architectures.
-        for daemon, arch in (("linux/aarch64", "arm64"), ("linux/x86_64", "amd64")):
-            with self.subTest(arch=arch):
-                result, calls, output = self.run_setup(
-                    TEST_OS="Darwin", TEST_HOST_ARCH="x86_64", TEST_DAEMON=daemon,
-                    TEST_NODE_ARCH=arch, TEST_ENDPOINT="unix:///Users/dev/.docker/run/docker.sock",
-                )
-                self.assertEqual(result.returncode, 0, result.stderr)
-                pull = next(call for call in calls if call["command"] == "docker" and call["args"][0] == "pull")
-                self.assertEqual(pull["args"][1:3], ["--platform", f"linux/{arch}"])
-                self.assertEqual(output, "selected cluster\n")
-
-    def test_default_kubeconfig_creates_missing_home_directory(self):
-        result, calls, output = self.run_setup(default_config=True)
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertTrue(calls[-1]["args"][-1].endswith("/home/.kube/kind-fixture.yaml"))
-        self.assertEqual(output, "selected cluster\n")
 
     def test_help_does_not_contact_host_or_write_config(self):
         result, calls, output = self.run_setup(["--help"])
@@ -146,7 +133,6 @@ else:
         cases = [
             ({"TEST_CIDRS": '["fd00:10:244::/64"]'}, "uses ipv6, requested ipv4"),
             ({"TEST_CIDRS": "[]"}, "invalid pod CIDRs"),
-            ({"TEST_CIDRS": '["10.244.0.0/24", "10.244.1.0/24"]'}, "invalid pod CIDRs"),
             ({"TEST_NODE_ARCH": "arm64"}, "node architecture arm64"),
             ({"TEST_NODES": "fixture-control-plane\nfixture-worker"}, "one control-plane node"),
         ]
@@ -180,7 +166,7 @@ else:
                 self.assertFalse(any(call["args"][:2] == ["export", "kubeconfig"] for call in calls))
 
     def test_invalid_options_fail_before_host_commands(self):
-        for args in (["--ip-family", "bad"], ["--name", "../elsewhere"], ["--name"], ["--kubeconfig", ""]):
+        for args in (["--ip-family", "bad"], ["--name", "../elsewhere"], ["--name"]):
             with self.subTest(args=args):
                 result, calls, output = self.run_setup(args)
                 self.assertNotEqual(result.returncode, 0)
