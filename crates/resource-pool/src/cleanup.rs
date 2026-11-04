@@ -53,12 +53,43 @@ impl AllocationCleanup {
         database: &PgPool,
         cancel: &CancellationToken,
     ) -> Result<(), ResourcePoolBackendError> {
+        self.wait_with_timing(
+            registry,
+            database,
+            cancel,
+            CLEANUP_TIMEOUT,
+            CLEANUP_INTERVAL,
+        )
+        .await
+    }
+
+    #[cfg(test)]
+    pub(super) async fn wait_with_test_timing(
+        &self,
+        registry: &ResourcePoolRegistry,
+        database: &PgPool,
+        cancel: &CancellationToken,
+        timeout: Duration,
+        interval: Duration,
+    ) -> Result<(), ResourcePoolBackendError> {
+        self.wait_with_timing(registry, database, cancel, timeout, interval)
+            .await
+    }
+
+    async fn wait_with_timing(
+        &self,
+        registry: &ResourcePoolRegistry,
+        database: &PgPool,
+        cancel: &CancellationToken,
+        timeout: Duration,
+        interval: Duration,
+    ) -> Result<(), ResourcePoolBackendError> {
         let Some(request_id) = self.request_id else {
             return Ok(());
         };
 
         cancel
-            .run_until_cancelled(tokio::time::timeout(CLEANUP_TIMEOUT, async {
+            .run_until_cancelled(tokio::time::timeout(timeout, async {
                 let mut txn = database_transaction(database).await?;
                 let saved = storage::load(&mut txn, request_id)
                     .await?
@@ -95,7 +126,7 @@ impl AllocationCleanup {
                         AllocationState::CancelRequested | AllocationState::ReleaseRequested => {}
                         _ => return Err(RemoteResourcePoolError::NotCurrent.into()),
                     }
-                    tokio::time::sleep(CLEANUP_INTERVAL).await;
+                    tokio::time::sleep(interval).await;
                 }
             }))
             .await
