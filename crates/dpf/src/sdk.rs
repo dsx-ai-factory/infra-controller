@@ -1325,7 +1325,7 @@ pub fn build_deployment(
                 flavor_template: matches!(deployment_type, DpuDeploymentType::Bf4Astra)
                     .then(|| flavor_name.to_string()),
             },
-            revision_history_limit: None,
+            revision_history_limit: Some(5000),
             service_chains,
             services: services_map,
         },
@@ -6478,7 +6478,7 @@ mod tests {
     }
 
     #[test]
-    fn deployment_disables_secure_boot() {
+    fn deployment_defaults() {
         let deployment = build_deployment(
             &[],
             "deployment",
@@ -6490,6 +6490,7 @@ mod tests {
             DpuDeploymentType::Bf3,
         );
 
+        assert_eq!(deployment.spec.revision_history_limit, Some(5000));
         assert_eq!(deployment.spec.dpus.secure_boot, Some(false));
         assert_eq!(
             serde_json::to_value(deployment).unwrap()["spec"]["dpus"]["secureBoot"],
