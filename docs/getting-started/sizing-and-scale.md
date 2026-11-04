@@ -103,15 +103,17 @@ release's notes state which of these changes it includes.
 
 Rack count is a convenient unit, but NICo's work scales with the devices in
 the racks: the BMC endpoints the site explorer probes, the machines the state
-controllers advance, and the rows the database holds for them. The rack
-profile sets the count. A GB200 NVL72 rack with 2 DPUs per compute tray has 18
-host BMCs, 36 DPU BMCs, 9 switch tray BMCs, and 8 power shelf BMCs: 71 BMC
-endpoints and 54 machines. The same rack with one DPU per tray has 53
-endpoints and 36 machines. The GB300 NVL72 rack profile has 18 compute trays,
-9 switch trays, and 6 power shelves, which is 51 endpoints with the one DPU
-per tray that the simulator models for it. The rack profiles ship in the
-nico-api chart configuration under `[rack_profiles]`. Size by endpoints and
-machines, then convert to racks for the profile in use.
+controllers advance, and the rows the database holds for them. The
+simulated rack definition sets the count. A GB200 NVL72 rack with 2 DPUs per
+compute tray has 18 host BMCs, 36 DPU BMCs, 9 switch tray BMCs, and 8 power
+shelf BMCs: 71 BMC endpoints and 54 machines. The same rack with one DPU per
+tray has 53 endpoints and 36 machines. The simulated GB300 NVL72 rack has 18
+compute trays, 9 switch trays, and 6 power shelves, which is 51 endpoints
+with the one DPU per tray that the simulator models for it. The rack
+profiles that ship in the nico-api chart configuration under
+`[rack_profiles]` carry minimum device counts for the rack state machine,
+not these totals. Size by endpoints and machines, then convert to racks for
+the rack type in use.
 
 Three things set the pace and the ceiling in the measurements:
 
@@ -275,7 +277,7 @@ split in these cases:
 
 | Limit | Value | Reference |
 |---|---|---|
-| BMC endpoints and machines per rack | 71 and 54 for GB200 NVL72 with 2 DPUs per tray, from the rack profile | [What Limits Scale](#what-limits-scale) |
+| BMC endpoints and machines per rack | 71 and 54 for GB200 NVL72 with 2 DPUs per tray, from the simulated rack definition | [What Limits Scale](#what-limits-scale) |
 | `max_concurrency` of the machine state controller | 10 by default, 80 to 120 recommended for large sites | [Large Site Sizing and Settings](../development/large-site-sizing-and-settings.md#time-to-ready-is-a-concurrency-setting) |
 | `max_database_connections` of nico-api | 1000 by default, within the Postgres `max_connections` of 1024 that helm-prereqs sets | [Settings Changed From the Defaults](../development/large-site-sizing-and-settings.md#settings-changed-from-the-defaults) |
 | API admission control | Enabled by default, with 64 requests in flight and 1024 pending in total and 8 in flight and 64 pending per client. Disabled for the simulated fleet runs that converged. The run with it enabled at raised limits stalled, refer to [What Limits Scale](#what-limits-scale) | [What Limits Scale](#what-limits-scale) and the [configuration reference](https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/api-core/src/cfg/README.md#apiadmissioncontrolconfig) |
