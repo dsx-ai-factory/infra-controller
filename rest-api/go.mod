@@ -38,7 +38,7 @@ require (
 	github.com/joho/godotenv v1.5.1
 	github.com/klauspost/connect-compress/v2 v2.0.0
 	github.com/labstack/echo-contrib v0.17.4
-	github.com/labstack/echo/v4 v4.16.2
+	github.com/labstack/echo/v4 v4.16.3
 	github.com/lib/pq v1.12.3
 	github.com/metal-stack/v v1.0.3
 	github.com/mitchellh/mapstructure v1.5.0
