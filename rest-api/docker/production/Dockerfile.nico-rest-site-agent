@@ -42,7 +42,6 @@ COPY common/ ./common/
 COPY site-manager/ ./site-manager/
 COPY proto/ ./proto/
 COPY site-workflow/ ./site-workflow/
-COPY cert-manager/ ./cert-manager/
 
 # Build site-agent
 WORKDIR /workspace/site-agent

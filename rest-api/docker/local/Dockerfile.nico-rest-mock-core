@@ -37,7 +37,6 @@ COPY common/ ./common/
 COPY site-manager/ ./site-manager/
 COPY proto/ ./proto/
 COPY site-workflow/ ./site-workflow/
-COPY cert-manager/ ./cert-manager/
 
 # Build mock-core (nico mock gRPC server)
 WORKDIR /workspace/site-agent

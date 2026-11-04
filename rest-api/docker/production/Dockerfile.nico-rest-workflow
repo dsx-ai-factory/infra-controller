@@ -44,7 +44,6 @@ COPY ipam/ ./ipam/
 COPY site-workflow/ ./site-workflow/
 COPY proto/ ./proto/
 COPY site-manager/ ./site-manager/
-COPY cert-manager/ ./cert-manager/
 
 # Create Temporal certs directory
 RUN mkdir -p /var/secrets/temporal/certs

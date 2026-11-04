@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-package sitemgr
+package sites
 
 import (
 	"bytes"
@@ -19,19 +19,16 @@ import (
 	"sync"
 	"time"
 
-	"github.com/NVIDIA/infra-controller/rest-api/cert-manager/pkg/certs"
-	"github.com/NVIDIA/infra-controller/rest-api/cert-manager/pkg/core"
+	"github.com/rs/zerolog/log"
+
+	"github.com/NVIDIA/infra-controller/rest-api/site-manager/internal/certmanager"
 	fakecrdclient "github.com/NVIDIA/infra-controller/rest-api/site-manager/pkg/client/clientset/versioned/fake"
-	crdsv1 "github.com/NVIDIA/infra-controller/rest-api/site-manager/pkg/crds/v1"
 	"github.com/NVIDIA/infra-controller/rest-api/site-manager/pkg/types"
-	"github.com/gorilla/mux"
 )
 
 const (
 	// Testuuid1 Test UUID 1
 	Testuuid1 = "test-uuid1-1234567890"
-	testuuid2 = "test-uuid2-1234567890"
-	testuuid3 = "test-uuid3-1234567890"
 )
 
 // Suite test instance
@@ -40,7 +37,6 @@ type Suite struct {
 	l net.Listener
 	//srv      *http.Server
 	srv      *httptest.Server
-	forceErr bool
 	tc       *http.Client
 	caPath   string
 	MgrURL   string
@@ -50,7 +46,7 @@ type Suite struct {
 
 // writeCAFile PEM-encodes cert into a temporary file usable as a CA bundle.
 func writeCAFile(cert *x509.Certificate) (string, error) {
-	f, err := os.CreateTemp("", "sitemgr-test-ca-*.pem")
+	f, err := os.CreateTemp("", "site-manager-test-ca-*.pem")
 	if err != nil {
 		return "", err
 	}
@@ -150,18 +146,15 @@ func (s *Suite) setup() error {
 	}
 	s.l = l
 
-	rtr := mux.NewRouter()
-	rtr.HandleFunc("/v1/pki/ca/pem", func(w http.ResponseWriter, _ *http.Request) {
+	rtr := http.NewServeMux()
+	rtr.HandleFunc("GET /v1/pki/ca/pem", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		// Mock response writes are best-effort if the client closes the connection.
 		_, _ = w.Write([]byte(testCACert))
-		if s.forceErr {
-			http.Error(w, "forced error", http.StatusInternalServerError)
-		}
 	})
 
-	rtr.HandleFunc("/v1/pki/cloud-cert", func(w http.ResponseWriter, _ *http.Request) {
-		resp := &certs.CertificateResponse{
+	rtr.HandleFunc("POST /v1/pki/cloud-cert", func(w http.ResponseWriter, _ *http.Request) {
+		resp := &certmanager.Certificate{
 			Key:         testKey,
 			Certificate: testCert,
 		}
@@ -171,9 +164,6 @@ func (s *Suite) setup() error {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write(c)
-		if s.forceErr {
-			http.Error(w, "forced error", http.StatusInternalServerError)
-		}
 	})
 
 	s.srv = httptest.NewUnstartedServer(rtr)
@@ -230,53 +220,6 @@ func (s *Suite) getSite(uuid string) (*types.SiteGetResponse, error) {
 	return sgr, nil
 }
 
-func (s *Suite) getSiteCreds(uuid, otp string) (*types.SiteCredsResponse, error) {
-	credsReq := &types.SiteCredsRequest{
-		SiteUUID: uuid,
-		OTP:      otp,
-	}
-	b := new(bytes.Buffer)
-	err := json.NewEncoder(b).Encode(credsReq)
-	if err != nil {
-		return nil, err
-	}
-	r, err := s.tc.Post(s.MgrURL+"/v1/sitecreds", "application/json", b)
-	if err != nil {
-		return nil, err
-	}
-	if http.StatusOK != r.StatusCode {
-		return nil, fmt.Errorf("status code: %v", r.StatusCode)
-	}
-	defer r.Body.Close()
-	c, err := io.ReadAll(r.Body)
-	if err != nil {
-		return nil, err
-	}
-	scr := &types.SiteCredsResponse{}
-	err = json.Unmarshal(c, scr)
-	if err != nil {
-		return nil, err
-	}
-	return scr, nil
-}
-
-func (s *Suite) getSiteCredsRaw(uuid, otp string) (*http.Response, error) {
-	credsReq := &types.SiteCredsRequest{
-		SiteUUID: uuid,
-		OTP:      otp,
-	}
-	b := new(bytes.Buffer)
-	err := json.NewEncoder(b).Encode(credsReq)
-	if err != nil {
-		return nil, err
-	}
-	r, err := s.tc.Post(s.MgrURL+"/v1/sitecreds", "application/json", b)
-	if err != nil {
-		return nil, err
-	}
-	return r, nil
-}
-
 func (s *Suite) createSite(uuid string) (*http.Response, error) {
 	req := &types.SiteCreateRequest{
 		SiteUUID: uuid,
@@ -310,234 +253,36 @@ func TestManagerCreateSite() (*Suite, error) {
 		credsMgrCAPath: ts.caPath,
 		ingressHost:    "test-host",
 		listenPort:     "0",
-		namespace:      "csm",
+		namespace:      "site-manager",
+		otpDuration:    defOTPDuration * time.Hour,
 	}
 
-	ctx := core.NewDefaultContext(context.Background())
-	runCtx, cancel := context.WithCancel(ctx)
+	runCtx, cancel := context.WithCancel(context.Background())
 	ts.cancel = cancel
 	m, err := newSiteManager(runCtx, o, fcrd)
 	if err != nil {
 		return ts, err
 	}
 	m.Start(runCtx)
-	log := m.log
 
 	testURL := fmt.Sprintf("https://%s", m.l.Addr().String())
-	log.Infof("mgr serving at %v", testURL)
+	log.Info().Str("url", testURL).Msg("test Site Manager serving")
 	ts.MgrURL = testURL
 
-	testCase("Create site")
 	r, err := ts.createSite(Testuuid1)
 	if err != nil {
-		log.Infof("%s", err.Error())
 		return ts, err
 	}
 	if http.StatusOK != r.StatusCode {
 		return ts, fmt.Errorf("status code is !OK %+v", r.StatusCode)
 	}
 
-	testCase("Get site")
 	sgr, err := ts.getSite(Testuuid1)
 	if err != nil {
-		log.Infof("%s", err.Error())
 		return ts, err
 	}
-	log.Infof("Got site: %+v", sgr)
-	// save for roll test
+	// Site Agent's bootstrap test exchanges this OTP for credentials.
 	ts.UUID1OTP = sgr.OTP
 
 	return ts, nil
-}
-
-// TestManagerSiteTest run tests on a site
-func (s *Suite) TestManagerSiteTest() error {
-	ts := s
-	tc := ts.tc
-	testURL := fmt.Sprintf("https://%s", s.l.Addr().String())
-	testCase("Get site credentials - bad OTP")
-	httpResp, err := ts.getSiteCredsRaw(Testuuid1, "guessanOTP12345")
-	if err != nil {
-		return err
-	}
-	defer httpResp.Body.Close()
-	if http.StatusOK == httpResp.StatusCode {
-		return fmt.Errorf("status code is OK %+v", httpResp.StatusCode)
-	}
-
-	testCase("Get site credentials")
-	scr, err := ts.getSiteCreds(Testuuid1, ts.UUID1OTP)
-	if err != nil {
-		return err
-	}
-
-	fmt.Printf("Got site creds: %+v", scr)
-
-	testCase("Get site credentials again")
-	httpResp, err = ts.getSiteCredsRaw(Testuuid1, ts.UUID1OTP)
-	if err != nil {
-		return err
-	}
-	defer httpResp.Body.Close()
-	if http.StatusOK != httpResp.StatusCode {
-		return fmt.Errorf("status code is !OK %+v", httpResp.StatusCode)
-	}
-
-	testCase("Register site")
-	r, err := tc.Post(testURL+"/v1/site/register/"+Testuuid1, "", nil)
-	if err != nil {
-		return err
-	}
-	defer r.Body.Close()
-	if http.StatusOK != r.StatusCode {
-		return fmt.Errorf("status code is !OK %+v", r.StatusCode)
-	}
-
-	testCase("Check site bootstrap status after registration")
-	sgr, err := ts.getSite(Testuuid1)
-	if err != nil {
-		return err
-	}
-	if crdsv1.SiteRegistrationComplete != sgr.BootstrapState {
-		return fmt.Errorf("SiteRegistration !Complete %+v", sgr.BootstrapState)
-	}
-
-	testCase("Get site credentials for a registered site")
-	httpResp, err = ts.getSiteCredsRaw(Testuuid1, sgr.OTP)
-	if err != nil {
-		return err
-	}
-	defer httpResp.Body.Close()
-	if http.StatusOK != httpResp.StatusCode {
-		return fmt.Errorf("status code is !OK %+v", httpResp.StatusCode)
-	}
-
-	testCase("Create duplicate site")
-	r, err = ts.createSite(Testuuid1)
-	if err != nil {
-		return err
-	}
-	defer r.Body.Close()
-	if http.StatusOK != r.StatusCode {
-		return fmt.Errorf("status code is !OK %+v", r.StatusCode)
-	}
-
-	testCase("Register non-existent site")
-	r, err = tc.Post(testURL+"/v1/site/register/"+testuuid2, "", nil)
-	if err != nil {
-		return err
-	}
-	defer r.Body.Close()
-	if http.StatusOK != r.StatusCode {
-		return fmt.Errorf("status code is !OK %+v", r.StatusCode)
-	}
-
-	testCase("Expired OTP")
-	otpDuration = 100 * time.Millisecond
-	r, err = ts.createSite(testuuid2)
-	if err != nil {
-		return err
-	}
-	defer r.Body.Close()
-	if http.StatusOK != r.StatusCode {
-		return fmt.Errorf("status code is !OK %+v", r.StatusCode)
-	}
-
-	sgr, err = ts.getSite(testuuid2)
-	if err != nil {
-		return err
-	}
-	if sgr.OTP == "" {
-		return fmt.Errorf("OTP is empty")
-	}
-	time.Sleep(110 * time.Millisecond)
-
-	httpResp, err = ts.getSiteCredsRaw(testuuid2, sgr.OTP)
-	if err != nil {
-		return err
-	}
-	defer httpResp.Body.Close()
-	if http.StatusOK != httpResp.StatusCode {
-		return fmt.Errorf("status code is !OK %+v", httpResp.StatusCode)
-	}
-	otpDuration = 24 * time.Hour
-
-	testCase("Delete a site")
-	dreq, err := http.NewRequest(http.MethodDelete, testURL+"/v1/site/"+testuuid2, nil)
-	if err != nil {
-		return err
-	}
-	httpResp, err = tc.Do(dreq)
-	if err != nil {
-		return err
-	}
-	defer httpResp.Body.Close()
-	if http.StatusOK != httpResp.StatusCode {
-		return fmt.Errorf("status code is !OK %+v", httpResp.StatusCode)
-	}
-
-	testCase("Delete non-existent site")
-	dreq, err = http.NewRequest(http.MethodDelete, testURL+"/v1/site/"+testuuid2, nil)
-	if err != nil {
-		return err
-	}
-	httpResp, err = tc.Do(dreq)
-	if err != nil {
-		return err
-	}
-	defer httpResp.Body.Close()
-	if http.StatusOK != httpResp.StatusCode {
-		return fmt.Errorf("status code is !OK %+v", httpResp.StatusCode)
-	}
-
-	testCase("Get a non-existent site")
-	httpResp, err = tc.Get(testURL + "/v1/site/" + testuuid2)
-	if err != nil {
-		return err
-	}
-	defer httpResp.Body.Close()
-	if http.StatusOK != httpResp.StatusCode {
-		return fmt.Errorf("status code is !OK %+v", httpResp.StatusCode)
-	}
-
-	testCase("Roll a site")
-	r, err = tc.Post(testURL+"/v1/site/roll/"+Testuuid1, "", nil)
-	if err != nil {
-		return err
-	}
-	defer r.Body.Close()
-	if http.StatusOK != r.StatusCode {
-		return fmt.Errorf("status code is !OK %+v", r.StatusCode)
-	}
-
-	sgr, err = ts.getSite(Testuuid1)
-	if err != nil {
-		return err
-	}
-	if crdsv1.SiteAwaitHandshake != sgr.BootstrapState {
-		return fmt.Errorf("!SiteAwaitHandshake %+v", sgr.BootstrapState)
-	}
-	if sgr.OTP != s.UUID1OTP {
-		return fmt.Errorf("!SiteAwaitHandshake %+v", sgr.BootstrapState)
-	}
-
-	_, err = ts.getSiteCreds(Testuuid1, sgr.OTP)
-	if err != nil {
-		return err
-	}
-	testCase("Roll a non-existent site")
-	r, err = tc.Post(testURL+"/v1/site/roll/"+testuuid2, "", nil)
-	if err != nil {
-		return err
-	}
-	defer r.Body.Close()
-	if http.StatusOK != r.StatusCode {
-		return fmt.Errorf("status code is !OK %+v", r.StatusCode)
-	}
-
-	return nil
-}
-
-func testCase(s string) {
-	fmt.Printf("\n=====\n===== Test Case: %s\n=====\n", s)
 }

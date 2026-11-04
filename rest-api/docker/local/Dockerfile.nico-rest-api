@@ -41,7 +41,6 @@ COPY workflow/ ./workflow/
 COPY site-workflow/ ./site-workflow/
 COPY ipam/ ./ipam/
 COPY site-manager/ ./site-manager/
-COPY cert-manager/ ./cert-manager/
 COPY openapi/ ./openapi/
 COPY cli/ ./cli/
 
