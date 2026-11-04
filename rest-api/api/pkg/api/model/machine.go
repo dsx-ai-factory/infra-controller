@@ -513,6 +513,44 @@ type APIMachineGPUInfo struct {
 	PciBusId *string `json:"pciBusId"`
 }
 
+// APIMachineDisk is the data structure to capture API representation of a disk of a Machine.
+// Clients use it to pick the disk an image-based Operating System is written to (imageDisk).
+type APIMachineDisk struct {
+	// Type is the kind of disk reported by the Machine, for example "nvme" or "disk"
+	Type string `json:"type"`
+	// Model is the model of the disk
+	Model string `json:"model"`
+	// Serial is the serial number of the disk
+	Serial string `json:"serial"`
+	// SizeMb is the size of the disk in megabytes, when the Machine reports it
+	SizeMb *uint32 `json:"sizeMb"`
+	// PciPath is the PCI sysfs path of the disk, when the Machine reports it
+	PciPath *string `json:"pciPath"`
+}
+
+// newAPIMachineDisks lists the NVMe and other block-device disks Core discovered.
+// A block device already reported as NVMe (same serial) is listed once.
+func newAPIMachineDisks(info *corev1.DiscoveryInfo) []APIMachineDisk {
+	disks := []APIMachineDisk{}
+	seen := map[string]bool{}
+
+	for _, nvme := range info.GetNvmeDevices() {
+		disk := APIMachineDisk{Type: "nvme", Model: nvme.Model, Serial: nvme.Serial, SizeMb: nvme.SizeMb}
+		disk.PciPath = nvme.PciPath
+		seen[nvme.Serial] = true
+		disks = append(disks, disk)
+	}
+
+	for _, dev := range info.GetBlockDevices() {
+		if dev.DeviceType != "disk" || seen[dev.Serial] {
+			continue
+		}
+		disks = append(disks, APIMachineDisk{Type: dev.DeviceType, Model: dev.Model, Serial: dev.Serial})
+	}
+
+	return disks
+}
+
 // FromProto populates an APIMachineGPUInfo from its protobuf form.
 func (gpu *APIMachineGPUInfo) FromProto(protoGpu *corev1.Gpu) {
 	if protoGpu == nil {
@@ -689,6 +727,8 @@ type APIMachineMetadata struct {
 	BMCInfo *APIBMCInfo `json:"bmcInfo"`
 	// GPUInfo is the list of GPUs for the machine
 	GPUs []APIMachineGPUInfo `json:"gpus"`
+	// Disks is the list of disks of the machine
+	Disks []APIMachineDisk `json:"disks"`
 	// NetworkInterfaces is the list of Ethernet interfaces of the machine
 	NetworkInterfaces []APIMachineNetworkInterface `json:"networkInterfaces"`
 	// InfiniBandInterfaces is the list of InfiniBand interfaces of the machine
@@ -706,6 +746,7 @@ func (m *APIMachineMetadata) FromProto(machine *corev1.Machine) {
 	m.DMIData = nil
 	m.BMCInfo = nil
 	m.GPUs = []APIMachineGPUInfo{}
+	m.Disks = []APIMachineDisk{}
 	m.NetworkInterfaces = []APIMachineNetworkInterface{}
 	m.InfiniBandInterfaces = []APIMachineInfiniBandInterface{}
 	m.LifecycleState = nil
@@ -728,6 +769,8 @@ func (m *APIMachineMetadata) FromProto(machine *corev1.Machine) {
 			apiGPUInfo.FromProto(gpuInfo)
 			m.GPUs = append(m.GPUs, apiGPUInfo)
 		}
+
+		m.Disks = newAPIMachineDisks(discoveryInfo)
 
 		for _, networkInterface := range discoveryInfo.NetworkInterfaces {
 			apiNetworkInterface := APIMachineNetworkInterface{}

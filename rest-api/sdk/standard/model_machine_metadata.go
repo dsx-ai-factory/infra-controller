@@ -30,6 +30,8 @@ type MachineMetadata struct {
 	BmcInfo NullableMachineBMCInfo `json:"bmcInfo"`
 	// GPU inventory reported for the Machine
 	Gpus []MachineGPUInfo `json:"gpus"`
+	// Disks reported by the Machine. Use model and serial to pick the disk for imageDisk when creating an image-based Operating System
+	Disks []MachineDisk `json:"disks,omitempty"`
 	// List of Ethernet interfaces of the machine
 	NetworkInterfaces []MachineNetworkInterface `json:"networkInterfaces"`
 	// List of InfiniBand interfaces of the machine
@@ -140,6 +142,38 @@ func (o *MachineMetadata) GetGpusOk() ([]MachineGPUInfo, bool) {
 // SetGpus sets field value
 func (o *MachineMetadata) SetGpus(v []MachineGPUInfo) {
 	o.Gpus = v
+}
+
+// GetDisks returns the Disks field value if set, zero value otherwise.
+func (o *MachineMetadata) GetDisks() []MachineDisk {
+	if o == nil || IsNil(o.Disks) {
+		var ret []MachineDisk
+		return ret
+	}
+	return o.Disks
+}
+
+// GetDisksOk returns a tuple with the Disks field value if set, nil otherwise
+// and a boolean to check if the value has been set.
+func (o *MachineMetadata) GetDisksOk() ([]MachineDisk, bool) {
+	if o == nil || IsNil(o.Disks) {
+		return nil, false
+	}
+	return o.Disks, true
+}
+
+// HasDisks returns a boolean if a field has been set.
+func (o *MachineMetadata) HasDisks() bool {
+	if o != nil && !IsNil(o.Disks) {
+		return true
+	}
+
+	return false
+}
+
+// SetDisks gets a reference to the given []MachineDisk and assigns it to the Disks field.
+func (o *MachineMetadata) SetDisks(v []MachineDisk) {
+	o.Disks = v
 }
 
 // GetNetworkInterfaces returns the NetworkInterfaces field value
@@ -253,6 +287,9 @@ func (o MachineMetadata) ToMap() (map[string]interface{}, error) {
 	toSerialize["dmiData"] = o.DmiData.Get()
 	toSerialize["bmcInfo"] = o.BmcInfo.Get()
 	toSerialize["gpus"] = o.Gpus
+	if !IsNil(o.Disks) {
+		toSerialize["disks"] = o.Disks
+	}
 	toSerialize["networkInterfaces"] = o.NetworkInterfaces
 	toSerialize["infinibandInterfaces"] = o.InfinibandInterfaces
 	toSerialize["lifecycleState"] = o.LifecycleState.Get()

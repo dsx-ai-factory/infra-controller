@@ -574,7 +574,7 @@ func TestMachine_NewAPIMachine(t *testing.T) {
 
 		var fields map[string]json.RawMessage
 		require.NoError(t, json.Unmarshal(payload, &fields))
-		for _, field := range []string{"gpus", "networkInterfaces", "infinibandInterfaces"} {
+		for _, field := range []string{"gpus", "disks", "networkInterfaces", "infinibandInterfaces"} {
 			value, found := fields[field]
 			require.True(t, found, "%s must be present", field)
 			assert.JSONEq(t, `[]`, string(value))
@@ -651,6 +651,7 @@ func TestAPIMachineMetadata_FromProto(t *testing.T) {
 				"dmiData": null,
 				"bmcInfo": null,
 				"gpus": [],
+				"disks": [],
 				"networkInterfaces": [],
 				"infinibandInterfaces": [],
 				"lifecycleState": null,
@@ -665,6 +666,7 @@ func TestAPIMachineMetadata_FromProto(t *testing.T) {
 				"dmiData": null,
 				"bmcInfo": null,
 				"gpus": [],
+				"disks": [],
 				"networkInterfaces": [],
 				"infinibandInterfaces": [],
 				"lifecycleState": {

@@ -30425,6 +30425,11 @@ components:
           items:
             $ref: '#/components/schemas/MachineGPUInfo'
           description: 'GPU inventory reported for the Machine'
+        disks:
+          type: array
+          items:
+            $ref: '#/components/schemas/MachineDisk'
+          description: 'Disks reported by the Machine. Use model and serial to pick the disk for imageDisk when creating an image-based Operating System'
         networkInterfaces:
           type: array
           items:
@@ -30647,6 +30652,37 @@ components:
             - string
             - 'null'
           description: 'DMI system vendor reported by the Machine'
+    MachineDisk:
+      title: MachineDisk
+      type: object
+      description: Describes a disk of a Machine
+      examples:
+        - type: nvme
+          model: Dell BOSS-N1
+          serial: CN0WW56VFCP0042T04MQ
+          sizeMb: null
+          pciPath: /devices/pci0000:00/0000:00:0a.0/0000:01:00.0/nvme/nvme2
+      properties:
+        type:
+          type: string
+          description: 'Kind of disk reported by the Machine, for example nvme'
+        model:
+          type: string
+          description: 'Model of the disk'
+        serial:
+          type: string
+          description: 'Serial number of the disk'
+        sizeMb:
+          type:
+            - integer
+            - 'null'
+          format: uint32
+          description: 'Size of the disk in megabytes, when the Machine reports it'
+        pciPath:
+          type:
+            - string
+            - 'null'
+          description: 'PCI sysfs path of the disk, when the Machine reports it'
     MachineGPUInfo:
       title: MachineGPUInfo
       type: object
