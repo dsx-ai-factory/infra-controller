@@ -297,8 +297,11 @@ REST resolves the site from `siteId` or the route's machine and supplies that
 machine as Core's expected-host check on Complete/Cancel. The route's
 `attemptId` maps to Core `request_id`; `holdId` is the expected hold identity
 for removal. Core `opened_at` maps to REST attempt `created`, and
-`allocation_state` maps to the attempt's `allocationStatus` values NotStarted,
-Creating, and Created. Core tenant organization IDs are resolved to REST Tenant
+`allocation_state` maps to the attempt's `allocationStatus` values `NotStarted`,
+`Creating`, and `Created`. Core `state_changed_at` maps to the hold's
+`statusChanged`, and `closed_at` maps to the attempt's `closed`. The companion
+supports completed-hold discovery with `status=Satisfied`.
+Core tenant organization IDs are resolved to REST Tenant
 UUIDs; the companion permits a null `tenantId` if no REST Tenant matches the org.
 
 REST's `pageNumber`, `pageSize`, and `orderBy` are adapter-level pagination over
@@ -308,17 +311,8 @@ Fetch details in batches respecting Core's configured `max_find_by_ids`, even
 when a REST page is larger than that limit. Neither layer promises a frozen
 snapshot across discovery and retrieval.
 
-Before operational integration, the companion REST schema still needs alignment
-with the remaining Core guarantees:
-
-- Core can discover/read Satisfied holds, while the companion hold enum and list
-  describe active states only and offer no state filter or completed-hold read.
-  Expose completed-state retrieval without dropping Core's retained outcomes.
-- Core provides `state_changed_at` and `closed_at`; the companion response models
-  expose creation time only. Define their REST representation for age monitoring.
-- The structured create outcomes and HTTP 201 guarantee below need REST/workflow
-  implementation and OpenAPI coverage; an attempt's `allocationStatus` alone is
-  not a structured create-error outcome.
+Before operational integration, the bound-create behavior below still needs
+REST/workflow implementation and OpenAPI coverage in the companion PR.
 
 The companion does not add `externalValidationRequestId` to batch create and
 ignores it there as an unknown JSON field. That is not request-bound allocation.
@@ -326,8 +320,11 @@ Callers must use single-instance create for this workflow; Core continues to
 reject a present binding in its batch RPC. Do not describe the REST placeholder
 as explicitly rejecting that unknown batch field.
 
-The following is the proposed REST contract for the request-bound allocation
-milestone; it is not implemented or added to OpenAPI by this contract-only PR:
+The following describes the binding requirements for the request-bound allocation
+milestone. The companion [PR #8147](https://github.com/dsx-ai-factory/infra-controller/pull/8147)
+and its [OpenAPI schema](https://github.com/dsx-ai-factory/infra-controller/blob/a05a3f4e45c7766dcf6de742bce4a82a774a3234/rest-api/openapi/spec.yaml)
+own the REST representation, including field names and status codes. This Core
+contract milestone does not implement the REST allocation path.
 
 - Add optional scalar UUID `externalValidationRequestId` to the single-instance
   create model and OpenAPI schema. Omission preserves ordinary allocation;
@@ -340,27 +337,21 @@ milestone; it is not implemented or added to OpenAPI by this contract-only PR:
   identity before dispatch. A replay of the same request and inputs must reuse
   that identity and return the original instance rather than generate a new one.
   Changed accepted inputs, including a different Core `instance_id`, conflict.
-- Capture Core's allocation metadata at the gRPC boundary and carry the state
-  through Temporal errors/results into a structured REST response. HTTP status,
-  a generic retryable flag, or parsing an error message cannot substitute for it.
+- Capture Core's allocation trailer at the gRPC boundary and preserve it through
+  Temporal errors/results so REST can distinguish a known in-progress allocation
+  from an uncertain outcome. Do not infer allocation state from error text or a
+  generic retryable flag.
 
-For a bound create response, propose structured fields
-`externalValidationRequestId` (the submitted UUID) and
-`externalValidationAllocationState` (`notStarted`, `creating`, `created`, or
-`unknown`). Preserve these fields in the error representation as well as the
-success response. The OpenAPI/REST implementation must establish the response
-schema before enabling this path.
+The bound-create semantics to preserve in that REST contract are:
 
 | Observed result | REST representation | Caller action |
 | --- | --- | --- |
-| Committed allocation or identical committed replay | HTTP 201 with the original instance and `created` | Continue using the saved instance identity and poll readiness. |
-| Definite rejection, confirmed unaccepted | HTTP 4xx with `notStarted`; for an existing attempt this requires authoritative Core confirmation | Correct inputs or cancel only after confirming the attempt is NotStarted. |
-| Accepted allocation still in progress | HTTP 503 with `creating`, preserving Core's `external-validation-allocation-state: creating` meaning | Retry the same request identity and inputs; never cancel. |
-| Lost reply, timeout, or otherwise uncertain outcome | `unknown` if an HTTP response is possible; network failure has no response | Reconcile the saved request; never cancel or create a new attempt merely because the reply was lost. |
+| Committed allocation or identical committed replay | HTTP 201 with the original instance, after Core commits the allocation and its binding | Continue using the saved instance identity and poll readiness. |
+| Accepted allocation still in progress, confirmed by Core's allocation trailer | HTTP 503 with `allocationStatus: Creating`, preserving Core's `external-validation-allocation-state: creating` meaning | Retry the same request identity and inputs; never cancel. |
+| Any other outcome, including a 4xx, an unclassified failure, or a lost reply | No allocation state in the response; a network failure has no response | Read the attempt's `allocationStatus` from the hold list before deciding what to do next. |
 
-For a bound create, HTTP 201 must always carry
-`externalValidationAllocationState: created`, never `creating`, `notStarted`,
-or `unknown`. The REST handler must await successful Core allocation and the
+For a bound create, HTTP 201 always implies Core allocation state Created.
+The REST handler must await successful Core allocation and the
 REST transaction before returning it. The existing unbound create path awaits
 the Site workflow's `AllocateInstance` call before returning 201; the bound
 implementation must preserve that ordering and additionally verify the durable
@@ -369,10 +360,12 @@ allocation-commit guarantee, not an instance-readiness guarantee, so callers may
 proceed directly from 201 to readiness polling without an extra hold lookup.
 
 A 4xx from a changed-input conflict is not proof that the original create was
-unaccepted. Missing structured state, an unrecognized state, and a bare 5xx are
-unknown outcomes. `notStarted` permits cancellation only while the saved attempt
-still satisfies Core's cancellation preconditions. The REST adapter must not
-classify an accepted operation as a definite rejection after an ambiguous result.
+unaccepted. REST does not add a Core read solely to report `NotStarted` on an
+error response. Except for a successful 201 or the trailer-confirmed Creating
+response, callers must read the hold list to determine the saved attempt's
+allocation status. A retrieved `NotStarted` permits cancellation only while the
+attempt still satisfies Core's cancellation preconditions. A missing or uncertain
+outcome never authorizes cancellation or a new attempt by itself.
 
 REST model/handler/workflow changes, OpenAPI, SDK regeneration, and integration
 tests are required together in the allocation milestone. These tests must cover
