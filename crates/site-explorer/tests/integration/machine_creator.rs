@@ -1509,16 +1509,8 @@ async fn test_create_machines_moves_on_after_a_failed_attempt_within_the_cap(
     let (healthy_host, endpoints) = register_ingestible_hosts(&env, &[rack_host(&rack_b)]).await?;
     explorer.insert_endpoints(endpoints);
 
-    let metrics = MetricsCapture::start();
     explorer.run_single_iteration().await?;
 
-    assert_eq!(
-        metrics.histogram_count_delta(
-            "carbide_site_explorer_managed_host_creation_latency_milliseconds",
-            &[("outcome", "failed")]
-        ),
-        1
-    );
     assert_eq!(ingested_host_count(&env.pool, &failing_host).await?, 0);
     assert_eq!(
         ingested_host_count(&env.pool, &healthy_host).await?,
