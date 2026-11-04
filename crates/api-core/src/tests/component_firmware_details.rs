@@ -2075,6 +2075,7 @@ async fn component_firmware_details_keep_owning_sources_and_target_identity(
             power_drains_needed: None,
             started_at: now,
             deadline: now + chrono::Duration::hours(1),
+            delivered_at: None,
             task_json: PRIVATE.into(),
             result: None,
         },

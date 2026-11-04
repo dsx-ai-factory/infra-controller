@@ -82,7 +82,6 @@ carbide-test-support = { path = "../test-support" }
 rcgen = { workspace = true }
 rustls = { workspace = true }
 tonic-prost = { workspace = true }
-tokio = { workspace = true, features = ["test-util"] }
 
 [build-dependencies]
 carbide-version = { path = "../version" }

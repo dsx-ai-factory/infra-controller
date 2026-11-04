@@ -49,8 +49,6 @@ impl ScoutFirmwareUpgradeState {
         task: &FirmwareUpgradeTask,
         config: &SupervisorConfig,
         instrumentation: &Instrumentation,
-        requires_acknowledgement: bool,
-        acknowledge: impl std::future::Future<Output = scout::CarbideClientResult<()>>,
     ) -> scout::CarbideClientResult<&FirmwareUpgradeResult> {
         if let Some(completed) = &self.completed
             && completed.task.upgrade_task_id == task.upgrade_task_id
@@ -61,9 +59,6 @@ impl ScoutFirmwareUpgradeState {
                 ));
             }
         } else {
-            if requires_acknowledgement {
-                acknowledge.await?;
-            }
             let result = handle_firmware_upgrade(client, task, config, instrumentation).await;
             let result = FirmwareUpgradeResult {
                 stdout: crate::truncate(
@@ -511,7 +506,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn acceptance_precedes_execution_and_redelivery_reuses_completion() {
+    async fn redelivery_reuses_bounded_completion() {
         let fixture = FirmwareUpgradeFixture::new();
         let instrumentation = Instrumentation::global();
         let directory = tempfile::tempdir().unwrap();
@@ -546,36 +541,8 @@ mod tests {
         };
         let client = reqwest::Client::new();
         let mut state = ScoutFirmwareUpgradeState::default();
-        let error = state
-            .run(
-                &client,
-                &task,
-                &fixture.config,
-                &instrumentation,
-                true,
-                async {
-                    Err(scout::CarbideClientError::TonicStatusError(
-                        tonic::Status::unavailable("lost acknowledgement response"),
-                    ))
-                },
-            )
-            .await
-            .unwrap_err();
-        assert!(matches!(
-            error,
-            scout::CarbideClientError::TonicStatusError(_)
-        ));
-        assert!(!marker.exists());
-
         let result = state
-            .run(
-                &client,
-                &task,
-                &fixture.config,
-                &instrumentation,
-                true,
-                async { Ok(()) },
-            )
+            .run(&client, &task, &fixture.config, &instrumentation)
             .await
             .unwrap();
         assert!(result.success);
@@ -587,14 +554,7 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&marker).unwrap(), "run");
         // Simulate loss of the completion report: Core delivers the same task again.
         let result = state
-            .run(
-                &client,
-                &task,
-                &fixture.config,
-                &instrumentation,
-                true,
-                async { panic!("completed task must only replay its result") },
-            )
+            .run(&client, &task, &fixture.config, &instrumentation)
             .await
             .unwrap();
         assert!(result.success);
@@ -605,18 +565,21 @@ mod tests {
         changed.target_version = "different".into();
         assert!(
             state
-                .run(
-                    &client,
-                    &changed,
-                    &fixture.config,
-                    &instrumentation,
-                    true,
-                    async { Ok(()) }
-                )
+                .run(&client, &changed, &fixture.config, &instrumentation)
                 .await
                 .is_err()
         );
         assert_eq!(std::fs::read_to_string(&marker).unwrap(), "run");
+
+        changed.upgrade_task_id = "next-task".into();
+        assert!(
+            state
+                .run(&client, &changed, &fixture.config, &instrumentation)
+                .await
+                .unwrap()
+                .success
+        );
+        assert_eq!(std::fs::read_to_string(&marker).unwrap(), "runrun");
     }
 
     fn test_runtime() -> tokio::runtime::Runtime {
