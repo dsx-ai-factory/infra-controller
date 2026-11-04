@@ -266,8 +266,8 @@ func (mde ManageDpuExtensionService) UpdateDpuExtensionServicesInDB(ctx context.
 	for _, dpuExtensionService := range dpuExtensionServicesToDelete {
 		slogger := logger.With().Str("DPU Extension Service ID", dpuExtensionService.ID.String()).Logger()
 
-		// Avoid these actions if the object was updated since the inventory was received
-		if site.IsTimeWithinStaleInventoryThreshold(dpuExtensionService.Updated) {
+		// Removal of a Service in Deleting status is not affected by its Updated timestamp.
+		if dpuExtensionService.Status != cdbm.DpuExtensionServiceStatusDeleting && site.IsTimeWithinStaleInventoryThreshold(dpuExtensionService.Updated) {
 			continue
 		}
 
