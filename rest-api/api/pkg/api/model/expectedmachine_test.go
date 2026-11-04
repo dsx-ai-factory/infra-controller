@@ -359,6 +359,33 @@ func TestAPIExpectedMachineCreateRequest_Validate(t *testing.T) {
 			expectErr: true,
 		},
 		{
+			desc: "error when dpuPolicy is empty string",
+			obj: APIExpectedMachineCreateRequest{
+				BmcMacAddress:       "00:11:22:33:44:55",
+				DefaultBmcUsername:  &validUsername,
+				DefaultBmcPassword:  &validPassword,
+				ChassisSerialNumber: validChassisSerial,
+				DpuPolicy:           cutil.GetPtr(""),
+			},
+			expectErr: true,
+		},
+		{
+			desc: "error when interfaces and hostNics are both set",
+			obj: APIExpectedMachineCreateRequest{
+				BmcMacAddress:       "00:11:22:33:44:55",
+				DefaultBmcUsername:  &validUsername,
+				DefaultBmcPassword:  &validPassword,
+				ChassisSerialNumber: validChassisSerial,
+				Interfaces: APIExpectedMachineInterfaces{
+					{MacAddress: cutil.GetPtr("02:00:00:00:00:09"), NicType: cutil.GetPtr("CX9")},
+				},
+				HostNics: []APIExpectedHostNic{
+					{MacAddress: "aa:bb:cc:dd:ee:01"},
+				},
+			},
+			expectErr: true,
+		},
+		{
 			desc: "error when two hostNics set primary",
 			obj: APIExpectedMachineCreateRequest{
 				BmcMacAddress:       "00:11:22:33:44:55",
@@ -758,6 +785,12 @@ func TestNewAPIExpectedMachine(t *testing.T) {
 			if tc.wantInterfacesJSON != "" {
 				assert.JSONEq(t, tc.wantInterfacesJSON, string(fields["interfaces"]))
 			}
+			assert.Contains(t, fields, "dpuPolicy")
+			assert.Equal(t, "null", string(fields["dpuPolicy"]))
+			assert.Contains(t, fields, "hostNics")
+			assert.JSONEq(t, `[]`, string(fields["hostNics"]))
+			assert.Contains(t, fields, "bmcRetainCredentials")
+			assert.Equal(t, "null", string(fields["bmcRetainCredentials"]))
 		})
 	}
 }
@@ -903,6 +936,18 @@ func TestAPIExpectedMachineUpdateRequest_Validate(t *testing.T) {
 				{MacAddress: cutil.GetPtr("02:00:00:00:00:01"), Primary: cutil.GetPtr(true)},
 				{MacAddress: cutil.GetPtr("02:00:00:00:00:02"), Primary: cutil.GetPtr(true)},
 			}},
+			expectErr: true,
+		},
+		{
+			desc: "reject interfaces and hostNics together",
+			obj: APIExpectedMachineUpdateRequest{
+				Interfaces: APIExpectedMachineInterfaces{
+					{MacAddress: cutil.GetPtr("02:00:00:00:00:09"), NicType: cutil.GetPtr("CX9")},
+				},
+				HostNics: &[]APIExpectedHostNic{
+					{MacAddress: "aa:bb:cc:dd:ee:01"},
+				},
+			},
 			expectErr: true,
 		},
 		{

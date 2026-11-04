@@ -354,7 +354,7 @@ func expectedHostNicsToDB(nics []APIExpectedHostNic) cdbm.ExpectedHostNics {
 
 func newAPIExpectedHostNics(nics cdbm.ExpectedHostNics) []APIExpectedHostNic {
 	if len(nics) == 0 {
-		return nil
+		return []APIExpectedHostNic{}
 	}
 	out := make([]APIExpectedHostNic, 0, len(nics))
 	for _, nic := range nics {
@@ -395,8 +395,11 @@ func ExpectedMachineReplaceHostNics(hostNics *[]APIExpectedHostNic, replaceHostN
 }
 
 func validateExpectedMachineDpuPolicy(policy *string) error {
-	if policy == nil || *policy == "" {
+	if policy == nil {
 		return nil
+	}
+	if *policy == "" {
+		return errors.New("dpuPolicy must be manage, nic, or ignore")
 	}
 	return validation.Validate(*policy,
 		validation.In(
@@ -570,6 +573,10 @@ func (emcr *APIExpectedMachineCreateRequest) Validate() error {
 		return err
 	}
 
+	if len(emcr.Interfaces) > 0 && len(emcr.HostNics) > 0 {
+		return validation.Errors{"hostNics": errors.New("cannot be combined with interfaces")}
+	}
+
 	return validateExpectedHostNics(emcr.HostNics)
 }
 
@@ -703,6 +710,10 @@ func (emur *APIExpectedMachineUpdateRequest) Validate() error {
 		return err
 	}
 
+	if emur.Interfaces != nil && emur.HostNics != nil {
+		return validation.Errors{"hostNics": errors.New("cannot be combined with interfaces")}
+	}
+
 	if emur.HostNics != nil {
 		return validateExpectedHostNics(*emur.HostNics)
 	}
@@ -814,11 +825,11 @@ type APIExpectedMachine struct {
 	// IsDpfEnabled indicates whether this host is eligible for DPF-based provisioning, defaulting to true when unset.
 	IsDpfEnabled bool `json:"isDpfEnabled"`
 	// DpuPolicy selects how NICo treats DPU hardware for this host
-	DpuPolicy *string `json:"dpuPolicy,omitempty"`
+	DpuPolicy *string `json:"dpuPolicy"`
 	// HostNics lists declared host interfaces for this machine (legacy REST field; prefer interfaces)
-	HostNics []APIExpectedHostNic `json:"hostNics,omitempty"`
+	HostNics []APIExpectedHostNic `json:"hostNics"`
 	// BmcRetainCredentials skips BMC password rotation when true
-	BmcRetainCredentials *bool `json:"bmcRetainCredentials,omitempty"`
+	BmcRetainCredentials *bool `json:"bmcRetainCredentials"`
 	// Labels is the labels of the expected machine
 	Labels APILabels `json:"labels"`
 	// HostLifecycleProfile is the optional per-host lifecycle profile
