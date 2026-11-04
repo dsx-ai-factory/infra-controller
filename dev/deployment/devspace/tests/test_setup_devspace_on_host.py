@@ -12,6 +12,15 @@ SCRIPT = Path(__file__).resolve().parents[1] / "setup-devspace-on-host.sh"
 
 
 class SetupDevSpaceOnHostTest(unittest.TestCase):
+    def run_parser(self, args):
+        source = SCRIPT.read_text()
+        # Stop before privilege escalation even if argument validation regresses.
+        parser = source[:source.index('\nif [[ "${EUID}" -ne 0 ]]; then')]
+        return subprocess.run(
+            ["bash", "-c", parser + "\nexit 99\n", "bash", *args],
+            capture_output=True, text=True, timeout=10,
+        )
+
     def test_cluster_setup_delegates_before_tls_and_wait(self):
         source = SCRIPT.read_text()
         prepare = source[source.index("prepare_cluster() {"):
@@ -64,10 +73,7 @@ run_as_user() {
     def test_invalid_cluster_name_fails_before_host_setup(self):
         for name in ("bad.name", "a" * 50):
             with self.subTest(name=name):
-                result = subprocess.run(
-                    ["bash", str(SCRIPT), "--cluster-name", name],
-                    capture_output=True, text=True, timeout=10,
-                )
+                result = self.run_parser(["--cluster-name", name])
                 self.assertEqual(result.returncode, 1)
                 self.assertIn("--cluster-name must be a lowercase DNS label", result.stderr)
 
@@ -131,8 +137,7 @@ deploy_stack
     def test_missing_profile(self):
         for args in (["--profile"], ["--profile", ""], ["--profile", "--skip-deploy"]):
             with self.subTest(args=args):
-                result = subprocess.run(["bash", str(SCRIPT), *args],
-                                        capture_output=True, text=True, timeout=10)
+                result = self.run_parser(args)
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn("--profile requires a value", result.stderr)
 
