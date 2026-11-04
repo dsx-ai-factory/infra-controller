@@ -11083,7 +11083,7 @@ async fn test_fnn_vrf_loopback_release_uses_remaining_host_and_service_membershi
     let mut config = get_config();
     config.dpf.enabled = true;
     let mut overrides = TestEnvOverrides::with_config(config)
-        .with_dpf_sdk(service_vpc_deployment_mock())
+        .with_dpf_sdk(service_vpc_placement_mock())
         .with_fnn_config(None);
     overrides.fnn_config.as_mut().unwrap().use_vpc_vrf_loopback = true;
     let env = create_test_env_with_overrides(pool, overrides).await;
@@ -14136,6 +14136,23 @@ fn service_vpc_deployment_mock() -> Arc<dyn DpfOperations> {
     dpf_sdk
         .expect_deployment_type_for_dpu()
         .returning(|_, _| Ok(DpuDeploymentType::Bf3));
+    Arc::new(dpf_sdk)
+}
+
+/// Extends the deployment lookup with the placement-label calls the Assigned/Ready handler makes
+/// for an attached DPF Helm service. A test controller pass keeps dispatching while another host's
+/// task is in flight, so a host can reach that handler before the test's state checks run.
+fn service_vpc_placement_mock() -> Arc<dyn DpfOperations> {
+    let mut dpf_sdk = MockDpfOperations::new();
+    dpf_sdk
+        .expect_deployment_type_for_dpu()
+        .returning(|_, _| Ok(DpuDeploymentType::Bf3));
+    dpf_sdk
+        .expect_merge_dpu_device_node_labels()
+        .returning(|_, _| Ok(()));
+    dpf_sdk
+        .expect_get_dpu_device_node_labels()
+        .returning(|_| Ok(Default::default()));
     Arc::new(dpf_sdk)
 }
 
