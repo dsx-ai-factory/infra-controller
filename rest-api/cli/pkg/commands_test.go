@@ -454,137 +454,153 @@ func TestBuildCommands_NoDuplicateFlags(t *testing.T) {
 	visit("nicocli", cmds)
 }
 
-func TestGeneratedCommandInfos_ContainsConciseAliases(t *testing.T) {
-	spec, err := ParseSpec(openapi.Spec)
-	require.NoError(t, err)
-
-	operations := make(map[string]string)
-	for _, info := range GeneratedCommandInfos(spec) {
-		operations[info.Name] = info.OperationID
-	}
-
-	assert.Equal(t, "machine-power-control-machine", operations["machine power"])
-	assert.Equal(t, "get-all-dpu-machines", operations["dpu-machine list"])
-	assert.Equal(t, "get-dpu-machine", operations["dpu-machine get"])
-	assert.Equal(t,
-		"machine-power-control-machine",
-		operations["machine power-control-machine machine-power-control-machine"],
-	)
-
-	for operationID, path := range commandPathAliases {
-		assert.Equalf(t,
-			operationID,
-			operations[strings.Join(path, " ")],
-			"concise command path for %q does not identify the same operation",
-			operationID,
-		)
-	}
-	for operationID, path := range commandPathReplacements {
-		assert.Equalf(t,
-			operationID,
-			operations[strings.Join(path, " ")],
-			"replacement command path for %q does not identify the same operation",
-			operationID,
-		)
-	}
-	for operationID, paths := range additionalCommandPathAliases {
-		for _, path := range paths {
-			assert.Equalf(t,
-				operationID,
-				operations[strings.Join(path, " ")],
-				"additional command path for %q does not identify the same operation",
-				operationID,
-			)
-		}
-	}
-}
-
-func TestGeneratedCommandInfos_ExpectedInventoryBatchPaths(t *testing.T) {
-	spec, err := ParseSpec(openapi.Spec)
-	require.NoError(t, err)
-
-	operations := make(map[string]GeneratedCommandInfo)
-	for _, info := range GeneratedCommandInfos(spec) {
-		operations[info.OperationID] = info
-	}
-
+func TestGeneratedCommandInfos(t *testing.T) {
 	tests := []struct {
-		operationID string
-		method      string
-		path        string
+		name string
+		run  func(*testing.T)
 	}{
 		{
-			operationID: "replace-all-expected-rack",
-			method:      http.MethodPut,
-			path:        "/v2/org/{org}/nico/expected-rack/all",
-		},
-		{
-			operationID: "replace-all-expected-rack-group",
-			method:      http.MethodPut,
-			path:        "/v2/org/{org}/nico/expected-rack-group/all",
-		},
-		{operationID: "replace-all-expected-machine", method: http.MethodPut, path: "/v2/org/{org}/nico/expected-machine/all"},
-		{operationID: "delete-all-expected-machine", method: http.MethodDelete, path: "/v2/org/{org}/nico/expected-machine/all"},
-		{operationID: "replace-all-expected-switch", method: http.MethodPut, path: "/v2/org/{org}/nico/expected-switch/all"},
-		{operationID: "delete-all-expected-switch", method: http.MethodDelete, path: "/v2/org/{org}/nico/expected-switch/all"},
-		{operationID: "replace-all-expected-power-shelf", method: http.MethodPut, path: "/v2/org/{org}/nico/expected-power-shelf/all"},
-		{operationID: "delete-all-expected-power-shelf", method: http.MethodDelete, path: "/v2/org/{org}/nico/expected-power-shelf/all"},
-	}
-	for _, tt := range tests {
-		operation, ok := operations[tt.operationID]
-		require.True(t, ok, "missing %s", tt.operationID)
-		assert.Equal(t, tt.method, operation.Method)
-		assert.Equal(t, tt.path, operation.Path)
-	}
+			name: "concise aliases",
+			run: func(t *testing.T) {
+				spec, err := ParseSpec(openapi.Spec)
+				require.NoError(t, err)
 
-	_, hasRackLegacy := operations["replace-all-expected-rack-legacy"]
-	assert.False(t, hasRackLegacy)
-	_, hasRackGroupLegacy := operations["replace-all-expected-rack-group-legacy"]
-	assert.False(t, hasRackGroupLegacy)
-}
+				operations := make(map[string]string)
+				for _, info := range GeneratedCommandInfos(spec) {
+					operations[info.Name] = info.OperationID
+				}
 
-// TestGeneratedCommandInfos groups metadata scenarios under the production
-// function that exposes generated command information to alternate interfaces.
-func TestGeneratedCommandInfos(t *testing.T) {
-	t.Run("repeatable query parameters", func(t *testing.T) {
-		spec, err := ParseSpec(openapi.Spec)
-		require.NoError(t, err)
+				assert.Equal(t, "machine-power-control-machine", operations["machine power"])
+				assert.Equal(t, "get-all-dpu-machines", operations["dpu-machine list"])
+				assert.Equal(t, "get-dpu-machine", operations["dpu-machine get"])
+				assert.Equal(t,
+					"machine-power-control-machine",
+					operations["machine power-control-machine machine-power-control-machine"],
+				)
 
-		operations := make(map[string]GeneratedCommandInfo)
-		for _, info := range GeneratedCommandInfos(spec) {
-			operations[info.OperationID] = info
-		}
-
-		tests := []struct {
-			name        string
-			operationID string
-			parameter   string
-			repeatable  bool
-		}{
-			// A scalar description is the source of truth for legacy repeatable filters.
-			{name: "documented scalar", operationID: "get-all-vpc-peering", parameter: "status", repeatable: true},
-			// Array schemas carry repeatability structurally instead of through prose.
-			{name: "OpenAPI array", operationID: "get-all-ipxe-template", parameter: "siteId", repeatable: true},
-			// Relation handlers consume every repeated includeRelation value across endpoint families.
-			{name: "relation", operationID: "get-vpc-prefix", parameter: "includeRelation", repeatable: true},
-			// Pagination remains scalar even next to repeatable filters.
-			{name: "scalar pagination", operationID: "get-all-vpc-peering", parameter: "pageSize", repeatable: false},
-		}
-
-		for _, test := range tests {
-			t.Run(test.name, func(t *testing.T) {
-				operation, ok := operations[test.operationID]
-				require.True(t, ok, "missing operation %s", test.operationID)
-				for _, parameter := range operation.QueryParameters {
-					if parameter.Name == test.parameter {
-						assert.Equal(t, test.repeatable, parameter.Repeatable)
-						return
+				for operationID, path := range commandPathAliases {
+					assert.Equalf(t,
+						operationID,
+						operations[strings.Join(path, " ")],
+						"concise command path for %q does not identify the same operation",
+						operationID,
+					)
+				}
+				for operationID, path := range commandPathReplacements {
+					assert.Equalf(t,
+						operationID,
+						operations[strings.Join(path, " ")],
+						"replacement command path for %q does not identify the same operation",
+						operationID,
+					)
+				}
+				for operationID, paths := range additionalCommandPathAliases {
+					for _, path := range paths {
+						assert.Equalf(t,
+							operationID,
+							operations[strings.Join(path, " ")],
+							"additional command path for %q does not identify the same operation",
+							operationID,
+						)
 					}
 				}
-				t.Fatalf("missing parameter %s on operation %s", test.parameter, test.operationID)
-			})
-		}
-	})
+			},
+		},
+		{
+			name: "expected inventory batch paths",
+			run: func(t *testing.T) {
+				spec, err := ParseSpec(openapi.Spec)
+				require.NoError(t, err)
+
+				operations := make(map[string]GeneratedCommandInfo)
+				for _, info := range GeneratedCommandInfos(spec) {
+					operations[info.OperationID] = info
+				}
+
+				tests := []struct {
+					operationID string
+					method      string
+					path        string
+				}{
+					{
+						operationID: "replace-all-expected-rack",
+						method:      http.MethodPut,
+						path:        "/v2/org/{org}/nico/expected-rack/all",
+					},
+					{
+						operationID: "replace-all-expected-rack-group",
+						method:      http.MethodPut,
+						path:        "/v2/org/{org}/nico/expected-rack-group/all",
+					},
+					{operationID: "replace-all-expected-machine", method: http.MethodPut, path: "/v2/org/{org}/nico/expected-machine/all"},
+					{operationID: "delete-all-expected-machine", method: http.MethodDelete, path: "/v2/org/{org}/nico/expected-machine/all"},
+					{operationID: "replace-all-expected-switch", method: http.MethodPut, path: "/v2/org/{org}/nico/expected-switch/all"},
+					{operationID: "delete-all-expected-switch", method: http.MethodDelete, path: "/v2/org/{org}/nico/expected-switch/all"},
+					{operationID: "replace-all-expected-power-shelf", method: http.MethodPut, path: "/v2/org/{org}/nico/expected-power-shelf/all"},
+					{operationID: "delete-all-expected-power-shelf", method: http.MethodDelete, path: "/v2/org/{org}/nico/expected-power-shelf/all"},
+				}
+				for _, tt := range tests {
+					t.Run(tt.operationID, func(t *testing.T) {
+						operation, ok := operations[tt.operationID]
+						require.True(t, ok, "missing %s", tt.operationID)
+						assert.Equal(t, tt.method, operation.Method)
+						assert.Equal(t, tt.path, operation.Path)
+					})
+				}
+
+				_, hasRackLegacy := operations["replace-all-expected-rack-legacy"]
+				assert.False(t, hasRackLegacy)
+				_, hasRackGroupLegacy := operations["replace-all-expected-rack-group-legacy"]
+				assert.False(t, hasRackGroupLegacy)
+			},
+		},
+		{
+			name: "repeatable query parameters",
+			run: func(t *testing.T) {
+				spec, err := ParseSpec(openapi.Spec)
+				require.NoError(t, err)
+
+				operations := make(map[string]GeneratedCommandInfo)
+				for _, info := range GeneratedCommandInfos(spec) {
+					operations[info.OperationID] = info
+				}
+
+				tests := []struct {
+					name        string
+					operationID string
+					parameter   string
+					repeatable  bool
+				}{
+					// A scalar description is the source of truth for legacy repeatable filters.
+					{name: "documented scalar", operationID: "get-all-vpc-peering", parameter: "status", repeatable: true},
+					// Array schemas carry repeatability structurally instead of through prose.
+					{name: "OpenAPI array", operationID: "get-all-ipxe-template", parameter: "siteId", repeatable: true},
+					// Relation handlers consume every repeated includeRelation value across endpoint families.
+					{name: "relation", operationID: "get-vpc-prefix", parameter: "includeRelation", repeatable: true},
+					// Pagination remains scalar even next to repeatable filters.
+					{name: "scalar pagination", operationID: "get-all-vpc-peering", parameter: "pageSize", repeatable: false},
+				}
+
+				for _, test := range tests {
+					t.Run(test.name, func(t *testing.T) {
+						operation, ok := operations[test.operationID]
+						require.True(t, ok, "missing operation %s", test.operationID)
+						for _, parameter := range operation.QueryParameters {
+							if parameter.Name == test.parameter {
+								assert.Equal(t, test.repeatable, parameter.Repeatable)
+								return
+							}
+						}
+						t.Fatalf("missing parameter %s on operation %s", test.parameter, test.operationID)
+					})
+				}
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, test.run)
+	}
 }
 
 // TestRunGeneratedCommand groups request behavior for alternate interfaces
@@ -1672,6 +1688,7 @@ func testNewAppPreservesRepeatedQueryFlags(t *testing.T) {
 		command   []string
 		wantPath  string
 		wantQuery url.Values
+		wantError string
 	}{
 		// Status is a scalar schema whose description promises repeatable filtering.
 		{
@@ -1693,6 +1710,17 @@ func testNewAppPreservesRepeatedQueryFlags(t *testing.T) {
 			command:   []string{"vpc-peering", "list", "--vpc-id", firstID, "--vpc-id", secondID},
 			wantPath:  "/v2/org/test-org/nico/vpc-peering",
 			wantQuery: url.Values{"vpcId": {firstID, secondID}},
+		},
+		{
+			name:      "repeated integers including zero",
+			command:   []string{"allocation", "list", "--constraint-value", "0", "--constraint-value", "42"},
+			wantPath:  "/v2/org/test-org/nico/allocation",
+			wantQuery: url.Values{"constraintValue": {"0", "42"}},
+		},
+		{
+			name:      "invalid repeated integer",
+			command:   []string{"allocation", "list", "--constraint-value", "1", "--constraint-value", "not-an-integer"},
+			wantError: "not-an-integer",
 		},
 		// Relation expansion is repeatable in the shared handler contract.
 		{
@@ -1734,7 +1762,13 @@ func testNewAppPreservesRepeatedQueryFlags(t *testing.T) {
 			args := []string{"nicocli", "--base-url", server.URL, "--org", "test-org", "--token", "test-token"}
 			args = append(args, test.command...)
 
-			require.NoError(t, app.Run(args))
+			err = app.Run(args)
+			if test.wantError != "" {
+				require.ErrorContains(t, err, test.wantError)
+				assert.Zero(t, requestCount.Load())
+				return
+			}
+			require.NoError(t, err)
 			assert.EqualValues(t, 1, requestCount.Load())
 		})
 	}
