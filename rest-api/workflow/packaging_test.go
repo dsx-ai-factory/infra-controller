@@ -5,7 +5,6 @@ package workflow_test
 
 import (
 	"bufio"
-	"bytes"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -13,9 +12,9 @@ import (
 	"testing"
 )
 
-// This stdlib-only boundary test needs neither PostgreSQL nor a workflow build:
+// This boundary test needs no PostgreSQL:
 // from rest-api/workflow, run go test -p 1 ./packaging_test.go -count=1 -v.
-// Resolve the real workflow dependency graph with only the files its builder
+// Build the workflow and shared Site proxy with only the files their builder
 // copies, so a new transitive local import cannot be hidden by a full checkout.
 func TestWorkflowDockerfilePackaging(t *testing.T) {
 	root, err := filepath.Abs("..") // Go runs package tests in workflow/.
@@ -28,21 +27,18 @@ func TestWorkflowDockerfilePackaging(t *testing.T) {
 			workspace := t.TempDir()
 			copyWorkflowBuilderInputs(t, root, dockerfile, workspace)
 
-			cmd := exec.CommandContext(t.Context(), "go", "list", "-deps", "-p=1", "-mod=readonly", "-f={{.ImportPath}}", "./workflow/cmd/workflow")
+			// The executable does not yet import siteproxy. Compile it explicitly
+			// so its build boundary is protected before recovery workers adopt it.
+			cmd := exec.CommandContext(t.Context(), "go", "build", "-p=1", "-mod=readonly", "./workflow/cmd/workflow", "./workflow/pkg/client/siteproxy")
 			cmd.Dir = workspace
 			// Both Dockerfiles disable CGO and cross-compile; these are the
 			// Linux/amd64 settings used by the tracked Makefile build target.
 			cmd.Env = append(os.Environ(), "CGO_ENABLED=0", "GOOS=linux", "GOARCH=amd64", "GOWORK=off", "GOFLAGS=")
-			var stderr bytes.Buffer
-			cmd.Stderr = &stderr
-			output, err := cmd.Output()
+			output, err := cmd.CombinedOutput()
 			if err != nil {
-				t.Fatalf("%s builder COPY boundary: CGO_ENABLED=0 GOOS=linux GOARCH=amd64 GOWORK=off GOFLAGS= go list -deps -p=1 -mod=readonly -f={{.ImportPath}} ./workflow/cmd/workflow: %v\n%s", variant, err, stderr.String())
+				t.Fatalf("%s builder COPY boundary: CGO_ENABLED=0 GOOS=linux GOARCH=amd64 GOWORK=off GOFLAGS= go build -p=1 -mod=readonly ./workflow/cmd/workflow ./workflow/pkg/client/siteproxy: %v\n%s", variant, err, output)
 			}
-			if len(strings.Fields(string(output))) == 0 {
-				t.Fatal("go list returned no workflow dependencies")
-			}
-			t.Logf("%s builder COPY boundary resolves workflow dependencies", variant)
+			t.Logf("%s builder COPY boundary builds workflow and siteproxy", variant)
 		})
 	}
 }
