@@ -1495,7 +1495,7 @@ mod tests {
     #[test]
     fn firmware_upgrade_job_preserves_completed_return_marker() {
         scenarios!(
-            run = |marker: Option<bool>| -> Result<bool, serde_json::Error> {
+            run = |marker: Option<bool>| -> Result<bool, String> {
                 // Predecessor job JSON has no return marker or device lists.
                 let mut wire = serde_json::json!({
                     "job_id": "parent-job", "status": "in_progress",
@@ -1504,9 +1504,10 @@ mod tests {
                 if let Some(marker) = marker {
                     wire["return_to_completed"] = serde_json::json!(marker);
                 }
-                let job: FirmwareUpgradeJob = serde_json::from_value(wire)?;
+                let job: FirmwareUpgradeJob = serde_json::from_value(wire).map_err(|error| error.to_string())?;
+                let persisted = serde_json::to_string(&job).map_err(|error| error.to_string())?;
                 let resumed: FirmwareUpgradeJob =
-                    serde_json::from_str(&serde_json::to_string(&job)?)?;
+                    serde_json::from_str(&persisted).map_err(|error| error.to_string())?;
                 Ok(resumed.return_to_completed)
             };
             "legacy and normal jobs retain the normal maintenance continuation" {
