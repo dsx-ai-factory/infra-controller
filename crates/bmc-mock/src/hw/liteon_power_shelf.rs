@@ -28,6 +28,15 @@ pub(crate) struct LiteOnPowerShelf<'a> {
 }
 
 impl LiteOnPowerShelf<'_> {
+    pub(crate) fn service_root_config(&self) -> redfish::service_root::Config {
+        redfish::service_root::Config {
+            vendor: redfish::oem::BmcVendor::LiteOn,
+            product: None,
+            redfish_version: "1.9.0",
+            exposes_computer_systems: true,
+        }
+    }
+
     fn sensor_layout() -> redfish::sensor::Layout {
         redfish::sensor::Layout {
             temperature: 20,
