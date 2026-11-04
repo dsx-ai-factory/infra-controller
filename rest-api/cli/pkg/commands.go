@@ -1474,6 +1474,7 @@ func isRepeatableQueryParameter(p Parameter) bool {
 	description := strings.ToLower(p.Description)
 	for _, phrase := range []string{
 		"multiple times",
+		"multiple query parameters",
 		"repeat the parameter",
 		"repeated params",
 		"repeated values",

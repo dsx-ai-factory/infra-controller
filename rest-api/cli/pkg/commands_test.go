@@ -1722,6 +1722,13 @@ func testNewAppPreservesRepeatedQueryFlags(t *testing.T) {
 			command:   []string{"allocation", "list", "--constraint-value", "1", "--constraint-value", "not-an-integer"},
 			wantError: "not-an-integer",
 		},
+		// Repeated inactive-device indices preserve their caller-supplied order.
+		{
+			name:      "inactive devices in order",
+			command:   []string{"machine", "capabilities", "list", "--site-id", firstID, "--inactive-devices", "1", "--inactive-devices", "3"},
+			wantPath:  "/v2/org/test-org/nico/machine-capability",
+			wantQuery: url.Values{"siteId": {firstID}, "inactiveDevices": {"1", "3"}},
+		},
 		// Relation expansion is repeatable in the shared handler contract.
 		{
 			name:      "relations",
