@@ -14,7 +14,7 @@
 //!   of `resources::RedfishResourcesExt` on `OpCx`.
 //! - Standard Redfish workflows one capability's drivers share are methods of
 //!   that capability's `Redfish<Capability>Ext` trait in its `support.rs`,
-//!   such as `power::support::RedfishPowerExt::force_off_and_wait`.
+//!   such as `power::support::RedfishPowerExt::ensure_host_off`.
 //! - Vendor-specific mechanics are free functions taking `cx` in the vendor's
 //!   module, such as `dell::job_outcome(cx, response)` or
 //!   `boot_order::lenovo::network_group_first(cx)`.

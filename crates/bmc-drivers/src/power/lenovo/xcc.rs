@@ -9,10 +9,10 @@ use async_trait::async_trait;
 use bmc_platform::{DriverOutcome, OpCx, PlatformError, Power, Quirk};
 use nv_redfish::core::{ActionError, Bmc};
 use nv_redfish::oem::lenovo::SystemResetType;
-use nv_redfish::resource::ResetType;
+use nv_redfish::resource::{PowerState, ResetType};
 
 use crate::power::standard::StandardPower;
-use crate::power::support::RedfishPowerExt as _;
+use crate::power::support::current_power_state;
 
 /// Lenovo XClarity Controller power behavior.
 ///
@@ -21,15 +21,26 @@ use crate::power::support::RedfishPowerExt as _;
 pub(crate) struct XccPower;
 
 /// How long the host stays off before it is powered back on in place of a
-/// hanging ForceRestart.
+/// hanging ForceRestart; the host must report off by then.
 const FORCE_RESTART_OFF_TIME: Duration = Duration::from_secs(10);
 
 async fn off_then_on<B: Bmc>(cx: &OpCx<'_, B>) -> Result<DriverOutcome, PlatformError>
 where
     B::Error: ActionError,
 {
-    cx.force_off_and_wait().await?;
+    if current_power_state(cx).await? != Some(PowerState::Off) {
+        StandardPower.set(cx, ResetType::ForceOff).await?;
+    }
     tokio::time::sleep(FORCE_RESTART_OFF_TIME).await;
+    let state = current_power_state(cx).await?;
+    if state != Some(PowerState::Off) {
+        return Err(PlatformError::Timeout {
+            message: format!(
+                "host reports power state {state:?} {}s after ForceOff",
+                FORCE_RESTART_OFF_TIME.as_secs()
+            ),
+        });
+    }
     StandardPower.set(cx, ResetType::On).await
 }
 
@@ -80,36 +91,49 @@ mod tests {
     use super::*;
     use crate::test_support::{Fixture, body};
 
+    /// The host is powered back on only after it has stayed off for the off
+    /// time; a host still on by then fails after that one wait, never on.
     #[tokio::test(start_paused = true)]
     async fn hanging_force_restart_powers_on_only_after_the_host_has_stayed_off() {
         const SYSTEM: &str = "/redfish/v1/Systems/1";
-        let bmc = Fixture::new("Lenovo", "XCC", "1", "1")
-            .document(
-                SYSTEM,
-                json!({
-                    "@odata.id": SYSTEM,
-                    "Id": "1",
-                    "Name": "System",
-                    "PowerState": "Off",
-                    "Actions": {"#ComputerSystem.Reset": {
-                        "target": "/redfish/v1/Systems/1/Actions/ComputerSystem.Reset"
-                    }},
-                }),
-            )
-            .build()
-            .await;
-        let quirks = BTreeSet::from([Quirk::LenovoForceRestartHangs]);
-        let cx = bmc.cx().await.with_quirks(&quirks);
-        let started = Instant::now();
+        for (power_state, powered_on, writes) in [
+            ("Off", true, vec![json!({"ResetType": "On"})]),
+            ("On", false, vec![json!({"ResetType": "ForceOff"})]),
+        ] {
+            let bmc = Fixture::new("Lenovo", "XCC", "1", "1")
+                .document(
+                    SYSTEM,
+                    json!({
+                        "@odata.id": SYSTEM,
+                        "Id": "1",
+                        "Name": "System",
+                        "PowerState": power_state,
+                        "Actions": {"#ComputerSystem.Reset": {
+                            "target": "/redfish/v1/Systems/1/Actions/ComputerSystem.Reset"
+                        }},
+                    }),
+                )
+                .build()
+                .await;
+            let quirks = BTreeSet::from([Quirk::LenovoForceRestartHangs]);
+            let cx = bmc.cx().await.with_quirks(&quirks);
+            let started = Instant::now();
 
-        assert_eq!(
-            XccPower.set(&cx, ResetType::ForceRestart).await,
-            Ok(DriverOutcome::complete())
-        );
-        assert!(started.elapsed() >= FORCE_RESTART_OFF_TIME);
-        assert_eq!(
-            bmc.writes().iter().map(body).collect::<Vec<_>>(),
-            [json!({"ResetType": "On"})]
-        );
+            let result = XccPower.set(&cx, ResetType::ForceRestart).await;
+            if powered_on {
+                assert_eq!(result, Ok(DriverOutcome::complete()), "{power_state}");
+            } else {
+                assert!(
+                    matches!(result, Err(PlatformError::Timeout { .. })),
+                    "{power_state}: {result:?}"
+                );
+            }
+            assert_eq!(started.elapsed(), FORCE_RESTART_OFF_TIME, "{power_state}");
+            assert_eq!(
+                bmc.writes().iter().map(body).collect::<Vec<_>>(),
+                writes,
+                "{power_state}"
+            );
+        }
     }
 }

@@ -45,6 +45,12 @@ pub trait Power<B: Bmc>: Send + Sync {
         self.standard().ac_power_cycle_supported(cx).await
     }
 
+    /// Requests `reset_type`.
+    ///
+    /// A platform that accepts [`ResetType::FullPowerCycle`] only on a
+    /// powered-off host forces the host off and answers
+    /// [`PlatformError::NotReady`] until it reports off; the caller asks
+    /// again later rather than the call waiting for the host.
     async fn set(
         &self,
         cx: &OpCx<'_, B>,

@@ -146,11 +146,28 @@ impl<B: Bmc> RedfishResourcesExt<B> for OpCx<'_, B> {
     }
 
     async fn chassis_by_id(&self, chassis_id: &str) -> Result<Option<Chassis<B>>, PlatformError> {
-        Ok(self
-            .all_chassis()
-            .await?
-            .into_iter()
-            .find(|chassis| chassis.raw().id == chassis_id))
+        let links = self
+            .service_root()
+            .chassis_links()
+            .await
+            .map_err(|error| self.map_redfish_error(error))?
+            .ok_or(PlatformError::Unsupported)?;
+        let Some(link) = links
+            .iter()
+            .find(|link| link.odata_id().last_segment() == Some(chassis_id))
+        else {
+            // A BMC whose member URIs do not end in the Id is still found by
+            // reading every member.
+            return Ok(self
+                .all_chassis()
+                .await?
+                .into_iter()
+                .find(|chassis| chassis.raw().id == chassis_id));
+        };
+        link.upgrade::<Chassis<B>>()
+            .await
+            .map(Some)
+            .map_err(|error| self.map_redfish_error(error))
     }
 
     async fn bios(&self) -> Result<Bios<B>, PlatformError> {

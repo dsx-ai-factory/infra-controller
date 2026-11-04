@@ -5,22 +5,13 @@
 
 //! Power mechanics shared by several vendor drivers.
 
-use std::time::Duration;
-
 use bmc_platform::{DriverOutcome, OpCx, PlatformError, Power};
 use nv_redfish::chassis::PowerSupply;
 use nv_redfish::core::{ActionError, Bmc};
 use nv_redfish::resource::{PowerState, ResetType};
-use tokio::time::Instant;
 
 use crate::power::standard::StandardPower;
 use crate::resources::RedfishResourcesExt as _;
-
-/// How often the power state is re-read while waiting for a forced power-off.
-const POWER_OFF_POLL_INTERVAL: Duration = Duration::from_secs(2);
-
-/// How long a forced power-off may take to show in the reported power state.
-const POWER_OFF_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// The selected system's power state as the BMC reports it now; the
 /// context's resolved system keeps the state it was fetched with.
@@ -46,9 +37,12 @@ pub(super) fn power_state_from_supplies(states: &[Option<bool>]) -> Option<Power
 
 /// Power resources and reset workflows shared by power drivers.
 pub(super) trait RedfishPowerExt<B: Bmc> {
-    /// Forces the host off and returns once the BMC reports it off, for
-    /// operations a platform accepts only on a powered-off host.
-    async fn force_off_and_wait(&self) -> Result<(), PlatformError>
+    /// Succeeds once the BMC reports the host off, for operations a platform
+    /// accepts only on a powered-off host. Until then it forces the host off,
+    /// unless it is already powering off, and answers
+    /// [`PlatformError::NotReady`], so the caller asks again later rather than
+    /// this call waiting for the host.
+    async fn ensure_host_off(&self) -> Result<(), PlatformError>
     where
         B::Error: ActionError;
 
@@ -61,30 +55,21 @@ pub(super) trait RedfishPowerExt<B: Bmc> {
 }
 
 impl<B: Bmc> RedfishPowerExt<B> for OpCx<'_, B> {
-    async fn force_off_and_wait(&self) -> Result<(), PlatformError>
+    async fn ensure_host_off(&self) -> Result<(), PlatformError>
     where
         B::Error: ActionError,
     {
-        if current_power_state(self).await? == Some(PowerState::Off) {
-            return Ok(());
-        }
-        StandardPower.set(self, ResetType::ForceOff).await?;
-        let deadline = Instant::now() + POWER_OFF_TIMEOUT;
-        loop {
-            tokio::time::sleep(POWER_OFF_POLL_INTERVAL).await;
-            let state = current_power_state(self).await?;
-            if state == Some(PowerState::Off) {
-                return Ok(());
-            }
-            if Instant::now() >= deadline {
-                return Err(PlatformError::Timeout {
-                    message: format!(
-                        "host still reports power state {state:?} {}s after ForceOff",
-                        POWER_OFF_TIMEOUT.as_secs()
-                    ),
-                });
+        let state = current_power_state(self).await?;
+        match state {
+            Some(PowerState::Off) => return Ok(()),
+            Some(PowerState::PoweringOff) => {}
+            _ => {
+                StandardPower.set(self, ResetType::ForceOff).await?;
             }
         }
+        Err(PlatformError::NotReady {
+            message: format!("the host reports power state {state:?}, not Off"),
+        })
     }
 
     async fn ipmi_restart(&self) -> Result<DriverOutcome, PlatformError> {
@@ -117,36 +102,53 @@ mod tests {
     use super::*;
     use crate::test_support::{Fixture, body, path};
 
-    #[tokio::test(start_paused = true)]
-    async fn a_host_that_never_reports_off_times_out_after_one_force_off() {
+    /// An off host passes at once; any other host answers `NotReady` without
+    /// waiting, after a ForceOff unless it is already powering off.
+    #[tokio::test]
+    async fn a_host_not_yet_off_is_forced_off_and_not_ready() {
         const SYSTEM: &str = "/redfish/v1/Systems/1";
         const RESET: &str = "/redfish/v1/Systems/1/Actions/ComputerSystem.Reset";
-        let bmc = Fixture::new("Contoso", "Server", "1", "1")
-            .document(
-                SYSTEM,
-                json!({
-                    "@odata.id": SYSTEM,
-                    "Id": "1",
-                    "Name": "System",
-                    "PowerState": "On",
-                    "Actions": {"#ComputerSystem.Reset": {"target": RESET}},
-                }),
-            )
-            .build()
-            .await;
-        let cx = bmc.cx().await;
+        for (power_state, ready, forced_off) in [
+            ("Off", true, false),
+            ("On", false, true),
+            ("PoweringOn", false, true),
+            ("PoweringOff", false, false),
+        ] {
+            let bmc = Fixture::new("Contoso", "Server", "1", "1")
+                .document(
+                    SYSTEM,
+                    json!({
+                        "@odata.id": SYSTEM,
+                        "Id": "1",
+                        "Name": "System",
+                        "PowerState": power_state,
+                        "Actions": {"#ComputerSystem.Reset": {"target": RESET}},
+                    }),
+                )
+                .build()
+                .await;
+            let cx = bmc.cx().await;
 
-        assert!(matches!(
-            cx.force_off_and_wait().await,
-            Err(PlatformError::Timeout { .. })
-        ));
-        assert_eq!(
-            bmc.writes()
+            let result = cx.ensure_host_off().await;
+            assert_eq!(result.is_ok(), ready, "{power_state}: {result:?}");
+            if !ready {
+                assert!(
+                    matches!(result, Err(PlatformError::NotReady { .. })),
+                    "{power_state}: {result:?}"
+                );
+            }
+            let writes: Vec<_> = bmc
+                .writes()
                 .iter()
                 .map(|write| (path(write).to_string(), body(write)))
-                .collect::<Vec<_>>(),
-            [(RESET.to_string(), json!({"ResetType": "ForceOff"}))]
-        );
+                .collect();
+            let expected = if forced_off {
+                vec![(RESET.to_string(), json!({"ResetType": "ForceOff"}))]
+            } else {
+                Vec::new()
+            };
+            assert_eq!(writes, expected, "{power_state}");
+        }
     }
 
     #[test]

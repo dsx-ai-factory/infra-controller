@@ -14,8 +14,8 @@ use crate::power::support::RedfishPowerExt as _;
 use crate::resources::RedfishResourcesExt as _;
 
 /// NVIDIA OpenBMC platforms cycle auxiliary power through the BMC chassis,
-/// which GB200 accepts only while the host is off, so the host is forced off
-/// first.
+/// which GB200 accepts only while the host is off, so a request on a host
+/// that is not yet off forces it off and answers `NotReady` until it is.
 pub(crate) struct OpenBmcPower;
 
 /// The chassis whose OEM action cycles auxiliary power.
@@ -58,7 +58,7 @@ where
     ) -> Result<DriverOutcome, PlatformError> {
         match reset_type {
             ResetType::FullPowerCycle => {
-                cx.force_off_and_wait().await?;
+                cx.ensure_host_off().await?;
                 aux_power_cycle(cx).await
             }
             other => self.standard().set(cx, other).await,
@@ -107,10 +107,10 @@ mod tests {
         "/redfish/v1/Chassis/BMC_0/Actions/Oem/NvidiaChassis.AuxPowerReset";
 
     /// The auxiliary power cycle goes out only once the host reports off: an
-    /// off host gets it at once, and a host that never powers off gets only
-    /// the ForceOff.
-    #[tokio::test(start_paused = true)]
-    async fn an_ac_power_cycle_waits_for_the_host_to_be_off() {
+    /// off host gets it at once, and a host still on gets only the ForceOff
+    /// and a `NotReady` answer to ask again.
+    #[tokio::test]
+    async fn an_ac_power_cycle_goes_out_only_once_the_host_is_off() {
         for (scenario, power_state, posted) in [
             (
                 "host already off",
@@ -118,7 +118,7 @@ mod tests {
                 (AUX_POWER_RESET, json!({"ResetType": "AuxPowerCycle"})),
             ),
             (
-                "host stays on",
+                "host still on",
                 "On",
                 (RESET, json!({"ResetType": "ForceOff"})),
             ),
@@ -156,11 +156,14 @@ mod tests {
             let cx = bmc.cx().await;
 
             let result = OpenBmcPower.set(&cx, ResetType::FullPowerCycle).await;
-            assert_eq!(
-                result.is_ok(),
-                power_state == "Off",
-                "{scenario}: {result:?}"
-            );
+            if power_state == "Off" {
+                assert!(result.is_ok(), "{scenario}: {result:?}");
+            } else {
+                assert!(
+                    matches!(result, Err(PlatformError::NotReady { .. })),
+                    "{scenario}: {result:?}"
+                );
+            }
             let writes = bmc.writes();
             assert_eq!(writes.len(), 1, "{scenario}: {writes:?}");
             assert_eq!(writes[0].method, Method::POST, "{scenario}");

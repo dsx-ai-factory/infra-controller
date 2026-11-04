@@ -14,8 +14,8 @@ use crate::power::support::RedfishPowerExt as _;
 /// HPE iLO power behavior.
 ///
 /// iLO maps `ForceRestart` to a graceful restart, and its auxiliary power
-/// cycle is only accepted while the host is off, so the host is forced off
-/// first.
+/// cycle is only accepted while the host is off, so a request on a host that
+/// is not yet off forces it off and answers `NotReady` until it is.
 pub(crate) struct IloPower;
 
 /// Posts the iLO auxiliary power cycle, which the BMC accepts only while the host is off.
@@ -55,7 +55,7 @@ where
         match reset_type {
             ResetType::ForceRestart => self.standard().set(cx, ResetType::GracefulRestart).await,
             ResetType::FullPowerCycle => {
-                cx.force_off_and_wait().await?;
+                cx.ensure_host_off().await?;
                 aux_power_cycle(cx).await
             }
             other => self.standard().set(cx, other).await,
