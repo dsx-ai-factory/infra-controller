@@ -439,6 +439,26 @@ fn resource_status_attributes(info: &ResourceStatusInfo) -> Vec<(&'static str, A
     attributes
 }
 
+fn resource_status_body(info: &ResourceStatusInfo) -> String {
+    let prefix = format!("{} {} status", info.resource_type.as_str(), info.id);
+    let Some(status) = &info.status else {
+        return format!("{prefix}: unavailable");
+    };
+
+    let state = status.state.as_deref().unwrap_or("unknown");
+    let health = status.health.as_deref().unwrap_or("unknown");
+    let health_rollup = status.health_rollup.as_deref().unwrap_or("unknown");
+    let condition_count = status.conditions.as_ref().map_or_else(
+        || "unknown".to_string(),
+        |conditions| conditions.len().to_string(),
+    );
+
+    format!(
+        "{prefix}: state={state}, health={health}, health_rollup={health_rollup}, \
+         conditions={condition_count}"
+    )
+}
+
 fn resource_status_severity(info: &ResourceStatusInfo) -> LogSeverity {
     let Some(status) = &info.status else {
         return LogSeverity::Info;
@@ -517,7 +537,7 @@ fn convert_event(
             })
         }
         CollectorEvent::ResourceStatus(info) => {
-            let body = format!("{} {} status", info.resource_type.as_str(), info.id);
+            let body = resource_status_body(info);
             let severity = resource_status_severity(info);
             Some(OtlpLogRecord {
                 time_unix_nano: observed_nanos,
@@ -1362,7 +1382,14 @@ mod tests {
             assert_eq!(record.severity_number, SeverityNumber::Error as i32);
             assert_eq!(
                 body_value(record),
-                Some(format!("{} resource-1 status", resource_type.as_str()).as_str())
+                Some(
+                    format!(
+                        "{} resource-1 status: state=Enabled, health=Warning, \
+                         health_rollup=unknown, conditions=65",
+                        resource_type.as_str()
+                    )
+                    .as_str()
+                )
             );
             assert_eq!(
                 attr_value(&record.attributes, "event.type"),
@@ -1425,12 +1452,38 @@ mod tests {
         let record = &request.resource_logs[0].scope_logs[0].log_records[0];
 
         assert_eq!(record.severity_text, "INFO");
-        assert_eq!(body_value(record), Some("firmware BMC status"));
+        assert_eq!(body_value(record), Some("firmware BMC status: unavailable"));
         assert_eq!(attr_value(&record.attributes, STATUS_STATE_KEY), None);
         assert_eq!(attr_value(&record.attributes, STATUS_HEALTH_KEY), None);
         assert_eq!(
             attr_array_value(&record.attributes, STATUS_CONDITIONS_KEY),
             None
+        );
+    }
+
+    #[test]
+    fn resource_status_event_body_marks_partial_fields_unknown() {
+        let event = CollectorEvent::ResourceStatus(Box::new(ResourceStatusInfo {
+            resource_type: RedfishResourceType::Firmware,
+            id: "CPLDMB_0".to_string(),
+            name: "CPLD MB".to_string(),
+            status: Some(RedfishStatus {
+                state: None,
+                health: Some("OK".to_string()),
+                health_rollup: Some("OK".to_string()),
+                conditions: Some(Vec::new()),
+            }),
+        }));
+
+        let request = build_export_request(&[(test_context(), event)], EXPORT_NANOS, false);
+        let record = &request.resource_logs[0].scope_logs[0].log_records[0];
+
+        assert_eq!(
+            body_value(record),
+            Some(
+                "firmware CPLDMB_0 status: state=unknown, health=OK, \
+                 health_rollup=OK, conditions=0"
+            )
         );
     }
 
