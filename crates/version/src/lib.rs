@@ -89,30 +89,20 @@ pub fn build() {
         println!("cargo:rerun-if-env-changed={var}");
     }
 
-    if !can_git {
-        println!("cargo:warning=No git, version will be blank");
-        // still define it so that we can read it in a build time macro
-        // TODO: Remove after migration to new CARBIDE_ naming
-        println!("cargo:rustc-env=FORGE_BUILD_GIT_TAG=");
-        println!("cargo:rustc-env=CARBIDE_BUILD_GIT_HASH=");
-        let helm_version = std::env::var("CARBIDE_BUILD_HELM_VERSION")
-            .ok()
-            .filter(|v| !v.is_empty())
-            .unwrap_or_default();
-        println!("cargo:rustc-env=CARBIDE_BUILD_HELM_VERSION={helm_version}");
-        return;
-    }
-
-    // For these two in CI we use the env var, locally we query git
-
-    let sha = std::env::var("CI_COMMIT_SHORT_SHA")
-        .ok()
-        .unwrap_or_else(|| run("git", &["rev-parse", "--short=8", "HEAD"]));
+    // CI passes these in. Locally they come from git. An omitted Docker ARG
+    // still exports an empty string, and the release build's `cargo new` repo
+    // has no commits, so an empty value must not hide the supplied one or a
+    // usable git result.
+    let sha = value_or_git(
+        std::env::var("CI_COMMIT_SHORT_SHA").ok(),
+        can_git,
+        || run("git", &["rev-parse", "--short=8", "HEAD"]),
+    );
     // TODO: Remove after migration to new CARBIDE_ naming
     println!("cargo:rustc-env=FORGE_BUILD_GIT_HASH={sha}");
     println!("cargo:rustc-env=CARBIDE_BUILD_GIT_HASH={sha}");
 
-    let build_version = std::env::var("VERSION").ok().unwrap_or_else(|| {
+    let build_version = value_or_git(std::env::var("VERSION").ok(), can_git, || {
         run(
             "git",
             &["describe", "--tags", "--first-parent", "--always", "--long"],
@@ -121,6 +111,19 @@ pub fn build() {
     // TODO: Remove after migration to new CARBIDE_ naming
     println!("cargo:rustc-env=FORGE_BUILD_GIT_TAG={build_version}");
     println!("cargo:rustc-env=CARBIDE_BUILD_GIT_TAG={build_version}");
+
+    if !can_git {
+        if sha.is_empty() || build_version.is_empty() {
+            println!("cargo:warning=No git, version will be blank");
+        }
+        // still define it so that we can read it in a build time macro
+        let helm_version = std::env::var("CARBIDE_BUILD_HELM_VERSION")
+            .ok()
+            .filter(|v| !v.is_empty())
+            .unwrap_or_default();
+        println!("cargo:rustc-env=CARBIDE_BUILD_HELM_VERSION={helm_version}");
+        return;
+    }
 
     // If CI pre-computed CARBIDE_BUILD_HELM_VERSION (passed as a Docker build-arg), use it
     // directly. This avoids re-deriving helm_version in Rust and keeps CI as the single
@@ -204,6 +207,22 @@ fn build_date(repo: &Path, ci_commit_timestamp: Option<String>) -> String {
         }
     }
     run("date", &["-u", "+%Y-%m-%dT%H:%M:%SZ"]) // like 'date --iso-8601=seconds --utc' but portable across GNU/BSD
+}
+
+/// A non-empty supplied value wins. An empty or missing one falls back to git
+/// when git can run. Without git, the result is empty.
+fn value_or_git(
+    supplied: Option<String>,
+    can_git: bool,
+    git_value: impl FnOnce() -> String,
+) -> String {
+    if let Some(value) = supplied.filter(|value| !value.is_empty()) {
+        return value;
+    }
+    if can_git {
+        return git_value();
+    }
+    String::new()
 }
 
 /// Whether `repo` is inside a git repository whose HEAD names a commit. A bare
@@ -383,6 +402,37 @@ mod tests {
     fn is_utc_timestamp(date: &str) -> bool {
         // YYYY-MM-DDTHH:MM:SSZ
         date.len() == 20 && date.as_bytes()[10] == b'T' && date.ends_with('Z')
+    }
+
+    #[test]
+    fn supplied_version_and_sha_win_without_git() {
+        let supplied = Some("v2.2.2".to_string());
+        assert_eq!(value_or_git(supplied, false, || panic!("git")), "v2.2.2");
+        assert_eq!(
+            value_or_git(Some("abc1234".to_string()), false, || panic!("git")),
+            "abc1234"
+        );
+    }
+
+    #[test]
+    fn empty_supplied_value_uses_git_when_available() {
+        assert_eq!(
+            value_or_git(Some(String::new()), true, || "from-git".to_string()),
+            "from-git"
+        );
+        assert_eq!(
+            value_or_git(None, true, || "from-git".to_string()),
+            "from-git"
+        );
+    }
+
+    #[test]
+    fn missing_value_without_git_is_empty() {
+        assert_eq!(value_or_git(None, false, || panic!("git")), "");
+        assert_eq!(
+            value_or_git(Some(String::new()), false, || panic!("git")),
+            ""
+        );
     }
 
     // The release Dockerfiles build inside the repository `cargo new`
