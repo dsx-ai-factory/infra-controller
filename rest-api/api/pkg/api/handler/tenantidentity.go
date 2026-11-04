@@ -71,6 +71,7 @@ func NewCreateOrUpdateTenantIdentityConfigHandler(dbSession *cdb.Session, scp *s
 // @Param message body model.APITenantIdentityConfigCreateOrUpdateRequest true "Tenant Identity Config create/update request"
 // @Success 201 {object} model.APITenantIdentityConfig "Config created on first call"
 // @Success 200 {object} model.APITenantIdentityConfig "Config replaced/updated"
+// @Failure 409 {object} util.APIError
 // @Failure 503 {object} util.APIError
 // @Router /v2/org/{org}/nico/site/{siteID}/tenant-identity/config [put]
 func (umich CreateOrUpdateTenantIdentityConfigHandler) Handle(c echo.Context) error {

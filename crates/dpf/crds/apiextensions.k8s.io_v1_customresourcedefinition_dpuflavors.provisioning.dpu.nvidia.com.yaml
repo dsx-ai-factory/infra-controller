@@ -40,7 +40,12 @@ spec:
           metadata:
             type: object
           spec:
-            description: DPUFlavorSpec defines the content of DPUFlavor
+            description: |-
+              DPUFlavorSpec defines the content of DPUFlavor.
+              Config-only fields (grub, sysctl, nvconfig, ovs, packages, systemdServices,
+              containerdConfig, agent-applied configFiles, serviceReadiness, ewNicConfigurations,
+              dma, virtualFunctions) may be updated in place.
+              Immutable fields require a new DPUFlavor.
             properties:
               bfcfgParameters:
                 description: BFCfgParameters are the parameters to be set in the bf.cfg
@@ -137,20 +142,22 @@ spec:
                     description: RegistryEndpoint is the endpoint of the container
                       registry.
                     type: string
+                  sandboxImage:
+                    description: |-
+                      SandboxImage overrides the containerd sandbox (pause) image on the DPU, e.g.
+                      "registry.example.com/pause:3.9". When unset, the sandbox image shipped with the BFB is kept.
+                    maxLength: 512
+                    minLength: 1
+                    type: string
                 type: object
               dma:
                 description: |-
-                  DMA configures the DMA SF that e.g. SNAP DOCA service uses to DMA host
-                  memory over the second Grace PCI link on BlueField-4 socket-direct
-                  systems.
+                  DMA configures the SNAP DMA SF. The agent picks the ECPF; sfnum is 8000 and MAC is derived.
+                  Ignored except on BlueField-4.
                 properties:
                   enabled:
-                    description: |-
-                      Enabled controls whether the dpu-agent creates the DMA SF. Defaults to
-                      false when unset, so the presence of the dma struct alone does not enable
-                      creation. Only takes effect on BlueField-4 socket-direct systems. The
-                      created Scalable Function always uses sfnum 8000, the SNAP discovery ABI
-                      value.
+                    description: Enabled creates the SNAP DMA SF on BlueField-4 socket-direct
+                      systems.
                     type: boolean
                 type: object
               dpuMode:
@@ -503,6 +510,93 @@ spec:
                 x-kubernetes-validations:
                 - message: package names must be unique
                   rule: self.all(x, self.exists_one(y, x.name == y.name))
+              scalableFunctions:
+                description: |-
+                  ScalableFunctions is the list of SF groups to create on the DPU, or on the host when
+                  hostDevice is set. Count is per selected device. Over-subscribe can trigger failures at
+                  create time. This field is immutable. Changing it requires a new DPUFlavor. For backward compatibility, when
+                  both this SF list and VF list are empty, SF counts are still derived from PF_TOTAL_SF
+                  (removed in a future release).
+                items:
+                  description: ScalableFunction is one group of SFs to create.
+                  properties:
+                    count:
+                      description: |-
+                        Count is SFs to create per selected device. With device "*", count 20 is 20 SFs
+                        on each port. Zero creates nothing.
+                      format: int32
+                      minimum: 0
+                      type: integer
+                    device:
+                      description: 'Device is the target port: "*", a name such as
+                        p0, or a PCI address. Defaults to "*".'
+                      pattern: ^(\*|[pP][0-9]+|[0-9a-fA-F]{4}:[0-9a-fA-F]{2}:[0-9a-fA-F]{2}\.[0-7])$
+                      type: string
+                    hostDevice:
+                      description: |-
+                        HostDevice creates the SFs on the host (representors on the DPU). Implies
+                        controller 1; options.controller overrides. Host SFs use the host firmware
+                        budget and must not set poolName.
+                      type: boolean
+                    options:
+                      description: Options are creation settings for this group.
+                      properties:
+                        controller:
+                          description: Controller is the external controller to create
+                            on. Overrides hostDevice.
+                          format: int32
+                          maximum: 15
+                          minimum: 0
+                          type: integer
+                        cpuList:
+                          description: CPUList pins the SFs to CPUs in mlnx-sf list
+                            form, for example 0-3 or 0,2,4.
+                          maxLength: 200
+                          pattern: ^[0-9]+(-[0-9]+)?(,[0-9]+(-[0-9]+)?)*$
+                          type: string
+                        disableNetdev:
+                          description: DisableNetdev leaves the SFs without an ethernet
+                            netdev.
+                          type: boolean
+                        disableRoCE:
+                          description: DisableRoCE creates the SFs with RoCE disabled.
+                          type: boolean
+                        macAddress:
+                          description: MACAddress pins the SF MAC (colon-separated
+                            48-bit). Requires count 1.
+                          pattern: ^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$
+                          type: string
+                        sfNumStart:
+                          description: |-
+                            SFNumStart is the first sfnum of the group; the rest are sequential from it.
+                            Reserved before agent-numbered groups, which fill from 0 around them.
+                          format: int32
+                          maximum: 65535
+                          minimum: 0
+                          type: integer
+                        trusted:
+                          description: Trusted creates the SFs as trusted functions.
+                          type: boolean
+                      type: object
+                    poolName:
+                      description: |-
+                        PoolName is the device-plugin resource (for example bf_sf). Unset: created in
+                        hardware only. Forbidden with hostDevice.
+                      maxLength: 63
+                      pattern: ^[A-Za-z0-9][A-Za-z0-9_.-]*$
+                      type: string
+                  required:
+                  - count
+                  type: object
+                  x-kubernetes-validations:
+                  - message: options.macAddress requires count == 1
+                    rule: '!has(self.options) || !has(self.options.macAddress) ||
+                      self.count == 1'
+                  - message: poolName must not be set when hostDevice is true
+                    rule: '!has(self.hostDevice) || !self.hostDevice || !has(self.poolName)'
+                maxItems: 16
+                type: array
+                x-kubernetes-list-type: atomic
               serviceReadiness:
                 description: serviceReadiness configures the Service Readiness phase.
                 properties:
@@ -566,10 +660,81 @@ spec:
                 x-kubernetes-validations:
                 - message: systemd service names must be unique
                   rule: self.all(x, self.exists_one(y, x.name == y.name))
+              virtualFunctions:
+                description: |-
+                  VirtualFunctions is the list of VF groups to create. Count is per selected
+                  device. Groups ending up on the same device sum to a single `sriov_numvfs` and then
+                  list order assigns contiguous index ranges. Over-subscribe can trigger failures at
+                  create time. Editing this field reprovisions the DPU.
+                items:
+                  description: VirtualFunction is one group of VFs to create.
+                  properties:
+                    count:
+                      description: |-
+                        Count is VFs to create per selected device. Groups ending up on the same device sum to
+                        a single `sriov_numvfs` and then list order assigns contiguous index ranges. Zero creates nothing.
+                      format: int32
+                      minimum: 0
+                      type: integer
+                    device:
+                      description: 'Device is the target port: "*", a name such as
+                        p0, or a PCI address. Defaults to "*".'
+                      pattern: ^(\*|[pP][0-9]+|[0-9a-fA-F]{4}:[0-9a-fA-F]{2}:[0-9a-fA-F]{2}\.[0-7])$
+                      type: string
+                    options:
+                      description: Options are creation settings for this group.
+                      properties:
+                        macAddress:
+                          description: MACAddress sets the VF MAC (colon-separated
+                            48-bit). Requires count 1.
+                          pattern: ^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$
+                          type: string
+                      type: object
+                    poolName:
+                      description: |-
+                        PoolName is the device-plugin resource (for example bf_vf). Unset: created in
+                        hardware only.
+                      maxLength: 63
+                      pattern: ^[A-Za-z0-9][A-Za-z0-9_.-]*$
+                      type: string
+                  required:
+                  - count
+                  type: object
+                  x-kubernetes-validations:
+                  - message: options.macAddress requires count == 1
+                    rule: '!has(self.options) || !has(self.options.macAddress) ||
+                      self.count == 1'
+                maxItems: 16
+                type: array
+                x-kubernetes-list-type: atomic
             type: object
             x-kubernetes-validations:
-            - message: DPUFlavor spec is immutable
-              rule: self == oldSelf
+            - message: dpuMode is immutable
+              rule: (!has(self.dpuMode) && !has(oldSelf.dpuMode)) || (has(self.dpuMode)
+                && has(oldSelf.dpuMode) && self.dpuMode == oldSelf.dpuMode)
+            - message: bfcfgParameters is immutable
+              rule: (!has(self.bfcfgParameters) && !has(oldSelf.bfcfgParameters))
+                || (has(self.bfcfgParameters) && has(oldSelf.bfcfgParameters) && self.bfcfgParameters
+                == oldSelf.bfcfgParameters)
+            - message: dpuResources is immutable
+              rule: (!has(self.dpuResources) && !has(oldSelf.dpuResources)) || (has(self.dpuResources)
+                && has(oldSelf.dpuResources) && self.dpuResources == oldSelf.dpuResources)
+            - message: systemReservedResources is immutable
+              rule: (!has(self.systemReservedResources) && !has(oldSelf.systemReservedResources))
+                || (has(self.systemReservedResources) && has(oldSelf.systemReservedResources)
+                && self.systemReservedResources == oldSelf.systemReservedResources)
+            - message: hostNetworkInterfaceConfigs is immutable
+              rule: (!has(self.hostNetworkInterfaceConfigs) && !has(oldSelf.hostNetworkInterfaceConfigs))
+                || (has(self.hostNetworkInterfaceConfigs) && has(oldSelf.hostNetworkInterfaceConfigs)
+                && self.hostNetworkInterfaceConfigs == oldSelf.hostNetworkInterfaceConfigs)
+            - message: configFiles with type cloud-init (the default) are immutable
+              rule: '(has(self.configFiles) ? self.configFiles.filter(f, !has(f.type)
+                || f.type == ''cloud-init'') : []) == (has(oldSelf.configFiles) ?
+                oldSelf.configFiles.filter(f, !has(f.type) || f.type == ''cloud-init'')
+                : [])'
+            - message: scalableFunctions is immutable
+              rule: '(has(self.scalableFunctions) ? self.scalableFunctions : []) ==
+                (has(oldSelf.scalableFunctions) ? oldSelf.scalableFunctions : [])'
         type: object
     served: true
     storage: true

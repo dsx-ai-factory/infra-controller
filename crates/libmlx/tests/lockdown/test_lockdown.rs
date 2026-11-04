@@ -87,30 +87,43 @@ fn test_lockdown_manager_with_dry_run() {
     assert!(matches!(result, Err(MlxError::DryRun(_))));
 }
 
-// With a fake flint path every operation fails when it tries to execute the tool,
-// surfacing as CommandFailed. Each manager method has its own signature, so the
-// rows feed pre-computed outcomes (mapped to their error variant) through identity.
+// A missing executable must identify the failed operation without exposing its
+// key. Check only the prefix because the OS error text varies by platform.
 #[test]
 fn test_manager_error_handling() {
-    let runner = FlintRunner::with_path("/fake/flint");
+    let directory = tempfile::tempdir().unwrap();
+    let missing = directory.path().join("flint");
+    let runner = FlintRunner::with_path(missing.to_str().unwrap());
     let manager = LockdownManager::with_runner(runner);
+    let key = "0a1B2c3D4e5F6789";
 
     value_scenarios!(
-        run = |kind| kind;
+        run = |(error, prefix): (MlxError, &str)| {
+            let display = error.to_string();
+            for rendered in [&display, &format!("{error:?}")] {
+                assert!(!rendered.contains(key));
+                assert!(!rendered.contains(&key.to_uppercase()));
+            }
+            display.starts_with(prefix)
+        };
         "lock_device" {
-            error_kind(manager.lock_device("fake_device", "12345678")) => "CommandFailed",
+            (manager.lock_device("fake_device", key).unwrap_err(),
+                "command execution failed: failed to execute disable: ") => true,
         }
 
         "unlock_device" {
-            error_kind(manager.unlock_device("fake_device", "12345678")) => "CommandFailed",
+            (manager.unlock_device("fake_device", key).unwrap_err(),
+                "command execution failed: failed to execute enable: ") => true,
         }
 
         "get_status" {
-            error_kind(manager.get_status("fake_device")) => "CommandFailed",
+            (manager.get_status("fake_device").unwrap_err(),
+                "command execution failed: failed to execute query: ") => true,
         }
 
         "set_device_key" {
-            error_kind(manager.set_device_key("fake_device", "12345678")) => "CommandFailed",
+            (manager.set_device_key("fake_device", key).unwrap_err(),
+                "command execution failed: failed to execute set_key: ") => true,
         }
     );
 }

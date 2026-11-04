@@ -126,6 +126,17 @@ need a cold start to take effect; after a one-shot override, the backend
 restores the persistent selection in the saved configuration for a subsequent
 cold start.
 
+Libvirt publishes power-on and boot-completed lifecycle observations after a
+successful start, reset or reboot is confirmed online, or after a real observed
+Off-to-On transition. The first running observation and repeated running polls
+only update power state. Boot completion is inferred from domain power.
+Warm resets preserve a one-shot override staged for the next cold start.
+Power commands wait up to 40 seconds for the first recognized observation before
+validation. Expiry returns HTTP 500 without enqueueing a power command. Polling
+continues, so a later request can succeed after an observation recovers. Ready
+commands retain their existing enqueue acknowledgment. Execution failures are
+logged and do not synthesize a completed BFB install.
+
 ## Run a separate DPU endpoint
 
 A DPU is independently addressable hardware, so expose it through its own
@@ -324,6 +335,21 @@ identities, mismatched system/manager identities, and unsupported versions remai
 errors. Older account-only snapshots retain profile defaults for resource settings. MAT snapshots use
 `bmc_state`; the old `bmc_accounts` format is not migrated.
 Start with fresh persisted state when upgrading from that format.
+
+### DPU BFB recovery
+
+A BMC snapshot keeps the installed DPU image and retained BFB tasks together.
+A restored unfinished task keeps its ID and resumes its restart. New tasks use a
+fresh random epoch after each restore, so stale snapshots do not rewind the
+current allocator. A non-DPU BMC rejects a `DPU_OS` update target with HTTP 404.
+`PersistedBmcState::dpu_os_status()` supplies the saved disk to the MAT actor
+integration, which must prefer it over a separately sampled OS observation.
+
+Recovery replays the last captured install and its restart. If that install
+completed after capture, restore can restart the DPU again and reapply the captured
+image. Requests accepted after the last save are not recovered. Snapshots without
+`dpu_update`, including snapshots from before this format, cannot recover pending
+BFB installs on the first upgrade. Unremembered task IDs return HTTP 404.
 
 ## Switch NVOS endpoint
 

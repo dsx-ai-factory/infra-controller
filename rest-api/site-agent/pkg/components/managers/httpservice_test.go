@@ -7,12 +7,17 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/components/managers/bootstrap"
 	"github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/components/managers/managerapi"
+	"github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/components/managers/workflow"
 	computils "github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/components/utils"
 	"github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/conftypes"
+	"github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/datatypes/elektratypes"
 	bootstraptypes "github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/datatypes/managertypes/bootstrap"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/assert"
@@ -176,6 +181,68 @@ func TestNewStatusServeMux(t *testing.T) {
 }
 
 func TestNewMetricsServeMux(t *testing.T) {
+	t.Run("exports bootstrap and Temporal counter aliases", func(t *testing.T) {
+		require.Equal(t, "nico_rest_site_agent", conftypes.DefaultMetricsNamespace)
+		previousRegisterer, previousGatherer := prometheus.DefaultRegisterer, prometheus.DefaultGatherer
+		previousBootstrap, previousWorkflow := bootstrap.ManagerAccess, workflow.ManagerAccess
+		previousGauge := workflow.CertExpirationMetric
+		t.Cleanup(func() {
+			prometheus.DefaultRegisterer, prometheus.DefaultGatherer = previousRegisterer, previousGatherer
+			bootstrap.ManagerAccess, workflow.ManagerAccess = previousBootstrap, previousWorkflow
+			workflow.CertExpirationMetric = previousGauge
+		})
+		registry := prometheus.NewRegistry()
+		prometheus.DefaultRegisterer, prometheus.DefaultGatherer = registry, registry
+		conf := &conftypes.Config{
+			MetricsNamespace: "custom_site_agent",
+			IsMasterPod:      true,
+			BootstrapSecret:  t.TempDir(),
+		}
+		for name, contents := range map[string]string{
+			bootstraptypes.TagUUID:     "test-site",
+			bootstraptypes.TagOTP:      "8Nn5Qk0mVQqHqk2hXwfXQz1Yk5A=",
+			bootstraptypes.TagCredsURL: "https://credentials.example.test",
+			bootstraptypes.TagCACert:   "test-ca",
+		} {
+			require.NoError(t, os.WriteFile(filepath.Join(conf.BootstrapSecret, name), []byte(contents), 0600))
+		}
+		data := elektratypes.NewElektraTypes()
+		data.Conf = conf
+		managerConf := &managerapi.ManagerConf{EB: conf}
+		bootstrap.NewBootstrapManager(data, nil, managerConf).Init()
+		workflow.NewWorkflowManager(data, nil, managerConf).Init()
+		data.Managers.Bootstrap.State.DownloadAttempted.Store(7)
+		data.Managers.Bootstrap.State.DownloadSucceeded.Store(5)
+		data.Managers.Workflow.State.ConnectionAttempted.Store(3)
+		data.Managers.Workflow.State.ConnectionSucc.Store(2)
+		request := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+		request.Header.Set("Accept", "application/openmetrics-text; version=1.0.0")
+		response := httptest.NewRecorder()
+		newMetricsServeMux().ServeHTTP(response, request)
+		require.Equal(t, http.StatusOK, response.Code)
+		assert.Contains(t, response.Header().Get("Content-Type"), "text/plain")
+		for _, counter := range []struct {
+			name string
+			help string
+			want int
+		}{
+			{"credentials_download_attempted", "Credentials download attempted for Site Agent", 7},
+			{"credentials_download_attempted_total", "Credentials download attempted for Site Agent", 7},
+			{"credentials_download_succeeded", "Credentials download succeeded for Site Agent", 5},
+			{"credentials_download_succeeded_total", "Credentials download succeeded for Site Agent", 5},
+			{"temporal_connection_attempted", "Temporal connections attempted by the Site Agent", 3},
+			{"temporal_connection_attempted_total", "Temporal connections attempted by the Site Agent", 3},
+			{"temporal_connection_succeeded", "Temporal connections succeeded by the Site Agent", 2},
+			{"temporal_connection_succeeded_total", "Temporal connections succeeded by the Site Agent", 2},
+		} {
+			fullName := "custom_site_agent_" + counter.name
+			assert.Contains(t, response.Body.String(), "# HELP "+fullName+" "+counter.help+"\n")
+			assert.Contains(t, response.Body.String(), "# TYPE "+fullName+" counter\n")
+			assert.Contains(t, response.Body.String(), fmt.Sprintf("\n%s %d\n", fullName, counter.want))
+			assert.NotContains(t, response.Body.String(), "nico_rest_site_agent_"+counter.name)
+		}
+	})
+
 	mux := newMetricsServeMux()
 	tests := []struct {
 		name            string

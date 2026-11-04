@@ -16,9 +16,9 @@
  */
 
 use std::borrow::Cow;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 
 use axum::Router;
 use axum::extract::{Json, Path, State};
@@ -189,7 +189,11 @@ pub(crate) fn add_routes<C: Callbacks + 'static>(
         )
         .route(
             &redfish::bios::change_password_target(&bios),
-            post(change_bios_password_action),
+            post(change_bios_password_action::<C>),
+        )
+        .route(
+            &redfish::bios::reset_target(&bios),
+            post(reset_bios_action::<C>),
         );
     if matches!(bmc_vendor, redfish::oem::BmcVendor::Hpe) {
         let hpe_boot = hpe_boot_resource(SYSTEM_ID);
@@ -236,6 +240,8 @@ pub struct SystemState<C: Callbacks> {
     systems: Vec<SingleSystemState<C>>,
 }
 
+pub(crate) type UefiPasswords = BTreeMap<String, String>;
+
 #[derive(Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 struct BootSourceOverride {
     mode: Option<String>,
@@ -256,6 +262,8 @@ pub(crate) struct SingleSystemState<C: Callbacks> {
     boot_source_override: Mutex<BootSourceOverride>,
     secure_boot_enabled: Arc<AtomicBool>,
     bios_overrides: Arc<Mutex<serde_json::Value>>,
+    /// BIOS setup passwords by `PasswordName`. A name that is absent has no password set.
+    uefi_passwords: Arc<Mutex<UefiPasswords>>,
 }
 
 #[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -366,6 +374,14 @@ impl<C: Callbacks> SystemState<C> {
         }
     }
 
+    pub(crate) fn power_state(&self) -> Option<PowerState> {
+        *self
+            .controlled_system()?
+            .power_state
+            .lock()
+            .expect("power state lock poisoned")
+    }
+
     /// Updates the power observation exposed for the controlled system.
     /// `PowerState` is omitted from Redfish responses until an observation is published.
     /// Unrecognized observations (`UnsupportedValue`) are reported as JSON null.
@@ -393,6 +409,59 @@ impl<C: Callbacks> SystemState<C> {
         self.systems
             .iter()
             .find(|system| system.config.id.as_ref() == system_id)
+    }
+
+    pub(crate) fn effect_snapshots(
+        &self,
+        updates: &redfish::update_service::UpdateServiceState,
+    ) -> HashMap<String, crate::persistence::BmcSystemEffectSnapshot> {
+        self.systems
+            .iter()
+            .map(|system| {
+                (
+                    system.config.id.to_string(),
+                    crate::persistence::BmcSystemEffectSnapshot {
+                        bios_attributes: system
+                            .bios_json()
+                            .and_then(|bios| bios.get("Attributes").cloned()),
+                        uefi_passwords_set: system
+                            .uefi_passwords
+                            .lock()
+                            .expect("mutex poisoned")
+                            .values()
+                            .any(|password| !password.is_empty()),
+                        boot_progress: updates.dpu_boot_progress(system.powered_on()),
+                    },
+                )
+            })
+            .collect()
+    }
+
+    pub(crate) fn uefi_password_sources(
+        &self,
+    ) -> impl Iterator<Item = (&str, Weak<Mutex<UefiPasswords>>)> {
+        self.systems.iter().map(|system| {
+            (
+                system.config.id.as_ref(),
+                Arc::downgrade(&system.uefi_passwords),
+            )
+        })
+    }
+
+    pub(crate) fn restore_uefi_passwords(
+        &self,
+        passwords: &BTreeMap<String, UefiPasswords>,
+    ) -> Result<(), &'static str> {
+        if passwords.keys().any(|id| self.find(id).is_none()) {
+            return Err("UEFI password snapshot references an unknown system");
+        }
+        for system in &self.systems {
+            *system.uefi_passwords.lock().expect("mutex poisoned") = passwords
+                .get(system.config.id.as_ref())
+                .cloned()
+                .unwrap_or_default();
+        }
+        Ok(())
     }
 
     /// `@odata.id` of the controllable host system: the one wired to power
@@ -518,7 +587,52 @@ impl<C: Callbacks> SingleSystemState<C> {
             boot_source_override: Mutex::new(BootSourceOverride::default()),
             secure_boot_enabled: Arc::new(AtomicBool::new(false)),
             bios_overrides: Arc::new(Mutex::new(serde_json::json!({}))),
+            uefi_passwords: Arc::default(),
         }
+    }
+
+    fn bios_json(&self) -> Option<serde_json::Value> {
+        self.config.base_bios.as_ref().map(|base_bios| {
+            let overrides = self.bios_overrides.lock().expect("mutex is poisoned");
+            base_bios
+                .clone()
+                .patch(redfish::bios::actions(&redfish::bios::resource(
+                    &self.config.id,
+                )))
+                .patch(overrides.clone())
+        })
+    }
+
+    fn powered_on(&self) -> bool {
+        self.power_state
+            .lock()
+            .expect("power state lock poisoned")
+            .is_none_or(|power_state| power_state == PowerState::On)
+    }
+
+    /// Applies a BIOS setup password change the way the BIOS does: `old` must match the stored
+    /// password (an unset password reads as empty) and an empty `new` clears it.
+    /// Returns false when the change is refused.
+    fn change_uefi_password(&self, name: &str, old: &str, new: &str) -> bool {
+        let mut passwords = self.uefi_passwords.lock().expect("mutex poisoned");
+        let current = passwords.get(name).map_or("", String::as_str);
+        // NICo clears with the credential it recorded when it set the password, so an unset
+        // password is only ever cleared with an empty old value, like any other change.
+        if current != old {
+            return false;
+        }
+        if new.is_empty() {
+            passwords.remove(name);
+        } else {
+            passwords.insert(name.to_owned(), new.to_owned());
+        }
+        true
+    }
+
+    /// Drops every BIOS attribute change so the hardware profile's attributes show again.
+    /// Setup passwords survive a BIOS reset and are cleared by their own action.
+    fn reset_bios(&self) {
+        *self.bios_overrides.lock().expect("mutex poisoned") = json!({});
     }
 
     pub(crate) fn on_boot_completed(&self) {
@@ -872,6 +986,12 @@ async fn get_system<C: Callbacks>(
     )
     .pcie_devices(pcie_devices);
     let mut document = model.into_json();
+    if let Some(boot_progress) = state
+        .update_service_state
+        .dpu_boot_progress(power_state.is_none_or(|power_state| power_state == PowerState::On))
+    {
+        document = document.patch(json!({"BootProgress": boot_progress}));
+    }
     // Bound actions are not emitted by the server schema generator yet.
     if config.callbacks.is_some() {
         document = document.patch(json!({"Actions": {"#ComputerSystem.Reset": {
@@ -1435,18 +1555,8 @@ async fn get_bios<C: Callbacks>(
     state
         .system_state
         .find(&system_id)
-        .and_then(|system_state| {
-            system_state.config.base_bios.as_ref().map(|base_bios| {
-                let overrides = system_state
-                    .bios_overrides
-                    .lock()
-                    .expect("mutex is poisoned");
-                base_bios
-                    .clone()
-                    .patch(overrides.clone())
-                    .into_ok_response()
-            })
-        })
+        .and_then(SingleSystemState::bios_json)
+        .map(JsonExt::into_ok_response)
         .unwrap_or_else(http::not_found)
 }
 
@@ -1494,8 +1604,53 @@ async fn patch_bios_settings<C: Callbacks>(
     }
 }
 
-async fn change_bios_password_action(Path(_system_id): Path<String>) -> Response {
-    json!({}).into_ok_response()
+/// Body libredfish posts to `Bios.ChangePassword`.
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct ChangeBiosPasswordRequest {
+    password_name: String,
+    old_password: String,
+    new_password: String,
+}
+
+async fn change_bios_password_action<C: Callbacks>(
+    State(state): State<BmcState<C>>,
+    Path(system_id): Path<String>,
+    Json(request): Json<ChangeBiosPasswordRequest>,
+) -> Response {
+    let Some(system_state) = state.system_state.find(&system_id) else {
+        return http::not_found();
+    };
+    if system_state.config.base_bios.is_none() {
+        return http::not_found();
+    }
+    if system_state.change_uefi_password(
+        &request.password_name,
+        &request.old_password,
+        &request.new_password,
+    ) {
+        json!({}).into_ok_response()
+    } else {
+        http::bad_request("the old BIOS password does not match")
+    }
+}
+
+/// libredfish posts an empty body, `{}` or `{"ResetType": "Reset"}` depending on the vendor,
+/// so the body is not read.
+async fn reset_bios_action<C: Callbacks>(
+    State(state): State<BmcState<C>>,
+    Path(system_id): Path<String>,
+) -> Response {
+    // A system without a BIOS resource has nothing to reset, as GET Bios says with its 404.
+    let Some(system_state) = state
+        .system_state
+        .find(&system_id)
+        .filter(|system_state| system_state.config.base_bios.is_some())
+    else {
+        return http::not_found();
+    };
+    system_state.reset_bios();
+    http::ok_no_content()
 }
 
 #[cfg(test)]
@@ -1771,6 +1926,71 @@ mod tests {
             assert_eq!(system["SerialConsole"]["SSH"]["ServiceEnabled"], true);
             assert_eq!(system["SerialConsole"]["SSH"]["Port"], 3222);
             assert_eq!(system["SerialConsole"]["IPMI"]["ServiceEnabled"], false);
+        }
+    }
+    /// The `Bios` resource path of the host's system.
+    async fn bios_path(router: &Router) -> String {
+        let systems = get_json(router, "/redfish/v1/Systems").await;
+        for member in systems["Members"].as_array().unwrap() {
+            let path = format!("{}/Bios", member["@odata.id"].as_str().unwrap());
+            let response = router
+                .clone()
+                .oneshot(Request::builder().uri(&path).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            if response.status() == StatusCode::OK {
+                return path;
+            }
+        }
+        panic!("no system serves a Bios resource");
+    }
+
+    #[tokio::test]
+    async fn bios_actions_need_a_system_with_a_bios() {
+        let (router, _) = create_test_bmc(
+            &host_info(HardwareType::WiwynnGB200Nvl),
+            TestBmcConfig::default(),
+            "test-host-id".to_string(),
+            false,
+            MachineRouterOptions::default(),
+        );
+        let bios_system = bios_path(&router).await.replace("/Bios", "");
+        let change_password = json!({
+            "PasswordName": "AdminPassword",
+            "OldPassword": "",
+            "NewPassword": "first",
+        });
+        for (scenario, system, expected) in [
+            ("a system with a BIOS", bios_system.as_str(), [204, 200]),
+            (
+                "a system without a BIOS",
+                "/redfish/v1/Systems/HGX_Baseboard_0",
+                [404, 404],
+            ),
+            (
+                "an unknown system",
+                "/redfish/v1/Systems/NoSuchSystem",
+                [404, 404],
+            ),
+        ] {
+            for (action, body, expected) in [
+                ("ResetBios", json!({}), expected[0]),
+                ("ChangePassword", change_password.clone(), expected[1]),
+            ] {
+                let response = router
+                    .clone()
+                    .oneshot(
+                        Request::builder()
+                            .method(Method::POST)
+                            .uri(format!("{system}/Bios/Actions/Bios.{action}"))
+                            .header(CONTENT_TYPE, "application/json")
+                            .body(Body::from(body.to_string()))
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(response.status().as_u16(), expected, "{scenario}: {action}");
+            }
         }
     }
 }

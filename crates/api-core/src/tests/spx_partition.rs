@@ -153,6 +153,103 @@ async fn spx_partition_validation_preserves_existing_partitions(pool: sqlx::PgPo
     assert_eq!(after["allocation"]["state"]["state"], "free");
 }
 
+/// Creation reserves the VNI and inserts the partition in one transaction, so a
+/// failed insert rolls back the reservation instead of leaking the VNI.
+#[crate::sqlx_test]
+async fn failed_partition_insert_rolls_back_its_vni(pool: sqlx::PgPool) {
+    let env = create_test_env(pool).await;
+    sqlx::query(
+        "ALTER TABLE spx_partitions ADD CONSTRAINT reject_partition_insert
+            CHECK (name <> 'failed partition')",
+    )
+    .execute(&env.pool)
+    .await
+    .expect("reject this partition's insert");
+    // These reads use their own connections, so they see only committed rows.
+    let pool_rows =
+        "SELECT to_jsonb(resource_pool) FROM resource_pool WHERE name = $1 ORDER BY value";
+    let before: Vec<serde_json::Value> = sqlx::query_scalar(pool_rows)
+        .bind(env.common_pools.ethernet.pool_dpa_vni.name())
+        .fetch_all(&env.pool)
+        .await
+        .expect("read DPA VNIs before creation");
+
+    let error = env
+        .api
+        .create_spx_partition(Request::new(SpxPartitionCreationRequest {
+            metadata: Some(rpc::forge::Metadata {
+                name: "failed partition".to_string(),
+                ..Default::default()
+            }),
+            tenant_organization_id: FIXTURE_TENANT_ORG_ID.to_string(),
+            ..Default::default()
+        }))
+        .await
+        .expect_err("injected partition insert failure");
+    assert_eq!(error.code(), tonic::Code::Internal);
+    assert_eq!(error.message(), "internal database error");
+
+    let partition_count: i64 = sqlx::query_scalar("SELECT count(*) FROM spx_partitions")
+        .fetch_one(&env.pool)
+        .await
+        .expect("count partitions");
+    assert_eq!(partition_count, 0);
+    let after: Vec<serde_json::Value> = sqlx::query_scalar(pool_rows)
+        .bind(env.common_pools.ethernet.pool_dpa_vni.name())
+        .fetch_all(&env.pool)
+        .await
+        .expect("read DPA VNIs after creation");
+    assert_eq!(after, before);
+}
+
+/// Creation reports `Integrated` allocation failures with the statuses SPX
+/// clients already see. The test pool has only automatic values, so a requested
+/// VNI fails for lack of an explicit range, and a second partition exhausts a
+/// pool reduced to one value.
+#[crate::sqlx_test]
+async fn spx_partition_creation_preserves_allocation_failure_statuses(pool: sqlx::PgPool) {
+    let env = create_test_env(pool).await;
+    let creation_request = |name: &str, vni: Option<u32>| {
+        Request::new(SpxPartitionCreationRequest {
+            metadata: Some(rpc::forge::Metadata {
+                name: name.to_string(),
+                ..Default::default()
+            }),
+            tenant_organization_id: FIXTURE_TENANT_ORG_ID.to_string(),
+            vni,
+            ..Default::default()
+        })
+    };
+
+    let error = env
+        .api
+        .create_spx_partition(creation_request("requested VNI", Some(40_001)))
+        .await
+        .expect_err("a requested VNI needs an explicit range");
+    assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+    assert_eq!(
+        error.message(),
+        "resource-pool `dpa-vni` has no explicit allocation range"
+    );
+
+    sqlx::query(
+        "DELETE FROM resource_pool WHERE name=$1
+         AND value <> (SELECT min(value) FROM resource_pool WHERE name=$1)",
+    )
+    .bind(env.common_pools.ethernet.pool_dpa_vni.name())
+    .execute(&env.pool)
+    .await
+    .expect("keep one DPA VNI");
+    create_partition(&env, "last partition").await;
+    let error = env
+        .api
+        .create_spx_partition(creation_request("exhausted pool", None))
+        .await
+        .expect_err("no DPA VNI remains");
+    assert_eq!(error.code(), tonic::Code::ResourceExhausted);
+    assert_eq!(error.message(), "pool dpa-vni");
+}
+
 async fn deletion_records(env: &TestEnv, id: SpxPartitionId) -> serde_json::Value {
     sqlx::query_scalar(
         "SELECT jsonb_build_object('partition', to_jsonb(p), 'allocation', to_jsonb(r))
@@ -491,7 +588,7 @@ async fn spx_partition_deletion_before_batch_allocation_rejects_attachment(pool:
         .unwrap();
     let before = deletion_records(&env, partition_id).await;
 
-    // Stop deletion at VNI release, after it has locked and marked the partition.
+    // Stop deletion at its VNI lookup, after it has locked and marked the partition.
     let mut blocker = env.db_txn().await;
     let blocker_pid: i32 = sqlx::query_scalar(
         "SELECT pg_backend_pid() FROM resource_pool WHERE name = $1 AND value = $2 FOR UPDATE",
@@ -509,7 +606,7 @@ async fn spx_partition_deletion_before_batch_allocation_rejects_attachment(pool:
     tokio::pin!(deletion);
     let deletion_pid = tokio::select! {
         result = &mut deletion => panic!("deletion did not wait for its VNI reservation: {result:?}"),
-        pid = wait_for_blocked_query(&env.pool, blocker_pid, "UPDATE resource_pool") => pid,
+        pid = wait_for_blocked_query(&env.pool, blocker_pid, "SELECT value FROM resource_pool") => pid,
     };
 
     let allocation =
@@ -519,7 +616,7 @@ async fn spx_partition_deletion_before_batch_allocation_rejects_attachment(pool:
             }));
     tokio::pin!(allocation);
     tokio::select! {
-        result = &mut deletion => panic!("deletion passed the blocked VNI release: {result:?}"),
+        result = &mut deletion => panic!("deletion passed the blocked VNI lookup: {result:?}"),
         result = &mut allocation => panic!("allocation did not wait for partition deletion: {result:?}"),
         _ = wait_for_blocked_query(&env.pool, deletion_pid, "FROM spx_partitions") => {}
     }
@@ -577,7 +674,7 @@ async fn spx_partition_deletion_before_config_update_rejects_attachment(pool: sq
         .expect("instance exists before the update");
     assert!(before_instance.config.spxconfig.spx_attachments.is_empty());
 
-    // Stop deletion at VNI release, while it owns the partition's exclusive lock.
+    // Stop deletion at its VNI lookup, while it owns the partition's exclusive lock.
     let mut blocker = env.db_txn().await;
     let blocker_pid: i32 = sqlx::query_scalar(
         "SELECT pg_backend_pid() FROM resource_pool WHERE name = $1 AND value = $2 FOR UPDATE",
@@ -595,7 +692,7 @@ async fn spx_partition_deletion_before_config_update_rejects_attachment(pool: sq
     tokio::pin!(deletion);
     let deletion_pid = tokio::select! {
         result = &mut deletion => panic!("deletion did not wait for its VNI reservation: {result:?}"),
-        pid = wait_for_blocked_query(&env.pool, blocker_pid, "UPDATE resource_pool") => pid,
+        pid = wait_for_blocked_query(&env.pool, blocker_pid, "SELECT value FROM resource_pool") => pid,
     };
 
     let update =
@@ -608,7 +705,7 @@ async fn spx_partition_deletion_before_config_update_rejects_attachment(pool: sq
             }));
     tokio::pin!(update);
     tokio::select! {
-        result = &mut deletion => panic!("deletion passed the blocked VNI release: {result:?}"),
+        result = &mut deletion => panic!("deletion passed the blocked VNI lookup: {result:?}"),
         result = &mut update => panic!("update did not wait for partition deletion: {result:?}"),
         _ = wait_for_blocked_query(&env.pool, deletion_pid, "FROM spx_partitions") => {}
     }

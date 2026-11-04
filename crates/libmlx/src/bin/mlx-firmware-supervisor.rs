@@ -132,7 +132,12 @@ fn service_logging(
 fn run_command_worker() -> std::io::Result<()> {
     // This branch must remain single-threaded: its subreaper owns every tool
     // descendant and uses /proc/thread-self/children to locate them.
-    match supervisor::run() {
+    worker_result(supervisor::run())
+}
+
+#[cfg(target_os = "linux")]
+fn worker_result(result: std::io::Result<()>) -> std::io::Result<()> {
+    match result {
         // A caller can disconnect before dispatch or while the tool runs.
         // No tool starts before a complete request; once dispatched, bounded
         // cleanup finishes before the helper attempts to write its result.
@@ -150,10 +155,28 @@ fn run_command_worker() -> std::io::Result<()> {
 
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
-    use carbide_test_support::Outcome::{Fails, Yields};
+    use carbide_test_support::Outcome::{Fails, FailsWith, Yields};
     use carbide_test_support::scenarios;
 
     use super::*;
+
+    #[test]
+    fn worker_result_preserves_timeout_failures() {
+        use std::io::{Error, ErrorKind};
+
+        scenarios!(run = |result: std::io::Result<()>| worker_result(result)
+            .map_err(|error| (error.kind(), error.to_string()));
+            "finished work and disconnected callers succeed" {
+                Ok(()) => Yields(()),
+                Err(Error::from(ErrorKind::BrokenPipe)) => Yields(()),
+                Err(Error::from(ErrorKind::UnexpectedEof)) => Yields(()),
+            }
+            "protocol timeouts retain their failure and diagnostic" {
+                Err(Error::new(ErrorKind::TimedOut, "supervisor deadline expired"))
+                    => FailsWith((ErrorKind::TimedOut, "supervisor deadline expired".to_string())),
+            }
+        );
+    }
 
     /// Incomplete service requests must fail parsing rather than enter the private worker.
     #[test]

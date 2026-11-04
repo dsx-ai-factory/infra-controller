@@ -247,6 +247,7 @@ fn cmd_registry_check(
         status: None,
         part_number,
         fw_version_current,
+        fw_version_running: None,
     };
     if let Some(filter_set) = &registry.filters {
         if filter_set.matches(&device_info) {

@@ -288,9 +288,12 @@ mod tests {
         ]);
     }
 
+    /// Verifies saved provider outcomes retain stable tags and predecessor
+    /// route-target JSON so pending allocation work remains recoverable.
     #[test]
     fn allocation_result_preserves_stored_status_and_assignment_fields() {
         check_stored_json([
+            // An allocated result preserves a predecessor numeric route target.
             (
                 "assignment handle and policy",
                 r#"{
@@ -303,7 +306,7 @@ mod tests {
                             "mode":"preserve_generated",
                             "imports":null,
                             "exports":[],
-                            "peer_identity":[]
+                            "peer_identity":[{"asn":64512,"vni":9}]
                         }
                     }
                 }"#,
@@ -315,10 +318,15 @@ mod tests {
                         mode: ProviderRouteTargetMode::Preserve,
                         imports: None,
                         exports: Some(Vec::new()),
-                        peer_identity: Vec::new(),
+                        peer_identity: vec![RouteTargetConfig {
+                            asn: 64_512,
+                            vni: Some(9),    // Retains the predecessor's numeric value.
+                            vni_self: false, // Defaults the absent predecessor field.
+                        }],
                     }),
                 }),
             ),
+            // A failed result preserves its distinct status and error fields.
             (
                 "definite rejection",
                 r#"{"status":"failed","result":{"code":"failed_precondition","message":"eligibility revision rejected"}}"#,

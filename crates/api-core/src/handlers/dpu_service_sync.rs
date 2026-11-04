@@ -16,7 +16,7 @@
  */
 
 //! Operator-driven release of the DPF maintenance holds that park DPUs while a
-//! changed DPUService waits to roll out.
+//! changed DPUDeployment-owned DPUService revision waits to roll out.
 //!
 //! Carbide releases these on its own, but only for idle hosts, and only when the
 //! site has left the automatic rollout enabled. Neither is always true: a site

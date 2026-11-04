@@ -98,7 +98,7 @@ func (gafh GetAllFabricHandler) Handle(c echo.Context) error {
 
 	// Get Site
 	stDAO := cdbm.NewSiteDAO(gafh.dbSession)
-	st, err := stDAO.GetByID(ctx, nil, stID, nil, false)
+	st, err := stDAO.GetByID(ctx, nil, stID, nil, false, false)
 	if err != nil {
 		logger.Error().Err(err).Msg("error retrieving Site from DB")
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Site specified in query", nil)
@@ -258,7 +258,7 @@ func (gfh GetFabricHandler) Handle(c echo.Context) error {
 
 	// Get Site
 	stDAO := cdbm.NewSiteDAO(gfh.dbSession)
-	st, err := stDAO.GetByID(ctx, nil, stID, nil, false)
+	st, err := stDAO.GetByID(ctx, nil, stID, nil, false, false)
 	if err != nil {
 		logger.Error().Err(err).Msg("error retrieving Site from DB")
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Site specified in query", nil)

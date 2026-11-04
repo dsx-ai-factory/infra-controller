@@ -350,7 +350,9 @@ that already exists; use `sku assign` and `sku unassign` for that.
 The two paths differ in when the SKU has to exist. REST requires a supplied `skuId` to identify an existing SKU
 at the Expected Machine's Site. For single POST and PATCH requests, REST checks your Site access before looking
 up the SKU. It rejects missing SKUs and SKUs from another Site with HTTP 422 and "SKU ID specified in request
-does not exist". Batch create and update requests return HTTP 400 with a per-item `skuID` error prefixed by
+does not exist". If the SKU lookup fails because of a database error, these single requests return HTTP 500
+with "Failed to validate SKU ID in request data due to DB error" and `data: null`.
+Batch create and update requests return HTTP 400 with a per-item `skuID` error prefixed by
 "the SkuID specified for Expected Machine does not exist in DB:" followed by the supplied ID. Replace-all
 returns HTTP 400 and "SkuID specified for an Expected Machine does not exist on the Site". The admin CLI saves
 the entry without checking, so a host whose entry names a SKU that does not exist yet enters `SkuMissing` as

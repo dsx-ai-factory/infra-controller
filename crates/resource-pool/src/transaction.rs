@@ -9,9 +9,13 @@ use sqlx::PgPool;
 /// Maximum statement wait; callers separately bound the complete operation.
 pub(crate) const DATABASE_WAIT_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// `database_transaction` bounds statements that save or recover provider work.
-/// A caller still owns the overall deadline and must commit before provider I/O.
-pub(crate) async fn database_transaction(pool: &PgPool) -> Result<Transaction<'_>, DatabaseError> {
+/// `database_transaction` gives resource pool queries a five-second statement
+/// limit, preserving a shorter database setting. The limit ends with the transaction.
+/// This does not limit connection acquisition or the complete operation; callers
+/// supply those deadlines when needed and commit before waiting for a provider.
+/// After cancellation, a started statement can finish under its server-side limit
+/// before PostgreSQL processes the queued rollback.
+pub async fn database_transaction(pool: &PgPool) -> Result<Transaction<'_>, DatabaseError> {
     let mut txn = Transaction::begin(pool).await?;
     // A dropped SQLx query can retain its pooled connection and any work-lock
     // fence until PostgreSQL finishes the statement and runs the queued rollback.

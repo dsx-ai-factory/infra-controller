@@ -59,7 +59,7 @@ func (mer ManageExpectedRackGroup) UpdateExpectedRackGroupsInDB(ctx context.Cont
 
 	// Ensure Site exists
 	stDAO := cdbm.NewSiteDAO(mer.dbSession)
-	site, err := stDAO.GetByID(ctx, nil, siteID, nil, false)
+	site, err := stDAO.GetByID(ctx, nil, siteID, nil, false, false)
 	if err != nil {
 		if errors.Is(err, cdb.ErrDoesNotExist) {
 			logger.Warn().Err(err).Msg("received inventory for unknown or deleted Site")

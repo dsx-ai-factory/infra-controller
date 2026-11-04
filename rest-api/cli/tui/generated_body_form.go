@@ -54,19 +54,22 @@ func (terminalGeneratedBodyFormPrompter) Choice(
 // the caller already supplied --data, --data-file, or scalar body flags. The
 // guided mode walks object and array schemas, resolving resource IDs to names
 // when a compatible list fetcher exists. JSON mode remains the escape hatch for
-// arbitrary or schemaless payloads.
+// arbitrary or schemaless payloads. `bodyContext` seeds resource selectors
+// without adding fields to the request body.
 func addGeneratedBodyForm(
 	s *Session,
 	info appcli.GeneratedCommandInfo,
 	args []string,
+	bodyContext map[string]string,
 ) ([]string, error) {
-	return addGeneratedBodyFormWithPrompter(s, info, args, terminalGeneratedBodyFormPrompter{})
+	return addGeneratedBodyFormWithPrompter(s, info, args, bodyContext, terminalGeneratedBodyFormPrompter{})
 }
 
 func addGeneratedBodyFormWithPrompter(
 	s *Session,
 	info appcli.GeneratedCommandInfo,
 	args []string,
+	bodyContext map[string]string,
 	prompter generatedBodyFormPrompter,
 ) ([]string, error) {
 	out := append([]string(nil), args...)
@@ -109,7 +112,7 @@ func addGeneratedBodyFormWithPrompter(
 		return nil, fmt.Errorf("unsupported request-body input mode %q", mode)
 	}
 
-	body, set, err := buildGeneratedBodyForm(s, info, prompter)
+	body, set, err := buildGeneratedBodyForm(s, info, bodyContext, prompter)
 	if err != nil {
 		return nil, err
 	}
@@ -160,12 +163,13 @@ func addGeneratedJSONBody(
 func buildGeneratedBodyForm(
 	s *Session,
 	info appcli.GeneratedCommandInfo,
+	bodyContext map[string]string,
 	prompter generatedBodyFormPrompter,
 ) (interface{}, bool, error) {
 	if info.BodyRootType == "array" {
 		var items []map[string]interface{}
 		for {
-			item, err := buildGeneratedBodyFormObject(s, info, prompter)
+			item, err := buildGeneratedBodyFormObject(s, info, bodyContext, prompter)
 			if err != nil {
 				return nil, false, err
 			}
@@ -181,7 +185,7 @@ func buildGeneratedBodyForm(
 		return items, true, nil
 	}
 
-	body, err := buildGeneratedBodyFormObject(s, info, prompter)
+	body, err := buildGeneratedBodyFormObject(s, info, bodyContext, prompter)
 	if err != nil {
 		return nil, false, err
 	}
@@ -191,9 +195,10 @@ func buildGeneratedBodyForm(
 func buildGeneratedBodyFormObject(
 	s *Session,
 	info appcli.GeneratedCommandInfo,
+	bodyContext map[string]string,
 	prompter generatedBodyFormPrompter,
 ) (map[string]interface{}, error) {
-	resolvedValues := make(map[string]string)
+	resolvedValues := copyGeneratedBodyResolvedValues(bodyContext)
 	return buildGeneratedBodyFormProperties(s, info, info.BodyFormFields, resolvedValues, prompter)
 }
 

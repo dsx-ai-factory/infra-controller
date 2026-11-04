@@ -71,7 +71,10 @@ impl From<FirmwareComponentType> for rpc::forge::HostFirmwareComponentType {
             }
             FirmwareComponentType::Gpu => rpc::forge::HostFirmwareComponentType::Gpu,
             FirmwareComponentType::Cx7 => rpc::forge::HostFirmwareComponentType::Cx7,
-            FirmwareComponentType::Unknown => rpc::forge::HostFirmwareComponentType::Unspecified,
+            // The API has no drive component types yet.
+            FirmwareComponentType::Drive { .. } | FirmwareComponentType::Unknown => {
+                rpc::forge::HostFirmwareComponentType::Unspecified
+            }
         }
     }
 }

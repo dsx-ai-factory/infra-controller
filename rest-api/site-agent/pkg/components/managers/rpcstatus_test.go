@@ -33,12 +33,48 @@ import (
 // testRPCStatus exercises manager configuration, real RPC completion, and HTTP
 // reporting together; no test calls UpdateGrpcClientState to simulate wiring.
 func testRPCStatus(t *testing.T) {
+	const metricsNamespace = "custom_site_agent"
+
 	oldRegisterer, oldGatherer := prometheus.DefaultRegisterer, prometheus.DefaultGatherer
 	registry := prometheus.NewRegistry()
 	prometheus.DefaultRegisterer, prometheus.DefaultGatherer = registry, registry
 	t.Cleanup(func() {
 		prometheus.DefaultRegisterer, prometheus.DefaultGatherer = oldRegisterer, oldGatherer
 	})
+	checkHealthMetrics := func(t *testing.T, aggregate, temporal int) {
+		t.Helper()
+		response := httptest.NewRecorder()
+		newMetricsServeMux().ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+		require.Equal(t, http.StatusOK, response.Code)
+		for _, metric := range []struct {
+			name  string
+			kind  string
+			help  string
+			value int
+		}{
+			{
+				name: "health_status", kind: "counter",
+				help: "health status of the Site Agent", value: aggregate,
+			},
+			{
+				name: "health", kind: "gauge",
+				help: "Current aggregate health of the Site Agent: 0 unhealthy, 1 healthy", value: aggregate,
+			},
+			{
+				name: "temporal_connection_status", kind: "counter",
+				help: "Temporal health status of the Site Agent", value: temporal,
+			},
+			{
+				name: "temporal_connection_health", kind: "gauge",
+				help: "Current Temporal connection health of the Site Agent: 0 unhealthy, 1 healthy; 2 reserved for unknown", value: temporal,
+			},
+		} {
+			name := metricsNamespace + "_" + metric.name
+			assert.Contains(t, response.Body.String(), fmt.Sprintf("# HELP %s %s\n", name, metric.help))
+			assert.Contains(t, response.Body.String(), fmt.Sprintf("# TYPE %s %s\n", name, metric.kind))
+			assert.Contains(t, response.Body.String(), fmt.Sprintf("\n%s %d\n", name, metric.value))
+		}
+	}
 	var responseCode atomic.Uint32
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
@@ -57,7 +93,7 @@ func testRPCStatus(t *testing.T) {
 	elektra := elektratypes.NewElektraTypes()
 	elektra.Conf.FlowGrpc.Enabled = true
 	elektra.Conf.DisableBootstrap = true
-	elektra.Conf.MetricsNamespace = "nico_rest_site_agent"
+	elektra.Conf.MetricsNamespace = metricsNamespace
 	// Insecure clients do not parse certificates, but manager startup hashes them.
 	certPath := filepath.Join(t.TempDir(), "certificate")
 	require.NoError(t, os.WriteFile(certPath, []byte("test certificate hash input"), 0600))
@@ -70,6 +106,7 @@ func testRPCStatus(t *testing.T) {
 	manager, err := NewInstance(elektra)
 	require.NoError(t, err)
 	manager.Init()
+	checkHealthMetrics(t, 0, 0)
 	elektra.Managers.Workflow.State.HealthStatus.Store(uint64(computils.CompHealthy))
 	require.NoError(t, manager.API.CoreGrpc.CreateGrpcClient())
 	require.NoError(t, manager.API.FlowGrpc.CreateGrpcClient())
@@ -127,14 +164,15 @@ func testRPCStatus(t *testing.T) {
 			tc.recreate()
 			succeeded, failed := uint64(2), uint64(0) // Initial and replacement Version probes.
 			for _, step := range []struct {
-				name   string
-				code   codes.Code
-				health string
+				name        string
+				code        codes.Code
+				health      string
+				healthValue int
 			}{
-				{"success", codes.OK, "Healthy"},
-				{"connection failure", codes.Unavailable, "Unhealthy"},
-				{"recovery", codes.OK, "Healthy"},
-				{"application failure", codes.InvalidArgument, "Healthy"},
+				{"success", codes.OK, "Healthy", 1},
+				{"connection failure", codes.Unavailable, "Unhealthy", 0},
+				{"recovery", codes.OK, "Healthy", 1},
+				{"application failure", codes.InvalidArgument, "Healthy", 1},
 			} {
 				t.Run(step.name, func(t *testing.T) {
 					responseCode.Store(uint32(step.code))
@@ -154,13 +192,7 @@ func testRPCStatus(t *testing.T) {
 					assert.Equal(t, failed, section.RequestsFailed)
 					assert.Equal(t, step.health, section.Health)
 					assert.Equal(t, step.health, status.Health)
-					metrics := httptest.NewRecorder()
-					newMetricsServeMux().ServeHTTP(metrics, httptest.NewRequest(http.MethodGet, "/metrics", nil))
-					health := computils.CompHealthy
-					if step.health == "Unhealthy" {
-						health = computils.CompUnhealthy
-					}
-					assert.Contains(t, metrics.Body.String(), fmt.Sprintf("\nnico_rest_site_agent_health_status %d\n", health))
+					checkHealthMetrics(t, step.healthValue, 1)
 				})
 			}
 			t.Run("concurrent calls and status reads", func(t *testing.T) {
@@ -188,6 +220,26 @@ func testRPCStatus(t *testing.T) {
 			responseCode.Store(uint32(codes.OK))
 		})
 	}
+	t.Run("Temporal health transitions", func(t *testing.T) {
+		require.Equal(t, uint64(1), elektra.Managers.CoreGrpc.State.HealthStatus.Load())
+		require.Equal(t, uint64(1), elektra.Managers.FlowGrpc.State.HealthStatus.Load())
+		for _, step := range []struct {
+			name      string
+			status    computils.CompStatus
+			aggregate int
+			temporal  int
+		}{
+			{"healthy", computils.CompHealthy, 1, 1},
+			{"unhealthy", computils.CompUnhealthy, 0, 0},
+			{"recovered", computils.CompHealthy, 1, 1},
+			{"reserved unknown", computils.CompNotKnown, 0, 2},
+		} {
+			t.Run(step.name, func(t *testing.T) {
+				elektra.Managers.Workflow.State.HealthStatus.Store(uint64(step.status))
+				checkHealthMetrics(t, step.aggregate, step.temporal)
+			})
+		}
+	})
 }
 
 type statusCoreServer struct {

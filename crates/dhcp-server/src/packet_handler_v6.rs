@@ -23,13 +23,14 @@
 //! while this server uses dhcproto's typed API for response options.
 
 use std::borrow::Cow;
-use std::net::Ipv6Addr;
+use std::net::{Ipv6Addr, SocketAddrV6};
 use std::sync::Arc;
 
 use carbide_dhcpv6::{
     DecodeError as WireDecodeError, DecodedPacket as WirePacket, DuidMac, RELAY_REPLY,
     RelayEnvelope, decode as decode_wire_packet, extract_mac_from_duid, extract_mac_from_option79,
 };
+use carbide_instrument::emit;
 use dhcproto::v6::{
     Architecture, DhcpOption, DhcpOptions, IAAddr, IANA, Message, MessageType, NtpSuboption,
     OptionCode, Status, StatusCode, UnknownOption, VendorClass,
@@ -38,14 +39,15 @@ use dhcproto::{Encodable, Encoder};
 use ipnetwork::Ipv6Network;
 use lru::LruCache;
 use rpc::forge::{AddressFamily, DhcpDiscovery, MessageKind};
+use tokio::net::UdpSocket;
 use tokio::sync::Mutex;
 use tonic::transport::Uri;
 
 use crate::cache::CacheEntry;
 use crate::errors::DhcpError;
-use crate::metrics::V6ReplyMessageType;
+use crate::metrics::{DhcpV6ReplySent, V6ReplyMessageType};
 use crate::modes::{DhcpMode, V6Outcome};
-use crate::{Config, util};
+use crate::{Config, ReplyRetirement, ReplyStatus, util};
 
 #[derive(Debug)]
 struct DecodedPacketV6 {
@@ -60,12 +62,34 @@ struct DecodedPacketV6 {
 pub struct PacketV6 {
     encoded_packet: Vec<u8>,
     pub message_type: V6ReplyMessageType,
+    reply_retirement: ReplyRetirement,
 }
 
 impl PacketV6 {
     /// Return the wire bytes for the transport responsible for sending this response.
     pub fn encoded_packet(&self) -> &[u8] {
         &self.encoded_packet
+    }
+
+    /// Sends the response only while its listener generation remains active so DHCPv6 shares
+    /// DHCPv4's reload safety.
+    pub async fn send(
+        &self,
+        socket: &UdpSocket,
+        destination: SocketAddrV6,
+    ) -> Result<ReplyStatus, std::io::Error> {
+        let status = self
+            .reply_retirement
+            .send_to(socket, &self.encoded_packet, destination.into())
+            .await?;
+        // Count only completed socket writes so retired generations never appear as successful replies.
+        if status == ReplyStatus::Sent {
+            emit(DhcpV6ReplySent {
+                message_type: self.message_type,
+                destination_address: destination,
+            });
+        }
+        Ok(status)
     }
 }
 
@@ -615,7 +639,7 @@ fn encode_mode_reply(
         }
     }
 
-    encode_packet(reply, request.relay.as_ref())
+    encode_packet(reply, request.relay.as_ref(), config)
 }
 
 /// Encode protocol-local CONFIRM, RELEASE, and DECLINE responses without API mutation.
@@ -636,7 +660,7 @@ fn encode_local_reply(
     };
     let mut reply = base_reply(request, MessageType::Reply, config)?;
     reply.opts_mut().insert(status_option(status));
-    encode_packet(reply, request.relay.as_ref()).map(Some)
+    encode_packet(reply, request.relay.as_ref(), config).map(Some)
 }
 
 /// Determine CONFIRM status when this server has authoritative link knowledge.
@@ -804,7 +828,11 @@ fn reply_type_for(request_type: MessageType) -> MessageType {
 }
 
 /// Encode the inner response and optionally restore its Relay-Reply envelope.
-fn encode_packet(response: Message, relay: Option<&RelayEnvelope>) -> Result<PacketV6, DhcpError> {
+fn encode_packet(
+    response: Message,
+    relay: Option<&RelayEnvelope>,
+    config: &Config,
+) -> Result<PacketV6, DhcpError> {
     let message_type = if response.msg_type() == MessageType::Advertise {
         V6ReplyMessageType::Advertise
     } else {
@@ -818,6 +846,7 @@ fn encode_packet(response: Message, relay: Option<&RelayEnvelope>) -> Result<Pac
     Ok(PacketV6 {
         encoded_packet: encoded,
         message_type,
+        reply_retirement: config.reply_retirement.clone(),
     })
 }
 
@@ -855,12 +884,106 @@ fn encode_raw_option(
 
 #[cfg(test)]
 mod tests {
+    use std::net::{Ipv6Addr, SocketAddr, SocketAddrV6};
+    use std::time::Duration;
+
+    use carbide_instrument::testing::{MetricsCapture, capture_logs_async};
     use carbide_rpc_utils::dhcp::DhcpConfig;
     use carbide_test_support::Outcome::{Fails, Yields};
     use carbide_test_support::{Case, check_cases, scenarios, value_scenarios};
     use rpc::forge_tls_client::ForgeClientConfig;
 
     use super::*;
+
+    /// Verifies DHCPv6 send accounting occurs only after a completed socket write so retirement and
+    /// transport failure cannot appear successful.
+    #[tokio::test]
+    async fn send_accounts_for_active_and_retired_generations() {
+        // Build one active REPLY and one cancelled ADVERTISE so metric labels keep the outcomes independent.
+        let active = PacketV6 {
+            encoded_packet: vec![1, 2, 3],
+            message_type: V6ReplyMessageType::Reply,
+            reply_retirement: ReplyRetirement::new(tokio_util::sync::CancellationToken::new()),
+        };
+        let cancellation = tokio_util::sync::CancellationToken::new();
+        let retired = PacketV6 {
+            encoded_packet: vec![4, 5, 6],
+            message_type: V6ReplyMessageType::Advertise,
+            reply_retirement: ReplyRetirement::new(cancellation.clone()),
+        };
+        // An oversized UDP payload forces the real socket path to return an I/O error.
+        let failed = PacketV6 {
+            encoded_packet: vec![0; usize::from(u16::MAX) + 1],
+            message_type: V6ReplyMessageType::Reply,
+            reply_retirement: ReplyRetirement::new(tokio_util::sync::CancellationToken::new()),
+        };
+        // Retire only the ADVERTISE before transport so the active REPLY remains the accounting control.
+        cancellation.cancel();
+        let sender = UdpSocket::bind(SocketAddrV6::new(Ipv6Addr::LOCALHOST, 0, 0, 0))
+            .await
+            .unwrap();
+        let receiver = UdpSocket::bind(SocketAddrV6::new(Ipv6Addr::LOCALHOST, 0, 0, 0))
+            .await
+            .unwrap();
+        let SocketAddr::V6(destination) = receiver.local_addr().unwrap() else {
+            panic!("test receiver must bind an IPv6 address");
+        };
+
+        // Send the active packet before attempting transport from the retired generation.
+        let metrics = MetricsCapture::start();
+        let (active_status, active_logs) =
+            capture_logs_async(active.send(&sender, destination)).await;
+        let (retired_status, retired_logs) =
+            capture_logs_async(retired.send(&sender, destination)).await;
+        let (failed_status, failed_logs) =
+            capture_logs_async(failed.send(&sender, destination)).await;
+
+        // Only the active response reaches UDP and emits the reply Event and metric.
+        assert_eq!(active_status.unwrap(), ReplyStatus::Sent);
+        assert_eq!(retired_status.unwrap(), ReplyStatus::Retired);
+        assert!(failed_status.is_err());
+        let mut buffer = [0; 16];
+        let (length, _) =
+            tokio::time::timeout(Duration::from_secs(1), receiver.recv_from(&mut buffer))
+                .await
+                .unwrap()
+                .unwrap();
+        assert_eq!(&buffer[..length], active.encoded_packet());
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), receiver.recv_from(&mut buffer))
+                .await
+                .is_err()
+        );
+        assert!(
+            active_logs
+                .iter()
+                .any(|entry| entry.metadata_name == "dhcp_server_v6_reply_sent")
+        );
+        assert!(
+            retired_logs
+                .iter()
+                .all(|entry| entry.metadata_name != "dhcp_server_v6_reply_sent")
+        );
+        assert!(
+            failed_logs
+                .iter()
+                .all(|entry| entry.metadata_name != "dhcp_server_v6_reply_sent")
+        );
+        assert_eq!(
+            metrics.counter_delta(
+                "carbide_dhcp_v6_replies_sent_total",
+                &[("message_type", "reply")]
+            ),
+            1.0
+        );
+        assert_eq!(
+            metrics.counter_delta(
+                "carbide_dhcp_v6_replies_sent_total",
+                &[("message_type", "advertise")]
+            ),
+            0.0
+        );
+    }
 
     /// Verifies ClientId extraction accepts one valid option and rejects
     /// missing, malformed, or duplicate options.

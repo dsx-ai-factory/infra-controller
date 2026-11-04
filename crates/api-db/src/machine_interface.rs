@@ -15,7 +15,7 @@
  * limitations under the License.
  */
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 
 use carbide_network::ip::{IdentifyAddressFamily, IpAddressFamily};
@@ -26,6 +26,7 @@ use carbide_uuid::network::{NetworkPrefixId, NetworkSegmentId};
 use carbide_uuid::power_shelf::PowerShelfId;
 use carbide_uuid::switch::SwitchId;
 use chrono::{DateTime, Utc};
+use const_format::concatcp;
 use ipnetwork::IpNetwork;
 use itertools::Itertools;
 use mac_address::MacAddress;
@@ -324,6 +325,22 @@ pub async fn machine_has_primary_interface(
     Ok(exists)
 }
 
+/// Whether any interface row with `mac_address` belongs to a machine.
+///
+/// Lets DPU discovery tell a reattach of its host link from an allocation
+/// without loading the interface snapshots.
+pub async fn mac_address_has_machine(
+    db: impl DbReader<'_>,
+    mac_address: MacAddress,
+) -> DatabaseResult<bool> {
+    let query = "SELECT EXISTS(SELECT 1 FROM machine_interfaces WHERE mac_address = $1 AND machine_id IS NOT NULL)";
+    sqlx::query_scalar(query)
+        .bind(mac_address)
+        .fetch_one(db)
+        .await
+        .map_err(|e| DatabaseError::query(query, e))
+}
+
 /// Records the vendor-native Redfish `EthernetInterface.Id` on the machine_interface
 /// row(s) with the given MAC. Captured by site-explorer per exploration; callers only
 /// invoke this when the id resolves from the current report, so a wiped MAC leaves the
@@ -569,6 +586,37 @@ pub async fn find_by_ip(
         .fetch_optional(txn)
         .await
         .map_err(|e| DatabaseError::query(QUERY, e))
+}
+
+/// The interfaces holding any of `ips`, keyed by the requested address. An
+/// address belongs to at most one interface, so a requested address maps to
+/// one snapshot or is absent.
+pub async fn find_by_ips(
+    txn: impl DbReader<'_>,
+    ips: &[IpAddr],
+) -> Result<HashMap<IpAddr, MachineInterfaceSnapshot>, DatabaseError> {
+    static QUERY: &str = concat!(
+        machine_interface_snapshot_query!(),
+        r#" INNER JOIN machine_interface_addresses mia on mia.interface_id=mi.id
+        WHERE mia.address = ANY($1::inet[])"#,
+    );
+    let snapshots: Vec<MachineInterfaceSnapshot> = sqlx::query_as(QUERY)
+        .bind(ips)
+        .fetch_all(txn)
+        .await
+        .map_err(|e| DatabaseError::query(QUERY, e))?;
+    let requested: HashSet<IpAddr> = ips.iter().copied().collect();
+    let mut by_ip = HashMap::with_capacity(snapshots.len());
+    for snapshot in snapshots {
+        for address in snapshot
+            .addresses
+            .iter()
+            .filter(|address| requested.contains(address))
+        {
+            by_ip.insert(*address, snapshot.clone());
+        }
+    }
+    Ok(by_ip)
 }
 
 pub async fn find_all(txn: &mut PgConnection) -> DatabaseResult<Vec<MachineInterfaceSnapshot>> {
@@ -878,7 +926,7 @@ pub async fn find_or_create_observed_machine_interface(
                             .await?;
 
                     if network_segments.is_empty() {
-                        return Err(DatabaseError::internal(format!(
+                        return Err(DatabaseError::FailedPrecondition(format!(
                             "No network segment defined for relay addresses: {:?}",
                             relays
                         )));
@@ -1318,7 +1366,7 @@ async fn validate_existing_mac_and_create_inner(
                 .await?;
                 restore_retained_boot_interface(txn, interface, retained_window).await
             } else {
-                Err(DatabaseError::internal(format!(
+                Err(DatabaseError::FailedPrecondition(format!(
                     "No network segment defined for relay addresses: {:?}",
                     relays
                 )))
@@ -1971,18 +2019,17 @@ async fn create_dynamic(
             // DHCP callers choose this lock mode before interface writes. Match it
             // here so IPv4 never needs a shared-to-exclusive upgrade. Exclusive
             // SVI writers also exclude allocations while changing the prefix.
-            if segment
-                .prefixes
-                .iter()
-                .any(|prefix| prefix.prefix.is_ipv6())
-            {
-                lock_network_segment_exclusive(&mut allocation_txn, segment).await?;
-            } else {
-                lock_network_segments_shared(
-                    &mut allocation_txn,
-                    std::slice::from_ref(&segment.id),
-                )
-                .await?;
+            match segment_lock_mode(segment.prefixes.iter().map(|prefix| &prefix.prefix)) {
+                SegmentLockMode::Exclusive => {
+                    lock_network_segment_exclusive(&mut allocation_txn, segment).await?;
+                }
+                SegmentLockMode::Shared => {
+                    lock_network_segments_shared(
+                        &mut allocation_txn,
+                        std::slice::from_ref(&segment.id),
+                    )
+                    .await?;
+                }
             }
 
             let try_next_segment = match try_create_dynamic(
@@ -2416,46 +2463,130 @@ pub async fn lock_network_segments_shared(
     Ok(())
 }
 
-/// Advisory-lock every admin segment, in ascending id order. Transactions
-/// that touch machine-interface rows before their segment locks -- the flows
-/// that end in `reconcile_admin_addresses_for_host`, and machine teardown,
-/// which deletes interface rows wholesale -- call this right after opening
-/// the transaction so the whole transaction follows the allocator order.
-/// Later acquisitions of the same locks in the same transaction (reconcile's
-/// own pass) are no-ops.
+/// Advisory lock mode an allocating transaction holds on a segment.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SegmentLockMode {
+    /// Compatible with other IPv4 allocators, which claim candidates with
+    /// per-IP try-locks under the shared segment lock.
+    Shared,
+    /// Required once any prefix is IPv6: the IPv6 allocator reads used
+    /// addresses without candidate locks.
+    Exclusive,
+}
+
+/// Picks the lock mode for `prefixes`. A transaction decides this once, from
+/// every prefix it may allocate from, before its first segment lock: every
+/// later segment lock it takes requests the same or a weaker mode, so a shared
+/// lock is never upgraded.
+fn segment_lock_mode<'a>(prefixes: impl IntoIterator<Item = &'a IpNetwork>) -> SegmentLockMode {
+    if prefixes.into_iter().any(IpNetwork::is_ipv6) {
+        SegmentLockMode::Exclusive
+    } else {
+        SegmentLockMode::Shared
+    }
+}
+
+/// Advisory-lock every admin segment exclusively, in ascending id order, for
+/// transactions that lock interface rows and then reconcile or delete them in
+/// the same transaction. Call it right after opening the transaction so the
+/// whole transaction follows the allocator order (segment advisory lock
+/// first, then interface and address rows). Later acquisitions of the same
+/// keys in the same transaction never wait.
 pub async fn lock_all_admin_segments(txn: &mut PgConnection) -> DatabaseResult<()> {
     let segment_ids =
         db_network_segment::list_segment_ids(&mut *txn, Some(NetworkSegmentType::Admin)).await?;
     lock_network_segments_exclusive(txn, &segment_ids).await
 }
 
-static ADMIN_LOCK_ADMISSION: std::sync::OnceLock<std::sync::Arc<tokio::sync::Semaphore>> =
-    std::sync::OnceLock::new();
+/// Advisory-lock every admin segment, in ascending id order, in the mode the
+/// admin allocators use: shared while every admin prefix is IPv4, exclusive
+/// once any admin segment carries an IPv6 prefix. Taken right after opening a
+/// transaction that allocates a DPU-backed host link, it makes the allocator's
+/// own segment locks re-acquisitions of held keys, so the transaction never
+/// requests a segment lock after a row lock and never upgrades one.
+pub async fn lock_all_admin_segments_for_allocation(txn: &mut PgConnection) -> DatabaseResult<()> {
+    load_and_lock_all_admin_segments(txn).await.map(|_| ())
+}
 
-/// Admission gate for the `lock_all_admin_segments` flows. The admin-segment
-/// advisory locks serialize those transactions anyway; without a gate, every
-/// waiter parks *inside* an open transaction, pinning a pool connection while
-/// blocked on the lock. At fleet-ingestion scale that queue grows past
-/// Postgres `max_connections` and the whole system wedges (registration,
-/// exploration, and the state controllers all starve; see the 4,500-host
-/// ingestion wedge). Acquire this permit BEFORE opening the transaction and
-/// hold it until commit/rollback, so excess waiters queue in memory instead
-/// of on connections. Permits: `ADMIN_LOCK_ADMISSION` env var, default 16.
+/// The admission gate: its permit count and the semaphore that hands the
+/// permits out.
+struct AdminLockAdmission {
+    permits: usize,
+    semaphore: std::sync::Arc<tokio::sync::Semaphore>,
+}
+
+static ADMIN_LOCK_ADMISSION: std::sync::OnceLock<AdminLockAdmission> = std::sync::OnceLock::new();
+
+/// Accepted range of the admission permit count. 0 would deadlock every
+/// gated flow, and a value at or above the pool size defeats the gate's
+/// purpose (the waiters it is meant to keep off connections would all be
+/// admitted). The site configuration is validated against it at startup.
+pub const ADMIN_LOCK_ADMISSION_PERMIT_RANGE: std::ops::RangeInclusive<usize> = 1..=256;
+const DEFAULT_ADMIN_LOCK_ADMISSION_PERMITS: usize = 16;
+
+/// The permit count: the configured value, else the `ADMIN_LOCK_ADMISSION`
+/// environment variable clamped to the accepted range, else the default.
+fn admin_lock_admission_permit_count(
+    configured: Option<usize>,
+    environment: Option<&str>,
+) -> usize {
+    configured
+        .or_else(|| environment?.parse().ok())
+        .map(|permits| {
+            permits.clamp(
+                *ADMIN_LOCK_ADMISSION_PERMIT_RANGE.start(),
+                *ADMIN_LOCK_ADMISSION_PERMIT_RANGE.end(),
+            )
+        })
+        .unwrap_or(DEFAULT_ADMIN_LOCK_ADMISSION_PERMITS)
+}
+
+fn new_admin_lock_admission(configured: Option<usize>) -> AdminLockAdmission {
+    let environment = std::env::var("ADMIN_LOCK_ADMISSION").ok();
+    let permits = admin_lock_admission_permit_count(configured, environment.as_deref());
+    AdminLockAdmission {
+        permits,
+        semaphore: std::sync::Arc::new(tokio::sync::Semaphore::new(permits)),
+    }
+}
+
+fn admin_lock_admission_gate() -> &'static AdminLockAdmission {
+    ADMIN_LOCK_ADMISSION.get_or_init(|| new_admin_lock_admission(None))
+}
+
+/// Sets the admission permit count from the parsed site configuration.
+/// Called once during server startup, before any gated flow runs; the first
+/// value wins, and a later differing value is logged and ignored.
+pub fn configure_admin_lock_admission(permits: Option<usize>) {
+    let gate = new_admin_lock_admission(permits);
+    let requested = gate.permits;
+    if ADMIN_LOCK_ADMISSION.set(gate).is_err() && admin_lock_admission_permits() != requested {
+        tracing::warn!(
+            requested_permit_count = requested,
+            active_permit_count = admin_lock_admission_permits(),
+            "admin-lock admission permits are already set; keeping the active count"
+        );
+    }
+}
+
+/// The permit count of the admission gate, so a caller that holds one permit
+/// per in-flight operation can bound its own concurrency below it.
+pub fn admin_lock_admission_permits() -> usize {
+    admin_lock_admission_gate().permits
+}
+
+/// Admission gate for the flows that may wait on the admin-segment advisory
+/// locks. Without it, every waiter parks *inside* an open transaction and
+/// pins a pool connection while blocked on the lock, and at fleet scale that
+/// queue exhausts Postgres `max_connections`. Acquire this permit BEFORE
+/// opening the transaction and hold it until commit/rollback, so excess
+/// waiters queue in memory instead of on connections. Permits:
+/// `admin_lock_admission_permits` in the site configuration, else the
+/// `ADMIN_LOCK_ADMISSION` env var, default 16.
 pub async fn admin_lock_admission() -> tokio::sync::OwnedSemaphorePermit {
-    let sem = ADMIN_LOCK_ADMISSION.get_or_init(|| {
-        // Clamp to a sane range: 0 would deadlock every gated flow, and a
-        // value at or above the pool size defeats the gate's purpose (the
-        // waiters it is meant to keep off connections would all be admitted).
-        const DEFAULT_PERMITS: usize = 16;
-        const MAX_PERMITS: usize = 256;
-        let permits = std::env::var("ADMIN_LOCK_ADMISSION")
-            .ok()
-            .and_then(|v| v.parse::<usize>().ok())
-            .map(|n| n.clamp(1, MAX_PERMITS))
-            .unwrap_or(DEFAULT_PERMITS);
-        std::sync::Arc::new(tokio::sync::Semaphore::new(permits))
-    });
-    sem.clone()
+    admin_lock_admission_gate()
+        .semaphore
+        .clone()
         .acquire_owned()
         .await
         .expect("admin-lock admission semaphore is never closed")
@@ -2702,7 +2833,7 @@ pub async fn move_predicted_machine_interface_to_machine(
         "Got DHCP from predicted machine interface, moving to machine"
     );
     let Some(network_segment) = crate::network_segment::for_relay(txn, relay_ip).await? else {
-        return Err(DatabaseError::internal(format!(
+        return Err(DatabaseError::FailedPrecondition(format!(
             "No network segment defined for relay address: {relay_ip}"
         )));
     };
@@ -2978,12 +3109,283 @@ pub async fn create_host_machine_dpu_interface_proactively(
 /// state must be synchronized, or reconciliation should allocate a new primary address before
 /// deleting the old primary's DHCP address.
 ///
+/// Lock order: the unlocked pass only reads. When it finds a repair to make,
+/// the locked pass takes every admin segment advisory lock (in the
+/// allocators' mode) and then the host's interface and address row locks, so
+/// a transaction that may reach the locked pass must not already hold
+/// interface, address, or machine row locks. Call this first in a short
+/// transaction that commits right after it (`reconcile_admin_addresses_after_commit`),
+/// or after `lock_all_admin_segments`.
+///
 /// Returns `true` only when the externally visible active admin config changed. Dormant-interface
 /// cleanup is persisted but intentionally returns `false` by itself.
 pub async fn reconcile_admin_addresses_for_host(
     txn: &mut PgConnection,
     host_machine_id: &MachineId,
 ) -> DatabaseResult<bool> {
+    Ok(
+        match reconcile_admin_addresses(txn, host_machine_id).await? {
+            AdminReconcile::NoAdminInterfaces => false,
+            AdminReconcile::Done {
+                active_config_changed,
+            } => active_config_changed,
+        },
+    )
+}
+
+/// What a reconcile pass found for the host.
+enum AdminReconcile {
+    /// The host owns no admin interface. For a host whose DPU link the caller
+    /// just committed, its machine id was renamed or the host deleted since.
+    NoAdminInterfaces,
+    /// The host was reconciled; whether the active admin config changed.
+    Done { active_config_changed: bool },
+}
+
+async fn reconcile_admin_addresses(
+    txn: &mut PgConnection,
+    host_machine_id: &MachineId,
+) -> DatabaseResult<AdminReconcile> {
+    // Most calls find nothing to repair; deciding that from an unlocked
+    // snapshot keeps them off the admin segment locks. The locked pass
+    // re-reads and recomputes from the locked rows, so a stale answer here
+    // costs the lock or defers the repair to the next call.
+    let interfaces = find_host_admin_interfaces(txn, host_machine_id).await?;
+    if interfaces.is_empty() {
+        return Ok(AdminReconcile::NoAdminInterfaces);
+    }
+    if !has_dpu_backed_host_link(&interfaces) {
+        return Ok(AdminReconcile::Done {
+            active_config_changed: false,
+        });
+    }
+    let segments = load_admin_segments(txn).await?;
+    if !admin_addresses_need_repair(
+        txn,
+        host_machine_id,
+        &segments_by_id(&segments),
+        &interfaces,
+    )
+    .await?
+    {
+        return Ok(AdminReconcile::Done {
+            active_config_changed: false,
+        });
+    }
+
+    repair_admin_addresses_for_host(txn, host_machine_id).await
+}
+
+/// Reconciles a host's admin addresses in a transaction of its own on `pool`
+/// and bumps the host's visible network config when the active config
+/// changed. For callers that have already committed the rows the reconcile
+/// reads, so the locked pass holds no row lock when it takes the segment
+/// locks. A transient failure (`is_transient_reconcile_failure`) is retried
+/// after 50 ms and again after 100 ms, three attempts in all. If the last attempt fails
+/// transiently too, the host's BMC endpoint is flagged for exploration, so
+/// the next Site Explorer iteration revisits the host and retries the
+/// repair; a permanent failure leaves the endpoint alone, since repeating
+/// the reconcile cannot fix it. The error is returned for the caller to
+/// count.
+///
+/// Returns whether the active admin config changed.
+pub async fn reconcile_admin_addresses_after_commit(
+    pool: &sqlx::PgPool,
+    host_machine_id: &MachineId,
+) -> DatabaseResult<bool> {
+    const RECONCILE_ATTEMPTS: u32 = 3;
+    const RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(50);
+
+    let mut result = reconcile_admin_addresses_in_own_transaction(pool, host_machine_id).await;
+    for retry in 1..RECONCILE_ATTEMPTS {
+        if !result.as_ref().is_err_and(is_transient_reconcile_failure) {
+            break;
+        }
+        tokio::time::sleep(RETRY_DELAY * retry).await;
+        result = reconcile_admin_addresses_in_own_transaction(pool, host_machine_id).await;
+    }
+    if let Err(reconcile_error) = &result
+        && is_transient_reconcile_failure(reconcile_error)
+        && let Err(error) = request_host_exploration(pool, host_machine_id).await
+    {
+        tracing::warn!(
+            %host_machine_id,
+            error = %error,
+            "could not request exploration of the host after its admin address reconcile failed"
+        );
+    }
+    result
+}
+
+/// Whether a failed reconcile can succeed on a retry without the rows
+/// changing first: an allocation that lost a lock race, a network config
+/// bump that lost every swap, or a transaction Postgres aborted for a
+/// deadlock or serialization failure. Pool and connection errors stay
+/// permanent: flagging the host for exploration needs a connection too.
+fn is_transient_reconcile_failure(error: &DatabaseError) -> bool {
+    matches!(
+        error,
+        DatabaseError::TryAgain | DatabaseError::NetworkConfigVersionChanged { .. }
+    ) || error.is_retryable_transaction_error()
+}
+
+/// Flags the host's BMC endpoint so the next Site Explorer iteration revisits
+/// the host and retries the reconcile.
+async fn request_host_exploration(
+    pool: &sqlx::PgPool,
+    host_machine_id: &MachineId,
+) -> DatabaseResult<()> {
+    let mut txn = Transaction::begin(pool).await?;
+    crate::explored_endpoints::request_exploration_for_machine(host_machine_id, txn.as_pgconn())
+        .await?;
+    txn.commit().await
+}
+
+async fn reconcile_admin_addresses_in_own_transaction(
+    pool: &sqlx::PgPool,
+    host_machine_id: &MachineId,
+) -> DatabaseResult<bool> {
+    let mut txn = Transaction::begin(pool).await?;
+    match reconcile_admin_addresses_and_network_config(txn.as_pgconn(), host_machine_id).await {
+        Ok(active_config_changed) => {
+            txn.commit().await?;
+            Ok(active_config_changed)
+        }
+        Err(error) => {
+            txn.rollback_or_log("admin address reconcile after commit")
+                .await;
+            Err(error)
+        }
+    }
+}
+
+/// Runs the reconcile and, when the active admin config changed, bumps the
+/// host's network config version so DPU agents fetch the new config.
+async fn reconcile_admin_addresses_and_network_config(
+    txn: &mut PgConnection,
+    host_machine_id: &MachineId,
+) -> DatabaseResult<bool> {
+    let active_config_changed = match reconcile_admin_addresses(txn, host_machine_id).await? {
+        AdminReconcile::NoAdminInterfaces => {
+            tracing::warn!(
+                %host_machine_id,
+                "host has no admin interfaces to reconcile"
+            );
+            return Ok(false);
+        }
+        AdminReconcile::Done {
+            active_config_changed,
+        } => active_config_changed,
+    };
+    if active_config_changed {
+        bump_network_config_version(txn, host_machine_id).await?;
+    }
+    Ok(active_config_changed)
+}
+
+/// Attempts of the read-then-swap that republishes a host's network config.
+const NETWORK_CONFIG_BUMP_ATTEMPTS: usize = 3;
+
+/// Republishes the host's current network config under a new version. The
+/// version is read without a lock, so a concurrent writer can advance it
+/// between the read and the swap; the repaired rows stay locked in this
+/// transaction, so the read and swap are simply repeated instead of rolling
+/// the repair back. Losing every attempt is transient
+/// (`NetworkConfigVersionChanged`): the caller retries the reconcile or flags
+/// the host for exploration.
+async fn bump_network_config_version(
+    txn: &mut PgConnection,
+    host_machine_id: &MachineId,
+) -> DatabaseResult<()> {
+    for _ in 0..NETWORK_CONFIG_BUMP_ATTEMPTS {
+        let (network_config, network_config_version) =
+            crate::machine::get_network_config(&mut *txn, host_machine_id)
+                .await?
+                .take();
+        if let crate::ConditionalWrite::Applied(()) = crate::machine::try_update_network_config(
+            &mut *txn,
+            host_machine_id,
+            network_config_version,
+            &network_config,
+        )
+        .await?
+        {
+            return Ok(());
+        }
+    }
+    Err(DatabaseError::NetworkConfigVersionChanged {
+        machine_id: *host_machine_id,
+        attempts: NETWORK_CONFIG_BUMP_ATTEMPTS,
+    })
+}
+
+/// Whether the locked pass would write or fail, judged from an unlocked
+/// snapshot. Every condition is the predicate the locked pass decides its
+/// writes and errors with, applied to this snapshot.
+async fn admin_addresses_need_repair(
+    txn: &mut PgConnection,
+    host_machine_id: &MachineId,
+    segments_by_id: &HashMap<NetworkSegmentId, &NetworkSegment>,
+    interfaces: &[AdminInterfaceForReconcile],
+) -> DatabaseResult<bool> {
+    let primary = match primary_admin_interface(txn, host_machine_id, segments_by_id, interfaces)
+        .await?
+    {
+        PrimaryAdminInterface::DpuBacked { index, segment } => Some((&interfaces[index], segment)),
+        PrimaryAdminInterface::NotDpuBacked => None,
+        PrimaryAdminInterface::Broken(_) => return Ok(true),
+    };
+
+    if let Some((primary, segment)) = primary
+        && (families_missing_on_primary(primary, segment)
+            .next()
+            .is_some()
+            || primary.addresses.is_empty())
+    {
+        return Ok(true);
+    }
+
+    if dormant_links(interfaces).any(has_dhcp_address) {
+        return Ok(true);
+    }
+
+    // No address change is pending, so the names the locked pass would derive
+    // follow from this snapshot. The preview derives them without the writes
+    // a strategy makes when it assigns a name.
+    for interface in dormant_links(interfaces).filter(|interface| interface.addresses.is_empty()) {
+        let hostname = host_naming::preview_hostname_for(
+            txn,
+            &dormant_naming_context(interface, host_machine_id),
+        )
+        .await?;
+        if dormant_naming_is_stale(interface, &hostname) {
+            return Ok(true);
+        }
+    }
+
+    if let Some((primary, segment)) = primary {
+        let active_addresses = addresses_of(primary);
+        let active_hostname = host_naming::preview_hostname_for(
+            txn,
+            &active_naming_context(primary, &active_addresses, host_machine_id),
+        )
+        .await?;
+        if primary_naming_is_stale(primary, segment, &active_hostname) {
+            return Ok(true);
+        }
+    }
+
+    Ok(false)
+}
+
+/// The locked pass of `reconcile_admin_addresses_for_host`: takes the admin
+/// segment advisory locks and the host's row locks, re-reads the host's admin
+/// interfaces, re-checks the unlocked predicate on that read, and repairs what
+/// is left.
+async fn repair_admin_addresses_for_host(
+    txn: &mut PgConnection,
+    host_machine_id: &MachineId,
+) -> DatabaseResult<AdminReconcile> {
     let mut txn = Transaction::begin_inner(txn).await?;
 
     // Lock all admin segments up front instead of doing a precise pre-read of
@@ -2993,62 +3395,57 @@ pub async fn reconcile_admin_addresses_for_host(
     // ordering obvious and deadlock-safe.
     //
     // This matches allocator lock ordering: segment advisory lock first, then
-    // machine interface/address row locks.
-    let segments = load_and_lock_all_admin_segments(&mut txn).await?;
-    let segments_by_id = segments
-        .iter()
-        .map(|segment| (segment.id, segment))
-        .collect::<HashMap<_, _>>();
+    // machine interface/address row locks. The mode is the allocators' too:
+    // the writes below are protected by the row locks and by the allocator's
+    // per-IP locks, so the pass needs ordering against other allocators, not
+    // exclusion from them.
+    let segments = load_and_lock_all_admin_segments(txn.as_pgconn()).await?;
+    let segments_by_id = segments_by_id(&segments);
 
-    // Start from all host admin interfaces so a non-DPU primary admin NIC can remain the active
-    // config source while DPU-backed links are treated as dormant.
-    let mut interfaces =
-        find_host_admin_interfaces_for_update(txn.as_pgconn(), host_machine_id).await?;
-    if !interfaces
-        .iter()
-        .any(|interface| interface.is_dpu_backed_host_link)
-    {
-        txn.commit().await?;
-        return Ok(false);
-    }
-
-    // Lock existing address rows
-    let interface_ids = interfaces
-        .iter()
+    // Lock the interface rows, then their address rows. After a wait on a row
+    // another repair held, the locking read returns the interface tuples
+    // refreshed but the joined address rows from its pre-wait snapshot, so
+    // the rows are read again below once every lock is held.
+    let interface_ids = find_host_admin_interfaces_for_update(txn.as_pgconn(), host_machine_id)
+        .await?
+        .into_iter()
         .map(|interface| interface.id)
         .collect::<Vec<_>>();
     lock_admin_interface_addresses(txn.as_pgconn(), &interface_ids).await?;
 
-    // The active primary admin interface to repair, paired with its segment --
-    // present only when the host boots from a DPU admin link. A host that boots
-    // from a non-admin primary (a HostInband integrated NIC on a managed-DPU host)
-    // has no primary in the admin set, which is valid, not broken: every DPU
-    // admin link is then dormant and only gets cleaned up below. A host with no
-    // primary interface at all is the genuine error.
-    let primary_to_repair = match interfaces
-        .iter()
-        .position(|interface| interface.primary_interface)
+    // Start from all host admin interfaces so a non-DPU primary admin NIC can remain the active
+    // config source while DPU-backed links are treated as dormant.
+    let mut interfaces = find_host_admin_interfaces(txn.as_pgconn(), host_machine_id).await?;
+    if interfaces.is_empty() {
+        txn.commit().await?;
+        return Ok(AdminReconcile::NoAdminInterfaces);
+    }
+    if !has_dpu_backed_host_link(&interfaces)
+        || !admin_addresses_need_repair(
+            txn.as_pgconn(),
+            host_machine_id,
+            &segments_by_id,
+            &interfaces,
+        )
+        .await?
     {
-        Some(index) if interfaces[index].is_dpu_backed_host_link => {
-            let segment = *segments_by_id
-                .get(&interfaces[index].segment_id)
-                .ok_or_else(|| {
-                    DatabaseError::internal(format!(
-                        "Primary admin segment {} was not loaded for host {host_machine_id}",
-                        interfaces[index].segment_id
-                    ))
-                })?;
-            Some((index, segment))
-        }
-        Some(_) => None,
-        None => {
-            if !machine_has_primary_interface(host_machine_id, txn.as_pgconn()).await? {
-                return Err(DatabaseError::internal(format!(
-                    "Host {host_machine_id} has DPU-backed admin interfaces but no primary admin interface"
-                )));
-            }
-            None
-        }
+        txn.commit().await?;
+        return Ok(AdminReconcile::Done {
+            active_config_changed: false,
+        });
+    }
+
+    let primary_to_repair = match primary_admin_interface(
+        txn.as_pgconn(),
+        host_machine_id,
+        &segments_by_id,
+        &interfaces,
+    )
+    .await?
+    {
+        PrimaryAdminInterface::DpuBacked { index, segment } => Some((index, segment)),
+        PrimaryAdminInterface::NotDpuBacked => None,
+        PrimaryAdminInterface::Broken(error) => return Err(error),
     };
 
     let mut active_config_changed = false;
@@ -3057,23 +3454,10 @@ pub async fn reconcile_admin_addresses_for_host(
         // Repair the active interface first. If a dormant DPU-backed interface already owns a
         // same-segment DHCP address, move it so the host keeps its current admin IP across
         // primary-DPU changes. If there is no reusable address, allocate only the missing family.
-        for family in [IpAddressFamily::Ipv4, IpAddressFamily::Ipv6]
-            .into_iter()
-            .filter(|family| {
-                primary_segment
-                    .prefixes
-                    .iter()
-                    .any(|prefix| prefix.prefix.is_address_family(*family))
-            })
-        {
-            if interfaces[primary_index]
-                .addresses
-                .iter()
-                .any(|address| address.address.is_address_family(family))
-            {
-                continue;
-            }
-
+        let missing_families =
+            families_missing_on_primary(&interfaces[primary_index], primary_segment)
+                .collect::<Vec<_>>();
+        for family in missing_families {
             if let Some((donor_index, donor_address)) =
                 find_reusable_dhcp_address(&interfaces, primary_index, family)
             {
@@ -3144,7 +3528,7 @@ pub async fn reconcile_admin_addresses_for_host(
     // reported as an active config change by itself.
     for interface in interfaces
         .iter_mut()
-        .filter(|interface| interface.is_dpu_backed_host_link && !interface.primary_interface)
+        .filter(|interface| is_dormant_link(interface))
     {
         let deleted = delete_dhcp_addresses_from_interface(txn.as_pgconn(), interface.id).await?;
         if !deleted.is_empty() {
@@ -3160,24 +3544,12 @@ pub async fn reconcile_admin_addresses_for_host(
             // serial is known. Either way we clear its domain so it drops out
             // of DNS, since with no address there's nothing for a name to
             // point at.
-            let ctx = NamingContext {
-                mac_address: interface.mac_address,
-                addresses: &[],
-                current_hostname: Some(&interface.hostname),
-                machine_id: Some(*host_machine_id),
-                // Should be always false here -- the above loop filters to
-                // non-primary links, but this should still read from the row
-                // so the context stays accurate (e.g. if the filter changes).
-                // In other words, a non-primary never takes the machine's
-                // (shared) bare serial.
-                is_primary: interface.primary_interface,
-                // DPU-backed host links are data interfaces by definition.
-                interface_type: InterfaceType::Data,
-                interface_id: Some(interface.id),
-                domain_id: interface.domain_id,
-            };
-            let hostname = host_naming::hostname_for(txn.as_pgconn(), &ctx).await?;
-            if interface.domain_id.is_some() || interface.hostname != hostname {
+            let hostname = host_naming::hostname_for(
+                txn.as_pgconn(),
+                &dormant_naming_context(interface, host_machine_id),
+            )
+            .await?;
+            if dormant_naming_is_stale(interface, &hostname) {
                 update_hostname_and_domain(txn.as_pgconn(), interface.id, &hostname, None).await?;
                 interface.hostname = hostname;
                 interface.domain_id = None;
@@ -3195,28 +3567,13 @@ pub async fn reconcile_admin_addresses_for_host(
                 primary.id
             )));
         }
-        let active_addresses: Vec<IpAddr> = primary
-            .addresses
-            .iter()
-            .map(|address| address.address)
-            .collect();
-        let ctx = NamingContext {
-            mac_address: primary.mac_address,
-            addresses: &active_addresses,
-            current_hostname: Some(&primary.hostname),
-            // The primary admin interface: where serial naming takes effect, once the
-            // machine's discovered serial is available.
-            machine_id: Some(*host_machine_id),
-            is_primary: true,
-            // The primary admin interface is a data interface by definition.
-            interface_type: InterfaceType::Data,
-            interface_id: Some(primary.id),
-            domain_id: primary.domain_id,
-        };
-        let active_hostname = host_naming::hostname_for(txn.as_pgconn(), &ctx).await?;
-        if primary.hostname != active_hostname
-            || primary.domain_id != primary_segment.config.subdomain_id
-        {
+        let active_addresses = addresses_of(primary);
+        let active_hostname = host_naming::hostname_for(
+            txn.as_pgconn(),
+            &active_naming_context(primary, &active_addresses, host_machine_id),
+        )
+        .await?;
+        if primary_naming_is_stale(primary, primary_segment, &active_hostname) {
             update_hostname_and_domain(
                 txn.as_pgconn(),
                 primary.id,
@@ -3229,15 +3586,173 @@ pub async fn reconcile_admin_addresses_for_host(
     }
 
     txn.commit().await?;
-    Ok(active_config_changed)
+    Ok(AdminReconcile::Done {
+        active_config_changed,
+    })
 }
 
-/// Finds host-owned admin interfaces and locks the interface rows.
-async fn find_host_admin_interfaces_for_update(
+/// Naming input for a dormant DPU-backed link that has lost every address.
+fn dormant_naming_context<'a>(
+    interface: &'a AdminInterfaceForReconcile,
+    host_machine_id: &MachineId,
+) -> NamingContext<'a> {
+    NamingContext {
+        mac_address: interface.mac_address,
+        addresses: &[],
+        current_hostname: Some(&interface.hostname),
+        machine_id: Some(*host_machine_id),
+        // Always false for a dormant link, but read from the row so the
+        // context stays accurate if a caller's filter changes. A non-primary
+        // never takes the machine's (shared) bare serial.
+        is_primary: interface.primary_interface,
+        // DPU-backed host links are data interfaces by definition.
+        interface_type: InterfaceType::Data,
+        interface_id: Some(interface.id),
+        domain_id: interface.domain_id,
+    }
+}
+
+/// Naming input for the active primary DPU-backed link and the addresses it
+/// will publish.
+fn active_naming_context<'a>(
+    primary: &'a AdminInterfaceForReconcile,
+    active_addresses: &'a [IpAddr],
+    host_machine_id: &MachineId,
+) -> NamingContext<'a> {
+    NamingContext {
+        mac_address: primary.mac_address,
+        addresses: active_addresses,
+        current_hostname: Some(&primary.hostname),
+        // The primary admin interface: where serial naming takes effect, once the
+        // machine's discovered serial is available.
+        machine_id: Some(*host_machine_id),
+        is_primary: true,
+        // The primary admin interface is a data interface by definition.
+        interface_type: InterfaceType::Data,
+        interface_id: Some(primary.id),
+        domain_id: primary.domain_id,
+    }
+}
+
+/// The primary admin interface of a host, as both reconcile passes classify it.
+enum PrimaryAdminInterface<'a> {
+    /// The primary is a DPU-backed link: the interface the locked pass repairs,
+    /// with the segment it allocates from.
+    DpuBacked {
+        index: usize,
+        segment: &'a NetworkSegment,
+    },
+    /// The host boots from a non-DPU NIC, in the admin set or outside it (a
+    /// HostInband integrated NIC on a managed-DPU host). Valid: every DPU
+    /// admin link is dormant and only gets cleaned up.
+    NotDpuBacked,
+    /// The locked pass fails on this host with the carried error: its primary
+    /// segment is not an admin segment, or it has no primary interface at all.
+    Broken(DatabaseError),
+}
+
+async fn primary_admin_interface<'a>(
     txn: &mut PgConnection,
     host_machine_id: &MachineId,
-) -> DatabaseResult<Vec<AdminInterfaceForReconcile>> {
-    let query = r#"
+    segments_by_id: &HashMap<NetworkSegmentId, &'a NetworkSegment>,
+    interfaces: &[AdminInterfaceForReconcile],
+) -> DatabaseResult<PrimaryAdminInterface<'a>> {
+    let Some(index) = interfaces
+        .iter()
+        .position(|interface| interface.primary_interface)
+    else {
+        return Ok(
+            if machine_has_primary_interface(host_machine_id, txn).await? {
+                PrimaryAdminInterface::NotDpuBacked
+            } else {
+                PrimaryAdminInterface::Broken(DatabaseError::internal(format!(
+                    "Host {host_machine_id} has DPU-backed admin interfaces but no primary admin interface"
+                )))
+            },
+        );
+    };
+    if !interfaces[index].is_dpu_backed_host_link {
+        return Ok(PrimaryAdminInterface::NotDpuBacked);
+    }
+    Ok(match segments_by_id.get(&interfaces[index].segment_id) {
+        Some(segment) => PrimaryAdminInterface::DpuBacked { index, segment },
+        None => PrimaryAdminInterface::Broken(DatabaseError::internal(format!(
+            "Primary admin segment {} was not loaded for host {host_machine_id}",
+            interfaces[index].segment_id
+        ))),
+    })
+}
+
+fn has_dpu_backed_host_link(interfaces: &[AdminInterfaceForReconcile]) -> bool {
+    interfaces
+        .iter()
+        .any(|interface| interface.is_dpu_backed_host_link)
+}
+
+/// A DPU-backed host link that is not the host's primary interface.
+fn is_dormant_link(interface: &AdminInterfaceForReconcile) -> bool {
+    interface.is_dpu_backed_host_link && !interface.primary_interface
+}
+
+fn dormant_links(
+    interfaces: &[AdminInterfaceForReconcile],
+) -> impl Iterator<Item = &AdminInterfaceForReconcile> {
+    interfaces
+        .iter()
+        .filter(|interface| is_dormant_link(interface))
+}
+
+fn has_dhcp_address(interface: &AdminInterfaceForReconcile) -> bool {
+    interface
+        .addresses
+        .iter()
+        .any(|address| address.allocation_type == AllocationType::Dhcp)
+}
+
+fn addresses_of(interface: &AdminInterfaceForReconcile) -> Vec<IpAddr> {
+    interface
+        .addresses
+        .iter()
+        .map(|address| address.address)
+        .collect()
+}
+
+/// Address families `segment` serves that `primary` holds no address for.
+fn families_missing_on_primary<'a>(
+    primary: &'a AdminInterfaceForReconcile,
+    segment: &'a NetworkSegment,
+) -> impl Iterator<Item = IpAddressFamily> + 'a {
+    [IpAddressFamily::Ipv4, IpAddressFamily::Ipv6]
+        .into_iter()
+        .filter(move |family| {
+            segment
+                .prefixes
+                .iter()
+                .any(|prefix| prefix.prefix.is_address_family(*family))
+        })
+        .filter(move |family| {
+            !primary
+                .addresses
+                .iter()
+                .any(|address| address.address.is_address_family(*family))
+        })
+}
+
+/// An addressless dormant link must carry no domain and its derived name.
+fn dormant_naming_is_stale(interface: &AdminInterfaceForReconcile, hostname: &str) -> bool {
+    interface.domain_id.is_some() || interface.hostname != hostname
+}
+
+/// The primary must carry its derived name and its segment's subdomain.
+fn primary_naming_is_stale(
+    primary: &AdminInterfaceForReconcile,
+    segment: &NetworkSegment,
+    active_hostname: &str,
+) -> bool {
+    primary.hostname != active_hostname || primary.domain_id != segment.config.subdomain_id
+}
+
+const HOST_ADMIN_INTERFACES_QUERY: &str = r#"
 SELECT
     mi.id,
     mi.segment_id,
@@ -3254,9 +3769,34 @@ JOIN network_segments ns ON ns.id = mi.segment_id
 LEFT JOIN machine_interface_addresses mia ON mia.interface_id = mi.id
 WHERE mi.machine_id = $1
   AND ns.network_segment_type = 'admin'
-ORDER BY mi.id, mia.address
-FOR UPDATE OF mi"#;
+ORDER BY mi.id, mia.address"#;
 
+/// Finds host-owned admin interfaces without locking them.
+async fn find_host_admin_interfaces(
+    txn: &mut PgConnection,
+    host_machine_id: &MachineId,
+) -> DatabaseResult<Vec<AdminInterfaceForReconcile>> {
+    load_host_admin_interfaces(txn, host_machine_id, HOST_ADMIN_INTERFACES_QUERY).await
+}
+
+/// Finds host-owned admin interfaces and locks the interface rows.
+async fn find_host_admin_interfaces_for_update(
+    txn: &mut PgConnection,
+    host_machine_id: &MachineId,
+) -> DatabaseResult<Vec<AdminInterfaceForReconcile>> {
+    load_host_admin_interfaces(
+        txn,
+        host_machine_id,
+        concatcp!(HOST_ADMIN_INTERFACES_QUERY, "\nFOR UPDATE OF mi"),
+    )
+    .await
+}
+
+async fn load_host_admin_interfaces(
+    txn: &mut PgConnection,
+    host_machine_id: &MachineId,
+    query: &'static str,
+) -> DatabaseResult<Vec<AdminInterfaceForReconcile>> {
     let rows: Vec<AdminInterfaceForReconcileRow> = sqlx::query_as(query)
         .bind(host_machine_id)
         .fetch_all(&mut *txn)
@@ -3332,17 +3872,10 @@ FOR UPDATE"#;
         .map_err(|e| DatabaseError::query(query, e))
 }
 
-/// Loads and exclusively locks all admin segments before reconciliation takes row locks.
-///
-/// This intentionally locks more broadly than the specific host touches so reconciliation follows
-/// the same high-level lock order as address allocation: segment advisory lock first, then
-/// machine interface/address row locks.
-async fn load_and_lock_all_admin_segments(
-    txn: &mut Transaction<'_>,
-) -> DatabaseResult<Vec<NetworkSegment>> {
+/// Loads every admin segment, sorted by id, without locking.
+async fn load_admin_segments(txn: &mut PgConnection) -> DatabaseResult<Vec<NetworkSegment>> {
     let mut segment_ids =
-        db_network_segment::list_segment_ids(txn.as_pgconn(), Some(NetworkSegmentType::Admin))
-            .await?;
+        db_network_segment::list_segment_ids(&mut *txn, Some(NetworkSegmentType::Admin)).await?;
     segment_ids.sort();
     segment_ids.dedup();
 
@@ -3366,9 +3899,44 @@ async fn load_and_lock_all_admin_segments(
         )));
     }
 
-    lock_network_segments_exclusive(txn.as_pgconn(), &segment_ids).await?;
-
     Ok(segments)
+}
+
+/// Loads every admin segment and locks them all, ascending, in the mode the
+/// admin allocators use (see `segment_lock_mode`), before the caller takes
+/// row locks.
+///
+/// This intentionally locks more broadly than the specific host touches so reconciliation follows
+/// the same high-level lock order as address allocation: segment advisory lock first, then
+/// machine interface/address row locks.
+async fn load_and_lock_all_admin_segments(
+    txn: &mut PgConnection,
+) -> DatabaseResult<Vec<NetworkSegment>> {
+    let segments = load_admin_segments(txn).await?;
+    let segment_ids = segments
+        .iter()
+        .map(|segment| segment.id)
+        .collect::<Vec<_>>();
+    // One mode for the whole set: a single IPv6 admin prefix makes every
+    // admin segment exclusive, so an IPv6 allocation on that segment later in
+    // the transaction re-acquires a held key instead of upgrading one.
+    match segment_lock_mode(
+        segments
+            .iter()
+            .flat_map(|segment| &segment.prefixes)
+            .map(|prefix| &prefix.prefix),
+    ) {
+        SegmentLockMode::Shared => lock_network_segments_shared(txn, &segment_ids).await?,
+        SegmentLockMode::Exclusive => lock_network_segments_exclusive(txn, &segment_ids).await?,
+    }
+    Ok(segments)
+}
+
+fn segments_by_id(segments: &[NetworkSegment]) -> HashMap<NetworkSegmentId, &NetworkSegment> {
+    segments
+        .iter()
+        .map(|segment| (segment.id, segment))
+        .collect()
 }
 
 /// Finds an existing same-segment DHCP address that can be reused by the primary interface.
@@ -3633,7 +4201,7 @@ async fn reconcile_interface_segment(
     };
 
     if relay_segments.is_empty() {
-        return Err(DatabaseError::internal(format!(
+        return Err(DatabaseError::FailedPrecondition(format!(
             "No network segment defined for DHCP relay addresses: {}",
             relays.iter().join(", ")
         )));

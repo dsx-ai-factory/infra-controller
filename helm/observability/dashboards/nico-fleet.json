@@ -6250,7 +6250,7 @@
         "type": "prometheus",
         "uid": "${datasource}"
       },
-      "description": "Endpoints the explorer successfully read, by machine type.",
+      "description": "BMC endpoint records, including failed and unexpected records. Host means not identified as DPU. Records are not unique machines.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -6302,7 +6302,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "max by ($site_label, machine_type) (${metric_prefix}_endpoint_exploration_machines_explored_overall_count{job=~\"$job\"})",
+          "expr": "sum by ($site_label, machine_type) (max by ($site_label, machine_type, expectation) (${metric_prefix}_endpoint_exploration_machines_explored_overall_count{job=~\"$job\"}))",
           "legendFormat": "{{$site_label}} {{machine_type}}",
           "range": false,
           "instant": true,
@@ -6310,7 +6310,7 @@
           "format": "table"
         }
       ],
-      "title": "Hosts explored by site and machine type",
+      "title": "BMC endpoint records by site and machine type",
       "transformations": [
         {
           "id": "organize",

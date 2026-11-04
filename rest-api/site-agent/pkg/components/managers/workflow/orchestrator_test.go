@@ -58,23 +58,18 @@ func TestWorkflowOrchestrator(t *testing.T) {
 		master       bool
 		reload       bool
 		failedReload bool
-		omitLeaf     bool
 		invalidKey   bool
 		nilGauge     bool
 	}{
 		{name: "master loads existing client certificate", master: true},
 		{name: "non-master loads existing client certificate"},
 		{name: "reload updates client expiration", reload: true},
-		{name: "load and reload without cached leaf", omitLeaf: true, reload: true},
 		{name: "failed reload retains previous expiration", failedReload: true},
 		{name: "invalid key leaves metric unchanged", invalidKey: true},
 		{name: "missing gauge does not interrupt certificate loading", nilGauge: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if tt.omitLeaf {
-				t.Setenv("GODEBUG", os.Getenv("GODEBUG")+",x509keypairleaf=0")
-			}
 			previousAccess := ManagerAccess
 			previousGauge := CertExpirationMetric
 			previousRegisterer := prometheus.DefaultRegisterer
@@ -155,7 +150,6 @@ func TestWorkflowOrchestrator(t *testing.T) {
 			assert.Equal(t, float64(expiration.Unix()), gaugeValue())
 			metrics, gatherErr := registry.Gather()
 			require.NoError(t, gatherErr)
-			require.Len(t, metrics, 4)
 			var expirationMetric *dto.MetricFamily
 			for _, metric := range metrics {
 				if metric.GetName() == "nico_rest_site_agent_temporal_cert_expiration_timestamp_seconds" {

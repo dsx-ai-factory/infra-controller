@@ -39,9 +39,10 @@ use rpc::forge_agent_control_response as fac;
 use rpc::protos::mlx_device::{
     FirmwareFlashReport, FirmwareOperation, FirmwareOperationState,
     MlxAdminDeviceIdentitiesRequest, MlxAdminDeviceReportRequest, MlxDeviceIdentity,
-    MlxDeviceIdentityReport, MlxDeviceInfo, MlxDeviceInfoReportResponse, MlxDeviceReport,
-    MlxObservation, MlxObservationReport, PublishMlxDeviceReportRequest,
-    PublishMlxObservationReportRequest, mlx_device_info_report_response,
+    MlxDeviceIdentityReport, MlxDeviceInfo, MlxDeviceInfoReportResponse, MlxDeviceLockdownResult,
+    MlxDeviceReport, MlxDeviceUpdateFirmwareResult, MlxObservation, MlxObservationReport,
+    PublishMlxDeviceReportRequest, PublishMlxObservationReportRequest,
+    mlx_device_info_report_response, mlx_device_lockdown_result, mlx_device_update_firmware_result,
 };
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
@@ -131,6 +132,201 @@ async fn firmware_test_card(
     card.controller_state.value = DpaInterfaceControllerState::ApplyFirmware;
     card.controller_state.version = version;
     card
+}
+
+/// A valid late result has no operation to advance and cannot create DPA work,
+/// a controller revision, or a wakeup when the legacy DPA route is disabled.
+#[crate::sqlx_test]
+async fn generic_nic_results_without_admission_are_ignored_without_dpa(pool: sqlx::PgPool) {
+    let mut config = get_config();
+    config.ewethers_config = None;
+    let env = create_test_env_with_overrides(
+        pool,
+        TestEnvOverrides {
+            config: Some(config),
+            ..Default::default()
+        },
+    )
+    .await;
+    let host = create_managed_host(&env).await;
+    let host_id: HostMachineId = host.id.into();
+    let machine_id: MachineId = host_id.into();
+    assert!(!env.api.runtime_config.is_svpc_enabled());
+    let before = db::machine::find_one(&env.pool, &host_id, Default::default())
+        .await
+        .unwrap()
+        .unwrap();
+    sqlx::query("DELETE FROM machine_state_controller_queued_objects WHERE object_id = $1")
+        .bind(host_id.to_string())
+        .execute(&env.pool)
+        .await
+        .unwrap();
+
+    for observation in [
+        firmware_update_observation("nic-firmware:attempt"),
+        lockdown_observation(),
+    ] {
+        env.api
+            .publish_mlx_observation_report(machine_request(
+                PublishMlxObservationReportRequest {
+                    report: Some(MlxObservationReport {
+                        machine_id: Some(machine_id),
+                        observations: vec![observation],
+                        ..Default::default()
+                    }),
+                },
+                machine_id,
+            ))
+            .await
+            .expect("late valid evidence is ignored without an admitted operation");
+        let after = db::machine::find_one(&env.pool, &host_id, Default::default())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(after.state.value, before.state.value);
+        assert_eq!(after.state.version, before.state.version);
+        let queued: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM machine_state_controller_queued_objects WHERE object_id = $1)")
+            .bind(host_id.to_string()).fetch_one(&env.pool).await.unwrap();
+        assert!(!queued);
+    }
+    assert!(
+        db::dpa_interface::find_by_machine_id(&env.pool, host_id, DpaSearchConfig::default())
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+/// Malformed generic evidence rejects the mixed request before a legacy write.
+/// A valid generic receipt cannot complete a colliding legacy DPA attempt.
+#[crate::sqlx_test]
+async fn malformed_generic_results_reject_batch_before_dpa_writes(pool: sqlx::PgPool) {
+    let env = create_test_env(pool).await;
+    let host = create_managed_host(&env).await;
+    let host_id: HostMachineId = host.id.into();
+    let machine_id: MachineId = host_id.into();
+    let before = firmware_test_card(&env.pool, host_id, "00:11:22:33:44:55", "0000:cc:00.0").await;
+    let operation_id = before.firmware_operation_id();
+    env.api
+        .publish_mlx_observation_report(machine_request(
+            PublishMlxObservationReportRequest {
+                report: Some(MlxObservationReport {
+                    machine_id: Some(machine_id),
+                    observations: vec![firmware_update_observation(&operation_id)],
+                    ..Default::default()
+                }),
+            },
+            machine_id,
+        ))
+        .await
+        .expect("a generic receipt cannot become legacy completion evidence");
+    let mut mixed_legacy_fields = firmware_update_observation(&operation_id);
+    mixed_legacy_fields.lock_status = Some(rpc::protos::mlx_device::LockStatus::Unlocked.into());
+    let mut missing_selector = lockdown_observation();
+    missing_selector
+        .lockdown_result
+        .as_mut()
+        .unwrap()
+        .expected_device = None;
+
+    for generic_result in [mixed_legacy_fields, missing_selector] {
+        let error = env
+            .api
+            .publish_mlx_observation_report(machine_request(
+                PublishMlxObservationReportRequest {
+                    report: Some(MlxObservationReport {
+                        machine_id: Some(machine_id),
+                        observations: vec![
+                            // An acceptable DPA update earlier in the batch must
+                            // not commit when a later generic row is malformed.
+                            MlxObservation {
+                                device_info: Some(MlxDeviceInfo {
+                                    base_mac: before.mac_address.to_string(),
+                                    pci_name: before.pci_name.clone(),
+                                    ..Default::default()
+                                }),
+                                profile_name: Some("must-not-be-saved".into()),
+                                ..Default::default()
+                            },
+                            generic_result,
+                        ],
+                        ..Default::default()
+                    }),
+                },
+                machine_id,
+            ))
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.code(), tonic::Code::InvalidArgument);
+    }
+    let stored =
+        db::dpa_interface::find_by_machine_id(&env.pool, host_id, DpaSearchConfig::default())
+            .await
+            .unwrap();
+    assert_eq!(stored.len(), 1);
+    assert_eq!(
+        stored[0].controller_state.value,
+        before.controller_state.value
+    );
+    assert_eq!(
+        stored[0].controller_state.version,
+        before.controller_state.version
+    );
+    assert_eq!(
+        serde_json::to_value(&stored[0].card_state).unwrap(),
+        serde_json::to_value(&before.card_state).unwrap()
+    );
+}
+
+/// Supply successful generic execution evidence without legacy completion fields.
+/// Its identity can deliberately collide with a DPA attempt to test routing.
+fn firmware_update_observation(operation_id: &str) -> MlxObservation {
+    MlxObservation {
+        firmware_update_result: Some(MlxDeviceUpdateFirmwareResult {
+            operation_id: operation_id.into(),
+            phase_id: "update:1".into(),
+            pci_name: "0000:cc:00.0".into(),
+            result: Some(mlx_device_update_firmware_result::Result::Receipt(
+                FirmwareOperation {
+                    operation_id: operation_id.into(),
+                    state: FirmwareOperationState::Complete.into(),
+                    report: Some(FirmwareFlashReport {
+                        flashed: true,
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+            )),
+        }),
+        ..Default::default()
+    }
+}
+
+/// Supply a completed generic lockdown change, which no DPA field can represent.
+fn lockdown_observation() -> MlxObservation {
+    MlxObservation {
+        device_info: Some(MlxDeviceInfo {
+            pci_name: "0000:cc:00.0".into(),
+            base_mac: "00:11:22:33:44:55".into(),
+            ..Default::default()
+        }),
+        lockdown_result: Some(MlxDeviceLockdownResult {
+            controller_state_version: "state-version".into(),
+            pci_name: "0000:cc:00.0".into(),
+            expected_device: Some(rpc::protos::mlx_device::MlxDeviceSelector {
+                identity: Some(
+                    rpc::protos::mlx_device::mlx_device_selector::Identity::BaseMac(
+                        "00:11:22:33:44:55".into(),
+                    ),
+                ),
+            }),
+            result: Some(mlx_device_lockdown_result::Result::Changed(
+                mlx_device_lockdown_result::Changed {},
+            )),
+        }),
+        ..Default::default()
+    }
 }
 
 /// Canonical inventory upgrades a saved MST locator without creating a new card
@@ -977,14 +1173,26 @@ async fn firmware_observation_batch_merges_partial_and_malformed_reports(pool: s
     }
 }
 
-/// A database write failure must reject the whole observation batch so Scout
-/// can retry without losing an acknowledged receipt or committing partial state.
+/// Legacy writes roll back together while separately committed generic evidence
+/// survives. Retrying the mixed request completes both without replaying progress.
 #[crate::sqlx_test]
 async fn firmware_observation_write_failure_rolls_back_and_allows_retry(pool: sqlx::PgPool) {
     let env = create_test_env(pool).await;
     let host = create_managed_host(&env).await;
     let host_id: HostMachineId = host.id.into();
     let machine_id: MachineId = host_id.into();
+    let admitted = model::test_support::nic_firmware::operation();
+    let mut txn = env.pool.begin().await.unwrap();
+    db::machine::update_state(
+        &mut txn,
+        &host_id,
+        &model::machine::ManagedHostState::NicFirmwareUpdating {
+            operation: admitted.clone(),
+        },
+    )
+    .await
+    .unwrap();
+    txn.commit().await.unwrap();
     let cards = [
         firmware_test_card(&env.pool, host_id, "00:11:22:33:44:55", "cc:00.0").await,
         firmware_test_card(&env.pool, host_id, "00:11:22:33:44:66", "dd:00.0").await,
@@ -1012,6 +1220,24 @@ async fn firmware_observation_write_failure_rolls_back_and_allows_retry(pool: sq
         report: Some(MlxObservationReport {
             machine_id: Some(machine_id),
             observations: vec![
+                // Generic evidence commits to machine state separately. A
+                // later legacy failure must not lose it or replay its CAS.
+                MlxObservation {
+                    firmware_update_result: Some(MlxDeviceUpdateFirmwareResult {
+                        operation_id: admitted.operation_id.clone(),
+                        phase_id: admitted.operation_id.clone(),
+                        pci_name: admitted.targets[0].pci_name.clone(),
+                        result: Some(mlx_device_update_firmware_result::Result::Receipt(
+                            FirmwareOperation {
+                                operation_id: admitted.operation_id.clone(),
+                                state: FirmwareOperationState::Running.into(),
+                                report: Some(Default::default()),
+                                ..Default::default()
+                            },
+                        )),
+                    }),
+                    ..Default::default()
+                },
                 MlxObservation {
                     firmware_operation: Some(operations[0].clone()),
                     ..Default::default()
@@ -1032,7 +1258,35 @@ async fn firmware_observation_write_failure_rolls_back_and_allows_retry(pool: sq
     .await;
     let error = result.unwrap_err();
     assert_eq!(error.code(), tonic::Code::Internal);
-    assert!(error.message().contains("test_reject_card_observation"));
+    assert_eq!(error.message(), "internal database error");
+    let generic_committed = db::machine::find_one(&env.pool, &host_id, Default::default())
+        .await
+        .unwrap()
+        .unwrap();
+    let model::machine::ManagedHostState::NicFirmwareUpdating { operation } =
+        &generic_committed.state.value
+    else {
+        panic!("the admitted operation must remain active")
+    };
+    assert_eq!(
+        operation.targets[0].receipt.as_ref().unwrap().state,
+        carbide_libmlx_model::firmware::operation::FirmwareOperationState::Running
+    );
+    let source = std::error::Error::source(&error)
+        .expect("database status source")
+        .downcast_ref::<crate::errors::CarbideErrorWithLocation>()
+        .expect("Carbide error source");
+    let crate::errors::CarbideError::DBError(annotated) = &source.error else {
+        panic!("expected the original database error: {source:?}");
+    };
+    let database_error = annotated
+        .source
+        .as_database_error()
+        .expect("database constraint error");
+    assert_eq!(
+        database_error.constraint(),
+        Some("test_reject_card_observation")
+    );
     // The first failed receipt reached PostgreSQL but was rolled back. Its
     // attention warning must wait until the whole batch has committed.
     assert!(
@@ -1075,6 +1329,18 @@ async fn firmware_observation_write_failure_rolls_back_and_allows_retry(pool: sq
     )
     .await;
     result.unwrap();
+    let generic_after_retry = db::machine::find_one(&env.pool, &host_id, Default::default())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        generic_after_retry.state.value,
+        generic_committed.state.value
+    );
+    assert_eq!(
+        generic_after_retry.state.version,
+        generic_committed.state.version
+    );
     let attention: Vec<_> = logs
         .iter()
         .filter(|log| log.message == "NIC firmware operation requires operator attention")
@@ -1388,6 +1654,7 @@ async fn stored_device_identities_include_secondary_dpu_without_scout(pool: sqlx
     ];
     let stored = MlxDeviceObservation {
         observed_at: "2026-09-29T00:00:00Z".parse().unwrap(),
+        received_at: None,
         devices: devices
             .iter()
             .cloned()
@@ -1403,6 +1670,12 @@ async fn stored_device_identities_include_secondary_dpu_without_scout(pool: sqlx
         db::ConditionalWrite::Applied(())
     );
     drop(connection);
+    let saved = db::machine::find_one(&env.pool, &host_machine_id, Default::default())
+        .await
+        .unwrap()
+        .unwrap()
+        .status
+        .mlx_device_observation;
 
     let response = env
         .api
@@ -1432,7 +1705,7 @@ async fn stored_device_identities_include_secondary_dpu_without_scout(pool: sqlx
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(after.status.mlx_device_observation, Some(stored));
+    assert_eq!(after.status.mlx_device_observation, saved);
     assert_eq!(after.state.value, machine.state.value);
     assert_eq!(after.state.version, machine.state.version);
     assert!(!env.api.scout_stream_registry.is_connected(machine_id).await);

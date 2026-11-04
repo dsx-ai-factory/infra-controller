@@ -181,8 +181,8 @@ func TestAllocationHandler_Create(t *testing.T) {
 	ipb4 := testIPBlockBuildIPBlock(t, dbSession, "test4pb", site4, ip2, &tenant3.ID, cdbm.IPBlockRoutingTypeDatacenterOnly, "196.162.0.0", 16, cdbm.IPBlockProtocolVersionV4, false, cdbm.IPBlockStatusReady, ipu)
 	ipb5 := testIPBlockBuildIPBlock(t, dbSession, "test4pb", site5, ip2, &tenant4.ID, cdbm.IPBlockRoutingTypeDatacenterOnly, "194.162.0.0", 16, cdbm.IPBlockProtocolVersionV4, false, cdbm.IPBlockStatusReady, ipu)
 
-	// Matching the provider and site is not enough. A record with SitePrefixID
-	// set belongs to SitePrefix and cannot be the parent of an Allocation.
+	// Matching the provider and site is not enough. A tenant-managed block
+	// cannot be the parent of an Allocation.
 	tenantSitePrefix := testIPBlockBuildTenantSitePrefix(t, dbSession, "private-site-prefix", site, ip, tenant1, "192.169.0.0", 16, cdbm.IPBlockStatusReady, ipu)
 
 	ipbFG := testIPBlockBuildIPBlock(t, dbSession, "testipbFG", site, ip, nil, cdbm.IPBlockRoutingTypeDatacenterOnly, "192.170.0.0", 16, cdbm.IPBlockProtocolVersionV4, false, cdbm.IPBlockStatusReady, ipu)
@@ -2857,30 +2857,37 @@ func TestAllocationHandler_Delete(t *testing.T) {
 	}
 
 	cases := []struct {
-		name          string
-		providerGrant bool
-		siteOverride  *bool
-		revokeGrant   bool
+		name                     string
+		providerGrant            bool
+		siteOverride             *bool
+		crossTenantProviderGrant bool
+		crossTenantSiteOverride  *bool
+		revokeGrant              bool
 	}{
 		{name: "last allocation preserves provider grant", providerGrant: true},
 		{name: "last allocation preserves site grant", siteOverride: cutil.GetPtr(true)},
 		{name: "last allocation preserves site denial overriding provider grant", providerGrant: true, siteOverride: cutil.GetPtr(false)},
 		{name: "last allocation removes association after provider grant is revoked", providerGrant: true, revokeGrant: true},
+		{name: "last allocation preserves cross-Tenant site grant", crossTenantSiteOverride: cutil.GetPtr(true)},
+		{name: "last allocation preserves cross-Tenant site denial overriding provider grant", crossTenantProviderGrant: true, crossTenantSiteOverride: cutil.GetPtr(false)},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			tenant := common.TestBuildTenant(t, dbSession, tc.name, uuid.NewString(), tnu)
-			var account *cdbm.TenantAccount
-			if tc.providerGrant {
-				account = common.TestBuildTenantAccountWithTargetedInstanceCreation(t, dbSession, ip, &tenant.ID, tenant.Org, cdbm.TenantAccountStatusReady, tnu)
-			} else {
-				account = common.TestBuildTenantAccount(t, dbSession, ip, &tenant.ID, tenant.Org, cdbm.TenantAccountStatusReady, tnu)
-			}
-			ts := cdbm.TestBuildTenantSite(t, dbSession, tenant, site, &cdbm.TenantSiteConfig{TargetedInstanceCreation: tc.siteOverride}, tnu)
+			account := common.TestBuildTenantAccountWithCapabilities(t, dbSession, ip, &tenant.ID, tenant.Org, cdbm.TenantAccountStatusReady, tnu, cdbm.TenantAccountConfig{
+				TargetedInstanceCreation:     tc.providerGrant,
+				CrossTenantInterfaceCreation: tc.crossTenantProviderGrant,
+			})
+			ts := cdbm.TestBuildTenantSite(t, dbSession, tenant, site, &cdbm.TenantSiteConfig{
+				TargetedInstanceCreation:     tc.siteOverride,
+				CrossTenantInterfaceCreation: tc.crossTenantSiteOverride,
+			}, tnu)
 			allocation := common.TestBuildAllocation(t, dbSession, site, tenant, tc.name, tnu)
 			if tc.revokeGrant {
+				accountConfig := account.Config
+				accountConfig.TargetedInstanceCreation = false
 				_, err := cdbm.NewTenantAccountDAO(dbSession).Update(ctx, nil, cdbm.TenantAccountUpdateInput{
-					TenantAccountID: account.ID, Config: &cdbm.TenantAccountConfig{TargetedInstanceCreation: false},
+					TenantAccountID: account.ID, Config: &accountConfig,
 				})
 				require.NoError(t, err)
 			}
@@ -2906,6 +2913,12 @@ func TestAllocationHandler_Delete(t *testing.T) {
 			}
 			require.NoError(t, err)
 			assert.Equal(t, tc.siteOverride, remaining.Config.TargetedInstanceCreation)
+			assert.Equal(t, tc.crossTenantSiteOverride, remaining.Config.CrossTenantInterfaceCreation)
+			if tc.crossTenantSiteOverride != nil {
+				crossTenantAllowed, err := cdbm.TenantHasCrossTenantInterfaceCreation(ctx, nil, dbSession, tenant, site.ID)
+				require.NoError(t, err)
+				assert.Equal(t, *tc.crossTenantSiteOverride, crossTenantAllowed)
+			}
 		})
 	}
 }

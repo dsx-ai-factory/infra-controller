@@ -24,12 +24,25 @@ mod proto {
     tonic::include_proto!("dhcp_server_control");
 }
 
+use std::future::Future;
+use std::time::Duration;
+
 use carbide_rpc_utils::dhcp::{
     DhcpConfig as ModelDhcpConfig, HostConfig as ModelHostConfig,
     InterfaceInfo as ModelInterfaceInfo, InterfaceInfoV6 as ModelInterfaceInfoV6,
+    ServiceConfig as ModelServiceConfig,
+    ServiceInterfaceReservations as ModelServiceInterfaceReservations,
+    ServiceLink as ModelServiceLink, ServiceLinkV4 as ModelServiceLinkV4,
+    ServiceLinkV6 as ModelServiceLinkV6, ServiceReservation as ModelServiceReservation,
 };
 use carbide_uuid::machine::MachineInterfaceId;
+#[cfg(test)]
+pub(super) use proto::UpdateAndReloadConfigRequest;
 use proto::dhcp_server_control_client::DhcpServerControlClient;
+use tonic::transport::{Channel, Endpoint};
+
+const DHCP_CONTROL_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+const DHCP_CONTROL_REQUEST_TIMEOUT: Duration = Duration::from_secs(35);
 
 // ── Model → proto conversions ─────────────────────────────────────────────────
 
@@ -116,31 +129,118 @@ impl From<ModelHostConfig> for proto::HostConfig {
     }
 }
 
+impl From<ModelServiceLinkV4> for proto::ServiceLinkV4 {
+    fn from(link: ModelServiceLinkV4) -> Self {
+        Self {
+            address: link.address.to_string(),
+            prefix: link.prefix.to_string(),
+            gateway: link.gateway.to_string(),
+        }
+    }
+}
+
+impl From<ModelServiceLinkV6> for proto::ServiceLinkV6 {
+    fn from(link: ModelServiceLinkV6) -> Self {
+        Self {
+            address: link.address.to_string(),
+            prefix: link.prefix.to_string(),
+            hbn_peer: link.hbn_peer.to_string(),
+        }
+    }
+}
+
+impl From<ModelServiceReservation> for proto::ServiceReservation {
+    fn from(reservation: ModelServiceReservation) -> Self {
+        let link = match reservation.link {
+            ModelServiceLink::Ipv4(link) => proto::service_reservation::Link::Ipv4(link.into()),
+            ModelServiceLink::Ipv6(link) => proto::service_reservation::Link::Ipv6(link.into()),
+        };
+        Self {
+            attachment_id: reservation.attachment_id.to_string(),
+            interface_ordinal: reservation.interface_ordinal,
+            internal_uuid: reservation.internal_uuid.to_string(),
+            mac_address: reservation.mac_address.to_string(),
+            link: Some(link),
+        }
+    }
+}
+
+impl From<ModelServiceInterfaceReservations> for proto::ServiceInterfaceReservations {
+    fn from(group: ModelServiceInterfaceReservations) -> Self {
+        Self {
+            receiving_interface: group.receiving_interface,
+            reservations: group.reservations.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+impl From<ModelServiceConfig> for proto::ServiceConfig {
+    fn from(config: ModelServiceConfig) -> Self {
+        Self {
+            interfaces: config
+                .into_interface_groups()
+                .into_iter()
+                .map(Into::into)
+                .collect(),
+        }
+    }
+}
+
 // ── Public API ────────────────────────────────────────────────────────────────
+
+/// Waits for one complete DHCP control unary RPC within the request deadline so client readiness,
+/// response data, and trailers cannot stall the sequential agent main loop.
+async fn complete_unary<T>(
+    operation: &str,
+    call: impl Future<Output = Result<T, tonic::Status>>,
+) -> eyre::Result<T> {
+    tokio::time::timeout(DHCP_CONTROL_REQUEST_TIMEOUT, call)
+        .await
+        .map_err(|_| {
+            eyre::eyre!(
+                "{operation} gRPC timed out after {} seconds",
+                DHCP_CONTROL_REQUEST_TIMEOUT.as_secs()
+            )
+        })?
+        .map_err(|status| eyre::eyre!("{operation} gRPC failed: {status}"))
+}
+
+/// Connects to the DHCP control service within five seconds so DNS resolution and transport setup
+/// cannot stall the sequential agent main loop.
+async fn connect_client(grpc_addr: &str) -> eyre::Result<DhcpServerControlClient<Channel>> {
+    let endpoint = Endpoint::new(grpc_addr.to_string())
+        .map_err(|error| eyre::eyre!("invalid dhcp-server gRPC endpoint {grpc_addr}: {error}"))?
+        .connect_timeout(DHCP_CONTROL_CONNECT_TIMEOUT);
+    let channel = tokio::time::timeout(DHCP_CONTROL_CONNECT_TIMEOUT, endpoint.connect())
+        .await
+        .map_err(|_| {
+            eyre::eyre!(
+                "connect to dhcp-server gRPC at {grpc_addr} timed out after {} seconds",
+                DHCP_CONTROL_CONNECT_TIMEOUT.as_secs()
+            )
+        })?
+        .map_err(|error| eyre::eyre!("connect to dhcp-server gRPC at {grpc_addr}: {error}"))?;
+    Ok(DhcpServerControlClient::new(channel))
+}
 
 /// Fetches last DHCP request timestamps from the dhcp-server control service.
 ///
 /// Used when the DHCP server runs in a separate container where the timestamps
 /// file is not directly accessible on the DPU filesystem.  Each entry carries
 /// the host interface UUID and the timestamp of the last DHCP request seen for
-/// that interface.  Returns an empty `Vec` (with a warning) if the call fails,
-/// so the caller can degrade gracefully.
+/// that interface. Connection and RPC failures are returned to the caller.
 pub(super) async fn get_dhcp_timestamps(
     grpc_addr: &str,
 ) -> eyre::Result<Vec<::rpc::forge::LastDhcpRequest>> {
-    let channel = tonic::transport::Endpoint::new(grpc_addr.to_string())
-        .map_err(|e| eyre::eyre!("invalid dhcp-server gRPC endpoint {grpc_addr}: {e}"))?
-        .connect()
-        .await
-        .map_err(|e| eyre::eyre!("connect to dhcp-server gRPC at {grpc_addr}: {e}"))?;
-    let mut client = DhcpServerControlClient::new(channel);
+    let mut client = connect_client(grpc_addr).await?;
 
-    let entries = client
-        .get_dhcp_timestamps(proto::GetDhcpTimestampsRequest {})
-        .await
-        .map_err(|s| eyre::eyre!("GetDhcpTimestamps gRPC failed: {s}"))?
-        .into_inner()
-        .entries;
+    let entries = complete_unary(
+        "GetDhcpTimestamps",
+        client.get_dhcp_timestamps(proto::GetDhcpTimestampsRequest {}),
+    )
+    .await?
+    .into_inner()
+    .entries;
 
     let requests = entries
         .into_iter()
@@ -167,60 +267,201 @@ pub(super) async fn get_dhcp_timestamps(
 /// The gRPC control server remains running after this call so that a future
 /// [`update_and_reload`] call can restart the DHCP process.
 pub(super) async fn stop_server(grpc_addr: &str) -> eyre::Result<()> {
-    let channel = tonic::transport::Endpoint::new(grpc_addr.to_string())
-        .map_err(|e| eyre::eyre!("invalid dhcp-server gRPC endpoint {grpc_addr}: {e}"))?
-        .connect()
-        .await
-        .map_err(|e| eyre::eyre!("connect to dhcp-server gRPC at {grpc_addr}: {e}"))?;
-    let mut client = DhcpServerControlClient::new(channel);
+    let mut client = connect_client(grpc_addr).await?;
 
-    client
-        .stop_server(proto::StopServerRequest {})
-        .await
-        .map_err(|s| eyre::eyre!("StopServer gRPC failed: {s}"))?;
+    complete_unary(
+        "StopServer",
+        client.stop_server(proto::StopServerRequest {}),
+    )
+    .await?;
 
     Ok(())
 }
 
-/// Pushes new DHCP config to the dhcp-server control service and triggers an
-/// immediate reload in a single RPC.
+/// Pushes DHCP settings, optional host settings, complete service reservations, and listener names
+/// to the dhcp-server control service and triggers an immediate reload in a single RPC.
+/// Omitting `host_config` retains the existing host file. Omitting `service_config` clears service
+/// reservations.
 ///
 /// Matching configuration and interfaces do not restart a running server, so
 /// this function is safe to call on every agent tick. Success acknowledges
-/// application, not listener readiness; an empty interface list only stages
-/// configuration for a later request that includes interfaces.
+/// application, not listener readiness. An empty interface list stages file-only
+/// changes, but a changed service replacement applies on remembered listeners.
 pub(super) async fn update_and_reload(
     grpc_addr: &str,
     dhcp_config: ModelDhcpConfig,
     host_config: Option<ModelHostConfig>,
+    service_config: Option<ModelServiceConfig>,
     interfaces: Vec<String>,
 ) -> eyre::Result<()> {
-    let channel = tonic::transport::Endpoint::new(grpc_addr.to_string())
-        .map_err(|e| eyre::eyre!("invalid dhcp-server gRPC endpoint {grpc_addr}: {e}"))?
-        .connect()
-        .await
-        .map_err(|e| eyre::eyre!("connect to dhcp-server gRPC at {grpc_addr}: {e}"))?;
-    let mut client = DhcpServerControlClient::new(channel);
+    let mut client = connect_client(grpc_addr).await?;
 
-    client
-        .update_and_reload_config(proto::UpdateAndReloadConfigRequest {
+    complete_unary(
+        "UpdateAndReloadConfig",
+        client.update_and_reload_config(proto::UpdateAndReloadConfigRequest {
             dhcp_config: Some(dhcp_config.into()),
             host_config: host_config.map(Into::into),
             interfaces,
-        })
-        .await
-        .map_err(|s| eyre::eyre!("UpdateAndReloadConfig gRPC failed: {s}"))?;
+            service_config: service_config.map(Into::into),
+        }),
+    )
+    .await?;
 
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
+    use std::convert::Infallible;
     use std::net::Ipv6Addr;
+    use std::sync::Arc;
 
-    use carbide_test_support::value_scenarios;
+    use axum::Router;
+    use axum::response::IntoResponse;
+    use axum::routing::post;
+    use carbide_test_support::Outcome::Yields;
+    use carbide_test_support::{Case, check_cases_async, value_scenarios};
+    use mac_address::MacAddress;
+    use tokio::sync::Notify;
 
     use super::*;
+
+    /// Verifies every DHCP control operation fails after 35 seconds when its request reaches the
+    /// server but response headers stall, preventing any unbounded RPC from blocking reconciliation.
+    #[tokio::test]
+    async fn control_calls_time_out_when_response_headers_stall() {
+        check_cases_async(
+            [
+                // Configuration submissions must retain their complete-call deadline.
+                "UpdateAndReloadConfig",
+                // Stop requests must remain bounded when the server withholds acknowledgement.
+                "StopServer",
+                // Timestamp reads must not indefinitely delay subsequent network reconciliation.
+                "GetDhcpTimestamps",
+            ]
+            .map(|operation| Case {
+                scenario: operation,
+                input: operation,
+                expect: Yields(format!("{operation} gRPC timed out after 35 seconds")),
+            }),
+            |operation| async move {
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                    .await
+                    .expect("bind DHCP control mock");
+                let address = listener.local_addr().expect("DHCP control mock address");
+                let request_received = Arc::new(Notify::new());
+                let handler_signal = request_received.clone();
+
+                // Receive the RPC before withholding headers so the request deadline is active.
+                let app = Router::new().route(
+                    &format!("/dhcp_server_control.DhcpServerControl/{operation}"),
+                    post(move || {
+                        let signal = handler_signal.clone();
+                        async move {
+                            signal.notify_one();
+                            std::future::pending::<axum::response::Response>().await
+                        }
+                    }),
+                );
+                let server = tokio::spawn(async move { axum::serve(listener, app).await });
+
+                // Call each production function to protect its deadline wiring; the mock does not
+                // validate the update payload because it withholds all response headers.
+                let request = tokio::spawn(async move {
+                    let grpc_address = format!("http://{address}");
+                    match operation {
+                        "UpdateAndReloadConfig" => {
+                            update_and_reload(
+                                &grpc_address,
+                                ModelDhcpConfig::default(),
+                                None,
+                                None,
+                                vec![],
+                            )
+                            .await
+                        }
+                        "StopServer" => stop_server(&grpc_address).await,
+                        "GetDhcpTimestamps" => get_dhcp_timestamps(&grpc_address).await.map(drop),
+                        _ => unreachable!("unknown DHCP control operation: {operation}"),
+                    }
+                });
+
+                // Freeze time after request receipt to exclude connection setup from this proof.
+                tokio::time::timeout(Duration::from_secs(5), request_received.notified())
+                    .await
+                    .expect("mock must receive the RPC before the test watchdog expires");
+                tokio::time::pause();
+                tokio::time::advance(DHCP_CONTROL_REQUEST_TIMEOUT).await;
+                tokio::task::yield_now().await;
+                tokio::time::resume();
+
+                // Compare each production call's timeout error against its table expectation.
+                let error = tokio::time::timeout(Duration::from_secs(5), request)
+                    .await
+                    .expect("DHCP control task must finish")
+                    .expect("DHCP control task must not panic")
+                    .expect_err("pending response headers must time out");
+                server.abort();
+                let _ = server.await;
+                Ok::<_, ()>(format!("{error:#}"))
+            },
+        )
+        .await;
+    }
+
+    /// Verifies a generated StopServer call fails after 35 seconds when its message is decoded but
+    /// trailers remain pending, keeping the complete unary deadline effective through grpc-status.
+    #[tokio::test]
+    async fn stop_server_times_out_when_response_trailers_stall() -> eyre::Result<()> {
+        let trailers_polled = Arc::new(Notify::new());
+        let handler_signal = trailers_polled.clone();
+
+        // Pass the body directly to Tonic so its second poll observes the client's trailer wait.
+        let transport = tower::service_fn(move |_request| {
+            let signal = handler_signal.clone();
+            async move {
+                Ok::<_, Infallible>(
+                    crate::tests::respond_then_stall_before_trailers((), signal).into_response(),
+                )
+            }
+        });
+        let mut client = DhcpServerControlClient::new(transport);
+        let request = tokio::spawn(async move {
+            complete_unary(
+                "StopServer",
+                client.stop_server(proto::StopServerRequest {}),
+            )
+            .await
+        });
+
+        // Wait until Tonic consumes the message and requests the missing trailers.
+        tokio::time::timeout(Duration::from_secs(5), trailers_polled.notified())
+            .await
+            .expect("client must reach its trailer wait");
+        // Decoding the message must leave the unary call pending until its trailers arrive.
+        assert!(
+            !request.is_finished(),
+            "decoded message must not complete the unary call before trailers"
+        );
+        // Freeze time only after Tonic consumes the message and requests the missing trailers.
+        tokio::time::pause();
+        tokio::time::advance(DHCP_CONTROL_REQUEST_TIMEOUT).await;
+        tokio::task::yield_now().await;
+        tokio::time::resume();
+
+        // The generated unary call must be bounded through response-trailer completion.
+        let error = tokio::time::timeout(Duration::from_secs(5), request)
+            .await
+            .expect("StopServer task must finish")
+            .expect("StopServer task must not panic")
+            .expect_err("pending trailers must time out");
+        assert_eq!(
+            format!("{error:#}"),
+            "StopServer gRPC timed out after 35 seconds"
+        );
+
+        Ok(())
+    }
 
     // The control request must preserve absent IPv4 fields and keep the DHCP
     // server address separate from the provisioning address when both exist.
@@ -308,5 +549,104 @@ mod tests {
             .expect("tenant IPv6 binding must be present");
         assert_eq!(ipv6.address.as_deref(), Some("2001:db8::1"));
         assert_eq!(ipv6.prefix, "2001:db8::1/128");
+    }
+
+    /// Verifies the agent's outbound control conversion preserves empty listeners and every
+    /// `ServiceReservation` field because the server cannot reconstruct them from host
+    /// configuration.
+    #[test]
+    fn service_reservations_survive_control_transport() {
+        let service_config = ModelServiceConfig::try_new(vec![
+            // Keep the first listener empty because its presence prevents host fallback after detach.
+            ModelServiceInterfaceReservations {
+                receiving_interface: "d_iface_svc_1".to_string(),
+                reservations: vec![],
+            },
+            // Populate the second listener with both families to exercise the complete wire union.
+            ModelServiceInterfaceReservations {
+                receiving_interface: "d_iface_svc_2".to_string(),
+                reservations: vec![
+                    // The IPv4 binding drives the DHCP response fields used by service clients.
+                    ModelServiceReservation {
+                        attachment_id: "11111111-1111-1111-1111-111111111111"
+                            .parse()
+                            .expect("IPv4 attachment UUID"),
+                        interface_ordinal: 3,
+                        internal_uuid: "22222222-2222-2222-2222-222222222222"
+                            .parse()
+                            .expect("IPv4 internal UUID"),
+                        mac_address: MacAddress::new([0x02, 0, 0, 0, 0, 1]),
+                        link: ModelServiceLink::Ipv4(ModelServiceLinkV4 {
+                            address: "192.0.2.11".parse().expect("IPv4 service address"),
+                            prefix: "192.0.2.10/31".parse().expect("IPv4 service prefix"),
+                            gateway: "192.0.2.10".parse().expect("IPv4 HBN gateway"),
+                        }),
+                    },
+                    // Add an IPv6 binding to exercise transport of the independent fixed-link variant.
+                    ModelServiceReservation {
+                        attachment_id: "33333333-3333-3333-3333-333333333333"
+                            .parse()
+                            .expect("IPv6 attachment UUID"),
+                        interface_ordinal: 4,
+                        internal_uuid: "44444444-4444-4444-4444-444444444444"
+                            .parse()
+                            .expect("IPv6 internal UUID"),
+                        mac_address: MacAddress::new([0x02, 0, 0, 0, 0, 2]),
+                        link: ModelServiceLink::Ipv6(ModelServiceLinkV6 {
+                            address: "2001:db8::11".parse().expect("IPv6 service address"),
+                            prefix: "2001:db8::10/127".parse().expect("IPv6 service prefix"),
+                            hbn_peer: "2001:db8::10".parse().expect("IPv6 HBN peer"),
+                        }),
+                    },
+                ],
+            },
+        ])
+        .expect("valid shared-slot service reservations");
+
+        // Convert with the exact model-to-protobuf logic used by UpdateAndReloadConfig.
+        let wire = proto::ServiceConfig::from(service_config);
+
+        // Assert empty and occupied listeners remain distinct before inspecting reservation fields.
+        let [empty_group, group] = wire.interfaces.as_slice() else {
+            panic!("expected two service listeners: {wire:?}");
+        };
+        assert_eq!(empty_group.receiving_interface, "d_iface_svc_1");
+        assert!(empty_group.reservations.is_empty());
+        assert_eq!(group.receiving_interface, "d_iface_svc_2");
+        let [ipv4, ipv6] = group.reservations.as_slice() else {
+            panic!("expected two service reservations: {group:?}");
+        };
+        // Verify every field in the IPv4 `ServiceReservation`, including its `ServiceLinkV4`
+        // values.
+        assert_eq!(ipv4.attachment_id, "11111111-1111-1111-1111-111111111111");
+        assert_eq!(ipv4.interface_ordinal, 3);
+        assert_eq!(ipv4.internal_uuid, "22222222-2222-2222-2222-222222222222");
+        assert_eq!(ipv4.mac_address, "02:00:00:00:00:01");
+        assert_eq!(
+            ipv4.link,
+            Some(proto::service_reservation::Link::Ipv4(
+                proto::ServiceLinkV4 {
+                    address: "192.0.2.11".to_string(),
+                    prefix: "192.0.2.10/31".to_string(),
+                    gateway: "192.0.2.10".to_string(),
+                }
+            ))
+        );
+        // Verify every field in the IPv6 `ServiceReservation`, including its independent
+        // `ServiceLinkV6` values.
+        assert_eq!(ipv6.attachment_id, "33333333-3333-3333-3333-333333333333");
+        assert_eq!(ipv6.interface_ordinal, 4);
+        assert_eq!(ipv6.internal_uuid, "44444444-4444-4444-4444-444444444444");
+        assert_eq!(ipv6.mac_address, "02:00:00:00:00:02");
+        assert_eq!(
+            ipv6.link,
+            Some(proto::service_reservation::Link::Ipv6(
+                proto::ServiceLinkV6 {
+                    address: "2001:db8::11".to_string(),
+                    prefix: "2001:db8::10/127".to_string(),
+                    hbn_peer: "2001:db8::10".to_string(),
+                }
+            ))
+        );
     }
 }

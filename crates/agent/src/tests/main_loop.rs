@@ -20,6 +20,102 @@ use super::*;
 #[path = "fmds_routing.rs"]
 mod fmds_routing;
 
+/// Astra failures must retract readiness without replacing an earlier
+/// HBN/DHCP diagnostic in the shared network status.
+#[test]
+fn astra_status_reporting_maps_results_and_preserves_network_errors() {
+    use carbide_test_support::value_scenarios;
+
+    #[derive(Debug)]
+    struct Row {
+        configured: bool,
+        result: eyre::Result<rpc::AstraConfigStatus>,
+        previous_error: Option<&'static str>,
+    }
+
+    let config = rpc::AstraConfig::default();
+    let ready_status = rpc::AstraConfigStatus {
+        astra_attachments_status: vec![rpc::AstraAttachmentStatus {
+            mac_address: "02:00:00:00:00:01".to_string(),
+            vni: 42,
+            revision: "V2-T100".to_string(),
+            status: Some(rpc::AstraStatus {
+                phase: rpc::AstraPhase::PhaseReady.into(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+
+    value_scenarios!(run = |row: Row| {
+        // HBN/DHCP can record an error before Astra reconciliation runs.
+        let mut status_out = rpc::DpuNetworkStatus {
+            network_config_error: row.previous_error.map(str::to_string),
+            ..Default::default()
+        };
+
+        set_astra_config_status(
+            row.configured.then_some(&config),
+            row.result,
+            &mut status_out,
+        );
+        (status_out.astra_config_status, status_out.network_config_error)
+    };
+        "absent configuration leaves Astra status absent" {
+            Row {
+                configured: false,
+                result: Ok(rpc::AstraConfigStatus::default()),
+                previous_error: None,
+            } => (None, None),
+        }
+        "successful reconciliation preserves its observations" {
+            Row {
+                configured: true,
+                result: Ok(ready_status.clone()),
+                previous_error: None,
+            } => (Some(ready_status.clone()), None),
+        }
+        "successful reconciliation keeps an earlier network error" {
+            Row {
+                configured: true,
+                result: Ok(ready_status.clone()),
+                previous_error: Some("HBN update failed"),
+            } => (Some(ready_status), Some("HBN update failed".to_string())),
+        }
+        // Core retracts old readiness for an explicit empty report; an omitted
+        // report would leave those observations unchanged after failure.
+        "failed reconciliation reports no ready attachments" {
+            Row {
+                configured: true,
+                result: Err(eyre::eyre!("astra list failed")),
+                previous_error: None,
+            } => (
+                Some(rpc::AstraConfigStatus {
+                    is_attachment_status_present: Some(true),
+                    is_maintenance_status_present: Some(false),
+                    ..Default::default()
+                }),
+                Some("astra list failed".to_string()),
+            ),
+        }
+        "an earlier network error keeps its diagnostic" {
+            Row {
+                configured: true,
+                result: Err(eyre::eyre!("astra list failed")),
+                previous_error: Some("HBN update failed"),
+            } => (
+                Some(rpc::AstraConfigStatus {
+                    is_attachment_status_present: Some(true),
+                    is_maintenance_status_present: Some(false),
+                    ..Default::default()
+                }),
+                Some("HBN update failed".to_string()),
+            ),
+        }
+    );
+}
+
 /// IPv6 tenant prefixes must produce replies from FMDS's configured endpoint,
 /// not its link-local address, without changing IPv4 or enabling IPv6 by default.
 #[test]
@@ -160,27 +256,71 @@ fn ipv6_only_network_requires_dhcp_acceptance() {
     }
 }
 
-/// A failed stop must not prevent secondary-admin isolation, while DPUs that
-/// configure DHCP must still wait for acceptance before applying IPv6 networking.
+/// Without fixed service listeners, a failed secondary-admin DHCP stop must not prevent NVUE
+/// isolation, while IPv6-primary roles that submit a replacement must wait for acceptance.
 #[test]
 fn dhcp_stop_failure_does_not_block_secondary_admin_isolation() {
     use carbide_test_support::Outcome::{Fails, Yields};
     use carbide_test_support::scenarios;
 
-    scenarios!(run = |(is_primary_dpu, use_admin_network)| {
+    scenarios!(run = |(is_primary_dpu, use_admin_network, inventory)| {
+        // Compare host-DHCP role exemptions with omitted or explicitly empty service inventory.
         let mut config = comparison_network_config();
+        // Use an IPv6 primary loopback so a failed replacement reaches the DHCP acceptance check.
         config.managed_host_config.as_mut().unwrap().loopback_ip = "2001:db8::1".to_string();
         config.is_primary_dpu = is_primary_dpu;
         config.use_admin_network = use_admin_network;
+        config.service_vpc_slot_inventory = inventory;
         let dhcp_result = Err(eyre::eyre!("injected DHCP operation failure"));
 
         require_dhcp_before_ipv6_only_network_update(&config, &dhcp_result).map_err(drop)
     };
-        // Only this role stops DHCP instead of applying a replacement config.
-        "secondary admin" { (false, true) => Yields(()) }
+        // With no service inventory, only this role stops DHCP instead of applying a replacement.
+        "secondary admin" { (false, true, None) => Yields(()) }
+        // Explicit zero slots must preserve the same stop exemption as omitted inventory.
+        "secondary admin with empty inventory" {
+            (
+                false,
+                true,
+                Some(rpc::ServiceVpcSlotInventory { slots: vec![] }),
+            ) => Yields(())
+        }
         // Neither being secondary nor using the admin network alone bypasses it.
-        "secondary tenant" { (false, false) => Fails }
-        "primary admin" { (true, true) => Fails }
+        "secondary tenant" { (false, false, None) => Fails }
+        // A primary admin DPU still submits host DHCP, so admin-network selection cannot bypass
+        // acceptance.
+        "primary admin" { (true, true, None) => Fails }
+    );
+}
+
+/// An IPv6-primary secondary admin DPU with a fixed service listener must wait for DHCP acceptance
+/// because the failed operation is a service replacement rather than the legacy host-only stop.
+#[test]
+fn secondary_admin_service_listener_requires_dhcp_acceptance() {
+    // Use an IPv6 primary loopback so DHCP acceptance controls the IPv6-only NVUE gate.
+    let mut config = comparison_network_config();
+    config.managed_host_config.as_mut().unwrap().loopback_ip = "2001:db8::1".to_string();
+    // Select secondary-admin mode, which would stop DHCP in the legacy host-only topology.
+    config.is_primary_dpu = false;
+    config.use_admin_network = true;
+    // Add one fixed listener so this role submits a service replacement instead of stopping.
+    config.service_vpc_slot_inventory = Some(rpc::ServiceVpcSlotInventory {
+        slots: vec![rpc::ServiceVpcSlot {
+            slot_index: 0,
+            hbn_interface_name: "iface_svc_0".to_string(),
+        }],
+    });
+
+    // A failed service replacement must gate the IPv6-only network update.
+    let dhcp_result = Err(eyre::eyre!("injected DHCP operation failure"));
+    let error = require_dhcp_before_ipv6_only_network_update(&config, &dhcp_result)
+        .expect_err("service-bearing secondary admin update must wait for DHCP");
+
+    // The gate must report the same retryable wait used by other DHCP-bearing roles.
+    assert!(
+        error
+            .to_string()
+            .contains("IPv6-only network update is waiting for DHCP")
     );
 }
 
@@ -191,21 +331,25 @@ fn comparison_routing_profile() -> rpc::RoutingProfile {
         route_target_imports: vec![
             ::rpc::common::RouteTarget {
                 asn: 65_001,
-                vni: 101,
+                vni: Some(101),
+                vni_self: false,
             },
             ::rpc::common::RouteTarget {
                 asn: 65_002,
-                vni: 102,
+                vni: Some(102),
+                vni_self: false,
             },
         ],
         route_targets_on_exports: vec![
             ::rpc::common::RouteTarget {
                 asn: 65_003,
-                vni: 103,
+                vni: Some(103),
+                vni_self: false,
             },
             ::rpc::common::RouteTarget {
                 asn: 65_004,
-                vni: 104,
+                vni: Some(104),
+                vni_self: false,
             },
         ],
         leak_default_route_from_underlay: false,
@@ -378,16 +522,19 @@ fn comparison_network_config() -> ManagedHostNetworkConfigResponse {
         datacenter_asn: 65_100,
         common_internal_route_target: Some(::rpc::common::RouteTarget {
             asn: 65_200,
-            vni: 5_000,
+            vni: Some(5_000),
+            vni_self: false,
         }),
         additional_route_target_imports: vec![
             ::rpc::common::RouteTarget {
                 asn: 65_201,
-                vni: 5_001,
+                vni: Some(5_001),
+                vni_self: false,
             },
             ::rpc::common::RouteTarget {
                 asn: 65_202,
-                vni: 5_002,
+                vni: Some(5_002),
+                vni_self: false,
             },
         ],
         network_security_policy_overrides: vec![
@@ -919,7 +1066,17 @@ impl NonHbnInputChange {
                         ..Default::default()
                     });
             }
-            Self::AstraConfig => config.astra_config = Some(rpc::AstraConfig::default()),
+            Self::AstraConfig => {
+                config.astra_config = Some(rpc::AstraConfig {
+                    multiplane_interfaces: vec![rpc::AstraMultiplaneInterface {
+                        logical_ifname: "eth_r2_p6".to_string(),
+                        cfg_maintenance_mode: Some(false),
+                        revision: "V2-T1791792000000000".to_string(),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                })
+            }
             Self::AdminNetworkTransition => config.use_admin_network_changed = Some(true),
         }
     }
@@ -1039,4 +1196,47 @@ async fn test_get_fabric_interfaces_data() {
     // should pass on any Linux host with real hardware or a virtualized PCI
     // network interface.
     // assert!(fabric_interfaces_data.len() > 0);
+}
+
+#[test]
+fn multiplane_delivery_preserves_optional_mode_without_attachments() {
+    use prost::Message;
+    for mode in [None, Some(true), Some(false)] {
+        let response = ManagedHostNetworkConfigResponse {
+            astra_config: Some(rpc::AstraConfig {
+                astra_attachments: Vec::new(),
+                is_attachment_config_present: Some(false),
+                is_maintenance_config_present: Some(true),
+                multiplane_interfaces: vec![rpc::AstraMultiplaneInterface {
+                    logical_ifname: "eth_r2_p6".to_string(),
+                    cfg_maintenance_mode: mode,
+                    reference: Some("https://tickets.example.com/SPX-42".to_string()),
+                    revision: "V2-T1791792000000000".to_string(),
+                }],
+            }),
+            ..Default::default()
+        };
+        let received =
+            ManagedHostNetworkConfigResponse::decode(response.encode_to_vec().as_slice()).unwrap();
+        let configuration = received.astra_config.unwrap();
+        assert!(configuration.astra_attachments.is_empty());
+        assert_eq!(configuration.is_attachment_config_present, Some(false));
+        assert_eq!(configuration.is_maintenance_config_present, Some(true));
+        assert_eq!(
+            configuration.multiplane_interfaces[0].cfg_maintenance_mode,
+            mode
+        );
+        assert_eq!(
+            configuration.multiplane_interfaces[0].logical_ifname,
+            "eth_r2_p6"
+        );
+        assert_eq!(
+            configuration.multiplane_interfaces[0].revision,
+            "V2-T1791792000000000"
+        );
+        assert_eq!(
+            configuration.multiplane_interfaces[0].reference.as_deref(),
+            Some("https://tickets.example.com/SPX-42")
+        );
+    }
 }

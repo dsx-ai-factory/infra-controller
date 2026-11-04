@@ -346,13 +346,15 @@ pub(crate) async fn update_operating_system(
         .ok_or_else(|| Status::invalid_argument("id is required"))?;
     let id = Uuid::from(id_proto);
 
-    let existing = db::operating_system::get(&mut txn, id).await.map_err(|e| {
-        if e.is_not_found() {
-            Status::not_found(format!("operating system {id} not found"))
-        } else {
-            Status::internal(e.to_string())
-        }
-    })?;
+    let existing = db::operating_system::get_for_update(&mut txn, id)
+        .await
+        .map_err(|e| {
+            if e.is_not_found() {
+                Status::not_found(format!("operating system {id} not found"))
+            } else {
+                Status::internal(e.to_string())
+            }
+        })?;
 
     let req_template_id: Option<String> = req.ipxe_template_id.map(|id| id.to_string());
 
@@ -563,13 +565,15 @@ pub(crate) async fn update_operating_system_cachable_ipxe_script_artifacts(
         .ok_or_else(|| Status::invalid_argument("id is required"))?;
     let id = Uuid::from(id_proto);
 
-    let existing = db::operating_system::get(&mut txn, id).await.map_err(|e| {
-        if e.is_not_found() {
-            Status::not_found(format!("operating system {id} not found"))
-        } else {
-            Status::internal(e.to_string())
-        }
-    })?;
+    let existing = db::operating_system::get_for_update(&mut txn, id)
+        .await
+        .map_err(|e| {
+            if e.is_not_found() {
+                Status::not_found(format!("operating system {id} not found"))
+            } else {
+                Status::internal(e.to_string())
+            }
+        })?;
 
     let mut artifacts = artifacts_from_json(existing.ipxe_artifacts.as_ref().map(|j| &j.0));
 

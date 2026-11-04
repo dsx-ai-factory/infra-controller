@@ -5,6 +5,7 @@ package model
 
 import (
 	"context"
+	cryptorand "crypto/rand"
 	"fmt"
 	"math/rand"
 	"reflect"
@@ -83,8 +84,6 @@ func testInitDB(t *testing.T) *db.Session {
 		bundebug.WithEnabled(false),
 		bundebug.FromEnv(""),
 	))
-
-	rand.Seed(time.Now().UnixNano())
 
 	return dbSession
 }
@@ -444,7 +443,7 @@ func testGenerateStarfleetID() string {
 
 func testGenerateMacAddress(t *testing.T) string {
 	buf := make([]byte, 6)
-	_, err := rand.Read(buf)
+	_, err := cryptorand.Read(buf)
 	assert.NoError(t, err)
 	// Set the local bit
 	buf[0] = (buf[0] | 2) & 0xfe // Set local bit, ensure unicast address

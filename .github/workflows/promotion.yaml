@@ -129,10 +129,12 @@ jobs:
       name: promote-release-candidate
     steps:
       - name: Promotion approved
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
         run: |
           echo "✅ Promotion approved"
           echo "Promoting images from carbide-dev to carbide"
-          echo "Version: ${{ needs.prepare.outputs.version }}"
+          echo "Version: ${VERSION}"
           echo ""
           echo "Images to be promoted:"
           echo "  - nvmetal-carbide"
@@ -149,7 +151,7 @@ jobs:
     needs:
       - prepare
       - approve-promotion
-    uses: dsx-ai-factory/dsx-github-actions/.github/workflows/promote-image.yml@95e609360851cfc141918c2c21e57762d77394ac
+    uses: dsx-ai-factory/dsx-github-actions/.github/workflows/promote-image.yml@f2a3b631804750e94e7725070ec3fa8374f6218f # v1.20.2
     with:
       source: ${{ needs.prepare.outputs.image_registry }}/nvmetal-carbide
       source_tag: ${{ needs.prepare.outputs.version }}
@@ -168,7 +170,7 @@ jobs:
     needs:
       - prepare
       - approve-promotion
-    uses: dsx-ai-factory/dsx-github-actions/.github/workflows/promote-image.yml@95e609360851cfc141918c2c21e57762d77394ac
+    uses: dsx-ai-factory/dsx-github-actions/.github/workflows/promote-image.yml@f2a3b631804750e94e7725070ec3fa8374f6218f # v1.20.2
     with:
       source: ${{ needs.prepare.outputs.image_registry }}/carbide-release-artifacts-aarch64
       source_tag: ${{ needs.prepare.outputs.version }}
@@ -187,7 +189,7 @@ jobs:
     needs:
       - prepare
       - approve-promotion
-    uses: dsx-ai-factory/dsx-github-actions/.github/workflows/promote-image.yml@95e609360851cfc141918c2c21e57762d77394ac
+    uses: dsx-ai-factory/dsx-github-actions/.github/workflows/promote-image.yml@f2a3b631804750e94e7725070ec3fa8374f6218f # v1.20.2
     with:
       source: ${{ needs.prepare.outputs.image_registry }}/carbide-release-artifacts-x86_64
       source_tag: ${{ needs.prepare.outputs.version }}
@@ -214,7 +216,7 @@ jobs:
           persist-credentials: false
 
       - name: Package and push Helm prereqs chart to production NGC
-        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@911d86017e6e0715cef26cb3105d66c2fcd985fb # reviewed commit 911d860 (upstream #94, pending merge)
+        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@ac4a97cf516428e1aa81681bbb4734d268e27b95 # v1.28.0
         with:
           chart-path: helm-prereqs
           chart-version: ${{ needs.prepare.outputs.helm_version }}
@@ -222,4 +224,5 @@ jobs:
           lint: 'false'
           ngc-key: ${{ secrets.NVCR_PROD_TOKEN }}
           ngc-path: ${{ needs.prepare.outputs.prod_registry_path }}
-          ngc-duplicate: fail
+          ngc-duplicate: verify
+          retries: 3

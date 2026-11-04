@@ -63,7 +63,7 @@ spec:
                 description: |-
                   Select the Clusters with specific labels, ServiceInterfaceSet CRs will be created only for these Clusters
 
-                  Deprecated: This field is deprecated and will be removed with v27.1.0. Use DPUClusterSelector instead.
+                  Deprecated: This field is deprecated and will be removed with v31.0.0. Use DPUClusterSelector instead.
                 properties:
                   matchExpressions:
                     description: matchExpressions is a list of label selector requirements.
@@ -266,7 +266,8 @@ spec:
                               ovn:
                                 description: |-
                                   The OVN definition
-                                  Deprecated: This field is deprecated and will be removed with v26.10.0.
+
+                                  Deprecated: This field is deprecated and will be removed with v31.0.0.
                                   Migrate to interfaceType="patch" with spec.patch.peerBridge and spec.patch.peerPatchName instead.
                                 properties:
                                   externalBridge:

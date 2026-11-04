@@ -30,7 +30,6 @@ use config_version::ConfigVersion;
 use db::ObjectColumnFilter;
 use mac_address::MacAddress;
 use model::instance::config::spx::SpxAttachmentType;
-use model::machine::machine_search_config::MachineSearchConfig;
 use model::machine::spx::{MachineSpxAttachmentStatusObservation, MachineSpxStatusObservation};
 use mqttea::client::{ClientOptions, MqtteaClient};
 use mqttea::registry::traits::ProtobufRegistration;
@@ -189,29 +188,32 @@ async fn handle_dpa_message(services: Arc<Api>, message: SetVni, topic: String) 
         observed_at: chrono::Utc::now(),
     };
 
-    // Get the machine corresponding to the DPA interface.
-    // The machine entry needs to be obtained with FOR UPDATE to avoid race conditions.
-    let machine = match db::machine::find_one(
-        txn.as_mut(),
-        &dpa_if.machine_id,
-        MachineSearchConfig {
-            for_update: true,
-            ..Default::default()
-        },
-    )
-    .await
+    // Lock before reading shared SPX observations so a report committed while
+    // we waited is included in the merge.
+    if let Err(e) =
+        db::machine::lock_by_id_for_update(txn.as_mut(), &dpa_if.machine_id.into()).await
     {
-        Ok(m) => m,
-        Err(e) => {
-            tracing::error!(
-                machine_id = %dpa_if.machine_id,
-                dpa_interface_id = %dpa_if.id,
-                error = ?e,
-                "Failed to find machine",
-            );
-            return;
-        }
-    };
+        tracing::error!(
+            machine_id = %dpa_if.machine_id,
+            dpa_interface_id = %dpa_if.id,
+            error = ?e,
+            "Failed to lock machine",
+        );
+        return;
+    }
+    let machine =
+        match db::machine::find_one(txn.as_mut(), &dpa_if.machine_id, Default::default()).await {
+            Ok(m) => m,
+            Err(e) => {
+                tracing::error!(
+                    machine_id = %dpa_if.machine_id,
+                    dpa_interface_id = %dpa_if.id,
+                    error = ?e,
+                    "Failed to find machine",
+                );
+                return;
+            }
+        };
 
     let Some(machine) = machine else {
         tracing::error!(
@@ -232,10 +234,17 @@ async fn handle_dpa_message(services: Arc<Api>, message: SetVni, topic: String) 
             new_spx_status_observations
                 .spx_attachments
                 .push(obs.clone());
-        } else if obs.observed_at < at_status.observed_at {
+        } else {
+            // This report may have waited behind a newer observation for the
+            // same MAC. Keeping that value must also suppress the final append.
+            let observation = if obs.observed_at < at_status.observed_at {
+                &at_status
+            } else {
+                obs
+            };
             new_spx_status_observations
                 .spx_attachments
-                .push(at_status.clone());
+                .push(observation.clone());
             add_new_observation = false;
         }
     }
@@ -277,6 +286,12 @@ async fn handle_dpa_message(services: Arc<Api>, message: SetVni, topic: String) 
             );
         }
     }
+}
+
+/// Test entrypoint for the real SVPC message handler without MQTT transport.
+#[cfg(test)]
+pub(crate) async fn handle_test_dpa_message(services: Arc<Api>, message: SetVni, topic: String) {
+    handle_dpa_message(services, message, topic).await;
 }
 
 // Create an MQTTEA client, and start up the thread that will do eventloop polling

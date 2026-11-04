@@ -1,0 +1,77 @@
+suite: switch client TLS deployment integration
+templates:
+  - deployment.yaml
+release:
+  namespace: nico-system
+set:
+  global.image.repository: registry.example.com/nvmetal-carbide
+  global.image.tag: test
+tests:
+  - it: leaves the switch TLS profile unset by default
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: NICO_BMC_PROXY__TLS__SWITCH__CA_CERT_PATH
+          any: true
+      - notContains:
+          path: spec.template.spec.volumes
+          content:
+            name: switch-client
+          any: true
+
+  - it: mounts the client Secret and sets every key of the profile when enabled
+    set:
+      switchTls:
+        enabled: true
+        secretName: proxy-switch-client-tls
+        mountPath: /var/run/secrets/proxy-switch-client
+        uris:
+          - spiffe://switch.local/nico-system/sa/nico-bmc-proxy-switch
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content:
+            name: switch-client
+            mountPath: /var/run/secrets/proxy-switch-client
+            readOnly: true
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: switch-client
+            secret:
+              secretName: proxy-switch-client-tls
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: NICO_BMC_PROXY__TLS__SWITCH__CA_CERT_PATH
+            value: /var/run/secrets/nico-roots/ca.crt
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: NICO_BMC_PROXY__TLS__SWITCH__CLIENT_CERT_PATH
+            value: /var/run/secrets/proxy-switch-client/tls.crt
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: NICO_BMC_PROXY__TLS__SWITCH__CLIENT_KEY_PATH
+            value: /var/run/secrets/proxy-switch-client/tls.key
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: NICO_BMC_PROXY__TLS__SWITCH__TLS_SERVER_NAME
+            value: ""
+
+  - it: checks switches against a shared server name when one is set
+    set:
+      switchTls:
+        enabled: true
+        tlsServerName: switches.example.internal
+        uris:
+          - spiffe://switch.local/nico-system/sa/nico-bmc-proxy-switch
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: NICO_BMC_PROXY__TLS__SWITCH__TLS_SERVER_NAME
+            value: switches.example.internal

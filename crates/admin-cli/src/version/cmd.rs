@@ -59,13 +59,41 @@ fn format_list(values: &[String]) -> String {
         .join("\n")
 }
 
+/// Client to retry `version` with when the first, server-verifying attempt
+/// fails for any reason.
+pub(crate) struct VerificationFallback {
+    pub(crate) api_client: ApiClient,
+    pub(crate) root_ca_path: String,
+}
+
 pub(super) async fn handle_show_version(
     opts: &Opts,
     api_client: &ApiClient,
+    fallback: Option<&VerificationFallback>,
     format: OutputFormat,
     output: &mut Box<dyn tokio::io::AsyncWrite + Unpin>,
 ) -> Result<(), CarbideCliError> {
-    let v = api_client.0.version(opts.show_runtime_config).await?;
+    // The retry covers only the RPC, so a failure while rendering below can
+    // never print version info twice.
+    let v = match api_client.0.version(opts.show_runtime_config).await {
+        Ok(v) => v,
+        Err(error) => match fallback {
+            Some(fallback) => {
+                tracing::warn!(
+                    root_ca = %fallback.root_ca_path,
+                    %error,
+                    "could not verify the server with the given root CA; retrying without \
+                     server certificate verification, so the version info below is unauthenticated"
+                );
+                fallback
+                    .api_client
+                    .0
+                    .version(opts.show_runtime_config)
+                    .await?
+            }
+            None => return Err(error.into()),
+        },
+    };
     if format == OutputFormat::Json {
         async_writeln!(output, "{}", serde_json::to_string(&v)?)?;
         return Ok(());

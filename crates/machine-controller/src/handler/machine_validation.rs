@@ -615,7 +615,7 @@ pub(crate) async fn handle_machine_validation_requested(
     mh_snapshot: &ManagedHostStateSnapshot,
     clear_failure_details: bool,
 ) -> Result<Option<StateHandlerOutcome<ManagedHostState>>, StateHandlerError> {
-    if is_machine_validation_requested(mh_snapshot).await {
+    if is_machine_validation_requested(mh_snapshot) {
         let mut txn = services.db_pool.begin().await?;
         if clear_failure_details {
             // Clear the error so that state machine doesnt get into loop

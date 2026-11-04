@@ -455,7 +455,7 @@ func (gerh GetExpectedRackHandler) Handle(c echo.Context) error {
 	site := expectedRack.Site
 	if site == nil {
 		siteDAO := cdbm.NewSiteDAO(gerh.dbSession)
-		site, err = siteDAO.GetByID(ctx, nil, expectedRack.SiteID, nil, false)
+		site, err = siteDAO.GetByID(ctx, nil, expectedRack.SiteID, nil, false, false)
 		if err != nil {
 			logger.Error().Err(err).Msg("error retrieving Site from DB")
 			return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Site details for Expected Rack due to DB error", nil)

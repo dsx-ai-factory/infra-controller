@@ -45,11 +45,18 @@ pub struct StartArgs {
     pub ready_channel: Sender<carbide::ApiServerReady>,
     pub credential_config: CredentialConfig,
     pub insecure_discovery: bool,
+    /// Enable the SPDM controller and the machine controller's SPDM measuring paths.
+    /// This flag is fixed for the server's lifetime. The fixture uses deliberately
+    /// nonfunctional NRAS endpoints on loopback port 9; verification cannot complete.
+    pub(crate) spdm_enabled: bool,
 }
 
-pub async fn start(
+pub async fn start(args: StartArgs) -> eyre::Result<()> {
+    start_with_config(args, toml::Table::new()).await
+}
+
+pub(crate) async fn start_with_config(
     StartArgs {
-        // Destructure start args
         addr,
         metrics_addr,
         root_dir,
@@ -60,7 +67,9 @@ pub async fn start(
         ready_channel,
         credential_config,
         insecure_discovery,
+        spdm_enabled,
     }: StartArgs,
+    overrides: toml::Table,
 ) -> eyre::Result<()> {
     let firmware_directory_str = firmware_directory.to_string_lossy();
     let root_dir_str = root_dir.to_string_lossy();
@@ -214,6 +223,8 @@ pub async fn start(
         dpu_wait_time = "1s"
         power_down_wait = "1s"
         failure_retry_time = "1s"
+        # Supermicro DMI selects unlock/reboot; shorten all UEFI waits in this test server.
+        uefi_boot_wait = "1s"
         dpu_up_threshold = "31449600s"
 
         [machine_state_controller.controller]
@@ -234,6 +245,12 @@ pub async fn start(
         max_concurrency = 10
         metric_emission_interval = "1s"
         metric_hold_time = "2s"
+
+        [vpc_prefix_state_controller.controller]
+        metric_emission_interval = "1s"
+
+        [extension_service_state_controller.controller]
+        metric_emission_interval = "1s"
 
         [ib_partition_state_controller.controller]
         iteration_time = "20s"
@@ -311,6 +328,20 @@ pub async fn start(
         enabled = true
         run_interval = "10s"
 
+        [spdm]
+        enabled = {spdm_enabled}
+
+        # NRAS configuration is required when SPDM is enabled. Port 9 is deliberately
+        # nonfunctional: these loopback endpoints cannot complete verification.
+        [spdm.nras_config]
+        nras_url = "http://127.0.0.1:9"
+        nras_gpu_url_suffix = "/gpu"
+        nras_jwks_url = "http://127.0.0.1:9/jwks"
+        validate_jwt_expiry = true
+
+        [spdm_state_controller.controller]
+        metric_emission_interval = "1s"
+
         [machine_validation_config]
         enabled = true
 
@@ -319,6 +350,14 @@ pub async fn start(
         # populate_initial_vault_secrets does not seed those for integration tests.
     "#
         )
+    };
+
+    let carbide_config_str = if overrides.is_empty() {
+        carbide_config_str
+    } else {
+        let mut config: toml::Table = toml::from_str(&carbide_config_str)?;
+        merge_config(&mut config, overrides);
+        toml::to_string(&config)?
     };
 
     let mut tmp = tempfile::NamedTempFile::new()?;
@@ -333,4 +372,36 @@ pub async fn start(
         ready_channel,
     )
     .await
+}
+
+fn merge_config(config: &mut toml::Table, overrides: toml::Table) {
+    for (key, value) in overrides {
+        match (config.get_mut(&key), value) {
+            (Some(toml::Value::Table(existing)), toml::Value::Table(overrides)) => {
+                merge_config(existing, overrides);
+            }
+            (_, value) => {
+                config.insert(key, value);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod config_tests {
+    use super::merge_config;
+
+    #[test]
+    fn nested_overrides_preserve_siblings_and_replace_scalars_and_arrays() {
+        let mut config: toml::Table = toml::from_str("[rack]\nvendor='old'\ncount=1\nmembers=['a','b']\n[rack.details]\npreserved=true\nchanged=1").unwrap();
+        let original = config.clone();
+        merge_config(&mut config, toml::Table::new());
+        assert_eq!(config, original);
+        let overrides =
+            toml::from_str("[rack]\nvendor='new'\nmembers=['c']\n[rack.details]\nchanged=2")
+                .unwrap();
+        merge_config(&mut config, overrides);
+        let expected: toml::Table = toml::from_str("[rack]\nvendor='new'\ncount=1\nmembers=['c']\n[rack.details]\npreserved=true\nchanged=2").unwrap();
+        assert_eq!(config, expected);
+    }
 }

@@ -270,6 +270,10 @@ impl IdracState {
         }
     }
 
+    pub(crate) fn reset_attributes(&self) {
+        *self.dell_attrs.lock().expect("mutex poisoned") = json!({});
+    }
+
     pub(crate) fn update_attrs(&self, v: serde_json::Value) {
         let mut dell_attrs = self.dell_attrs.lock().unwrap();
         json_patch(&mut dell_attrs, v);

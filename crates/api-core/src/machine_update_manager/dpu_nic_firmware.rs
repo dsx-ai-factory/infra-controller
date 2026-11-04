@@ -18,14 +18,16 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::time::Duration;
 
 use async_trait::async_trait;
-use carbide_machine_controller::dpf::DpfOperations;
+use carbide_machine_controller::dpf::{DpfOperations, validate_reprovision_compatibility};
 use carbide_uuid::machine::{DpuMachineId, HostMachineId};
 use db::dpu_machine_update;
 use model::dpu_machine_update::{DpuMachineUpdate, OutdatedDpfDpu};
-use model::machine::ManagedHostStateSnapshot;
+use model::machine::{ManagedHostStateSnapshot, dpf_based_dpu_provisioning_possible};
 use sqlx::PgConnection;
+use tokio::time::{Instant, timeout_at};
 
 use super::dpu_nic_firmware_metrics::DpuNicFirmwareUpdateMetrics;
 use super::machine_update_module::MachineUpdateModule;
@@ -37,6 +39,10 @@ use crate::cfg::file::CarbideConfig;
 use crate::machine_update_manager::MachineUpdateManager;
 use crate::{CarbideResult, DatabaseError};
 
+// Bound compatibility work across the whole admission pass, rather than
+// spending a complete Ready-check budget on every unavailable candidate.
+const DPF_ADMISSION_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// DpuNicFirmwareUpdate is a module used [MachineUpdateManager](crate::machine_update_manager::MachineUpdateManager)
 /// to ensure that DPU NIC firmware matches the expected version of the carbide release.
 ///
@@ -47,8 +53,8 @@ use crate::{CarbideResult, DatabaseError};
 pub(crate) struct DpuNicFirmwareUpdate {
     pub(crate) metrics: Option<DpuNicFirmwareUpdateMetrics>,
     pub(crate) config: Arc<CarbideConfig>,
-    /// DPF handle for discovering outdated DPF-managed DPUs. `None` when DPF
-    /// is disabled in config; in that case `find_outdated_dpus_dpf` is not called.
+    /// DPF handle for discovering outdated DPUs and checking reprovision compatibility.
+    /// `None` when DPF is disabled in config; then DPF discovery is not called.
     pub(crate) dpf: Option<Arc<dyn DpfOperations>>,
     /// Wrong-version outcomes already counted, keyed by DPU and the version it
     /// landed on: the condition persists across manager passes (the update
@@ -91,19 +97,14 @@ impl MachineUpdateModule for DpuNicFirmwareUpdate {
         updating_host_machines: &HashSet<HostMachineId>,
         snapshots: &HashMap<HostMachineId, ManagedHostStateSnapshot>,
     ) -> CarbideResult<HashSet<HostMachineId>> {
-        let machine_updates: Vec<DpuMachineUpdate> = self
-            .check_for_updates(snapshots, available_updates)
-            .await
-            .into_iter()
-            .filter(|u| updating_host_machines.get(&u.host_machine_id).is_none())
-            .collect();
-
-        // The outcome is vec<DpuMachineUpdate>, let's convert it to HashMap<host_machine_id, vec<DpuMachineUpdate>>
-        // This way we can run our loop based on host_machine id.
+        if available_updates <= 0 {
+            return Ok(HashSet::new());
+        }
+        // A host can have several outdated DPUs but uses one update slot.
         let mut host_machine_updates: HashMap<HostMachineId, Vec<DpuMachineUpdate>> =
             HashMap::new();
 
-        for machine_update in machine_updates {
+        for machine_update in self.check_for_updates(snapshots).await {
             host_machine_updates
                 .entry(machine_update.host_machine_id)
                 .or_default()
@@ -111,10 +112,56 @@ impl MachineUpdateModule for DpuNicFirmwareUpdate {
         }
 
         let mut updates_started = HashSet::default();
+        let mut compatibility_deadline = None;
 
         for (host_machine_id, machine_updates) in host_machine_updates {
+            if updates_started.len() >= available_updates as usize {
+                break;
+            }
             if updating_host_machines.contains(&host_machine_id) {
                 continue;
+            }
+
+            if let Some(snapshot) = snapshots.get(&host_machine_id)
+                && snapshot.host_snapshot.config.dpf.used_for_ingestion
+                && dpf_based_dpu_provisioning_possible(snapshot, self.config.dpf.enabled, true)
+            {
+                let Some(dpf) = self.dpf.as_deref() else {
+                    tracing::warn!(%host_machine_id, "Deferring DPF update: SDK is unavailable");
+                    continue;
+                };
+                // DPF checks share a deadline; expiry leaves classic candidates eligible.
+                let deadline = *compatibility_deadline
+                    .get_or_insert_with(|| Instant::now() + DPF_ADMISSION_TIMEOUT);
+                if Instant::now() >= deadline {
+                    continue;
+                }
+                let requested_dpus = machine_updates
+                    .iter()
+                    .map(|update| update.dpu_machine_id)
+                    .collect::<Vec<_>>();
+                match timeout_at(
+                    deadline,
+                    validate_reprovision_compatibility(
+                        snapshot,
+                        &requested_dpus,
+                        pool,
+                        &self.config.rack_profiles,
+                        dpf,
+                    ),
+                )
+                .await
+                {
+                    Ok(Ok(())) => {}
+                    Ok(Err(error)) => {
+                        tracing::warn!(%host_machine_id, %error, "Deferring DPF update");
+                        continue;
+                    }
+                    Err(_) => {
+                        tracing::warn!(%host_machine_id, "DPF admission compatibility deadline reached");
+                        continue;
+                    }
+                }
             }
 
             let dpu_update_string = machine_updates.iter().fold("".to_string(), |output, dpu| {
@@ -126,14 +173,15 @@ impl MachineUpdateModule for DpuNicFirmwareUpdate {
             // add it to updates_started.
 
             let mut txn = db::Transaction::begin(pool).await?;
-            if let Err(reprovisioning_err) =
-                dpu_machine_update::trigger_reprovisioning_for_managed_host(
-                    &mut txn,
-                    &machine_updates,
-                )
-                .await
+            match dpu_machine_update::trigger_reprovisioning_for_managed_host(
+                &mut txn,
+                &machine_updates,
+            )
+            .await
             {
-                match reprovisioning_err {
+                Ok(true) => {}
+                Ok(false) => continue,
+                Err(reprovisioning_err) => match reprovisioning_err {
                     DatabaseError::NotFoundError { id, .. } => {
                         carbide_instrument::emit(FirmwareUpdateFailed {
                             target: FirmwareUpdateTarget::DpuNic,
@@ -147,14 +195,13 @@ impl MachineUpdateModule for DpuNicFirmwareUpdate {
                     _ => {
                         return Err(reprovisioning_err.into());
                     }
-                }
+                },
             }
 
             txn.commit().await?;
 
-            // Counted only once the trigger is committed: a DPU that left
-            // ready between snapshot and trigger is a NoUpdateMatch failure,
-            // not a started update.
+            // Count only committed admissions. A DPU that left Ready or gained
+            // another request after the snapshot has not started this update.
             carbide_instrument::emit(FirmwareUpdateProgress {
                 target: FirmwareUpdateTarget::DpuNic,
                 phase: FirmwareUpdatePhase::Started,
@@ -300,11 +347,12 @@ impl DpuNicFirmwareUpdate {
     pub(crate) async fn check_for_updates(
         &self,
         snapshots: &HashMap<HostMachineId, ManagedHostStateSnapshot>,
-        available_updates: i32,
     ) -> Vec<DpuMachineUpdate> {
         let dpf_outdated = self.fetch_dpf_outdated().await;
+        // `start_updates` applies capacity after checking compatibility so a
+        // blocked host does not keep another candidate out of this pass.
         match DpuMachineUpdate::find_available_outdated_dpus(
-            Some(available_updates),
+            None,
             &self.config.dpu_config.dpu_nic_firmware_update_versions,
             snapshots,
             &dpf_outdated,

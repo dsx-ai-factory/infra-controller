@@ -33,7 +33,7 @@ use sqlx::types::Json;
 use crate::db_read::DbReader;
 use crate::{ConditionalWrite, DatabaseError, DatabaseResult};
 
-/// After `non_active_slot_expires_at`, clears the non-current slot (public + private ciphertext).
+/// At or after `non_active_slot_expires_at`, clears the non-current slot (public + private ciphertext).
 pub async fn gc_expired_non_active_signing_key(
     org_id: &TenantOrganizationId,
     txn: &mut PgConnection,
@@ -46,37 +46,29 @@ async fn gc_expired_non_active_signing_key_at(
     txn: &mut PgConnection,
     now: DateTime<Utc>,
 ) -> DatabaseResult<()> {
-    let Some(row) = find(org_id, txn).await? else {
-        return Ok(());
-    };
-    let Some(expires) = row.non_active_slot_expires_at else {
-        return Ok(());
-    };
-    if expires > now {
-        return Ok(());
-    }
-
-    let slot_to_clear = row.current_signing_key_slot.other();
-    let stmt = match slot_to_clear {
-        TenantIdentityCurrentSigningKeySlot::SigningKey1 => {
-            "UPDATE tenant_identity_config SET \
-                signing_key_public_1 = NULL, \
-                encrypted_signing_key_1 = NULL, \
-                non_active_slot_expires_at = NULL, \
-                updated_at = NOW() \
-                WHERE organization_id = $1"
-        }
-        TenantIdentityCurrentSigningKeySlot::SigningKey2 => {
-            "UPDATE tenant_identity_config SET \
-                signing_key_public_2 = NULL, \
-                encrypted_signing_key_2 = NULL, \
-                non_active_slot_expires_at = NULL, \
-                updated_at = NOW() \
-                WHERE organization_id = $1"
-        }
-    };
+    // Check the deadline and choose the inactive slot in the same update.
+    // A rotation that commits while we wait can change both.
+    let stmt = r#"
+        UPDATE tenant_identity_config
+        SET signing_key_public_1 = CASE
+                WHEN current_signing_key_slot = 'signing_key_1' THEN signing_key_public_1
+                ELSE NULL END,
+            encrypted_signing_key_1 = CASE
+                WHEN current_signing_key_slot = 'signing_key_1' THEN encrypted_signing_key_1
+                ELSE NULL END,
+            signing_key_public_2 = CASE
+                WHEN current_signing_key_slot = 'signing_key_2' THEN signing_key_public_2
+                ELSE NULL END,
+            encrypted_signing_key_2 = CASE
+                WHEN current_signing_key_slot = 'signing_key_2' THEN encrypted_signing_key_2
+                ELSE NULL END,
+            non_active_slot_expires_at = NULL,
+            updated_at = NOW()
+        WHERE organization_id = $1 AND non_active_slot_expires_at <= $2
+    "#;
     sqlx::query(stmt)
         .bind(org_id.as_str())
+        .bind(now)
         .execute(txn)
         .await
         .map_err(|e| DatabaseError::query("gc_expired_non_active_signing_key", e))?;
@@ -140,10 +132,22 @@ struct KeyRows {
 }
 
 /// Set identity config for an org.
-/// When creating new or rotating key, caller must provide `key_material` (generated key pair, encrypted private key).
+///
 /// Caller must ensure tenant exists and global machine-identity is enabled.
-/// On key rotation, `config.signing_key_overlap_sec` must be set (seconds until the previous JWKS key is dropped);
-/// see [`IdentityConfig::try_from_proto`].
+/// Creating or rotating requires `key_material` with a generated key pair and
+/// encrypted private key. Generate and encrypt it, including any remote key access,
+/// before opening the transaction. The connection must belong to a transaction;
+/// the entire existing configuration row stays locked until that transaction ends.
+///
+/// When `config.rotate_key` is true, rotation uses the configuration found under
+/// the row lock, even if an earlier caller read found no configuration. Rotation
+/// requires [`IdentityConfig::signing_key_overlap_sec`] to set the previous key's
+/// overlap deadline.
+///
+/// Returns [`DatabaseError::AlreadyFoundError`] if the locked read finds no row but
+/// insertion conflicts with a concurrent creation, or if a non-rotation request
+/// supplies initial key material for an existing configuration. Neither case
+/// replaces the existing signer with that initial material.
 pub async fn set(
     org_id: &TenantOrganizationId,
     config: &IdentityConfig,
@@ -164,7 +168,7 @@ pub async fn set(
         .try_into()
         .map_err(|_| DatabaseError::InvalidArgument("token_ttl out of range".into()))?;
 
-    let existing = find(org_id, &mut *txn).await?;
+    let existing = find_for_update(org_id, txn).await?;
 
     let key_rows = match (&existing, config.rotate_key, key_material) {
         (None, _, None) | (_, true, None) => {
@@ -228,12 +232,17 @@ pub async fn set(
             non_active_expires_at: ex.non_active_slot_expires_at,
         },
         (Some(_), false, Some(_)) => {
-            return Err(DatabaseError::InvalidArgument(
-                "key_material must not be set when rotate_key is false".into(),
-            ));
+            // An unlocked preflight can see no config before another creator commits.
+            // Its prepared initial material must not replace that creator's signer.
+            return Err(DatabaseError::AlreadyFoundError {
+                kind: "tenant_identity_config",
+                id: org_id.to_string(),
+            });
         }
     };
 
+    // A missing row cannot be locked. Only update a row we locked above;
+    // otherwise a concurrent creation must keep its initial signing key.
     let query = format!(
         r#"
         INSERT INTO tenant_identity_config (
@@ -257,6 +266,7 @@ pub async fn set(
             signing_key_public_2 = EXCLUDED.signing_key_public_2,
             current_signing_key_slot = EXCLUDED.current_signing_key_slot,
             non_active_slot_expires_at = EXCLUDED.non_active_slot_expires_at
+        WHERE $14
         RETURNING {}"#,
         TenantIdentityConfig::db_table_columns(),
     );
@@ -274,9 +284,14 @@ pub async fn set(
         .bind(key_rows.pub2)
         .bind(key_rows.current_slot)
         .bind(key_rows.non_active_expires_at)
-        .fetch_one(txn)
+        .bind(existing.is_some())
+        .fetch_optional(txn)
         .await
-        .map_err(|e| DatabaseError::query("UPSERT tenant_identity_config", e))
+        .map_err(|e| DatabaseError::query("UPSERT tenant_identity_config", e))?
+        .ok_or_else(|| DatabaseError::AlreadyFoundError {
+            kind: "tenant_identity_config",
+            id: org_id.to_string(),
+        })
 }
 
 pub async fn find<DB>(
@@ -322,23 +337,21 @@ pub async fn find_by_machine_id(
     machine_id: &MachineId,
 ) -> DatabaseResult<TenantIdentityConfig> {
     let instance_machine_id = instance_machine_id_for_identity_lookup(txn, machine_id).await?;
-    let row = sqlx::query_as::<_, TenantIdentityConfig>(
+    // `tic` is the alias declared by `TenantIdentityConfig`'s `DbTable` metadata.
+    let query = format!(
         r"
-        SELECT tic.organization_id, tic.issuer, tic.default_audience, tic.allowed_audiences,
-            tic.token_ttl_sec, tic.subject_prefix, tic.enabled, tic.created_at, tic.updated_at,
-            tic.encrypted_signing_key_1, tic.encrypted_signing_key_2,
-            tic.signing_key_public_1, tic.signing_key_public_2,
-            tic.current_signing_key_slot, tic.non_active_slot_expires_at,
-            tic.token_endpoint, tic.auth_method, tic.encrypted_auth_method_config,
-            tic.subject_token_audience, tic.token_delegation_created_at
-        FROM tenant_identity_config tic
+        SELECT {}
+        FROM {}
         INNER JOIN instances i ON tic.organization_id = i.tenant_org
         WHERE i.machine_id = $1 AND i.deleted IS NULL AND tic.enabled = true",
-    )
-    .bind(instance_machine_id)
-    .fetch_optional(&mut *txn)
-    .await
-    .map_err(|e| DatabaseError::query("SELECT tenant_identity_config BY machine_id", e))?;
+        TenantIdentityConfig::db_aliased_columns(),
+        TenantIdentityConfig::db_aliased_table(),
+    );
+    let row = sqlx::query_as::<_, TenantIdentityConfig>(sqlx::AssertSqlSafe(query))
+        .bind(instance_machine_id)
+        .fetch_optional(&mut *txn)
+        .await
+        .map_err(|e| DatabaseError::query("SELECT tenant_identity_config BY machine_id", e))?;
     let Some(cfg) = row else {
         return Err(DatabaseError::NotFoundError {
             kind: "machine_identity",
@@ -446,7 +459,8 @@ where
     .map_err(|e| DatabaseError::query("LIST tenant_identity_config organization_ids", e))
 }
 
-/// Loads a row for update during master-key re-wrap.
+/// Locks an existing configuration until the caller's transaction ends.
+/// Returns `None` without a row lock when the configuration is absent.
 async fn find_for_update(
     org_id: &TenantOrganizationId,
     txn: &mut PgConnection,
@@ -524,8 +538,10 @@ pub async fn update_encrypted_fields(
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    use std::time::Duration;
 
     use carbide_secrets::key_encryption;
+    use carbide_uuid::machine::{MachineIdSource, MachineType};
     use chrono::Utc;
     use model::metadata::Metadata;
     use model::tenant::identity_config::SigningAlgorithm;
@@ -535,6 +551,7 @@ mod tests {
     };
 
     use super::*;
+    use crate::test_support::postgres::wait_for_blocked_query;
     use crate::{DatabaseError, tenant};
 
     /// Synthetic P-256 SPKI public PEMs for tests (not secret). Prefer real PEM so validation stays
@@ -622,6 +639,437 @@ ecbC7Qcisdw2/9l8bk/zfF9gvu4kh3hXZzMWgk+vj1e8KSX+NYswYiacQA==
             encryption_key_id: "test-master".parse().unwrap(),
             signing_key_overlap_sec: overlap,
         }
+    }
+
+    #[track_caller]
+    fn assert_signing_keys_eq(actual: &TenantIdentityConfig, expected: &TenantIdentityConfig) {
+        assert_eq!(
+            actual.encrypted_signing_key_1,
+            expected.encrypted_signing_key_1
+        );
+        assert_eq!(
+            actual.encrypted_signing_key_2,
+            expected.encrypted_signing_key_2
+        );
+        assert_eq!(actual.signing_key_public_1, expected.signing_key_public_1);
+        assert_eq!(actual.signing_key_public_2, expected.signing_key_public_2);
+        assert_eq!(
+            actual.current_signing_key_slot,
+            expected.current_signing_key_slot
+        );
+        assert_eq!(
+            actual.non_active_slot_expires_at,
+            expected.non_active_slot_expires_at
+        );
+    }
+
+    #[crate::sqlx_test]
+    async fn machine_lookup_requires_enabled_config_for_active_instance_tenant(pool: sqlx::PgPool) {
+        // The join must decode every selected column before reloading the
+        // matching organization. Each exclusion changes one lookup condition.
+        let mut txn = pool.begin().await.expect("begin machine lookup test");
+        let org_id = test_org_id();
+        let other_org_id = "OtherIdentityConfigOrg".parse().unwrap();
+        ensure_tenant(&mut txn, &org_id).await;
+        ensure_tenant(&mut txn, &other_org_id).await;
+        let config = base_identity_config(false, None);
+        set(&org_id, &config, Some(placeholder_key_material()), &mut txn)
+            .await
+            .expect("create identity config");
+        let machine_id = MachineId::new(
+            MachineIdSource::ProductBoardChassisSerial,
+            [1; 32],
+            MachineType::Host,
+        );
+        let other_machine_id = MachineId::new(
+            MachineIdSource::ProductBoardChassisSerial,
+            [2; 32],
+            MachineType::Host,
+        );
+        sqlx::query("INSERT INTO machines (id, dpf) VALUES ($1, '{}'::jsonb)")
+            .bind(machine_id)
+            .execute(&mut *txn)
+            .await
+            .expect("create instance machine");
+        sqlx::query("INSERT INTO instances (machine_id, tenant_org) VALUES ($1, $2)")
+            .bind(machine_id)
+            .bind(&org_id)
+            .execute(&mut *txn)
+            .await
+            .expect("create tenant instance");
+
+        #[derive(Clone, Copy)]
+        struct Case<'a> {
+            name: &'static str,
+            lookup_machine_id: MachineId,
+            instance_org: &'a TenantOrganizationId,
+            enabled: bool,
+            deleted: bool,
+            expect_found: bool,
+        }
+        let active = Case {
+            name: "active instance",
+            lookup_machine_id: machine_id,
+            instance_org: &org_id,
+            enabled: true,
+            deleted: false,
+            expect_found: true,
+        };
+        let cases = [
+            active,
+            Case {
+                name: "different machine",
+                lookup_machine_id: other_machine_id,
+                expect_found: false,
+                ..active
+            },
+            Case {
+                name: "different tenant",
+                instance_org: &other_org_id,
+                expect_found: false,
+                ..active
+            },
+            Case {
+                name: "disabled config",
+                enabled: false,
+                expect_found: false,
+                ..active
+            },
+            Case {
+                name: "deleted instance",
+                deleted: true,
+                expect_found: false,
+                ..active
+            },
+        ];
+        for case in cases {
+            sqlx::query("UPDATE instances SET tenant_org = $2, deleted = $3 WHERE machine_id = $1")
+                .bind(machine_id)
+                .bind(case.instance_org)
+                .bind(case.deleted.then(Utc::now))
+                .execute(&mut *txn)
+                .await
+                .expect("set instance lookup conditions");
+            sqlx::query(
+                "UPDATE tenant_identity_config SET enabled = $2 WHERE organization_id = $1",
+            )
+            .bind(&org_id)
+            .bind(case.enabled)
+            .execute(&mut *txn)
+            .await
+            .expect("set identity config lookup conditions");
+
+            let result = find_by_machine_id(&mut txn, &case.lookup_machine_id).await;
+
+            if case.expect_found {
+                let found = result.expect(case.name);
+                assert_eq!(found.organization_id, org_id);
+            } else {
+                assert!(
+                    matches!(result, Err(DatabaseError::NotFoundError { kind: "machine_identity", ref id })
+                        if id == &case.lookup_machine_id.to_string()),
+                    "{}: {result:?}",
+                    case.name,
+                );
+            }
+        }
+    }
+
+    #[crate::sqlx_test]
+    async fn config_update_preserves_concurrent_signing_key_rotation(pool: sqlx::PgPool) {
+        let org_id = test_org_id();
+        let mut setup = pool.begin().await.expect("begin setup");
+        ensure_tenant(&mut setup, &org_id).await;
+        set(
+            &org_id,
+            &base_identity_config(false, None),
+            Some(placeholder_key_material()),
+            &mut setup,
+        )
+        .await
+        .expect("create identity config");
+        setup.commit().await.expect("commit setup");
+
+        let mut rotation = pool.begin().await.expect("begin rotation");
+        let rotated = set(
+            &org_id,
+            &base_identity_config(true, Some(3600)),
+            Some(SigningKeyMaterial {
+                encrypted_signing_key: "ROTATED_ENCRYPTED_KEY".parse().unwrap(),
+                ..test_signing_key_material_from_es256_public_pem(TEST_ES256_PUB_1)
+            }),
+            &mut rotation,
+        )
+        .await
+        .expect("rotate signing key");
+        let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *rotation)
+            .await
+            .expect("get rotation backend");
+        let config = IdentityConfig {
+            default_audience: "updated".to_string(),
+            allowed_audiences: vec!["updated".to_string()],
+            ..base_identity_config(false, None)
+        };
+        let update = async {
+            let mut txn = pool.begin().await.expect("begin config update");
+            set(&org_id, &config, None, &mut txn)
+                .await
+                .expect("update config without rotating");
+            txn.commit().await.expect("commit config update");
+        };
+        let commit_rotation = async {
+            // The update must reach the database while the old key is still
+            // visible to an unlocked read.
+            wait_for_blocked_query(&pool, blocker_pid, "tenant_identity_config").await;
+            rotation.commit().await.expect("commit rotation");
+        };
+        tokio::time::timeout(Duration::from_secs(60), async {
+            tokio::join!(update, commit_rotation);
+        })
+        .await
+        .expect("config update and rotation must finish");
+
+        let mut connection = pool
+            .acquire()
+            .await
+            .expect("acquire verification connection");
+        let persisted = find(&org_id, &mut *connection)
+            .await
+            .expect("reload identity config")
+            .expect("identity config exists");
+        assert_eq!(persisted.default_audience, config.default_audience);
+        assert_eq!(persisted.allowed_audiences.0, config.allowed_audiences);
+        assert_signing_keys_eq(&persisted, &rotated);
+    }
+
+    #[crate::sqlx_test]
+    async fn expired_key_gc_preserves_concurrent_signing_key_rotation(pool: sqlx::PgPool) {
+        #[derive(Clone, Copy, Debug)]
+        enum CollectionTime {
+            DuringOverlap,
+            AtExpiry,
+        }
+
+        for collection_time in [CollectionTime::DuringOverlap, CollectionTime::AtExpiry] {
+            let org_id = format!("{collection_time:?}").parse().unwrap();
+            let now = Utc::now();
+            let mut setup = pool.begin().await.expect("begin setup");
+            ensure_tenant(&mut setup, &org_id).await;
+            set(
+                &org_id,
+                &base_identity_config(false, None),
+                Some(placeholder_key_material()),
+                &mut setup,
+            )
+            .await
+            .expect("create identity config");
+            set(
+                &org_id,
+                &base_identity_config(true, Some(3600)),
+                Some(test_signing_key_material_from_es256_public_pem(
+                    TEST_ES256_PUB_1,
+                )),
+                &mut setup,
+            )
+            .await
+            .expect("populate both signing slots");
+            sqlx::query(
+                r#"
+                UPDATE tenant_identity_config SET non_active_slot_expires_at = $2
+                WHERE organization_id = $1
+                "#,
+            )
+            .bind(org_id.as_str())
+            .bind(now - ChronoDuration::seconds(60))
+            .execute(&mut *setup)
+            .await
+            .expect("expire the first signing slot");
+            setup.commit().await.expect("commit setup");
+
+            let mut rotation = pool.begin().await.expect("begin rotation");
+            let rotated = set(
+                &org_id,
+                &base_identity_config(true, Some(3600)),
+                Some(SigningKeyMaterial {
+                    encrypted_signing_key: "ROTATED_ENCRYPTED_KEY".parse().unwrap(),
+                    ..test_signing_key_material_from_es256_public_pem(TEST_ES256_PUB_2)
+                }),
+                &mut rotation,
+            )
+            .await
+            .expect("rotate into the expired first slot");
+            // Rotation's cleanup must preserve the active slot 2 before it
+            // becomes the overlap key; comparing only to `rotated` would miss that loss.
+            assert_eq!(
+                rotated.current_signing_key_slot,
+                TenantIdentityCurrentSigningKeySlot::SigningKey1
+            );
+            assert_eq!(
+                rotated.encrypted_signing_key_1,
+                Some("ROTATED_ENCRYPTED_KEY".parse().unwrap())
+            );
+            assert_eq!(
+                rotated.encrypted_signing_key_2,
+                Some("PLACEHOLDER_ENCRYPTED_KEY".parse().unwrap())
+            );
+            assert_eq!(
+                rotated.signing_key_public_1,
+                Some(Json(
+                    SigningKeyPublicV1::es256_from_public_pem(TEST_ES256_PUB_2).unwrap()
+                ))
+            );
+            assert_eq!(
+                rotated.signing_key_public_2,
+                Some(Json(
+                    SigningKeyPublicV1::es256_from_public_pem(TEST_ES256_PUB_1).unwrap()
+                ))
+            );
+            let expires_at = rotated
+                .non_active_slot_expires_at
+                .expect("rotation sets an expiry");
+            assert!(expires_at > now);
+            let collect_at = match collection_time {
+                CollectionTime::DuringOverlap => now,
+                CollectionTime::AtExpiry => expires_at,
+            };
+            let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+                .fetch_one(&mut *rotation)
+                .await
+                .expect("get rotation backend");
+            let collect = async {
+                let mut txn = pool.begin().await.expect("begin garbage collection");
+                gc_expired_non_active_signing_key_at(&org_id, &mut txn, collect_at)
+                    .await
+                    .expect("collect expired signing key");
+                txn.commit().await.expect("commit garbage collection");
+            };
+            let commit_rotation = async {
+                // Before the rotation commits, slot 1 looks expired. After the
+                // wait, it is the active signer and slot 2 has a new deadline.
+                wait_for_blocked_query(&pool, blocker_pid, "tenant_identity_config").await;
+                rotation.commit().await.expect("commit rotation");
+            };
+            tokio::time::timeout(Duration::from_secs(60), async {
+                tokio::join!(collect, commit_rotation);
+            })
+            .await
+            .unwrap_or_else(|_| {
+                panic!("{collection_time:?}: garbage collection and rotation must finish")
+            });
+
+            let mut txn = pool.begin().await.expect("begin verification");
+            let persisted = find(&org_id, txn.as_mut())
+                .await
+                .expect("reload identity config")
+                .expect("identity config exists");
+            let persisted = match collection_time {
+                CollectionTime::DuringOverlap => {
+                    assert_signing_keys_eq(&persisted, &rotated);
+                    // At the replacement deadline, GC must still remove the inactive key.
+                    gc_expired_non_active_signing_key_at(&org_id, &mut txn, expires_at)
+                        .await
+                        .expect("collect at the replacement deadline");
+                    find(&org_id, txn.as_mut())
+                        .await
+                        .expect("reload after expiry")
+                        .expect("identity config exists")
+                }
+                CollectionTime::AtExpiry => persisted,
+            };
+
+            let expired = TenantIdentityConfig {
+                encrypted_signing_key_2: None,
+                signing_key_public_2: None,
+                non_active_slot_expires_at: None,
+                ..rotated
+            };
+            assert_signing_keys_eq(&persisted, &expired);
+            txn.commit().await.expect("commit verification");
+        }
+    }
+
+    #[crate::sqlx_test]
+    async fn concurrent_initial_creation_preserves_first_signing_key(pool: sqlx::PgPool) {
+        let org_id = test_org_id();
+        let mut setup = pool.begin().await.expect("begin setup");
+        ensure_tenant(&mut setup, &org_id).await;
+        setup.commit().await.expect("commit tenant");
+
+        let config = base_identity_config(false, None);
+        let mut first_txn = pool.begin().await.expect("begin first creation");
+        let first = set(
+            &org_id,
+            &config,
+            Some(placeholder_key_material()),
+            &mut first_txn,
+        )
+        .await
+        .expect("create first identity config");
+        let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *first_txn)
+            .await
+            .expect("get first creation backend");
+        let competing_config = IdentityConfig {
+            default_audience: "competing".to_string(),
+            ..base_identity_config(false, None)
+        };
+        let competing_key = SigningKeyMaterial {
+            encrypted_signing_key: "COMPETING_ENCRYPTED_KEY".parse().unwrap(),
+            ..test_signing_key_material_from_es256_public_pem(TEST_ES256_PUB_1)
+        };
+        let create = async {
+            let mut txn = pool.begin().await.expect("begin competing creation");
+            let result = set(
+                &org_id,
+                &competing_config,
+                Some(competing_key.clone()),
+                &mut txn,
+            )
+            .await;
+            txn.commit()
+                .await
+                .expect("commit competing creation attempt");
+            result
+        };
+        let commit_first = async {
+            wait_for_blocked_query(&pool, blocker_pid, "INSERT INTO tenant_identity_config").await;
+            first_txn.commit().await.expect("commit first creation");
+        };
+        let (result, ()) = tokio::time::timeout(Duration::from_secs(60), async {
+            tokio::join!(create, commit_first)
+        })
+        .await
+        .expect("competing creations must finish");
+        assert!(matches!(
+            result,
+            Err(DatabaseError::AlreadyFoundError { kind: "tenant_identity_config", id })
+                if id == org_id.as_str()
+        ));
+
+        let mut txn = pool.begin().await.expect("begin stale preflight attempt");
+        // Key generation can also finish after the other creation commits,
+        // before `set` performs its first read.
+        let result = set(&org_id, &competing_config, Some(competing_key), &mut txn).await;
+        assert!(matches!(
+            result,
+            Err(DatabaseError::AlreadyFoundError { kind: "tenant_identity_config", id })
+                if id == org_id.as_str()
+        ));
+        txn.commit().await.expect("commit stale preflight attempt");
+
+        let mut connection = pool
+            .acquire()
+            .await
+            .expect("acquire verification connection");
+        let persisted = find(&org_id, &mut *connection)
+            .await
+            .expect("reload identity config")
+            .expect("identity config exists");
+        assert_eq!(persisted.default_audience, first.default_audience);
+        assert_eq!(persisted.created_at, first.created_at);
+        assert_eq!(persisted.updated_at, first.updated_at);
+        assert_signing_keys_eq(&persisted, &first);
     }
 
     #[crate::sqlx_test]

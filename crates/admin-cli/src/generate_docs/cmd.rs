@@ -418,7 +418,9 @@ fn uses_clap_synopsis(path: &[String]) -> bool {
             path.get(1).map(String::as_str),
             path.get(2).map(String::as_str),
         ),
-        (Some("machine-validation"), Some("logs")) | (Some("firmware"), Some("nic"))
+        (Some("machine-validation"), Some("logs"))
+            | (Some("firmware"), Some("nic"))
+            | (Some("spx-maintenance"), _)
     )
 }
 

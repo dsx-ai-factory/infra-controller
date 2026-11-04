@@ -1711,6 +1711,7 @@ mod tests {
         sink.handle_event(
             &crate::sink::EventContext::from_endpoint(&endpoint, NVUE_GNMI_SAMPLE_STREAM_ID),
             &CollectorEvent::Metric(Box::new(MetricSample {
+                semantics: crate::sink::MetricSemantics::Gauge,
                 key: "unrelated-interface".into(),
                 name: NVUE_GNMI_SAMPLE_STREAM_ID.into(),
                 metric_type: "interface_reading".into(),

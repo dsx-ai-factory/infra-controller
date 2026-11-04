@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use carbide_resource_pool_api::v1;
 use db::resource_pool::{binding, registration as storage};
-use db::test_support::postgres::wait_for_blocked_query;
+use db::test_support::postgres::{wait_for_blocked_queries, wait_for_blocked_query};
 use model::resource_pool::registration::ResourcePoolRegistration;
 use model::resource_pool::{
     ResourcePoolBackendKind, ResourcePoolBinding, ResourcePoolSelection, ResourcePoolValueDomain,
@@ -15,10 +15,14 @@ use model::resource_pool::{
 use prost::{Message, encoding};
 use sqlx::PgPool;
 use sqlx::postgres::PgPoolOptions;
+use tokio::task::JoinSet;
 use tonic::Code;
 use uuid::Uuid;
 
-use super::{PreparedRegistration, RegistrationError, accepted, define, prepare, resume};
+use super::{
+    PreparedRegistration, RegistrationError, accepted, accepted_in_transaction, define,
+    latest_accepted, prepare, resume,
+};
 use crate::grpc::test_server::{Fault, FaultProvider, Gate, TestServer, bounded, pool, provider};
 use crate::grpc::{GrpcResourcePoolBackend, GrpcResourcePoolError, MAX_MESSAGE_BYTES};
 use crate::transaction::DATABASE_WAIT_TIMEOUT;
@@ -468,6 +472,88 @@ async fn failed_acknowledgement_leaves_provider_acceptance_replayable(
         Some(original_record)
     );
     harness.stop().await;
+    Ok(())
+}
+
+/// Inspection keeps using the provider's accepted pool identity while a newer
+/// definition awaits acknowledgement, and switches only after that acknowledgement.
+/// Allocation preparation reads use the caller's transaction so they can see an accepted
+/// definition before it commits.
+#[carbide_macros::sqlx_test]
+async fn latest_accepted_keeps_the_previous_revision_during_pending_growth(
+    database: PgPool,
+) -> TestResult {
+    let mut txn = database.begin().await?;
+    let binding = binding::bind_or_verify(&mut txn, &selection()).await?;
+    txn.commit().await?;
+    assert_eq!(latest_accepted(&database, &binding).await?, None);
+
+    // The provider's saved pool ID differs from its configured lookup alias.
+    // Inspection must return the saved ID so Stats queries the original pool.
+    let original = v1::DefineRequest {
+        pool: Some(v1::PoolBinding {
+            authority_id: binding.authority_id.clone(),
+            pool_id: "provider-pool-id".into(),
+            binding_id: binding.binding_id.to_string(),
+            logical_pool: binding.pool_name.clone(),
+        }),
+        eligibility_revision: "1".into(),
+        previous_revision: None,
+        value_domain: v1::ValueDomain::Integer as i32,
+        eligibility: eligibility().entries,
+    };
+    let mut grown = original.clone();
+    grown.eligibility_revision = "2".into();
+    grown.previous_revision = Some("1".into());
+    grown
+        .eligibility
+        .push(range(6, 10, v1::AssignmentMode::Automatic));
+
+    let mut txn = database.begin().await?;
+    storage::lock_binding(&mut txn, binding.binding_id).await?;
+    storage::insert(
+        &mut txn,
+        &ResourcePoolRegistration {
+            binding_id: binding.binding_id,
+            revision: 1,
+            request: original.encode_to_vec(),
+            accepted: true,
+        },
+    )
+    .await?;
+    storage::insert(
+        &mut txn,
+        &ResourcePoolRegistration {
+            binding_id: binding.binding_id,
+            revision: 2,
+            request: grown.encode_to_vec(),
+            accepted: false,
+        },
+    )
+    .await?;
+    // Preparation must use this transaction's view. A second connection
+    // would miss the accepted definition until this transaction commits.
+    for (scenario, revision, expected) in [
+        ("accepted revision", Some(1), Some(&original)),
+        ("latest accepted revision", None, Some(&original)),
+        ("pending revision", Some(2), None),
+    ] {
+        assert_eq!(
+            accepted_in_transaction(&mut txn, &binding, revision)
+                .await?
+                .as_ref(),
+            expected,
+            "{scenario}"
+        );
+    }
+    txn.commit().await?;
+    assert_eq!(latest_accepted(&database, &binding).await?, Some(original));
+
+    // Committing acceptance makes the newer revision available to inspection.
+    let mut txn = database.begin().await?;
+    storage::acknowledge(&mut txn, binding.binding_id, 2).await?;
+    txn.commit().await?;
+    assert_eq!(latest_accepted(&database, &binding).await?, Some(grown));
     Ok(())
 }
 
@@ -938,7 +1024,7 @@ async fn corrupt_saved_requests_are_not_replayed(database: PgPool) -> TestResult
     Ok(())
 }
 
-/// Cancelling either public lookup must eventually release its pooled connection
+/// Cancelling each public lookup must eventually release its pooled connection
 /// even when PostgreSQL cannot finish the read until its statement timeout expires.
 #[carbide_macros::sqlx_test]
 async fn cancelled_registration_reads_return_the_only_connection(database: PgPool) -> TestResult {
@@ -946,38 +1032,65 @@ async fn cancelled_registration_reads_return_the_only_connection(database: PgPoo
     enum Read {
         Resume,
         Accepted,
+        LatestAccepted,
     }
     let harness = Harness::new(database, Fault::None).await;
-    let single_connection = PgPoolOptions::new()
-        .max_connections(1)
-        .connect_with(harness.database.connect_options().as_ref().clone())
+    let mut blocker = harness.database.begin().await?;
+    let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *blocker)
         .await?;
-    sqlx::query("SET statement_timeout = 0")
-        .execute(&single_connection)
+    sqlx::query("LOCK TABLE resource_pool_registration IN ACCESS EXCLUSIVE MODE")
+        .execute(&mut *blocker)
         .await?;
-    for operation in [Read::Resume, Read::Accepted] {
-        let mut blocker = harness.database.begin().await?;
-        let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-            .fetch_one(&mut *blocker)
+    // Configure every pool before starting reads so fixture setup does not
+    // consume their PostgreSQL statement deadlines.
+    let mut connections = Vec::new();
+    for operation in [Read::Resume, Read::Accepted, Read::LatestAccepted] {
+        let single_connection = PgPoolOptions::new()
+            .max_connections(1)
+            .connect_with(harness.database.connect_options().as_ref().clone())
             .await?;
-        sqlx::query("LOCK TABLE resource_pool_registration IN ACCESS EXCLUSIVE MODE")
-            .execute(&mut *blocker)
+        sqlx::query("SET statement_timeout = 0")
+            .execute(&single_connection)
             .await?;
-        let mut pending = Box::pin(async {
-            match operation {
-                Read::Resume => resume(&single_connection, &harness.backend, &harness.binding, 1)
+        connections.push((operation, single_connection));
+    }
+    let mut readers = JoinSet::new();
+    for (operation, single_connection) in &connections {
+        let operation = *operation;
+        let single_connection = single_connection.clone();
+        let backend = harness.backend.clone();
+        let binding = harness.binding.clone();
+        readers.spawn(async move {
+            let result = match operation {
+                Read::Resume => resume(&single_connection, &backend, &binding, 1)
                     .await
                     .map(drop),
-                Read::Accepted => accepted(&single_connection, &harness.binding, 1)
+                Read::Accepted => accepted(&single_connection, &binding, 1).await.map(drop),
+                Read::LatestAccepted => latest_accepted(&single_connection, &binding)
                     .await
                     .map(drop),
-            }
+            };
+            (operation, result)
         });
-        tokio::select! {
-            result = &mut pending => panic!("{operation:?} did not wait for the registration table: {result:?}"),
-            _ = bounded(wait_for_blocked_query(&harness.database, blocker_pid, "FROM resource_pool_registration")) => {}
-        }
-        drop(pending);
+    }
+    // Each read has its own only connection. Observe all three blocked before
+    // cancelling them so their independent server deadlines can overlap.
+    tokio::select! {
+        result = readers.join_next() => panic!("a registration read did not stay blocked: {result:?}"),
+        count = bounded(wait_for_blocked_queries(
+            &harness.database, blocker_pid, "FROM resource_pool_registration", connections.len(),
+        )) => assert_eq!(count, connections.len()),
+    }
+    readers.abort_all();
+    while let Some(result) = readers.join_next().await {
+        assert!(
+            result
+                .expect_err("the blocked read must be cancelled")
+                .is_cancelled()
+        );
+    }
+    for (operation, single_connection) in connections {
         // SQLx queues rollback after the blocked statement. Keep the lock held
         // until the server-side timeout has freed the only service connection.
         let value: i32 = tokio::time::timeout(
@@ -987,9 +1100,9 @@ async fn cancelled_registration_reads_return_the_only_connection(database: PgPoo
         .await??;
         assert_eq!(value, 1, "{operation:?}");
         assert!(harness.requests().is_empty(), "{operation:?}");
-        blocker.rollback().await?;
+        single_connection.close().await;
     }
-    single_connection.close().await;
+    blocker.rollback().await?;
     harness.stop().await;
     Ok(())
 }

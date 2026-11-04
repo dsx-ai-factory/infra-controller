@@ -62,7 +62,7 @@ fn open_configured_socket(
 
 fn socket_setup_next_action(retry: i32) -> SocketSetupNextAction {
     if retry + 1 == SOCKET_SETUP_ATTEMPTS {
-        SocketSetupNextAction::Panic
+        SocketSetupNextAction::Return
     } else {
         SocketSetupNextAction::Retry
     }
@@ -70,7 +70,7 @@ fn socket_setup_next_action(retry: i32) -> SocketSetupNextAction {
 
 fn interface_bind_next_action(retries_left: i32) -> SocketSetupNextAction {
     if retries_left == 0 {
-        SocketSetupNextAction::Panic
+        SocketSetupNextAction::Return
     } else {
         SocketSetupNextAction::Retry
     }
@@ -135,20 +135,30 @@ pub(super) fn machine_get_filename(
     url.into_bytes().to_vec()
 }
 
-/// Create a UDP socket and set non_blocking, broadcast and other options flag on it.
-pub async fn get_socket(listen_address: core::net::SocketAddrV4, interface: String) -> UdpSocket {
-    for retry in 0..SOCKET_SETUP_ATTEMPTS {
+/// Creates a configured IPv4 UDP socket, returning the terminal setup error so listeners can drain
+/// accepted packet tasks before exiting.
+pub async fn get_socket(
+    listen_address: core::net::SocketAddrV4,
+    interface: String,
+) -> Result<UdpSocket, DhcpError> {
+    let mut retry = 0;
+    loop {
         // Create a socket2 socket because std and Tokio sockets do not expose
         // the options that must be set before binding.
         let socket = match open_configured_socket(listen_address) {
             Ok(socket) => socket,
             Err((operation, error)) => {
+                let next_action = socket_setup_next_action(retry);
                 emit(DhcpSocketSetupFailed::new(
                     operation,
-                    socket_setup_next_action(retry),
+                    next_action,
                     retry,
                     error.to_string(),
                 ));
+                if next_action == SocketSetupNextAction::Return {
+                    return Err(error.into());
+                }
+                retry += 1;
                 tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                 continue;
             }
@@ -160,22 +170,22 @@ pub async fn get_socket(listen_address: core::net::SocketAddrV4, interface: Stri
                 break;
             };
             retries_left -= 1;
+            let next_action = interface_bind_next_action(retries_left);
             emit(DhcpInterfaceBindFailed::new(
-                interface_bind_next_action(retries_left),
+                next_action,
                 interface.clone(),
                 retries_left,
                 error.to_string(),
             ));
+            if next_action == SocketSetupNextAction::Return {
+                return Err(error.into());
+            }
             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-        }
-        if retries_left == 0 {
-            panic!("Cannot bind interface {interface}.");
         }
 
         // Now create tokio UDPSocket from socket2, which has all needed advanced options set.
-        return UdpSocket::from_std(socket.into()).unwrap();
+        return UdpSocket::from_std(socket.into()).map_err(Into::into);
     }
-    panic!("Could not create socket successfully.");
 }
 
 const DHCPV6_SOCKET_SETUP_ATTEMPTS: usize = 10;
@@ -267,6 +277,7 @@ fn if_index_for(interface: &str) -> Result<u32, DhcpError> {
 
 #[cfg(test)]
 mod tests {
+    use carbide_instrument::testing::MetricsCapture;
     use carbide_test_support::value_scenarios;
 
     use super::*;
@@ -279,29 +290,55 @@ mod tests {
         );
     }
 
+    /// Verifies retry helpers return after bounded exhaustion; emitted metrics separately retain
+    /// the historical `panic` compatibility label.
     #[test]
-    fn socket_setup_failures_report_whether_the_next_step_retries_or_panics() {
+    fn socket_setup_failures_report_whether_the_next_step_retries_or_returns() {
         value_scenarios!(socket_setup_next_action:
             "another socket attempt follows" {
+                // The first failure retains the complete outer retry budget.
                 0 => SocketSetupNextAction::Retry,
+                // The penultimate failure still permits the final socket attempt.
                 8 => SocketSetupNextAction::Retry,
             }
 
             "the outer retry budget is exhausted" {
-                9 => SocketSetupNextAction::Panic,
+                // The final failure returns control so the listener can drain packet tasks.
+                9 => SocketSetupNextAction::Return,
             }
         );
 
         value_scenarios!(interface_bind_next_action:
             "another interface bind follows" {
+                // The first device-bind failure retains the remaining attempts.
                 9 => SocketSetupNextAction::Retry,
+                // One remaining attempt still retries rather than ending the listener.
                 1 => SocketSetupNextAction::Retry,
             }
 
             "the interface bind budget is exhausted" {
-                0 => SocketSetupNextAction::Panic,
+                // Exhaustion returns the bind error so listener cleanup remains explicit.
+                0 => SocketSetupNextAction::Return,
             }
         );
+    }
+
+    /// Verifies real IPv4 interface-binding exhaustion returns an error because listener cleanup
+    /// cannot run if setup still panics.
+    #[tokio::test(start_paused = true)]
+    async fn get_socket_returns_after_interface_retry_exhaustion() {
+        // Serialize emitted socket-failure metrics with other process-global metric assertions.
+        let _metrics_guard = MetricsCapture::start();
+
+        // Use a deliberately absent device so every production bind attempt takes the terminal retry path.
+        let result = get_socket(
+            "127.0.0.1:0".parse().unwrap(),
+            "nico-missing-interface".to_string(),
+        )
+        .await;
+
+        // Completing with an I/O error proves retry exhaustion returned through the production helper.
+        assert!(matches!(result, Err(DhcpError::IoError(_))));
     }
 
     /// DHCPv6 listeners always admit link-local discovery, while site-scoped

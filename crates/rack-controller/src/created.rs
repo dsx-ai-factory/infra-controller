@@ -22,24 +22,19 @@
 //! column) match the actual device counts (machines, switches,
 //! power shelves with `rack_id` FK).
 
-use carbide_rack_controller::context::RackStateHandlerContextObjects;
-use carbide_uuid::machine::MachineId;
-use carbide_uuid::rack::{RackId, RackProfileId};
-use db::{machine as db_machine, power_shelf as db_power_shelf, switch as db_switch};
-use model::machine::machine_search_config::MachineSearchConfig;
+use carbide_uuid::rack::RackId;
 use model::rack::RackState;
-use state_controller::state_handler::{
-    StateHandlerContext, StateHandlerError, StateHandlerOutcome,
-};
+use model::rack_type::RackCapabilitiesSet;
+use state_controller::state_handler::{StateHandlerError, StateHandlerOutcome};
 
-use crate as carbide_rack_controller;
+use crate::component_inventory::RackComponentCounts;
 
-pub async fn handle_created(
+pub(crate) fn handle_created(
     id: &RackId,
-    rack_profile_id: Option<&RackProfileId>,
-    ctx: &mut StateHandlerContext<'_, RackStateHandlerContextObjects>,
+    capabilities: Option<&RackCapabilitiesSet>,
+    component_counts: RackComponentCounts,
 ) -> Result<StateHandlerOutcome<RackState>, StateHandlerError> {
-    let capabilities = match super::resolve_capabilities(id, rack_profile_id, ctx) {
+    let capabilities = match capabilities {
         Some(caps) => caps,
         None => {
             return Ok(StateHandlerOutcome::wait(
@@ -48,57 +43,27 @@ pub async fn handle_created(
         }
     };
 
-    let mut txn = ctx.services.db_pool.begin().await?;
-
-    let compute_count = db_machine::find_machine_ids::<MachineId>(
-        txn.as_mut(),
-        MachineSearchConfig {
-            rack_id: Some(id.clone()),
-            ..Default::default()
-        },
-    )
-    .await?
-    .len() as u32;
-    let switch_count = db_switch::find_ids(
-        txn.as_mut(),
-        model::switch::SwitchSearchFilter {
-            rack_id: Some(id.clone()),
-            ..Default::default()
-        },
-    )
-    .await?
-    .len() as u32;
-    let power_shelf_count = db_power_shelf::find_ids(
-        txn.as_mut(),
-        model::power_shelf::PowerShelfSearchFilter {
-            rack_id: Some(id.clone()),
-            ..Default::default()
-        },
-    )
-    .await?
-    .len() as u32;
-
-    if compute_count < capabilities.compute.count
-        || switch_count < capabilities.switch.count
-        || power_shelf_count < capabilities.power_shelf.count
+    if component_counts.compute < capabilities.compute.count
+        || component_counts.switch < capabilities.switch.count
+        || component_counts.power_shelf < capabilities.power_shelf.count
     {
         return Ok(StateHandlerOutcome::wait(format!(
             "waiting for devices: compute={}/{}, switch={}/{}, power_shelf={}/{}",
-            compute_count,
+            component_counts.compute,
             capabilities.compute.count,
-            switch_count,
+            component_counts.switch,
             capabilities.switch.count,
-            power_shelf_count,
+            component_counts.power_shelf,
             capabilities.power_shelf.count,
         )));
     }
 
     tracing::info!(
         rack_id = %id,
-        compute_count,
-        switch_count,
-        power_shelf_count,
+        compute_count = component_counts.compute,
+        switch_count = component_counts.switch,
+        power_shelf_count = component_counts.power_shelf,
         "Rack has all expected devices (compute, switch, power_shelf). Transitioning to Discovering.",
     );
-    Ok(StateHandlerOutcome::transition(RackState::Discovering).with_txn(txn))
+    Ok(StateHandlerOutcome::transition(RackState::Discovering))
 }

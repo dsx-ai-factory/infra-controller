@@ -57,6 +57,7 @@ nv-redfish = { workspace = true, features = [
   "processors",
   "update-service",
   "secure-boot",
+  "storages",
   "oem-nvidia",
   "oem-dell-attributes",
   "oem-lenovo",

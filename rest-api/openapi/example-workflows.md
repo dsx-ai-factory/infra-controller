@@ -178,15 +178,25 @@ Site. An IPv4 Subnet requires that block to be `Ready`. VPC Prefixes configure
 
 ## Accessing the Serial Console
 
+Follow [SSH Console Setup and Access](../../docs/configuration/ssh-console.md)
+for service prerequisites, Provider and Tenant configuration, key-group
+synchronization, Instance attachments, and the SSH connection procedure.
+
+The Site's `serialConsoleHostname` advertises the endpoint used to construct
+`serialConsoleUrl`. It does not deploy the service or authorize connections.
+`isSerialConsoleEnabled`, `serialConsoleIdleTimeout`, and
+`serialConsoleMaxSessionLength` are deprecated and have no effect on SOL.
+
 <AccordionGroup>
-  <Accordion title="Enable the Serial Console on a Compute Instance">
-    <Code src="snippets/input/enable_serial_console.sh" title="Example Call" />
-    <Code src="snippets/output/enable_serial_console.json" title="Example Response" />
+  <Accordion title="Advertise the Site's Serial Console Hostname">
+    Run this request as a Provider Admin after deploying a reachable SSH Console endpoint.
+    <Code src="snippets/input/configure_serial_console_hostname.sh" title="Example Call" />
+    <Code src="snippets/output/configure_serial_console_hostname.json" title="Example Response" />
   </Accordion>
   <Accordion title="Add an SSH Key Group">
     The SSH key should be in RSA, ECDSA, or ED25519 format. Add the SSH Key Group:
     <Code src="snippets/input/add_ssh_key_group.sh" title="Example Call" />
-    Note the value of the `version` field — you will need it to update the SSH Key Group.
+    Group updates require the latest `version` from a GET of the SSH Key Group.
     <Code src="snippets/output/add_ssh_key_group.json" title="Example Response" />
   </Accordion>
   <Accordion title="Add a Public SSH Key">
@@ -203,13 +213,9 @@ Site. An IPv4 Subnet requires that block to be `Ready`. VPC Prefixes configure
     <Code src="snippets/input/add_sites_to_key_group.sh" title="Example Call" />
     <Code src="snippets/output/add_sites_to_key_group.json" title="Example Response" />
   </Accordion>
-  <Accordion title="View Instances That Belong to the VPC">
-    <Code src="snippets/input/get_vpc_instances.sh" title="Example Call" />
-    <Code src="snippets/output/get_vpc_instances.json" title="Example Response" />
-  </Accordion>
-  <Accordion title="Parse IP Addresses from the Response">
-    Use a command like the following to retrieve the IP Addresses from the response, then access the host or application deployed on the Instance.
-    <Code src="snippets/input/parse_instance_ip_addresses.sh" title="Example Call" />
-    <Code src="snippets/output/parse_instance_ip_addresses.json" title="Example Response" />
-  </Accordion>
 </AccordionGroup>
+
+Once the group's association with the target Site is `Synced`, attach the group
+using the Instance's `sshKeyGroupIds` field. That field replaces the complete
+attachment list, include every group that should retain access. Connect using
+the Instance's returned `serialConsoleUrl` and the matching private key.

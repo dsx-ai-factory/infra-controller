@@ -16,11 +16,13 @@ import (
 	"testing"
 	"time"
 
+	computils "github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/components/utils"
+	"github.com/prometheus/client_golang/prometheus"
+	dto "github.com/prometheus/client_model/go"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"gopkg.in/fsnotify.v1"
 	coreV1Types "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
@@ -34,6 +36,92 @@ import (
 
 // testOTP matches what Site Manager issues: 20 random bytes in URL-safe base64.
 const testOTP = "8Nn5Qk0mVQqHqk2hXwfXQz1Yk5A="
+
+func TestBoostrapAPI_Init(t *testing.T) {
+	tests := []struct {
+		name         string
+		namespace    string
+		master       bool
+		disabled     bool
+		wantCounters bool
+	}{
+		{name: "counter aliases use default namespace", namespace: conftypes.DefaultMetricsNamespace, master: true, wantCounters: true},
+		{name: "counter aliases honor namespace override", namespace: "acme_site_agent", master: true, wantCounters: true},
+		{name: "non-master omits bootstrap counters", namespace: conftypes.DefaultMetricsNamespace},
+		{name: "disabled bootstrap omits counters", namespace: conftypes.DefaultMetricsNamespace, master: true, disabled: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			previousAccess := ManagerAccess
+			previousRegisterer := prometheus.DefaultRegisterer
+			t.Cleanup(func() {
+				ManagerAccess = previousAccess
+				prometheus.DefaultRegisterer = previousRegisterer
+			})
+
+			registry := prometheus.NewRegistry()
+			prometheus.DefaultRegisterer = registry
+			conf := &conftypes.Config{
+				MetricsNamespace: tt.namespace,
+				IsMasterPod:      tt.master,
+				DisableBootstrap: tt.disabled,
+				BootstrapSecret:  t.TempDir(),
+			}
+			if tt.master && !tt.disabled {
+				for name, contents := range map[string]string{
+					bootstraptypes.TagUUID:     "test-site",
+					bootstraptypes.TagOTP:      testOTP,
+					bootstraptypes.TagCredsURL: "https://credentials.example.test",
+					bootstraptypes.TagCACert:   "test-ca",
+				} {
+					err := os.WriteFile(filepath.Join(conf.BootstrapSecret, name), []byte(contents), 0600)
+					require.NoError(t, err)
+				}
+				_, _, err := readBootstrapConfig(conf.BootstrapSecret)
+				require.NoError(t, err)
+			}
+			data := &elektratypes.Elektra{Log: log.Logger, Managers: managertypes.NewManagerType()}
+			NewBootstrapManager(data, nil, &Manager.ManagerConf{EB: conf}).Init()
+			for _, observation := range []struct {
+				attempted uint64
+				succeeded uint64
+			}{
+				{attempted: 0, succeeded: 0},
+				{attempted: 7, succeeded: 5},
+			} {
+				data.Managers.Bootstrap.State.DownloadAttempted.Store(observation.attempted)
+				data.Managers.Bootstrap.State.DownloadSucceeded.Store(observation.succeeded)
+				metrics, err := registry.Gather()
+				require.NoError(t, err)
+				byName := make(map[string]*dto.MetricFamily, len(metrics))
+				for _, metric := range metrics {
+					byName[metric.GetName()] = metric
+				}
+				for name, want := range map[string]uint64{
+					"credentials_download_attempted":       observation.attempted,
+					"credentials_download_attempted_total": observation.attempted,
+					"credentials_download_succeeded":       observation.succeeded,
+					"credentials_download_succeeded_total": observation.succeeded,
+				} {
+					fullName := tt.namespace + "_" + name
+					metric := byName[fullName]
+					if tt.namespace != conftypes.DefaultMetricsNamespace {
+						assert.NotContains(t, byName, conftypes.DefaultMetricsNamespace+"_"+name)
+					}
+					if !tt.wantCounters {
+						assert.Nil(t, metric, fullName)
+						continue
+					}
+					require.NotNil(t, metric, fullName)
+					assert.Equal(t, dto.MetricType_COUNTER, metric.GetType(), fullName)
+					require.Len(t, metric.GetMetric(), 1, fullName)
+					assert.Empty(t, metric.GetMetric()[0].GetLabel(), fullName)
+					assert.Equal(t, float64(want), metric.GetMetric()[0].GetCounter().GetValue(), fullName)
+				}
+			}
+		})
+	}
+}
 
 func TestReadBootstrapConfigUsesOneProjectedSecretRevision(t *testing.T) {
 	root := t.TempDir()
@@ -67,7 +155,7 @@ func TestReadBootstrapConfigUsesOneProjectedSecretRevision(t *testing.T) {
 	}
 	writeConfig(oldRevision, oldConfig)
 	writeConfig(newRevision, newConfig)
-	require.NoError(t, os.Symlink(filepath.Base(newRevision), filepath.Join(root, kubernetesSecretDataSymlink)))
+	require.NoError(t, os.Symlink(filepath.Base(newRevision), filepath.Join(root, computils.KubernetesSecretDataSymlink)))
 
 	for _, tag := range []string{
 		bootstraptypes.TagUUID,
@@ -75,7 +163,7 @@ func TestReadBootstrapConfigUsesOneProjectedSecretRevision(t *testing.T) {
 		bootstraptypes.TagCredsURL,
 		bootstraptypes.TagCACert,
 	} {
-		targetRevision := kubernetesSecretDataSymlink
+		targetRevision := computils.KubernetesSecretDataSymlink
 		if tag == bootstraptypes.TagUUID {
 			// Simulate a symlink view changing between separate key reads.
 			targetRevision = filepath.Base(oldRevision)
@@ -142,53 +230,6 @@ func TestNewBootstrapConfig(t *testing.T) {
 	assert.NotContains(t, logged.String(), caCert)
 	assert.Contains(t, logged.String(), siteID)
 	assert.Contains(t, logged.String(), credsURL)
-}
-
-func TestIsBootstrapSecretUpdate(t *testing.T) {
-	dir := t.TempDir()
-	otpFile := filepath.Join(dir, bootstraptypes.TagOTP)
-	files := map[string]bool{otpFile: true}
-	tests := []struct {
-		name  string
-		event fsnotify.Event
-		want  bool
-	}{
-		{
-			name:  "tracked file write",
-			event: fsnotify.Event{Name: otpFile, Op: fsnotify.Write},
-			want:  true,
-		},
-		{
-			name:  "tracked file metadata change",
-			event: fsnotify.Event{Name: otpFile, Op: fsnotify.Chmod},
-			want:  true,
-		},
-		{
-			name:  "projected Secret generation swap",
-			event: fsnotify.Event{Name: filepath.Join(dir, kubernetesSecretDataSymlink), Op: fsnotify.Create},
-			want:  true,
-		},
-		{
-			name:  "projected Secret symlink metadata change",
-			event: fsnotify.Event{Name: filepath.Join(dir, kubernetesSecretDataSymlink), Op: fsnotify.Chmod},
-			want:  false,
-		},
-		{
-			name:  "projected Secret staging directory",
-			event: fsnotify.Event{Name: filepath.Join(dir, "..2026_10_12_20_00_00"), Op: fsnotify.Create},
-			want:  false,
-		},
-		{
-			name:  "unrelated file",
-			event: fsnotify.Event{Name: filepath.Join(dir, "unrelated"), Op: fsnotify.Write},
-			want:  false,
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.want, isBootstrapSecretUpdate(tt.event, files, dir))
-		})
-	}
 }
 
 func TestBoostrapAPI_ReloadBootstrapCredentials(t *testing.T) {

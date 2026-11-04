@@ -48,15 +48,11 @@ impl std::fmt::Display for ManagedHostGroupType {
 /// Default NMX-C gRPC port when switch NVOS info does not specify one.
 pub const NMX_C_DEFAULT_GRPC_PORT: u16 = 9370;
 
-fn nmx_c_endpoint_uses_tls(config: &NvLinkConfig) -> bool {
-    config.nmx_c_tls_client_cert_path.is_some() && config.nmx_c_tls_client_key_path.is_some()
-}
-
 fn nmx_c_endpoint_scheme(config: &NvLinkConfig) -> &'static str {
-    if config.allow_insecure && !nmx_c_endpoint_uses_tls(config) {
-        "http"
-    } else {
+    if config.nmx_c_uses_https() {
         "https"
+    } else {
+        "http"
     }
 }
 

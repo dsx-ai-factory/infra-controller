@@ -40,6 +40,7 @@ use futures_util::StreamExt;
 use mac_address::MacAddress;
 use opentelemetry::trace::TracerProvider;
 use opentelemetry_sdk::trace::{InMemorySpanExporter, SdkTracerProvider};
+use rcgen::ExtendedKeyUsagePurpose;
 use rpc::forge;
 use rpc::forge::find_bmc_ips_request::LookupBy;
 use rpc::forge_api_client::ForgeApiClient;
@@ -48,6 +49,7 @@ use tokio_rustls::rustls;
 use tokio_rustls::rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use tracing_subscriber::layer::SubscriberExt;
 
+use crate::config::SwitchTlsConfig;
 use crate::proxy::credentials::{BmcCredentials, TargetCredentials, TargetKind};
 use crate::proxy::test_support::*;
 use crate::proxy::upstream::MAX_BUFFERED_BODY_SIZE;
@@ -125,10 +127,8 @@ impl FakeBmc {
     }
 }
 
-async fn fake_bmc_handler(
-    axum::extract::State(bmc): axum::extract::State<FakeBmc>,
-    request: Request<Body>,
-) -> axum::response::Response {
+/// Records `request` as `bmc` received it, and its parts and body.
+async fn record(bmc: &FakeBmc, request: Request<Body>) -> (http::request::Parts, Bytes) {
     let (parts, body) = request.into_parts();
     let body = axum::body::to_bytes(body, usize::MAX)
         .await
@@ -143,6 +143,14 @@ async fn fake_bmc_handler(
         headers: parts.headers.clone(),
         body_len: body.len(),
     });
+    (parts, body)
+}
+
+async fn fake_bmc_handler(
+    axum::extract::State(bmc): axum::extract::State<FakeBmc>,
+    request: Request<Body>,
+) -> axum::response::Response {
+    let (parts, body) = record(&bmc, request).await;
     let authorization = parts
         .headers
         .get(header::AUTHORIZATION)
@@ -273,21 +281,116 @@ fn spawn_tls(app: axum::Router) -> SocketAddr {
     .with_no_client_auth()
     .with_single_cert(vec![server_cert], server_key)
     .expect("server TLS config");
+    spawn_tls_with(app, config)
+}
 
+/// A fake switch's NVOS interface at [`FAKE_BMC_IP`], presenting
+/// `certificate` and requiring a client certificate `ca` issued, as nginx in
+/// front of NVUE with mTLS on does: the TLS handshake completes without one,
+/// and the request, once read, is answered 400.
+fn spawn_switch_requiring_client_certificates(
+    ca: &SwitchCa,
+    (certificate, key): (rcgen::Certificate, rcgen::KeyPair),
+) -> (SocketAddr, FakeBmc) {
+    let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
+    let mut clients = rustls::RootCertStore::empty();
+    clients
+        .add(ca.certificate())
+        .expect("the switch trusts the CA");
+    let clients = rustls::server::WebPkiClientVerifier::builder_with_provider(
+        Arc::new(clients),
+        provider.clone(),
+    )
+    .allow_unauthenticated()
+    .build()
+    .expect("client certificate verifier");
+    let config = rustls::ServerConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .expect("TLS protocol versions")
+        .with_client_cert_verifier(clients)
+        .with_single_cert(
+            vec![certificate.der().clone()],
+            PrivateKeyDer::Pkcs8(key.serialize_der().into()),
+        )
+        .expect("server TLS config");
+    let switch = FakeBmc::default();
+    let app = axum::Router::new()
+        .route("/{*path}", axum::routing::any(fake_switch_handler))
+        .with_state(switch.clone());
+    (spawn_tls_with(app, config), switch)
+}
+
+/// Whether the client presented a certificate in its TLS handshake.
+#[derive(Clone, Copy)]
+struct ClientCertificatePresented(bool);
+
+/// Answers as the fake BMC does a client that presented a certificate, and
+/// any other 400, having read its request, as nginx in front of NVUE does.
+async fn fake_switch_handler(
+    axum::extract::State(switch): axum::extract::State<FakeBmc>,
+    axum::Extension(ClientCertificatePresented(presented)): axum::Extension<
+        ClientCertificatePresented,
+    >,
+    request: Request<Body>,
+) -> axum::response::Response {
+    if presented {
+        return fake_bmc_handler(axum::extract::State(switch), request).await;
+    }
+    record(&switch, request).await;
+    (
+        StatusCode::BAD_REQUEST,
+        "No required SSL certificate was sent",
+    )
+        .into_response()
+}
+
+/// Accepts TLS with the fake's configuration, and tells the app whether
+/// the client presented a certificate.
+#[derive(Clone)]
+struct ClientCertificateAcceptor(axum_server::tls_rustls::RustlsAcceptor);
+
+impl<I, S> axum_server::accept::Accept<I, S> for ClientCertificateAcceptor
+where
+    I: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+    S: Send + 'static,
+{
+    type Stream = tokio_rustls::server::TlsStream<I>;
+    type Service = axum::middleware::AddExtension<S, ClientCertificatePresented>;
+    type Future =
+        futures_util::future::BoxFuture<'static, std::io::Result<(Self::Stream, Self::Service)>>;
+
+    fn accept(&self, stream: I, service: S) -> Self::Future {
+        let tls = self.0.clone();
+        Box::pin(async move {
+            let (stream, service) = tls.accept(stream, service).await?;
+            let presented = stream
+                .get_ref()
+                .1
+                .peer_certificates()
+                .is_some_and(|certificates| !certificates.is_empty());
+            let presented = axum::Extension(ClientCertificatePresented(presented));
+            Ok((stream, tower::Layer::layer(&presented, service)))
+        })
+    }
+}
+
+/// Serves `app` over TLS with `config` at [`FAKE_BMC_IP`] on a free port.
+fn spawn_tls_with(app: axum::Router, config: rustls::ServerConfig) -> SocketAddr {
     let listener = std::net::TcpListener::bind((FAKE_BMC_IP, 0)).expect("bind fake BMC");
     listener
         .set_nonblocking(true)
         .expect("nonblocking listener");
     let addr = listener.local_addr().expect("fake BMC address");
+    let tls = ClientCertificateAcceptor(axum_server::tls_rustls::RustlsAcceptor::new(
+        axum_server::tls_rustls::RustlsConfig::from_config(Arc::new(config)),
+    ));
     tokio::spawn(async move {
-        axum_server::from_tcp_rustls(
-            listener,
-            axum_server::tls_rustls::RustlsConfig::from_config(Arc::new(config)),
-        )
-        .expect("fake BMC listener")
-        .serve(app.into_make_service())
-        .await
-        .expect("fake BMC serves");
+        axum_server::from_tcp(listener)
+            .expect("fake BMC listener")
+            .acceptor(tls)
+            .serve(app.into_make_service())
+            .await
+            .expect("fake BMC serves");
     });
     addr
 }
@@ -595,6 +698,27 @@ async fn proxy_configured(
     credentials: BmcCredentials,
     redirect_mode: &str,
 ) -> BmcProxyState {
+    proxy_configured_for(
+        upstream,
+        acl,
+        classes,
+        "",
+        for_bmc(credentials),
+        redirect_mode,
+    )
+    .await
+}
+
+/// [`proxy_configured`], with `switch_tls` in its `[tls]`, and holding
+/// `cached` for [`FAKE_BMC_IP`].
+async fn proxy_configured_for(
+    upstream: &str,
+    acl: &str,
+    classes: &str,
+    switch_tls: &str,
+    cached: TargetCredentials,
+    redirect_mode: &str,
+) -> BmcProxyState {
     let state = test_state_with_config(&format!(
         r#"
         bmc_proxy = "{upstream}"
@@ -608,6 +732,8 @@ async fn proxy_configured(
         root_cafile_path = ""
         admin_root_cafile_path = ""
 
+        {switch_tls}
+
         [auth]
 
         [auth.acls]
@@ -618,7 +744,7 @@ async fn proxy_configured(
     ));
     state
         .credential_cache
-        .insert(FAKE_BMC_IP.parse().unwrap(), for_bmc(credentials))
+        .insert(FAKE_BMC_IP.parse().unwrap(), cached)
         .await;
     state
 }
@@ -1798,6 +1924,9 @@ enum BreakerScenario {
     /// The BMC's cached credential is a session token no header can carry,
     /// so the proxy fails every attempt before sending it.
     ProxyCannotUseTheCredential,
+    /// nico-api knows the address for a switch's NVOS interface, and the
+    /// certificate there is not one `[tls.switch]` accepts.
+    ProxyRefusesTheSwitchCertificate,
 }
 
 /// The statuses three requests get from a proxy with a [`breaker`] failing on
@@ -1813,7 +1942,8 @@ async fn three_requests(
         BreakerScenario::BmcAnswersAfterTheBudget => (addr.port(), SLOW_PATH),
         BreakerScenario::BmcAnswersTheReplayAfterTheBudget => (addr.port(), SLOW_ROTATED_PATH),
         BreakerScenario::BmcAnswersWithAnError => (addr.port(), LEAKY_PATH),
-        BreakerScenario::ProxyCannotUseTheCredential => (addr.port(), SYSTEM_PATH),
+        BreakerScenario::ProxyCannotUseTheCredential
+        | BreakerScenario::ProxyRefusesTheSwitchCertificate => (addr.port(), SYSTEM_PATH),
     };
     let credentials = match scenario {
         BreakerScenario::ProxyCannotUseTheCredential => BmcCredentials::SessionToken {
@@ -1821,15 +1951,28 @@ async fn three_requests(
         },
         _ => root_password(),
     };
-    let mut state = proxy_configured(
+    let files = tempfile::tempdir().expect("TLS files directory");
+    let (switch_tls, target, inventory) = match scenario {
+        BreakerScenario::ProxyRefusesTheSwitchCertificate => (
+            switch_tls_table(&SwitchCa::new().switch_tls(files.path(), Some(SWITCH_NAME))),
+            TargetKind::SwitchNvos,
+            FakeInventory::Switch,
+        ),
+        _ => (String::new(), TargetKind::Bmc, FakeInventory::NoSwitch),
+    };
+    let mut state = proxy_configured_for(
         &format!(":{port}"),
         r#"["/**"]"#,
         &format!("{QUICK_CLASS}{}", breaker(trip_on)),
-        credentials,
+        &switch_tls,
+        TargetCredentials {
+            target,
+            credentials,
+        },
         "follow_same_origin",
     )
     .await;
-    state.api_client = fake_nico_api().await;
+    state.api_client = fake_nico_api_with(Duration::ZERO, inventory).await.0;
     let mut statuses = Vec::new();
     for _ in 0..3 {
         statuses.push(exchange(metrics, &state, get(path)).await.status);
@@ -1843,7 +1986,8 @@ async fn three_requests(
 /// A BMC fails an exchange in the ways `trip_on` names: by default, when it
 /// refuses connections or does not answer within the budget, and with `5xx`,
 /// when it answers with one. After two failures, its breaker refuses the
-/// next request with 503. The proxy failing on its own never counts.
+/// next request with 503. The proxy failing on its own never counts, nor
+/// does a switch certificate it refuses, though the TLS handshake fails.
 #[tokio::test]
 async fn what_trips_a_bmcs_breaker() {
     const WITH_5XX: Option<&str> = Some(r#"["unreachable", "timeout", "5xx"]"#);
@@ -1895,6 +2039,11 @@ async fn what_trips_a_bmcs_breaker() {
             Case {
                 scenario: "the proxy cannot use the BMC's credential",
                 input: (BreakerScenario::ProxyCannotUseTheCredential, WITH_5XX),
+                expect: Yields(vec![502, 502, 502]),
+            },
+            Case {
+                scenario: "the proxy refuses the switch's certificate",
+                input: (BreakerScenario::ProxyRefusesTheSwitchCertificate, None),
                 expect: Yields(vec![502, 502, 502]),
             },
         ],
@@ -2145,4 +2294,256 @@ async fn the_nvue_environment_acl_example_covers_its_tree() {
         },
     )
     .await;
+}
+
+/// The name the test switches' certificates carry in place of their IPs, as
+/// a site's switches can share one.
+const SWITCH_NAME: &str = "switches.test";
+
+/// What answers at the address a switch TLS test names.
+#[derive(Clone, Copy, Debug)]
+enum MtlsUpstream {
+    /// A switch requiring a client certificate the switch CA issued, and
+    /// presenting one the CA issued for this name.
+    Switch(&'static str),
+    /// A switch presenting a certificate another CA issued for
+    /// [`SWITCH_NAME`].
+    Impostor,
+    /// A BMC presenting a self-signed certificate and asking for none.
+    Bmc,
+}
+
+/// The `[tls.switch]` of a switch TLS test's proxy.
+#[derive(Clone, Copy, Debug)]
+enum SwitchProfile {
+    /// None: switches are reached as BMCs are.
+    Unset,
+    /// The switch CA, and a client certificate it issued the proxy, with
+    /// switches checked against [`SWITCH_NAME`].
+    Named,
+    /// [`SwitchProfile::Named`], with each switch checked against its IP.
+    ByIp,
+}
+
+/// `switch_tls` as a config file's `[tls.switch]` table.
+fn switch_tls_table(switch_tls: &SwitchTlsConfig) -> String {
+    let SwitchTlsConfig {
+        ca_cert_path,
+        client_cert_path,
+        client_key_path,
+        tls_server_name,
+    } = switch_tls;
+    let tls_server_name = tls_server_name
+        .as_ref()
+        .map(|name| format!("tls_server_name = '{name}'"))
+        .unwrap_or_default();
+    format!(
+        "[tls.switch]\n\
+         ca_cert_path = '{ca_cert_path}'\n\
+         client_cert_path = '{client_cert_path}'\n\
+         client_key_path = '{client_key_path}'\n\
+         {tls_server_name}"
+    )
+}
+
+/// What a `GET` of NVUE's system resource at `upstream` leads to through a
+/// proxy with `profile`: the status the caller got, whether its answer says
+/// the upstream's certificate failed verification, and how many requests the
+/// upstream received.
+async fn reached_with(
+    metrics: &MetricsCapture,
+    (upstream, profile): (MtlsUpstream, SwitchProfile),
+) -> (u16, bool, usize) {
+    let ca = SwitchCa::new();
+    let (addr, upstream, target) = match upstream {
+        MtlsUpstream::Switch(name) => {
+            let certificate = ca.issue(&[name], ExtendedKeyUsagePurpose::ServerAuth);
+            let (addr, switch) = spawn_switch_requiring_client_certificates(&ca, certificate);
+            (addr, switch, TargetKind::SwitchNvos)
+        }
+        MtlsUpstream::Impostor => {
+            let certificate =
+                SwitchCa::new().issue(&[SWITCH_NAME], ExtendedKeyUsagePurpose::ServerAuth);
+            let (addr, switch) = spawn_switch_requiring_client_certificates(&ca, certificate);
+            (addr, switch, TargetKind::SwitchNvos)
+        }
+        MtlsUpstream::Bmc => {
+            let (addr, bmc) = spawn_fake_bmc();
+            (addr, bmc, TargetKind::Bmc)
+        }
+    };
+    let files = tempfile::tempdir().expect("TLS files directory");
+    let switch_tls = match profile {
+        SwitchProfile::Unset => String::new(),
+        SwitchProfile::Named => switch_tls_table(&ca.switch_tls(files.path(), Some(SWITCH_NAME))),
+        SwitchProfile::ByIp => switch_tls_table(&ca.switch_tls(files.path(), None)),
+    };
+    let mut state = proxy_configured_for(
+        &format!(":{}", addr.port()),
+        r#"["/**"]"#,
+        "",
+        &switch_tls,
+        TargetCredentials {
+            target,
+            credentials: root_password(),
+        },
+        "follow_same_origin",
+    )
+    .await;
+    // A refused certificate sends the replay to nico-api, which knows the
+    // address for what the test's upstream is.
+    let inventory = match target {
+        TargetKind::SwitchNvos => FakeInventory::Switch,
+        TargetKind::Bmc => FakeInventory::NoSwitch,
+    };
+    state.api_client = fake_nico_api_with(Duration::ZERO, inventory).await.0;
+
+    let answer = exchange(metrics, &state, get(NVUE_SYSTEM_PATH)).await;
+    let refused = String::from_utf8_lossy(&answer.body).contains("failed verification");
+    (answer.status, refused, upstream.received().len())
+}
+
+/// With `[tls.switch]`, a switch's NVOS interface is reached presenting the
+/// proxy's client certificate, once the switch's certificate is verified
+/// against the switch CA and the shared name, or the switch's IP when no
+/// name is set. A switch that fails verification never receives the request
+/// or the credentials on it, even on the replay, and a BMC is reached as it
+/// is without the profile. Without it, a switch requiring a client
+/// certificate is sent the request, credentials included, and answers 400.
+#[tokio::test]
+async fn a_switch_requiring_a_client_certificate_is_reached_with_the_proxys() {
+    let metrics = MetricsCapture::start();
+    let metrics_window = &metrics;
+    check_cases_async(
+        [
+            Case {
+                scenario: "a switch certified for the shared name",
+                input: (MtlsUpstream::Switch(SWITCH_NAME), SwitchProfile::Named),
+                expect: Yields((200, false, 1)),
+            },
+            Case {
+                scenario: "a switch certified for its IP",
+                input: (MtlsUpstream::Switch(FAKE_BMC_IP), SwitchProfile::ByIp),
+                expect: Yields((200, false, 1)),
+            },
+            Case {
+                scenario: "a switch reached without the profile",
+                input: (MtlsUpstream::Switch(SWITCH_NAME), SwitchProfile::Unset),
+                expect: Yields((400, false, 1)),
+            },
+            Case {
+                scenario: "a switch another CA certified",
+                input: (MtlsUpstream::Impostor, SwitchProfile::Named),
+                expect: Yields((502, true, 0)),
+            },
+            Case {
+                scenario: "a switch certified for another name",
+                input: (MtlsUpstream::Switch("other.test"), SwitchProfile::Named),
+                expect: Yields((502, true, 0)),
+            },
+            Case {
+                scenario: "a BMC beside the profile",
+                input: (MtlsUpstream::Bmc, SwitchProfile::Named),
+                expect: Yields((200, false, 1)),
+            },
+        ],
+        |input| async move { Ok::<_, Infallible>(reached_with(metrics_window, input).await) },
+    )
+    .await;
+}
+
+/// An expired CA in `[tls.switch]`'s bundle is reported, not distrusted: a
+/// switch whose certificate it anchors is still reached, as rustls-webpki
+/// keeps no validity for a trust anchor.
+#[tokio::test]
+async fn a_switch_an_expired_ca_anchors_is_reached_and_the_ca_reported() {
+    let metrics = MetricsCapture::start();
+    let ca = SwitchCa::expired();
+    let certificate = ca.issue(&[SWITCH_NAME], ExtendedKeyUsagePurpose::ServerAuth);
+    let (addr, switch) = spawn_switch_requiring_client_certificates(&ca, certificate);
+    let files = tempfile::tempdir().expect("TLS files directory");
+    let state = proxy_configured_for(
+        &format!(":{}", addr.port()),
+        r#"["/**"]"#,
+        "",
+        &switch_tls_table(&ca.switch_tls(files.path(), Some(SWITCH_NAME))),
+        TargetCredentials {
+            target: TargetKind::SwitchNvos,
+            credentials: root_password(),
+        },
+        "follow_same_origin",
+    )
+    .await;
+
+    let answer = exchange(&metrics, &state, get(NVUE_SYSTEM_PATH)).await;
+
+    assert_eq!(answer.status, 200);
+    assert_eq!(switch.received().len(), 1);
+    assert_eq!(
+        metrics.counter_delta(
+            "carbide_bmc_proxy_switch_tls_certificate_out_of_validity_total",
+            &[("file", "ca_bundle")],
+        ),
+        1.0
+    );
+}
+
+/// An address cached as a switch's NVOS interface that now belongs to a BMC
+/// is served as the BMC: the switch client refuses the BMC's self-signed
+/// certificate before sending anything, the proxy drops the cached entry,
+/// and the replay resolves the address afresh and reaches the BMC with its
+/// credential on the BMC client.
+#[tokio::test]
+async fn an_address_cached_as_a_switch_is_served_as_the_bmc_it_now_is() {
+    let metrics = MetricsCapture::start();
+    let (addr, bmc) = spawn_fake_bmc();
+    let files = tempfile::tempdir().expect("TLS files directory");
+    let switch_tls = switch_tls_table(&SwitchCa::new().switch_tls(files.path(), Some(SWITCH_NAME)));
+    let mut state = proxy_configured_for(
+        &format!(":{}", addr.port()),
+        r#"["/**"]"#,
+        "",
+        &switch_tls,
+        TargetCredentials {
+            target: TargetKind::SwitchNvos,
+            credentials: root_password(),
+        },
+        "follow_same_origin",
+    )
+    .await;
+    let (api_client, lookups) = fake_nico_api_with(Duration::ZERO, FakeInventory::NoSwitch).await;
+    state.api_client = api_client;
+
+    let answer = exchange(&metrics, &state, get(SYSTEM_PATH)).await;
+
+    assert_eq!(answer.status, 200, "{:?}", answer.body);
+    let sent: Vec<String> = bmc
+        .received()
+        .iter()
+        .flat_map(|received| values(&received.headers, "authorization"))
+        .collect();
+    assert_eq!(
+        sent,
+        [basic(FRESH_PASSWORD)],
+        "only the replay reached the BMC"
+    );
+    assert_eq!(*lookups.lock().unwrap(), [probe_lookup(), bmc_lookup()]);
+    let cached = state
+        .credential_cache
+        .get(&FAKE_BMC_IP.parse::<IpAddr>().unwrap())
+        .await
+        .map(|resolved| resolved.target);
+    assert_eq!(cached, Some(TargetKind::Bmc));
+    assert_eq!(
+        metrics.counter_delta("carbide_bmc_proxy_upstream_certificate_rejected_total", &[]),
+        1.0
+    );
+    assert_eq!(
+        metrics.counter_delta(
+            "carbide_bmc_proxy_upstream_auth_retries_total",
+            &[("method", "get")]
+        ),
+        0.0,
+        "a refused certificate is not a rejected credential"
+    );
 }

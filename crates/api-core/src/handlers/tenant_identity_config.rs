@@ -263,7 +263,7 @@ pub(crate) async fn delete_configuration(
 }
 
 /// `Forge::set_tenant_identity_configuration`: upserts per-org identity config into tenant_identity_config.
-/// Requires auth. Tenant must exist. Key generation is placeholder until credential-backed key provisioning.
+/// Requires auth. Tenant must exist. New signing keys use the configured encryption credential.
 pub(crate) async fn set_configuration(
     api: &Api,
     request: Request<SetTenantIdentityConfigRequest>,
@@ -359,7 +359,8 @@ pub(crate) async fn set_configuration(
                 Ok(cfg)
             })
         })
-        .await??;
+        .await?
+        .map_err(CarbideError::from)?;
 
     let signing_keys = tenant_identity_signing_keys_response(&cfg)?;
 

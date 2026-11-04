@@ -68,7 +68,7 @@ pub async fn run(
     cancel_token: CancellationToken,
     ready_channel: Sender<ApiServerReady>,
 ) -> eyre::Result<()> {
-    let (carbide_config, config_diagnostics) =
+    let (mut carbide_config, config_diagnostics) =
         carbide_api_core::cfg::load::parse_carbide_config_with_deferred_diagnostics(
             &config_path,
             site_config_path.as_deref(),
@@ -107,6 +107,9 @@ pub async fn run(
 
     config_diagnostics.emit();
     carbide_api_core::cfg::load::log_vpc_peering_policy_deprecations(&carbide_config);
+    carbide_api_core::cfg::load::apply_nmx_c_tls_defaults(std::sync::Arc::make_mut(
+        &mut carbide_config,
+    ));
     validate_network_prefixes(&carbide_config)?;
 
     // Load initial objects after logging setup so warn-mode unknown-field
