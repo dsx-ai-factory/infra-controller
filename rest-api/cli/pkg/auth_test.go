@@ -135,7 +135,7 @@ func TestLoginWithOIDCConfig(t *testing.T) {
 	}
 }
 
-func TestParseTokenResponseRejectsUntrustedErrorText(t *testing.T) {
+func TestParseTokenResponse(t *testing.T) {
 	const secret = "synthetic-secret-4686"
 	tests := []struct {
 		name, method, body, wantCode string
@@ -209,13 +209,26 @@ func TestParseTokenResponseRejectsUntrustedErrorText(t *testing.T) {
 			require.NotContains(t, err.Error(), secret)
 		})
 	}
-	// Go's HTTP server writes a standard status text, but a custom upstream
-	// Status value must not override the numeric code or enter diagnostics.
-	resp := &http.Response{StatusCode: http.StatusBadRequest, Status: "400 " + secret,
-		Body: io.NopCloser(strings.NewReader(`{"error":"` + secret + `"}`))}
-	_, err := parseTokenResponse(resp)
-	require.ErrorContains(t, err, "HTTP 400")
-	require.NotContains(t, err.Error(), secret)
+	// Exercise the reader directly: an HTTP server normalizes reason phrases,
+	// and transport buffering would hide how much of the response is consumed.
+	for _, tt := range []struct {
+		name string
+		body string
+	}{
+		{"custom reason phrase is not exposed", `{"error":"` + secret + `"}`},
+		{"oversized error response is bounded", strings.Repeat(" ", 4096) + `{"error":"invalid_client","error_description":"` + secret + `"}`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			body := strings.NewReader(tt.body)
+			resp := &http.Response{StatusCode: http.StatusBadRequest, Status: "400 " + secret,
+				Body: io.NopCloser(body)}
+			token, err := parseTokenResponse(resp)
+			require.Nil(t, token)
+			require.LessOrEqual(t, len(tt.body)-body.Len(), 4096, "failed response reads must stay bounded")
+			require.EqualError(t, err, "authentication failed (HTTP 400); check OIDC client credentials, scopes, and token endpoint configuration")
+			require.NotContains(t, err.Error(), secret)
+		})
+	}
 }
 
 func TestLoginWithOIDCCmd(t *testing.T) {
