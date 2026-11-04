@@ -2694,6 +2694,11 @@ async fn attach_rejects_site_agent_with_an_additional_identity(pool: sqlx::PgPoo
         ))
     };
     for (name, principals) in [
+        ("anonymous caller", vec![Principal::Anonymous]),
+        (
+            "unrelated service",
+            vec![Principal::SpiffeServiceIdentifier("nico-dns".to_string())],
+        ),
         (
             "site agent plus another service",
             vec![
@@ -2741,6 +2746,22 @@ async fn attach_rejects_site_agent_with_an_additional_identity(pool: sqlx::PgPoo
             .expect_err("an additional identity must not inherit SiteAgent attach authority");
         assert_eq!(error.code(), tonic::Code::PermissionDenied, "{name}");
     }
+
+    let mut request = authenticated_attach_request(
+        NetworkSegmentId::new(),
+        VpcId::new(),
+        true,
+        site_agent(),
+        None,
+        None,
+    );
+    request.extensions_mut().remove::<AuthContext>();
+    let error = env
+        .api
+        .attach_network_segment_to_vpc(request)
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), tonic::Code::PermissionDenied);
 }
 
 /// An A -> B -> A move must invalidate a timed-out A -> B request,
@@ -2773,20 +2794,235 @@ async fn tenant_attach_stale_version_rejected_after_aba(
         .await?
         .into_inner();
     assert_eq!(returned.config.unwrap().vpc_id, Some(a));
-    let stale = env
+    let current_intent = tenant_attach_intent(&env.pool, id).await;
+    assert_ne!(current_intent.1, original_version);
+    for target in [a, b] {
+        let stale = env
+            .api
+            .attach_network_segment_to_vpc(authenticated_attach_request(
+                id,
+                target,
+                true,
+                Principal::SpiffeServiceIdentifier("elektra-site-agent".to_string()),
+                Some(a),
+                Some(original_version.clone()),
+            ))
+            .await
+            .expect_err("stale intent must be fenced for both moves and same-target requests");
+        assert_eq!(stale.code(), tonic::Code::FailedPrecondition);
+        assert_eq!(tenant_attach_intent(&env.pool, id).await, current_intent);
+    }
+    Ok(())
+}
+
+#[crate::sqlx_test]
+async fn site_agent_attach_checks_intent_before_same_target(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = create_test_env_with_overrides(pool, TestEnvOverrides::no_network_segments()).await;
+    let source = create_attach_test_vpc(
+        &env,
+        "intent-source",
+        rpc::forge::VpcVirtualizationType::EthernetVirtualizer,
+    )
+    .await;
+    let target = create_attach_test_vpc(
+        &env,
+        "intent-target",
+        rpc::forge::VpcVirtualizationType::EthernetVirtualizer,
+    )
+    .await;
+    let id = create_live_tenant_segment(&env, source, 0, "TENANT_INTENT").await;
+    let intent = tenant_attach_intent(&env.pool, id).await;
+
+    for destination in [source, target] {
+        for (name, expected_source, version, code, message) in [
+            (
+                "missing version",
+                Some(source),
+                None,
+                tonic::Code::InvalidArgument,
+                "requires expected_segment_version",
+            ),
+            (
+                "malformed version",
+                Some(source),
+                Some("not-a-config-version".to_string()),
+                tonic::Code::InvalidArgument,
+                "invalid expected_segment_version",
+            ),
+            (
+                "wrong source with a current version",
+                Some(target),
+                Some(intent.1.clone()),
+                tonic::Code::FailedPrecondition,
+                "expected source VPC",
+            ),
+        ] {
+            let error = env
+                .api
+                .attach_network_segment_to_vpc(authenticated_attach_request(
+                    id,
+                    destination,
+                    true,
+                    Principal::SpiffeServiceIdentifier("elektra-site-agent".to_string()),
+                    expected_source,
+                    version,
+                ))
+                .await
+                .expect_err(name);
+            assert_eq!(error.code(), code, "{name}: {error}");
+            assert!(error.message().contains(message), "{name}: {error}");
+            assert_eq!(tenant_attach_intent(&env.pool, id).await, intent, "{name}");
+        }
+    }
+
+    // Source is optional. A current version still fences the move when the
+    // caller deliberately omits the source precondition.
+    let moved = env
         .api
         .attach_network_segment_to_vpc(authenticated_attach_request(
             id,
-            b,
+            target,
             true,
             Principal::SpiffeServiceIdentifier("elektra-site-agent".to_string()),
-            Some(a),
-            Some(original_version),
+            None,
+            Some(intent.1),
         ))
+        .await?
+        .into_inner();
+    assert_eq!(moved.config.unwrap().vpc_id, Some(target));
+    assert_segment_vpc(&env, id, target).await;
+    Ok(())
+}
+
+#[crate::sqlx_test]
+async fn site_agent_attach_rejects_missing_unknown_and_deleted_resources(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = create_test_env_with_overrides(pool, TestEnvOverrides::no_network_segments()).await;
+    let source = create_attach_test_vpc(
+        &env,
+        "resource-source",
+        rpc::forge::VpcVirtualizationType::EthernetVirtualizer,
+    )
+    .await;
+    let deleted_target = create_attach_test_vpc(
+        &env,
+        "resource-deleted-target",
+        rpc::forge::VpcVirtualizationType::EthernetVirtualizer,
+    )
+    .await;
+    env.api
+        .delete_vpc(Request::new(rpc::forge::VpcDeletionRequest {
+            id: Some(deleted_target),
+        }))
+        .await?;
+    let id = create_live_tenant_segment(&env, source, 0, "TENANT_RESOURCE_CHECKS").await;
+    let intent = tenant_attach_intent(&env.pool, id).await;
+    let unowned = common::api_fixtures::network_segment::create_tenant_network_segment(
+        &env.api,
+        None,
+        FIXTURE_TENANT_NETWORK_SEGMENT_GATEWAYS[1],
+        "TENANT_WITHOUT_SOURCE",
+        true,
+    )
+    .await;
+    let unowned_intent = tenant_attach_intent(&env.pool, unowned).await;
+    let error = attach_tenant_network_segment_to_vpc(&env, unowned, source, true)
         .await
-        .expect_err("stale A->B must be fenced even after A->B->A");
-    assert_eq!(stale.code(), tonic::Code::FailedPrecondition);
-    assert_segment_vpc(&env, id, a).await;
+        .expect_err("an unowned Tenant segment must not be attached by the reassignment path");
+    assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+    assert_eq!(
+        tenant_attach_intent(&env.pool, unowned).await,
+        unowned_intent
+    );
+    for (segment, target, code) in [
+        (None, Some(source), tonic::Code::InvalidArgument),
+        (Some(id), None, tonic::Code::InvalidArgument),
+        (
+            Some(NetworkSegmentId::new()),
+            Some(source),
+            tonic::Code::NotFound,
+        ),
+        (Some(id), Some(VpcId::new()), tonic::Code::NotFound),
+        (Some(id), Some(deleted_target), tonic::Code::NotFound),
+    ] {
+        let mut request = authenticated_attach_request(
+            id,
+            source,
+            true,
+            Principal::SpiffeServiceIdentifier("elektra-site-agent".to_string()),
+            Some(source),
+            Some(intent.1.clone()),
+        );
+        request.get_mut().network_segment_id = segment;
+        request.get_mut().vpc_id = target;
+        let error = env
+            .api
+            .attach_network_segment_to_vpc(request)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.code(),
+            code,
+            "segment={segment:?}, target={target:?}: {error}"
+        );
+        assert_eq!(tenant_attach_intent(&env.pool, id).await, intent);
+    }
+
+    env.api
+        .delete_network_segment(Request::new(rpc::forge::NetworkSegmentDeletionRequest {
+            id: Some(id),
+        }))
+        .await?;
+    let error = attach_tenant_network_segment_to_vpc(&env, id, source, true)
+        .await
+        .expect_err("a soft-deleted segment must not be revived by a same-target request");
+    assert_eq!(error.code(), tonic::Code::NotFound);
+    Ok(())
+}
+
+#[crate::sqlx_test]
+#[allow(deprecated)] // The attachment contract deliberately preserves this legacy mode.
+async fn site_agent_tenant_reassignment_accepts_legacy_etv_alias(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = create_test_env_with_overrides(pool, TestEnvOverrides::no_network_segments()).await;
+    let source = create_attach_test_vpc(
+        &env,
+        "legacy-etv-source",
+        rpc::forge::VpcVirtualizationType::EthernetVirtualizerWithNvue,
+    )
+    .await;
+    let target = create_attach_test_vpc(
+        &env,
+        "legacy-etv-target",
+        rpc::forge::VpcVirtualizationType::EthernetVirtualizerWithNvue,
+    )
+    .await;
+    let etv = create_attach_test_vpc(
+        &env,
+        "modern-etv-target",
+        rpc::forge::VpcVirtualizationType::EthernetVirtualizer,
+    )
+    .await;
+    let legacy_segment = create_live_tenant_segment(&env, source, 0, "LEGACY_ETV_MOVE").await;
+    let etv_segment = create_live_tenant_segment(&env, etv, 1, "MODERN_ETV_MOVE").await;
+    // The deprecated RPC value is normalized to ETV before persistence, so
+    // VPCs created with either spelling belong to the same supported mode.
+    for (id, destination) in [(legacy_segment, etv), (etv_segment, source)] {
+        let moved = attach_tenant_network_segment_to_vpc(&env, id, destination, true)
+            .await?
+            .into_inner();
+        assert_eq!(moved.config.unwrap().vpc_id, Some(destination));
+        assert_segment_vpc(&env, id, destination).await;
+    }
+    let moved = attach_tenant_network_segment_to_vpc(&env, legacy_segment, target, true)
+        .await?
+        .into_inner();
+    assert_eq!(moved.config.unwrap().vpc_id, Some(target));
+    assert_segment_vpc(&env, legacy_segment, target).await;
     Ok(())
 }
 
@@ -2838,6 +3074,14 @@ async fn site_agent_tenant_segment_same_target_is_idempotent(
     let segment_id = create_live_tenant_segment(&env, vpc_id, 0, "TENANT_ETV_IDEMPOTENT").await;
 
     let initial_version = tenant_attach_intent(&env.pool, segment_id).await.1;
+    sqlx::query(
+        "INSERT INTO machine_interfaces \
+         (segment_id, mac_address, primary_interface, hostname) \
+         VALUES ($1, '02:00:00:00:56:03', false, 'same-target-tenant-user')",
+    )
+    .bind(segment_id)
+    .execute(&env.pool)
+    .await?;
     let first = attach_tenant_network_segment_to_vpc(&env, segment_id, vpc_id, false)
         .await?
         .into_inner();

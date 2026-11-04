@@ -19750,9 +19750,9 @@ func (x *NetworkSegmentDeletionRequest) GetId() *NetworkSegmentId {
 // otherwise supported caller receives INVALID_ARGUMENT.
 //
 // Tenant segments must already belong to a live VPC. A move requires source and
-// target VPCs with the same ETHERNET_VIRTUALIZER or deprecated
-// ETHERNET_VIRTUALIZER_WITH_NVUE mode and no segment allocations. Unsupported
-// tenant modes, absent source
+// target VPCs using ETHERNET_VIRTUALIZER and no segment allocations. The
+// deprecated ETHERNET_VIRTUALIZER_WITH_NVUE input is an alias for that mode.
+// Unsupported tenant modes, absent source
 // ownership, allocations, or missing replacement consent return
 // FAILED_PRECONDITION. Unknown or deleted resources return NOT_FOUND.
 //
