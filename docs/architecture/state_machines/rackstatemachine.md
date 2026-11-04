@@ -77,8 +77,10 @@ stateDiagram-v2
             [*] --> R_Maintenance_FirmwareUpgrade
             R_Maintenance_FirmwareUpgrade --> R_Maintenance_NVOSUpdate
             R_Maintenance_NVOSUpdate --> R_Maintenance_ConfigureNmxCluster
-            R_Maintenance_ConfigureNmxCluster --> R_Maintenance_PowerSequence
-            R_Maintenance_PowerSequence --> R_Maintenance_Completed
+            R_Maintenance_ConfigureNmxCluster --> R_Maintenance_PowerSequence : configuration succeeded and compute Reset batch admitted
+            R_Maintenance_ConfigureNmxCluster --> R_Maintenance_ConfigureNmxCluster : Reset admission blocked, retry job poll
+            R_Maintenance_PowerSequence --> R_Maintenance_PowerSequence : PowerReset requests or reboot reports pending
+            R_Maintenance_PowerSequence --> R_Maintenance_Completed : PowerReset barrier satisfied, or PoweringOn no-op completes
             state "FirmwareUpgrade" as R_Maintenance_FirmwareUpgrade
             state "NVOSUpdate" as R_Maintenance_NVOSUpdate
             state "ConfigureNmxCluster" as R_Maintenance_ConfigureNmxCluster
@@ -98,7 +100,7 @@ stateDiagram-v2
         R_Ready --> R_Maintenance : reprovision or on-demand maintenance requested
         R_Ready --> R_Discovering : topology changed
         R_Ready --> R_Error : child device failure detected
-        R_Maintenance --> R_Error : timeout or failure
+        R_Maintenance --> R_Error : terminal failure or operator termination
         R_Validating --> R_Error : validation failure
         R_Error --> R_Ready : component failure and all child devices healthy
         R_Error --> R_Maintenance : on-demand maintenance requested
@@ -175,7 +177,7 @@ The rack waits until all child devices reach ready before starting the first mai
 - **Entry:** From `Discovering` after all children are ready, from `Ready` when `reprovision_requested` or `maintenance_requested` is set, or from `Error` when on-demand maintenance is requested.
 - **Exit:**
   - To **Validating** (`Pending`) when maintenance reaches `Completed`.
-  - To **Error** on timeout or unrecoverable failure.
+  - To **Error** on unrecoverable failure or operator termination. Compute restart admission and reboot waiting have no timeout.
 
 **Sub-state flow** (activities may be skipped based on `MaintenanceScope.activities`):
 
@@ -185,7 +187,7 @@ FirmwareUpgrade(Start -> WaitForComplete)
   -> ConfigureNmxCluster(Start -> WaitForSwitchCertificateJob
                                -> WaitForScaleUpFabricManagerJob
                                -> WaitForPrimarySwitchCertificateJob (optional telemetry))
-  -> PowerSequence (optional)
+  -> PowerSequence(PowerReset; required after successful NMX-C configuration)
   -> Completed
   -> Validating(Pending)
 ```
@@ -195,36 +197,42 @@ both update phases. If a switch in the maintenance scope is already in
 `ReProvisioning::WaitingForNVOSUpgrade`, the rack transitions to `Error` instead
 of skipping the NVOS phase.
 
+Successful NMX-C configuration triggers resets of every compute host in the rack, including hosts outside a partial maintenance scope, even when `PowerSequence` is not selected. Skipping `ConfigureNmxCluster` because of scope or missing switches does not itself submit resets: the next requested activity runs instead. The existing optional power sequence selected without this handoff enters `PoweringOn`, which advances to `Completed` without issuing power operations; `PoweringOff` waits without issuing operations. A saved `PowerReset` without target IDs submits a batch when the power activity is selected.
+
 | Sub-state | Description |
 |-----------|-------------|
 | **FirmwareUpgrade** | Rack-level RMS firmware upgrade for scoped machines and switches. Sets per-device `firmware_upgrade_status` and drives switch `ReProvisioning::WaitingForRackFirmwareUpgrade` / machine `HostReprovision`. |
 | **NVOSUpdate** | NVOS image update and NVOS admin password recovery for scoped switches. Sets `nvos_update_status` and drives switch `ReProvisioning::WaitingForNVOSUpgrade`. |
 | **ConfigureNmxCluster** | Rotates switch-local certificates on every rack switch, submits the asynchronous RMS ScaleUpFabricManager job, then optionally binds nmx-telemetry on the selected primary. RMS V2 binds NMX-C. See sub-states below. |
-| **PowerSequence** | Optional power-on/off/reset sequencing for scoped devices. |
+| **PowerSequence** | `PowerReset` submits rack-wide compute resets and waits for reboot reports. A batch submitted after NMX-C success must finish regardless of the activity scope. See the admission, resume, and termination behavior below. |
 | **Completed** | All requested maintenance activities finished; rack advances to validation. |
 
 #### ConfigureNmxCluster sub-states
 
 ```mermaid
 stateDiagram-v2
+    state "WaitForSwitch<br/>CertificateJob" as WaitForSwitchCertificateJob
+    state "WaitForScaleUp<br/>FabricManagerJob" as WaitForScaleUpFabricManagerJob
+    state "WaitForPrimarySwitch<br/>CertificateJob" as WaitForPrimarySwitchCertificateJob
     [*] --> Start
-    Start --> Start : retryable inventory error
-    Start --> WaitForSwitchCertificateJob : certificate batch accepted; persist job_id
-    Start --> NextActivity : no switches requested or discovered
-    Start --> Error : invalid profile, endpoint, backend, or certificate submission
-    WaitForSwitchCertificateJob --> WaitForSwitchCertificateJob : running, poll error, or restart
-    WaitForSwitchCertificateJob --> WaitForScaleUpFabricManagerJob : certificate complete and V2 accepted; persist job_id
-    WaitForSwitchCertificateJob --> NextActivity : V2 has no switches requested or discovered
-    WaitForSwitchCertificateJob --> Error : certificate failed, job missing, or V2 validation failed
-    WaitForScaleUpFabricManagerJob --> WaitForScaleUpFabricManagerJob : pending, poll or verification retry, restart, or V2 resubmission
-    WaitForScaleUpFabricManagerJob --> NextActivity : V2 complete; primary persisted; telemetry not selected
-    WaitForScaleUpFabricManagerJob --> WaitForPrimarySwitchCertificateJob : V2 complete; primary persisted; telemetry batch accepted
-    WaitForScaleUpFabricManagerJob --> WaitForScaleUpFabricManagerJob : telemetry request rejected before dispatch
-    WaitForScaleUpFabricManagerJob --> Error : V2 failed or returned invalid state, Component Manager is absent, polling is unsupported, or terminal verification failed
-    WaitForScaleUpFabricManagerJob --> Error : telemetry submission outcome is ambiguous or failed after dispatch
-    WaitForPrimarySwitchCertificateJob --> WaitForPrimarySwitchCertificateJob : running, poll error, or restart
-    WaitForPrimarySwitchCertificateJob --> NextActivity : primary certificate job complete
-    WaitForPrimarySwitchCertificateJob --> Error : certificate failed or job missing
+    Start --> Start : inventory retry
+    Start --> WaitForSwitchCertificateJob : certificate batch accepted
+    Start --> NextActivity : no switches in scope/inventory
+    Start --> Error : invalid input/submission failure
+    WaitForSwitchCertificateJob --> WaitForSwitchCertificateJob : pending/retry/restart
+    WaitForSwitchCertificateJob --> WaitForScaleUpFabricManagerJob : certificate complete, V2 accepted
+    WaitForSwitchCertificateJob --> NextActivity : V2 skipped, no switches
+    WaitForSwitchCertificateJob --> Error : job missing/failed, V2 invalid
+    WaitForScaleUpFabricManagerJob --> WaitForScaleUpFabricManagerJob : retry/restart/admission blocked
+    WaitForScaleUpFabricManagerJob --> PowerReset : verified, no telemetry, batch queued
+    WaitForScaleUpFabricManagerJob --> WaitForPrimarySwitchCertificateJob : verified, telemetry batch accepted
+    WaitForScaleUpFabricManagerJob --> Error : terminal configuration failure
+    WaitForPrimarySwitchCertificateJob --> WaitForPrimarySwitchCertificateJob : pending/retry/admission blocked
+    WaitForPrimarySwitchCertificateJob --> PowerReset : certificate complete, batch queued
+    WaitForPrimarySwitchCertificateJob --> Error : certificate failed/job missing
+    PowerReset --> PowerReset : pending/restart/membership change
+    PowerReset --> Error : conflicting request or termination
+    PowerReset --> Completed : all requests cleared, new reboot reports
 ```
 
 `Start` submits one `ConfigureSwitchCertificate` request containing every rack
@@ -248,15 +256,34 @@ certificate.
 | `Start` | Certificate submission returns `OperationOutcomeUnknown` or any other post-dispatch error | Transition to `Error` without automatically resubmitting because RMS may have accepted all or part of the batch. A failed aggregate parent job covers only accepted targets and cannot prove the complete rack was updated. Any returned RMS job ID is retained in the error for operator reconciliation. |
 | `Start` | RMS accepts the certificate batch | Persist its parent job ID in `WaitForSwitchCertificateJob`. |
 | `WaitForSwitchCertificateJob` | Component Manager is absent, polling fails, or the job is `Started` or `InProgress` | Retain the same parent job ID and poll again. A controller restart resumes from this persisted state. |
-| `WaitForSwitchCertificateJob` | RMS cannot find the persisted job | Transition to `Error` with the job ID in the cause. Do not resubmit the non-idempotent certificate batch. |
+| `WaitForSwitchCertificateJob` | Certificate-status response has a non-Success result, including a missing persisted job | Transition to `Error` with the job ID in the cause. Do not resubmit the non-idempotent certificate batch. A gRPC transport `NotFound` is a polling error and retries instead. |
 | `WaitForSwitchCertificateJob` | Certificate job is `Failed` | Transition to `Error`. |
 | `WaitForSwitchCertificateJob` | Certificate job is `Completed` | Submit RMS V2. Retryable inventory or submission errors retain the certificate wait state; skip and terminal conditions match the `Start` outcomes above. A successful submission persists `WaitForScaleUpFabricManagerJob`. |
 | `WaitForScaleUpFabricManagerJob` | Job is pending, polling or observed-status verification fails, or a restart occurs | Retain the V2 job ID and retry. If RMS no longer has the job, resubmit the idempotent V2 desired state. |
 | `WaitForScaleUpFabricManagerJob` | Job fails, has an invalid state, or a terminal validation error occurs | Transition to `Error`. |
-| `WaitForScaleUpFabricManagerJob` | Job completes and the RMS-selected primary and Fabric Manager status are persisted | Continue to the next activity if nmx-telemetry is absent from the effective service list. Otherwise submit its primary-only certificate batch. A rejection proven to occur before dispatch retains the V2 wait state for retry. An ambiguous or post-dispatch submission error transitions to `Error`. A successful submission persists `WaitForPrimarySwitchCertificateJob`. |
+| `WaitForScaleUpFabricManagerJob` | Job completes and the RMS-selected primary and Fabric Manager status are persisted | Attempt the rack-wide compute Reset batch if nmx-telemetry is absent from the effective service list. Otherwise submit its primary-only certificate batch. A rejection proven to occur before dispatch retains the V2 wait state for retry. An ambiguous or post-dispatch submission error transitions to `Error`. A successful submission persists `WaitForPrimarySwitchCertificateJob`. |
 | `WaitForPrimarySwitchCertificateJob` | Component Manager is absent, polling fails, or the job is `Started` or `InProgress` | Retain the same parent job ID and poll again. |
-| `WaitForPrimarySwitchCertificateJob` | RMS cannot find the job, or the job is `Failed` | Transition to `Error` without resubmitting the certificate operation. |
-| `WaitForPrimarySwitchCertificateJob` | Job is `Completed` | Continue to the next requested maintenance activity. |
+| `WaitForPrimarySwitchCertificateJob` | Certificate-status response has a non-Success result, or a successful response reports job state `Failed` | Transition to `Error` without resubmitting the certificate operation. A gRPC transport `NotFound` is a polling error and retries instead. |
+| `WaitForPrimarySwitchCertificateJob` | Job is `Completed` | Attempt the rack-wide compute Reset batch. |
+| Either final configuration-job wait | A compute host is ineligible for Reset, has an instance, or has a pending maintenance request | Roll back any batch claims, retain the configuration-job wait state, and poll that job again on the next iteration. The existing missing-job and retry rules above still apply. |
+| Either final configuration-job wait | All compute hosts pass admission | Queue every Reset and persist `PowerSequence::PowerReset` with target IDs atomically. |
+
+#### Compute reset admission and completion
+
+Reset submission takes machine-row locks in host-ID order to serialize with instance allocation. Each target must have no instance or pending maintenance request and be at a maintenance admission boundary: `Ready`, top-level `Failed`, or `BootConfiguring` in `Prepare` or `Failed`. Other host states wait rather than being excluded from the batch. These checks apply when submitting resets, not when configuring NMX-C; NMX-C configuration does not require compute hosts to remain `Ready`.
+
+The machine controller performs each Reset asynchronously through Component Manager. Clearing the request means the power-control call succeeded, not that the host has recovered. The rack also requires Scout's persisted `last_reboot_time` to be strictly newer than the batch's `PowerReset` state-version timestamp. Hosts need not be `Ready` at this barrier. This is a report-receipt timestamp check, not correlation with a particular Reset or boot identity: a report from an earlier boot received between batch submission and Reset dispatch can satisfy it once the request clears.
+
+| Current state | Condition | Result |
+|---------------|-----------|--------|
+| `PowerReset`, target IDs absent | Power activity is selected | Attempt atomic admission for all current rack compute hosts. A busy target leaves the state unchanged. |
+| `PowerReset`, target IDs saved | Controller restarts, a request is pending, or a qualifying reboot report is missing | Resume the saved batch without resubmitting it; wait until every target satisfies the barrier. An empty saved list is a submitted empty batch, unlike absent target IDs. |
+| `PowerReset`, target IDs saved | Current membership differs from the saved targets | Attempt a fresh batch for current members. Busy members delay it; already rebooted members can be reset again. Removed members' pending requests are not automatically cancelled. |
+| `PowerReset`, unchanged membership | A pending target request has a different initiator or operation | Enter maintenance-origin `Error`. Other targets' queued Resets are not automatically cancelled on this path. |
+| `PowerReset`, unchanged membership | Every request is cleared and every reboot timestamp is newer than the batch state timestamp | Advance to `Completed`, then `Validating(Pending)`. |
+| `PowerReset`, target IDs saved | Operator terminates maintenance | Cancel unclaimed Resets owned by this rack using saved IDs, including targets outside the current scope or membership. Preserve already-claimed and unrelated requests, clear the rack maintenance request, and enter maintenance-origin `Error`. |
+
+Neither admission waiting nor reboot waiting has a timeout. Operators can terminate maintenance; timeout policy is tracked in [issue #8461](https://github.com/dsx-ai-factory/infra-controller/issues/8461). Marking the rack deleted takes the separate `Deleting` path; it is not a maintenance termination request and does not run the termination cleanup above.
 
 #### Validating (R_Validating)
 
@@ -339,6 +366,8 @@ The Rack state machine drives or observes the Machine (compute) state machine as
 | R_Created | Rack checks for newly-created compute machines (`ManagedHostState` ingestion states) that belong to this rack. |
 | R_Discovering | Rack checks that all compute machines are `Ready` or `Assigned` before moving to `Maintenance`. |
 | R_Maintenance | Rack requests compute machine reprovision (`HostReprovision`); tracks when machines return to `Ready`. If a machine is stuck in `HostReprovision::FailedFirmwareUpgrade`, the Rack (or operator) may issue a fresh Host Reprovision request to restart the firmware upgrade flow without waiting for the auto-retry interval. |
+| R_Maintenance (`ConfigureNmxCluster` success) | Rack atomically queues Reset for all eligible, unallocated compute hosts and saves the targets in `PowerSequence::PowerReset`; one blocked host delays the whole batch. |
+| R_Maintenance (`PowerSequence::PowerReset`) | Machine controllers execute Reset independently. Rack waits for cleared requests and newer Scout reboot reports, without requiring host `Ready`; see [Compute reset admission and completion](#compute-reset-admission-and-completion). |
 | R_Ready | If a tray is replaced, a new machine is created and the rack re-enters `Discovering`. |
 
 These cross-state dependencies are shown in the [Combined State Diagram](#combined-state-diagram-machine-switch-power-shelf-rack).

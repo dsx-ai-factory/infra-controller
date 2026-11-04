@@ -14,6 +14,8 @@ The maintenance request carries an optional **`MaintenanceScope`** that specifie
 
 When no device IDs are specified (all three lists empty), the scope is treated as **full rack** — identical to the existing `reprovision_requested` behavior.
 
+Device scoping does not limit compute resets after successful NMX-C configuration: that handoff resets every compute host in the rack. See [Compute reset admission and completion](rackstatemachine.md#compute-reset-admission-and-completion) for admission, persisted targets, reboot waiting, and termination behavior.
+
 ## Activities
 
 The request also carries an optional list of **maintenance activities** to perform. When the list is empty, all activities are performed (the default). Available activities:
@@ -26,7 +28,7 @@ The request also carries an optional list of **maintenance activities** to perfo
 
 Each activity is represented as a `MaintenanceActivityConfig` message with a `oneof activity` field. The `oneof` discriminant identifies the activity type, and each variant carries only the configuration fields relevant to that activity.
 
-Activities that are not in the list are skipped during the maintenance cycle. The state machine always starts at `FirmwareUpgrade(Start)` (to consume the scope), but immediately advances to the next requested activity if firmware upgrade was not requested.
+Activities that are not in the list are skipped during the maintenance cycle, except that successful `ConfigureNmxCluster` submits a compute Reset batch even when `PowerSequence` is not selected. The state machine starts at the first requested activity. Skipping NMX-C configuration does not itself submit compute resets.
 
 ### Firmware Version Resolution
 
