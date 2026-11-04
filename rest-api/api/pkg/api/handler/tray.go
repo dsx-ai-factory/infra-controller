@@ -37,7 +37,8 @@ import (
 // UUIDs. Flow operation targets require identifiers, unlike inventory queries.
 // The caller's context bounds all pages and the subsequent operation together.
 func resolveBatchTrayTargetSpec(ctx context.Context, stc tClient.Client, filter *model.TrayFilter) (*flowv1.OperationTargetSpec, *cutil.APIError) {
-	if spec := filter.ToTargetSpec(nil); spec != nil {
+	spec := filter.ToTargetSpec(nil)
+	if spec != nil {
 		return spec, nil
 	}
 
@@ -48,6 +49,7 @@ func resolveBatchTrayTargetSpec(ctx context.Context, stc tClient.Client, filter 
 	req := &flowv1.GetComponentsRequest{
 		Filters:    []*flowv1.Filter{model.GetProtoTrayFilter("type", types)},
 		Pagination: &flowv1.Pagination{Limit: 100},
+		OrderBy:    model.GetProtoTrayOrderByFromQueryParam("name", "ASC"),
 	}
 	var components []*flowv1.Component
 	for {

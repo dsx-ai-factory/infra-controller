@@ -1538,28 +1538,16 @@ func TestBatchUpdateTrayPowerStateHandler_Handle(t *testing.T) {
 		expectedStatus int
 	}{
 		{
-			name:   "success - empty filter",
-			reqOrg: org, user: providerUser,
-			body:           fmt.Sprintf(`{"siteId":"%s","filter":{},"state":"on"}`, site.ID.String()),
-			mockTaskIDs:    []*flowv1.UUID{{Id: uuid.NewString()}},
-			expectedStatus: http.StatusOK,
-		},
-		{
-			name:   "success - type-only filter",
-			reqOrg: org, user: providerUser,
-			body:           fmt.Sprintf(`{"siteId":"%s","filter":{"type":"Compute"},"state":"on"}`, site.ID.String()),
-			mockTaskIDs:    []*flowv1.UUID{{Id: uuid.NewString()}},
-			expectedStatus: http.StatusOK,
-		},
-		{
-			name:   "success - no matching trays",
-			reqOrg: org, user: providerUser,
+			name:      "success - no matching trays",
+			reqOrg:    org,
+			user:      providerUser,
 			body:      fmt.Sprintf(`{"siteId":"%s","state":"on"}`, site.ID.String()),
 			noMatches: true, expectedStatus: http.StatusOK,
 		},
 		{
-			name:   "failure - inventory lookup",
-			reqOrg: org, user: providerUser,
+			name:           "failure - inventory lookup",
+			reqOrg:         org,
+			user:           providerUser,
 			body:           fmt.Sprintf(`{"siteId":"%s","state":"on"}`, site.ID.String()),
 			lookupErr:      tp.NewNonRetryableApplicationError("inventory unavailable", swe.ErrTypeNICoFailedPrecondition, nil),
 			expectedStatus: http.StatusPreconditionFailed,
@@ -1641,6 +1629,7 @@ func TestBatchUpdateTrayPowerStateHandler_Handle(t *testing.T) {
 				testFlowProxyRequest(t, args, &req)
 				assert.Nil(t, req.TargetSpec)
 				assert.Positive(t, req.GetPagination().GetLimit())
+				assert.Equal(t, "ASC", req.GetOrderBy().GetDirection())
 				var input struct {
 					Filter *model.TrayFilter `json:"filter"`
 				}
@@ -1920,35 +1909,40 @@ func TestBatchUpdateTrayFirmwareHandler_Handle(t *testing.T) {
 		expectedStatus int
 	}{
 		{
-			name:   "success - empty filter",
-			reqOrg: org, user: providerUser,
+			name:           "success - empty filter",
+			reqOrg:         org,
+			user:           providerUser,
 			body:           fmt.Sprintf(`{"siteId":"%s","filter":{},"targets":["dpu"]}`, site.ID.String()),
 			mockTaskIDs:    []*flowv1.UUID{{Id: uuid.NewString()}},
 			expectedStatus: http.StatusOK,
 		},
 		{
-			name:   "success - type-only filter",
-			reqOrg: org, user: providerUser,
+			name:           "success - type-only filter",
+			reqOrg:         org,
+			user:           providerUser,
 			body:           fmt.Sprintf(`{"siteId":"%s","filter":{"type":"Compute"},"targets":["dpu"]}`, site.ID.String()),
 			mockTaskIDs:    []*flowv1.UUID{{Id: uuid.NewString()}},
 			expectedStatus: http.StatusOK,
 		},
 		{
-			name:   "success - no matching trays",
-			reqOrg: org, user: providerUser,
+			name:      "success - no matching trays",
+			reqOrg:    org,
+			user:      providerUser,
 			body:      fmt.Sprintf(`{"siteId":"%s","targets":["dpu"]}`, site.ID.String()),
 			noMatches: true, expectedStatus: http.StatusOK,
 		},
 		{
-			name:   "failure - inventory lookup",
-			reqOrg: org, user: providerUser,
+			name:           "failure - inventory lookup",
+			reqOrg:         org,
+			user:           providerUser,
 			body:           fmt.Sprintf(`{"siteId":"%s","targets":["dpu"]}`, site.ID.String()),
 			lookupErr:      tp.NewNonRetryableApplicationError("inventory unavailable", swe.ErrTypeNICoFailedPrecondition, nil),
 			expectedStatus: http.StatusPreconditionFailed,
 		},
 		{
-			name:   "success - DPU target without filter or version",
-			reqOrg: org, user: providerUser,
+			name:           "success - DPU target without filter or version",
+			reqOrg:         org,
+			user:           providerUser,
 			body:           fmt.Sprintf(`{"siteId":"%s","targets":["dpu"]}`, site.ID.String()),
 			mockTaskIDs:    []*flowv1.UUID{{Id: uuid.NewString()}},
 			expectedStatus: http.StatusOK,
@@ -2024,6 +2018,7 @@ func TestBatchUpdateTrayFirmwareHandler_Handle(t *testing.T) {
 				testFlowProxyRequest(t, args, &req)
 				assert.Nil(t, req.TargetSpec)
 				assert.Positive(t, req.GetPagination().GetLimit())
+				assert.Equal(t, "ASC", req.GetOrderBy().GetDirection())
 				var input struct {
 					Filter *model.TrayFilter `json:"filter"`
 				}
@@ -2049,7 +2044,11 @@ func TestBatchUpdateTrayFirmwareHandler_Handle(t *testing.T) {
 			mockTemporalClient.Mock.On("ExecuteWorkflow", mock.Anything, mock.Anything, mock.Anything, mock.Anything).
 				Run(func(args mock.Arguments) {
 					var request flowv1.UpgradeFirmwareRequest
-					testFlowProxyRequest(t, args, &request)
+					if tt.expectedAuth != "" {
+						testFlowProxyRequestWithSecrets(t, args, site.ID.String(), tt.expectedAuth, &request)
+					} else {
+						testFlowProxyRequest(t, args, &request)
+					}
 					if !lookupDeadline.IsZero() {
 						targets := request.GetTargetSpec().GetComponents().GetTargets()
 						require.Len(t, targets, 1)
@@ -2062,9 +2061,7 @@ func TestBatchUpdateTrayFirmwareHandler_Handle(t *testing.T) {
 					if tt.expectedAuth == "" {
 						return
 					}
-					flowReq := &flowv1.UpgradeFirmwareRequest{}
-					testFlowProxyRequestWithSecrets(t, args, site.ID.String(), tt.expectedAuth, flowReq)
-					assert.Equal(t, tt.expectedAuth, flowReq.GetAuthenticationData().GetShared())
+					assert.Equal(t, tt.expectedAuth, request.GetAuthenticationData().GetShared())
 				}).
 				Return(mockWorkflowRun, nil)
 			scp.IDClientMap[site.ID.String()] = mockTemporalClient
