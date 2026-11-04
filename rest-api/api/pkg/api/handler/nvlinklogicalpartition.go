@@ -1303,7 +1303,13 @@ func (dibph DeleteNVLinkLogicalPartitionHandler) Handle(c echo.Context) error {
 			var applicationErr *tp.ApplicationError
 			if errors.As(wferr, &applicationErr) && slices.Contains(swe.ObjectNotFoundErrTypes(), applicationErr.Type()) {
 				logger.Warn().Msg(swe.ErrTypeNICoObjectNotFound + " received from Site")
-				// Reset error to nil
+				// NotFound confirms the partition is absent in Core, so inventory does not
+				// need to confirm absence again before removing the REST record.
+				derr = nvllpDAO.Delete(ctx, tx, nvllp.ID)
+				if derr != nil {
+					logger.Error().Err(derr).Msg("failed to delete NVLink Logical Partition from DB after Site reported it missing")
+					return cutil.NewAPIError(http.StatusInternalServerError, "Failed to delete NVLink Logical Partition, DB error", nil)
+				}
 				wferr = nil
 			}
 		}
@@ -1342,5 +1348,6 @@ func (dibph DeleteNVLinkLogicalPartitionHandler) Handle(c echo.Context) error {
 
 	// Create response
 	logger.Info().Msg("finishing API handler")
+	// Preserve the accepted-response contract even when Core confirms deletion is complete.
 	return c.JSON(http.StatusAccepted, model.NewAPIDeletionAcceptedResponse())
 }
