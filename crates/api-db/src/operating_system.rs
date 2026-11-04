@@ -21,7 +21,7 @@ use carbide_ipxe_renderer::{
 use carbide_uuid::{DbColumns, DbTable};
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
-use sqlx::{FromRow, PgConnection};
+use sqlx::{FromRow, PgConnection, PgTransaction};
 use uuid::Uuid;
 
 use crate::DatabaseError;
@@ -183,6 +183,28 @@ pub async fn get(
         .map_err(|e| DatabaseError::query(&query, e))
 }
 
+/// `get_for_update` locks an undeleted `OperatingSystem` until `txn` ends.
+///
+/// Perform dependent writes in this same transaction so a request preserves
+/// the current values for fields it omits. `FOR NO KEY UPDATE` allows instance
+/// foreign-key checks while excluding competing changes to this row.
+/// Missing or soft-deleted rows return a query error wrapping
+/// `sqlx::Error::RowNotFound`, like [`get`].
+pub async fn get_for_update(
+    txn: &mut PgTransaction<'_>,
+    id: Uuid,
+) -> Result<OperatingSystem, DatabaseError> {
+    let query = format!(
+        "SELECT {} FROM operating_systems WHERE id = $1 AND deleted IS NULL FOR NO KEY UPDATE",
+        OperatingSystem::db_table_columns()
+    );
+    sqlx::query_as::<_, OperatingSystem>(sqlx::AssertSqlSafe(query.as_str()))
+        .bind(id)
+        .fetch_one(&mut **txn)
+        .await
+        .map_err(|e| DatabaseError::query(&query, e))
+}
+
 /// Fetches multiple operating systems by id. Missing ids are skipped (no error).
 pub async fn get_many(
     txn: impl sqlx::Executor<'_, Database = sqlx::Postgres>,
@@ -325,6 +347,9 @@ pub struct UpdateOperatingSystem {
     pub status: Option<String>,
 }
 
+/// `update` fills fields omitted from `input` with values from `existing`.
+/// Load `existing` with [`get_for_update`] and call `update` in that same
+/// transaction so another writer cannot change those values before the write.
 pub async fn update(
     txn: &mut PgConnection,
     existing: &OperatingSystem,
@@ -414,6 +439,8 @@ pub async fn delete(txn: &mut PgConnection, id: Uuid) -> Result<(), DatabaseErro
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use model::operating_system_definition::{OS_TYPE_IPXE, OS_TYPE_TEMPLATED_IPXE};
     use uuid::Uuid;
 
@@ -424,7 +451,94 @@ mod tests {
         let mut txn = pool.begin().await.unwrap();
         let id = Uuid::nil();
         let err = get(&mut *txn, id).await.unwrap_err();
-        assert!(matches!(err, crate::DatabaseError::Sqlx(_)));
+        assert!(err.is_not_found());
+    }
+
+    #[crate::sqlx_test]
+    async fn test_get_for_update_locking_and_not_found(pool: sqlx::PgPool) {
+        let id: Uuid = sqlx::query_scalar(
+            "INSERT INTO operating_systems (name, org, type, ipxe_script)
+             VALUES ('locking-os', 'locking-org', $1, '#!ipxe') RETURNING id",
+        )
+        .bind(OS_TYPE_IPXE)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+        let mut txn = pool.begin().await.unwrap();
+        assert_eq!(get_for_update(&mut txn, id).await.unwrap().id, id);
+        let ordinary = tokio::time::timeout(Duration::from_secs(5), get(&pool, id))
+            .await
+            .expect("ordinary reads must not wait for the mutation lock")
+            .unwrap();
+        assert_eq!(ordinary.id, id);
+
+        // Instance foreign-key checks must remain compatible with this lock.
+        let referenced_id: Uuid = sqlx::query_scalar(
+            "SELECT id FROM operating_systems WHERE id = $1 FOR KEY SHARE NOWAIT",
+        )
+        .bind(id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(referenced_id, id);
+
+        // A shared read lock is too weak for callers that will update the row.
+        let err = sqlx::query_scalar::<_, Uuid>(
+            "SELECT id FROM operating_systems WHERE id = $1 FOR SHARE NOWAIT",
+        )
+        .bind(id)
+        .fetch_one(&pool)
+        .await
+        .unwrap_err();
+        assert_eq!(
+            err.as_database_error()
+                .and_then(|error| error.code())
+                .as_deref(),
+            Some("55P03"),
+            "the getter must exclude shared locks until its transaction ends"
+        );
+
+        txn.rollback().await.unwrap();
+        let released_id: Uuid =
+            sqlx::query_scalar("SELECT id FROM operating_systems WHERE id = $1 FOR SHARE NOWAIT")
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(released_id, id);
+
+        let mut txn = pool.begin().await.unwrap();
+        delete(&mut txn, id).await.unwrap();
+        for (case, lookup_id) in [("missing", Uuid::nil()), ("soft-deleted", id)] {
+            let err = get_for_update(&mut txn, lookup_id).await.unwrap_err();
+            assert!(err.is_not_found(), "{case}: {err:?}");
+        }
+
+        let deleting_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *txn)
+            .await
+            .unwrap();
+        let mut waiter = pool.begin().await.unwrap();
+        let read = get_for_update(&mut waiter, id);
+        tokio::pin!(read);
+        tokio::select! {
+            result = &mut read => panic!("lookup completed before deletion committed: {result:?}"),
+            blocked = tokio::time::timeout(
+                Duration::from_secs(10),
+                crate::test_support::postgres::wait_for_blocked_query(
+                    &pool, deleting_pid, "FOR NO KEY UPDATE",
+                ),
+            ) => {
+                blocked.expect("lookup should wait for the deleting transaction");
+            }
+        }
+        txn.commit().await.unwrap();
+        let err = tokio::time::timeout(Duration::from_secs(10), read)
+            .await
+            .expect("lookup should finish after deletion commits")
+            .unwrap_err();
+        assert!(err.is_not_found(), "concurrently deleted row: {err:?}");
     }
 
     #[crate::sqlx_test]

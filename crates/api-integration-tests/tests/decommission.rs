@@ -1042,6 +1042,8 @@ async fn ready_force_delete_rebuild(
                 delete_retained_boot_interfaces: true,
                 release_preserved_addresses: false,
                 allow_delete_with_orphaned_dpf_crds: false,
+                allow_delete_with_instance_type: false,
+                allow_delete_with_instance: false,
                 wait_for_instance_dpu: false,
             }))
         .await?;
@@ -1729,6 +1731,8 @@ async fn cycles(
                     delete_retained_boot_interfaces: true,
                     release_preserved_addresses: false,
                     allow_delete_with_orphaned_dpf_crds: false,
+                    allow_delete_with_instance_type: false,
+                    allow_delete_with_instance: false,
                     wait_for_instance_dpu: false,
                 }))
             .await?;

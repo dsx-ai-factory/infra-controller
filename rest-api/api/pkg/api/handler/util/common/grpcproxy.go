@@ -32,6 +32,24 @@ func ExecuteCoreGRPC(
 	return siteproxy.ExecuteCoreGRPC(ctx, stc, fullMethod, req, resp, secretKey, secretFields...)
 }
 
+// ExecuteCoreGRPCWithWorkflowID starts or retrieves a persisted Core attempt.
+// See siteproxy.ExecuteCoreGRPCWithWorkflowID for the start/recovery boundary and
+// coreResultObserved semantics; that result does not itself mean deletion succeeded.
+func ExecuteCoreGRPCWithWorkflowID(
+	ctx context.Context,
+	stc tclient.Client,
+	fullMethod string,
+	req proto.Message,
+	resp proto.Message,
+	workflowID string,
+	startNewAttempt bool,
+	secretKey string,
+	secretFields ...string,
+) (*cutil.APIError, bool) {
+	return siteproxy.ExecuteCoreGRPCWithWorkflowID(ctx, stc, fullMethod, req, resp,
+		workflowID, startNewAttempt, secretKey, secretFields...)
+}
+
 // ExecuteFlowGRPC proxies one already-validated Flow (v1.Flow) gRPC request via
 // the generic site proxy workflow with a caller-chosen workflow ID and conflict
 // policy. See siteproxy.ExecuteFlowGRPC.

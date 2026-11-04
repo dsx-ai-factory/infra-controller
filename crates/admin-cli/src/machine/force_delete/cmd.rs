@@ -41,7 +41,7 @@ pub(super) async fn force_delete(mut query: Args, api_client: &ApiClient) -> Car
         && !query.allow_delete_with_instance
     {
         return Err(CarbideCliError::GenericError(
-                "Machine has an associated instance, use --allow-delete-with-instance to acknowledge that this machine should be deleted with an instance allocated".to_string(),
+                "Machine has an attached Instance. Re-run with --allow-delete-with-instance to acknowledge that its control-plane record will be removed without first requesting a graceful workload shutdown and that force-delete cleanup may forcibly restart the host".to_string(),
             ));
     }
 

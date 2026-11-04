@@ -4714,6 +4714,8 @@ async fn test_auto_vpc_prefix_selection_force_delete_marks_generated_segment_del
         .unwrap();
 
     let request = AdminForceDeleteMachineRequest {
+        allow_delete_with_instance_type: false,
+        allow_delete_with_instance: true,
         host_query: managed_host.id.to_string(),
         delete_interfaces: false,
         delete_bmc_interfaces: false,
@@ -7379,7 +7381,7 @@ async fn test_service_vpc_coordinator_serializes_with_default_force_delete(
         )))
         .await
     }));
-    wait_for_blocked_query(&env.pool, activation_pid, "UPDATE machines").await;
+    wait_for_blocked_query(&env.pool, activation_pid, "SELECT row_to_json(m.*)").await;
     activation.commit().await?;
     let error = join_test_task(pending_force_delete, "default force deletion")
         .await
@@ -7481,7 +7483,7 @@ async fn test_service_vpc_coordinator_serializes_with_orphan_force_delete(
         )))
         .await
     }));
-    wait_for_blocked_query(&env.pool, activation_pid, "UPDATE machines").await;
+    wait_for_blocked_query(&env.pool, activation_pid, "SELECT row_to_json(m.*)").await;
     activation.commit().await?;
     let response = join_test_task(pending_force_delete, "orphan force deletion")
         .await?
@@ -13883,6 +13885,7 @@ async fn create_service_vpc_coordinator_test_env_with_capacity_and_families(
 
 /// Builds the minimal public force-delete request used to verify both service-endpoint membership
 /// decisions while leaving unrelated device-deletion options disabled.
+/// These fixtures authorize deleting their attached Instance so the request reaches endpoint checks.
 fn service_vpc_force_delete_request(
     host_id: impl std::fmt::Display,
     allow_orphaned_dpf_resources: bool,
@@ -13893,6 +13896,8 @@ fn service_vpc_force_delete_request(
         delete_bmc_interfaces: false,
         delete_bmc_credentials: false,
         allow_delete_with_orphaned_dpf_crds: allow_orphaned_dpf_resources,
+        allow_delete_with_instance_type: false,
+        allow_delete_with_instance: true,
         delete_bmc_suppressions: false,
         delete_retained_boot_interfaces: false,
         release_preserved_addresses: false,
