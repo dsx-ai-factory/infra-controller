@@ -48,6 +48,16 @@ pub(super) enum VirshCommand {
     Suspend,
     Resume,
     InjectNmi,
+    /// Lists the domain's disks as `Type Device Target Source`.
+    BlockList,
+    /// vmctl BMC shim extension: reports pending and reserved boot intent as JSON.
+    BootSelection,
+    /// vmctl BMC shim extension: selects one inserted medium for the next boot.
+    BootOnceMedia {
+        media_id: String,
+    },
+    /// vmctl BMC shim extension: cancels a pending one-time selection.
+    BootDefault,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -115,6 +125,10 @@ impl VirshCommand {
             Self::Suspend => "suspend",
             Self::Resume => "resume",
             Self::InjectNmi => "inject-nmi",
+            Self::BlockList => "domblklist",
+            Self::BootSelection => "boot-selection",
+            Self::BootOnceMedia { .. } => "boot-once-media",
+            Self::BootDefault => "boot-default",
         };
         let mut arguments = vec![OsString::from(command)];
         match self {
@@ -129,7 +143,15 @@ impl VirshCommand {
                 }
                 arguments.push(domain.into());
             }
+            Self::BlockList => {
+                arguments.extend(["--details".into(), domain.into()]);
+            }
+            Self::BootOnceMedia { media_id } => {
+                arguments.extend([domain.into(), media_id.into()]);
+            }
             Self::DomainState
+            | Self::BootSelection
+            | Self::BootDefault
             | Self::Start
             | Self::Shutdown
             | Self::Destroy
@@ -198,6 +220,24 @@ mod tests {
                     "--live",
                     "--config",
                 ],
+            ),
+            (
+                VirshCommand::BlockList,
+                vec!["domblklist", "--details", "test-domain"],
+            ),
+            (
+                VirshCommand::BootSelection,
+                vec!["boot-selection", "test-domain"],
+            ),
+            (
+                VirshCommand::BootOnceMedia {
+                    media_id: "media-1".into(),
+                },
+                vec!["boot-once-media", "test-domain", "media-1"],
+            ),
+            (
+                VirshCommand::BootDefault,
+                vec!["boot-default", "test-domain"],
             ),
         ] {
             assert_eq!(

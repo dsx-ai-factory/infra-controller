@@ -349,6 +349,33 @@ pub trait Callbacks: Send + Sync + 'static {
         std::future::ready(Ok(()))
     }
 
+    /// Returns the backend's opaque identity for the medium inserted in `device_id`.
+    ///
+    /// The identity names the exact attached medium, not its image URI. `Ok(None)`
+    /// means the backend exposes no identity; the default does not.
+    fn virtual_media_identity(
+        &self,
+        _device_id: &str,
+    ) -> impl Future<Output = Result<Option<String>, ActionError>> + Send {
+        std::future::ready(Ok(None))
+    }
+
+    /// Boots the controlled system once from the medium `media_id` inserted in `device_id`.
+    ///
+    /// The caller holds the drive's operation lock, so its media cannot change during
+    /// the call. The backend must confirm that `media_id` is still the inserted medium
+    /// and must not start the boot again when the same medium is already reserved or
+    /// its boot has started. The default rejects the action.
+    fn boot_virtual_media_once(
+        &self,
+        _device_id: &str,
+        _media_id: &str,
+    ) -> impl Future<Output = Result<(), ActionError>> + Send {
+        std::future::ready(Err(ActionError::BadRequest(eyre::eyre!(
+            "bmc-mock: backend does not support virtual-media boot"
+        ))))
+    }
+
     fn state_refresh_indication(&self);
 }
 

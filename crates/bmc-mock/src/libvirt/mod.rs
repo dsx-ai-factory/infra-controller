@@ -38,11 +38,13 @@ use crate::{
 mod commands;
 mod device_xml;
 mod domain_xml;
+mod media_boot;
 mod media_lifecycle;
 mod persistence;
 mod virsh;
 mod xml;
 use commands::{DomainConfiguration, VirshCommand};
+use media_boot::{MediaBootPlan, media_identity, plan_media_boot};
 use media_lifecycle::MediaLifecycle;
 use persistence::StateFile;
 use virsh::Virsh;
@@ -199,6 +201,15 @@ enum LibvirtMessage {
     },
     ResetBmcToDefaults {
         update: BmcResetUpdate,
+        reply: oneshot::Sender<Result<(), ActionError>>,
+    },
+    MediaIdentity {
+        device_id: String,
+        reply: oneshot::Sender<Result<Option<String>, ActionError>>,
+    },
+    BootMedia {
+        device_id: String,
+        media_id: String,
         reply: oneshot::Sender<Result<(), ActionError>>,
     },
     Refresh,
@@ -515,6 +526,87 @@ impl LibvirtBackend {
         Ok(())
     }
 
+    async fn inserted_media_identity(
+        &self,
+        device_id: &str,
+    ) -> Result<Option<String>, ActionError> {
+        let target = self
+            .config
+            .virtual_media_targets
+            .get(device_id)
+            .ok_or_else(|| {
+                ActionError::BadRequest(eyre::eyre!(
+                    "virtual media device {device_id} has no libvirt target"
+                ))
+            })?;
+        let output = self
+            .virsh()
+            .execute(VirshCommand::BlockList)
+            .await
+            .map_err(ActionError::Internal)?;
+        let listing = String::from_utf8(output.stdout).map_err(|error| {
+            ActionError::Internal(eyre::eyre!(
+                "virsh domblklist returned invalid UTF-8: {error}"
+            ))
+        })?;
+        media_identity(&listing, target)
+    }
+
+    /// Boots once from the inserted medium. The Redfish drive lock is held by the
+    /// caller; the identity is checked again here against the attached medium.
+    async fn boot_media_once(
+        &mut self,
+        device_id: &str,
+        media_id: &str,
+    ) -> Result<(), ActionError> {
+        if self.inserted_media_identity(device_id).await?.as_deref() != Some(media_id) {
+            return Err(ActionError::BadRequest(eyre::eyre!(
+                "inserted media identity changed"
+            )));
+        }
+        let output = self
+            .virsh()
+            .execute(VirshCommand::BootSelection)
+            .await
+            .map_err(ActionError::Internal)?;
+        let selection: serde_json::Value = serde_json::from_slice(&output.stdout)
+            .map_err(|error| ActionError::Internal(error.into()))?;
+        let MediaBootPlan::Arm {
+            cancel_pending_network,
+        } = plan_media_boot(&selection, media_id)?
+        else {
+            return Ok(());
+        };
+        if cancel_pending_network {
+            self.virsh()
+                .execute(VirshCommand::BootDefault)
+                .await
+                .map_err(ActionError::Internal)?;
+        }
+        self.virsh()
+            .execute(VirshCommand::BootOnceMedia {
+                media_id: media_id.to_owned(),
+            })
+            .await
+            .map_err(ActionError::Internal)?;
+        // The selection is consumed by the next start or reset, whichever applies.
+        let (command, boot) = match self.observe_power_state().await {
+            Some(PowerState::On) => (VirshCommand::Reset, BootKind::Warm),
+            Some(PowerState::Off) => (VirshCommand::Start, BootKind::Cold),
+            _ => {
+                return Err(ActionError::BadRequest(eyre::eyre!(
+                    "target power state is not bootable"
+                )));
+            }
+        };
+        self.virsh()
+            .execute(command)
+            .await
+            .map_err(ActionError::Internal)?;
+        self.boot_pending = Some(boot);
+        Ok(())
+    }
+
     async fn refresh(&mut self) {
         let Some(system_state) = self.system_state.as_ref().and_then(Weak::upgrade) else {
             tracing::error!(
@@ -567,6 +659,22 @@ impl ActorCallbacks<LibvirtMessage> for LibvirtBackend {
                 if result.is_ok() {
                     self.persist(mailbox);
                 }
+                reply.send(result).ok();
+                ActorResult::Noop
+            }
+            LibvirtMessage::MediaIdentity { device_id, reply } => {
+                reply
+                    .send(self.inserted_media_identity(&device_id).await)
+                    .ok();
+                ActorResult::Noop
+            }
+            LibvirtMessage::BootMedia {
+                device_id,
+                media_id,
+                reply,
+            } => {
+                let result = self.boot_media_once(&device_id, &media_id).await;
+                self.refresh_power_state().await;
                 reply.send(result).ok();
                 ActorResult::Noop
             }
@@ -685,6 +793,37 @@ impl Callbacks for LibvirtCallbacks {
         let (reply, response) = oneshot::channel();
         self.mailbox
             .send(LibvirtMessage::ResetBmcToDefaults { update, reply })
+            .map_err(|error| ActionError::Internal(error.into()))?;
+        response
+            .await
+            .map_err(|error| ActionError::Internal(error.into()))?
+    }
+
+    async fn virtual_media_identity(&self, device_id: &str) -> Result<Option<String>, ActionError> {
+        let (reply, response) = oneshot::channel();
+        self.mailbox
+            .send(LibvirtMessage::MediaIdentity {
+                device_id: device_id.to_owned(),
+                reply,
+            })
+            .map_err(|error| ActionError::Internal(error.into()))?;
+        response
+            .await
+            .map_err(|error| ActionError::Internal(error.into()))?
+    }
+
+    async fn boot_virtual_media_once(
+        &self,
+        device_id: &str,
+        media_id: &str,
+    ) -> Result<(), ActionError> {
+        let (reply, response) = oneshot::channel();
+        self.mailbox
+            .send(LibvirtMessage::BootMedia {
+                device_id: device_id.to_owned(),
+                media_id: media_id.to_owned(),
+                reply,
+            })
             .map_err(|error| ActionError::Internal(error.into()))?;
         response
             .await

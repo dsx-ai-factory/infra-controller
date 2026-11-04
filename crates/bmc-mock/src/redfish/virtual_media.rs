@@ -148,6 +148,13 @@ fn eject_media_target(system_id: &str, device_id: &str) -> String {
     )
 }
 
+fn boot_once_target(system_id: &str, device_id: &str) -> String {
+    format!(
+        "{}/Actions/Oem/VM.BootOnce",
+        resource(system_id, device_id).odata_id
+    )
+}
+
 pub(crate) fn add_routes<C: Callbacks>(router: Router<BmcState<C>>) -> Router<BmcState<C>> {
     const SYSTEM_ID: &str = "{system_id}";
     const DEVICE_ID: &str = "{device_id}";
@@ -164,6 +171,10 @@ pub(crate) fn add_routes<C: Callbacks>(router: Router<BmcState<C>>) -> Router<Bm
         .route(
             &eject_media_target(SYSTEM_ID, DEVICE_ID),
             post(eject_media::<C>),
+        )
+        .route(
+            &boot_once_target(SYSTEM_ID, DEVICE_ID),
+            post(boot_once::<C>),
         )
 }
 
@@ -200,7 +211,84 @@ async fn get_device<C: Callbacks>(
     else {
         return http::not_found();
     };
-    device.to_json(&system_id).into_ok_response()
+    let mut body = device.to_json(&system_id);
+    let contents = device.contents();
+    if matches!(
+        contents,
+        VirtualMediaContents::Inserted {
+            write_protected: true,
+            ..
+        }
+    ) && let Some(callbacks) = &state.callbacks
+    {
+        let identity = match callbacks.virtual_media_identity(&device_id).await {
+            Ok(identity) => identity,
+            Err(error) => return device.backend_error(error, "virtual media identity failed"),
+        };
+        // An insert or eject that completed during the lookup makes its answer stale.
+        if let Some(media_id) = identity
+            && device.contents() == contents
+        {
+            body = body.patch(json!({
+                "Oem": {"VM": {"MediaId": media_id}},
+                "Actions": {"Oem": {"#VM.BootOnce": {
+                    "target": boot_once_target(&system_id, &device_id),
+                }}},
+            }));
+        }
+    }
+    body.into_ok_response()
+}
+
+/// Boots the controlled system once from this drive's exact read-only medium.
+///
+/// The request names the image and the `MediaId` the drive reported. The drive's
+/// operation lock is held until the backend replies, so an insert or eject cannot
+/// change the medium between this check and the backend's own identity check.
+async fn boot_once<C: Callbacks>(
+    State(state): State<BmcState<C>>,
+    Path((system_id, device_id)): Path<(String, String)>,
+    Json(request): Json<serde_json::Value>,
+) -> Response {
+    let Some(device) = state
+        .system_state
+        .find(&system_id)
+        .and_then(|system| system.virtual_media())
+        .and_then(|virtual_media| virtual_media.find_device(&device_id))
+        .cloned()
+    else {
+        return http::not_found();
+    };
+    let (Some(image), Some(media_id)) = (
+        request.get("Image").and_then(serde_json::Value::as_str),
+        request.get("MediaId").and_then(serde_json::Value::as_str),
+    ) else {
+        return http::bad_request("Image and MediaId must be strings");
+    };
+    if media_id.is_empty() {
+        return http::bad_request("MediaId must not be empty");
+    }
+    let Some(callbacks) = &state.callbacks else {
+        return http::redfish_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "virtual media has no backend",
+        );
+    };
+    let _operation = device.operation.clone().lock_owned().await;
+    let inserted = matches!(
+        device.contents(),
+        VirtualMediaContents::Inserted { image: current, write_protected: true } if current == image
+    );
+    if !inserted {
+        return http::bad_request("boot requires the exact inserted read-only image");
+    }
+    match callbacks
+        .boot_virtual_media_once(&device_id, media_id)
+        .await
+    {
+        Ok(()) => json!({"Image": image, "MediaId": media_id}).into_ok_response(),
+        Err(error) => device.backend_error(error, "virtual media boot failed"),
+    }
 }
 
 async fn insert_media<C: Callbacks>(
@@ -285,15 +373,22 @@ impl DeviceState {
         };
         match callbacks.set_virtual_media(update).await {
             Ok(()) => http::ok_no_content(),
-            Err(ActionError::BadRequest(error)) => http::bad_request(&error.to_string()),
-            Err(ActionError::Internal(error)) => {
-                tracing::warn!(device_id = %self.config.id, error = ?error, "virtual media update failed");
-                http::redfish_error(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "virtual media update failed",
-                )
+            Err(error) => self.backend_error(error, "virtual media update failed"),
+        }
+    }
+
+    fn backend_error(&self, error: ActionError, summary: &'static str) -> Response {
+        match error {
+            ActionError::BadRequest(error) => http::bad_request(&error.to_string()),
+            ActionError::Internal(error) => {
+                tracing::warn!(device_id = %self.config.id, error = ?error, "{summary}");
+                http::redfish_error(StatusCode::INTERNAL_SERVER_ERROR, summary)
             }
         }
+    }
+
+    fn contents(&self) -> VirtualMediaContents {
+        self.media.lock().expect("mutex poisoned").clone()
     }
 
     fn state_json(&self) -> serde_json::Value {
@@ -475,6 +570,177 @@ mod tests {
         );
         let callbacks = state.callbacks.as_ref().unwrap();
         (router, callbacks.clone())
+    }
+
+    /// A backend whose inserted read-only medium is `media-1`; counts accepted boots.
+    struct IdentifiedMediaCallbacks {
+        boots: std::sync::atomic::AtomicUsize,
+    }
+
+    impl Callbacks for IdentifiedMediaCallbacks {
+        async fn computer_system_reset(
+            &self,
+            _: crate::ResourceResetType,
+        ) -> Result<(), ActionError> {
+            Ok(())
+        }
+
+        async fn virtual_media_identity(
+            &self,
+            device_id: &str,
+        ) -> Result<Option<String>, ActionError> {
+            assert_eq!(device_id, "ConfigCd");
+            Ok(Some("media-1".into()))
+        }
+
+        async fn boot_virtual_media_once(
+            &self,
+            device_id: &str,
+            media_id: &str,
+        ) -> Result<(), ActionError> {
+            assert_eq!(device_id, "ConfigCd");
+            if media_id != "media-1" {
+                return Err(ActionError::BadRequest(eyre::eyre!("stale media")));
+            }
+            self.boots.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn state_refresh_indication(&self) {}
+    }
+
+    #[tokio::test]
+    async fn media_boot_requires_the_exact_inserted_read_only_identity() {
+        let callbacks = Arc::new(IdentifiedMediaCallbacks {
+            boots: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let (router, _state) = crate::machine_router(
+            &host_info(HardwareType::DellPowerEdgeR750),
+            callbacks.clone(),
+            "test-host".to_owned(),
+            false,
+            MachineRouterOptions {
+                virtual_media_devices: Some(vec![DeviceConfig {
+                    id: "ConfigCd".into(),
+                    name: "Config".into(),
+                    media_types: vec!["CD".into()],
+                }]),
+                ..Default::default()
+            },
+        );
+        let drive = "/redfish/v1/Systems/System.Embedded.1/VirtualMedia/ConfigCd";
+        let image = "http://example.com/config.iso";
+        let boot = format!("{drive}/Actions/Oem/VM.BootOnce");
+        let intent = json!({"Image": image, "MediaId": "media-1"});
+        let system = "/redfish/v1/Systems/System.Embedded.1";
+        let (_, body) = request(&router, Method::GET, system, None).await;
+        let boot_settings = body.unwrap()["Boot"].clone();
+        assert!(
+            boot_settings.is_object(),
+            "the system reports its boot settings"
+        );
+
+        let (_, body) = request(&router, Method::GET, drive, None).await;
+        assert!(
+            body.unwrap().get("Oem").is_none(),
+            "an empty drive has no identity"
+        );
+        assert_eq!(
+            request(&router, Method::POST, &boot, Some(intent.clone()))
+                .await
+                .0,
+            StatusCode::BAD_REQUEST,
+            "nothing is inserted"
+        );
+
+        for write_protected in [false, true] {
+            assert_eq!(
+                request(
+                    &router,
+                    Method::POST,
+                    &format!("{drive}/Actions/VirtualMedia.InsertMedia"),
+                    Some(json!({"Image": image, "WriteProtected": write_protected})),
+                )
+                .await
+                .0,
+                StatusCode::NO_CONTENT
+            );
+            let (_, body) = request(&router, Method::GET, drive, None).await;
+            let body = body.unwrap();
+            let (status, response) =
+                request(&router, Method::POST, &boot, Some(intent.clone())).await;
+            if write_protected {
+                assert_eq!(body["Oem"]["VM"]["MediaId"], "media-1");
+                assert_eq!(body["Actions"]["Oem"]["#VM.BootOnce"]["target"], boot);
+                assert_eq!(status, StatusCode::OK);
+                assert_eq!(response.unwrap(), intent);
+            } else {
+                assert!(
+                    body.get("Oem").is_none(),
+                    "writable media has no boot identity"
+                );
+                assert_eq!(status, StatusCode::BAD_REQUEST);
+            }
+        }
+
+        for invalid in [
+            json!({"Image": image, "MediaId": "stale"}),
+            json!({"Image": "http://example.com/other.iso", "MediaId": "media-1"}),
+            json!({"Image": image, "MediaId": ""}),
+            json!({"Image": image}),
+        ] {
+            assert_eq!(
+                request(&router, Method::POST, &boot, Some(invalid.clone()))
+                    .await
+                    .0,
+                StatusCode::BAD_REQUEST,
+                "{invalid}"
+            );
+        }
+        assert_eq!(callbacks.boots.load(Ordering::SeqCst), 1);
+        let (_, body) = request(&router, Method::GET, system, None).await;
+        assert_eq!(
+            body.unwrap()["Boot"],
+            boot_settings,
+            "a one-time media boot leaves the persistent boot order and override unchanged"
+        );
+    }
+
+    #[tokio::test]
+    async fn media_boot_is_unsupported_without_backend_identity() {
+        let (router, _) = test_router_for(HardwareType::DellPowerEdgeR750);
+        let (_, body) = request(
+            &router,
+            Method::GET,
+            "/redfish/v1/Systems/System.Embedded.1/VirtualMedia",
+            None,
+        )
+        .await;
+        let drive = body.unwrap()["Members"][0]["@odata.id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let image = "http://example.com/boot.iso";
+        request(
+            &router,
+            Method::POST,
+            &format!("{drive}/Actions/VirtualMedia.InsertMedia"),
+            Some(json!({"Image": image})),
+        )
+        .await;
+        let (_, body) = request(&router, Method::GET, &drive, None).await;
+        assert!(body.unwrap().get("Oem").is_none());
+        assert_eq!(
+            request(
+                &router,
+                Method::POST,
+                &format!("{drive}/Actions/Oem/VM.BootOnce"),
+                Some(json!({"Image": image, "MediaId": "anything"})),
+            )
+            .await
+            .0,
+            StatusCode::BAD_REQUEST
+        );
     }
 
     #[tokio::test]
