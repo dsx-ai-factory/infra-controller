@@ -215,6 +215,46 @@ async fn lenovo_uefi_setup_unlocks_supported_bmc_controls(pool: PgPool) {
                 .contains(&libredfish::EnabledDisabled::Disabled),
             applies,
         );
+
+        if reboot {
+            env.redfish_sim
+                .seed_credential(
+                    &CredentialKey::host_uefi_site_default(0),
+                    &Credentials::UsernamePassword {
+                        username: String::new(),
+                        password: "uefi-v0".to_string(),
+                    },
+                )
+                .await;
+            let timepoint = env.redfish_sim.timepoint();
+            let attempts = env.redfish_sim.platform_actions().len();
+            env.redfish_sim
+                .fail_next_uefi_setup(libredfish::RedfishError::HTTPErrorCode {
+                    url: "/redfish/v1/Systems/Self/Bios/Actions/Bios.ChangePassword".to_string(),
+                    status_code: 503_u16.try_into().unwrap(),
+                    response_body: "Ami.1.0.ServiceTemporarilyUnavailableDueToHostBooting"
+                        .to_string(),
+                });
+            env.run_single_iteration().await;
+            assert!(at_uefi_step(
+                &mh.host.machine().await.state.value,
+                UefiSetupState::SetUefiPassword
+            ));
+            assert_eq!(env.redfish_sim.platform_actions().len(), attempts + 1);
+
+            env.run_single_iteration().await;
+            assert!(at_uefi_step(
+                &mh.host.machine().await.state.value,
+                UefiSetupState::WaitForPasswordJobScheduled
+            ));
+            assert_eq!(env.redfish_sim.platform_actions().len(), attempts + 2);
+            assert!(
+                env.redfish_sim
+                    .actions_since(&timepoint)
+                    .all_hosts()
+                    .is_empty()
+            );
+        }
     }
 }
 

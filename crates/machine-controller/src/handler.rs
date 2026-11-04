@@ -8231,6 +8231,17 @@ async fn handle_host_uefi_setup(
                         vec![addr],
                     )
                     .await?;
+                    if endpoints.is_empty()
+                        || endpoints.iter().any(|endpoint| {
+                            endpoint.report.vendor.is_none() || endpoint.report.model.is_none()
+                        })
+                    {
+                        tracing::warn!(
+                            machine_id = %state.host_snapshot.id,
+                            bmc_ip_address = %addr,
+                            "Skipping HS350 UEFI unlock reboot because BMC exploration metadata is incomplete"
+                        );
+                    }
                     if endpoints.iter().any(|endpoint| {
                         endpoint.report.vendor == Some(bmc_vendor::BMCVendor::LenovoAMI)
                             && endpoint.report.model.as_deref() == Some("ThinkSystem HS350X V3")
@@ -8303,6 +8314,8 @@ async fn handle_host_uefi_setup(
                         e
                     );
 
+                    // Lenovo HTTP 503 responses during boot retry this step without
+                    // repeating UnlockHost or requesting another reboot.
                     // This feature has only been tested thoroughly on Dells, Lenovos, and Vikings.
                     if state.host_snapshot.bmc_vendor().is_dell()
                         || state.host_snapshot.bmc_vendor().is_lenovo()
@@ -8851,8 +8864,8 @@ impl StateHandler for HostMachineStateHandler {
                                 uefi_setup_info: UefiSetupInfo {
                                     uefi_password_jid: None,
                                     credential_version: None,
-                                    // Lenovo AMI's BMC-only lockdown disables the host
-                                    // interface needed for BIOS password changes.
+                                    // Use each Lenovo backend's existing unlock operation
+                                    // before changing the BIOS password.
                                     uefi_setup_state: if mh_snapshot
                                         .host_snapshot
                                         .bmc_vendor()
