@@ -110,6 +110,30 @@ impl Fixture {
         self
     }
 
+    /// Gives system `system` a BIOS at `{system}/Bios` that runs with `current`
+    /// and stages `pending` at `{system}/Bios/Settings`.
+    pub(crate) fn bios(self, system: &str, current: Value, pending: Value) -> Self {
+        let system_id = format!("/redfish/v1/Systems/{system}");
+        let bios = format!("{system_id}/Bios");
+        let settings = format!("{bios}/Settings");
+        self.document(
+            &system_id,
+            json!({"@odata.id": system_id, "Id": system, "Name": system,
+                   "Bios": {"@odata.id": bios}}),
+        )
+        .document(
+            &bios,
+            json!({"@odata.id": bios, "Id": "Bios", "Name": "Bios",
+                   "@Redfish.Settings": {"SettingsObject": {"@odata.id": settings}},
+                   "Attributes": current}),
+        )
+        .document(
+            &settings,
+            json!({"@odata.id": settings, "Id": "Settings", "Name": "Settings",
+                   "Attributes": pending}),
+        )
+    }
+
     pub(crate) fn respond(
         mut self,
         method: Method,

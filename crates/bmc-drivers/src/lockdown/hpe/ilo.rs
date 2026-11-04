@@ -9,6 +9,7 @@ use bmc_platform::{
     PlatformError,
 };
 use nv_redfish::core::Bmc;
+use nv_redfish::oem::hpe::manager::HpeManager;
 use serde_json::json;
 
 use crate::lockdown::support::{reported, signal, state_from_signals, status};
@@ -17,7 +18,9 @@ use crate::resources::{RedfishResourcesExt as _, attribute_map};
 /// HPE iLO lockdown driver: KCS and USB boot for the host, the virtual NIC
 /// for the BMC.
 ///
-/// KCS is written only from iLO 6 firmware 1.40 onward.
+/// KCS is written only from iLO 6 firmware 1.40 onward. A full lockdown
+/// finds the virtual NIC control before writing the host controls, so an iLO
+/// without it is left as it was rather than half locked.
 pub(crate) struct IloLockdown;
 
 /// Whether the manager firmware, reported as `iLO <major> v<minor>`, accepts
@@ -65,12 +68,20 @@ async fn set_host<B: Bmc>(cx: &OpCx<'_, B>, enabled: bool) -> Result<DriverOutco
     Ok(kcs.merge(usb_boot))
 }
 
-async fn set_bmc<B: Bmc>(cx: &OpCx<'_, B>, enabled: bool) -> Result<DriverOutcome, PlatformError> {
+/// The iLO manager extension that reports the virtual NIC control;
+/// `Unsupported` when it does not.
+async fn virtual_nic_control<B: Bmc>(cx: &OpCx<'_, B>) -> Result<HpeManager<B>, PlatformError> {
     cx.manager()
         .await?
         .oem_hpe()
         .map_err(|error| cx.map_redfish_error(error))?
-        .ok_or(PlatformError::Unsupported)?
+        .filter(|hpe| hpe.virtual_nic_enabled().is_some())
+        .ok_or(PlatformError::Unsupported)
+}
+
+async fn set_bmc<B: Bmc>(cx: &OpCx<'_, B>, enabled: bool) -> Result<DriverOutcome, PlatformError> {
+    virtual_nic_control(cx)
+        .await?
         .set_virtual_nic_enabled(!enabled)
         .await
         .map_err(|error| cx.map_redfish_error(error))?
@@ -121,6 +132,7 @@ impl<B: Bmc> Lockdown<B> for IloLockdown {
                 Err(PlatformError::Unsupported)
             }
             LockdownScope::All => {
+                virtual_nic_control(cx).await?;
                 let host = set_host(cx, enabled).await?;
                 Ok(host.merge(set_bmc(cx, enabled).await?))
             }
@@ -133,6 +145,58 @@ mod tests {
     use carbide_test_support::value_scenarios;
 
     use super::*;
+    use crate::test_support::{Fixture, path};
+
+    const MANAGER: &str = "/redfish/v1/Managers/1";
+    const BIOS_SETTINGS: &str = "/redfish/v1/Systems/1/Bios/Settings";
+
+    /// A full lockdown writes nothing when iLO lacks the virtual NIC control,
+    /// rather than staging the host half and then reporting it unsupported.
+    #[tokio::test]
+    async fn full_lockdown_writes_nothing_without_the_virtual_nic_control() {
+        for (scenario, virtual_nic, expected) in [
+            (
+                "virtual NIC reported",
+                Some(true),
+                Ok(vec![BIOS_SETTINGS, MANAGER]),
+            ),
+            ("virtual NIC unreported", None, Err(())),
+        ] {
+            let mut hpe = json!({"@odata.type": "#HpeiLO.v2_11_0.HpeiLO"});
+            if let Some(enabled) = virtual_nic {
+                hpe["VirtualNICEnabled"] = json!(enabled);
+            }
+            let bmc = Fixture::new("HPE", "", "1", "1")
+                .document(
+                    MANAGER,
+                    json!({"@odata.id": MANAGER, "Id": "1", "Name": "Manager",
+                           "Oem": {"Hpe": hpe}}),
+                )
+                .bios("1", json!({"UsbBoot": "Enabled"}), json!({}))
+                .build()
+                .await;
+            let cx = bmc.cx().await;
+
+            let result = IloLockdown
+                .set(&cx, LockdownScope::All, LockdownDesiredState::Enabled)
+                .await;
+            let writes = bmc.writes();
+            let written: Vec<&str> = writes.iter().map(path).collect();
+            match expected {
+                Ok(expected) => {
+                    result.unwrap_or_else(|error| panic!("{scenario}: {error}"));
+                    assert_eq!(written, expected, "{scenario}");
+                }
+                Err(()) => {
+                    assert!(
+                        matches!(result, Err(PlatformError::Unsupported)),
+                        "{scenario}: {result:?}"
+                    );
+                    assert!(written.is_empty(), "{scenario}: {written:?}");
+                }
+            }
+        }
+    }
 
     #[test]
     fn kcs_is_written_from_ilo6_firmware_1_40() {

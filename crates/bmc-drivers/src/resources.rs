@@ -34,6 +34,20 @@ pub(crate) fn bios_update(
         .build())
 }
 
+/// The entries of `attributes` whose `pending` value, or `current` value when
+/// none is pending, differs.
+fn unstaged(
+    attributes: &BTreeMap<String, Value>,
+    current: &BTreeMap<String, Value>,
+    pending: &BTreeMap<String, Value>,
+) -> BTreeMap<String, Value> {
+    attributes
+        .iter()
+        .filter(|(key, value)| pending.get(*key).or_else(|| current.get(*key)) != Some(value))
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect()
+}
+
 /// Converts the BIOS `Attributes` object into plain JSON values, skipping null attributes.
 pub(crate) fn bios_attributes(bios: &BiosSchema) -> BTreeMap<String, Value> {
     bios.attributes
@@ -118,6 +132,13 @@ pub(crate) trait RedfishResourcesExt<B: Bmc> {
         attributes: &BTreeMap<String, Value>,
     ) -> Result<DriverOutcome, PlatformError>;
 
+    /// The entries of `attributes` the BIOS would not hold after the next
+    /// reset, judged as [`Self::stage_bios_attributes`] judges them.
+    async fn unstaged_bios_attributes(
+        &self,
+        attributes: &BTreeMap<String, Value>,
+    ) -> Result<BTreeMap<String, Value>, PlatformError>;
+
     /// Writes every entry of `attributes` to the pending-settings resource without
     /// comparing current or staged values, for attributes that cannot be read back.
     async fn write_bios_attributes(
@@ -199,12 +220,7 @@ impl<B: Bmc> RedfishResourcesExt<B> for OpCx<'_, B> {
             .await
             .map_err(|error| self.map_redfish_error(error))?
             .ok_or(PlatformError::Unsupported)?;
-        let pending = bios_attributes(&settings.raw());
-        let staged: BTreeMap<String, Value> = attributes
-            .iter()
-            .filter(|(key, value)| pending.get(*key).or_else(|| current.get(*key)) != Some(value))
-            .map(|(key, value)| (key.clone(), value.clone()))
-            .collect();
+        let staged = unstaged(attributes, &current, &bios_attributes(&settings.raw()));
         if staged.is_empty() {
             return Ok(DriverOutcome::complete());
         }
@@ -213,6 +229,23 @@ impl<B: Bmc> RedfishResourcesExt<B> for OpCx<'_, B> {
             .await
             .map(DriverOutcome::from)
             .map_err(|error| self.map_redfish_error(error))
+    }
+
+    async fn unstaged_bios_attributes(
+        &self,
+        attributes: &BTreeMap<String, Value>,
+    ) -> Result<BTreeMap<String, Value>, PlatformError> {
+        let bios = self.bios().await?;
+        let settings = bios
+            .settings()
+            .await
+            .map_err(|error| self.map_redfish_error(error))?
+            .ok_or(PlatformError::Unsupported)?;
+        Ok(unstaged(
+            attributes,
+            &bios_attributes(&bios.raw()),
+            &bios_attributes(&settings.raw()),
+        ))
     }
 
     async fn write_bios_attributes(

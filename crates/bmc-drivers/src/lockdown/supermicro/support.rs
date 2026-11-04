@@ -10,6 +10,7 @@ use bmc_platform::{DriverOutcome, LockdownScope, OpCx, PlatformError, Quirk};
 use nv_redfish::core::Bmc;
 use nv_redfish::host_interface::{HostInterface, HostInterfaceUpdate};
 use nv_redfish::oem::supermicro::kcs_interface::Privilege;
+use nv_redfish::oem::supermicro::{KcsInterface, SysLockdown};
 use nv_redfish::schema::host_interface::CredentialBootstrappingUpdate;
 
 use crate::lockdown::support::{RedfishLockdownExt as _, Signal, signal};
@@ -49,10 +50,8 @@ pub(super) async fn sys_lockdown<B: Bmc>(cx: &OpCx<'_, B>) -> Result<Option<bool
         .and_then(|value| value.sys_lockdown_enabled()))
 }
 
-pub(super) async fn set_sys_lockdown<B: Bmc>(
-    cx: &OpCx<'_, B>,
-    enabled: bool,
-) -> Result<DriverOutcome, PlatformError> {
+/// The OEM `SysLockdown` resource; `Unsupported` when the manager has none.
+async fn sys_lockdown_control<B: Bmc>(cx: &OpCx<'_, B>) -> Result<SysLockdown<B>, PlatformError> {
     cx.manager()
         .await?
         .oem_supermicro()
@@ -61,7 +60,38 @@ pub(super) async fn set_sys_lockdown<B: Bmc>(
         .sys_lockdown()
         .await
         .map_err(|error| cx.map_redfish_error(error))?
-        .ok_or(PlatformError::Unsupported)?
+        .ok_or(PlatformError::Unsupported)
+}
+
+/// Finds every control a lockdown change of `scope` writes, failing with
+/// `Unsupported` when one is missing; returns whether `SysLockdown` is on.
+pub(super) async fn find_controls<B: Bmc>(
+    cx: &OpCx<'_, B>,
+    scope: LockdownScope,
+    enabled: bool,
+) -> Result<bool, PlatformError> {
+    let switch_on = if sys_lockdown_scope(scope)? {
+        sys_lockdown_control(cx).await?.sys_lockdown_enabled() == Some(true)
+    } else {
+        false
+    };
+    if matches!(scope, LockdownScope::Host | LockdownScope::All) {
+        if !cx.has_quirk(Quirk::SupermicroMgxC2) {
+            kcs_interface(cx).await?;
+        }
+        if !enabled || !cx.has_quirk(Quirk::SupermicroHostInterfaceRequired) {
+            cx.host_interfaces().await?;
+        }
+    }
+    Ok(switch_on)
+}
+
+pub(super) async fn set_sys_lockdown<B: Bmc>(
+    cx: &OpCx<'_, B>,
+    enabled: bool,
+) -> Result<DriverOutcome, PlatformError> {
+    sys_lockdown_control(cx)
+        .await?
         .set_enabled(enabled)
         .await
         .map(DriverOutcome::from)
@@ -150,6 +180,17 @@ pub(super) async fn kcs_privilege<B: Bmc>(
             Privilege::Callback
         }));
     }
+    kcs_interface(cx)
+        .await?
+        .privilege()
+        .map(Some)
+        .ok_or_else(|| PlatformError::InvalidResponse {
+            message: "Supermicro KCSInterface does not report Privilege".to_string(),
+        })
+}
+
+/// The OEM `KCSInterface` resource; `Unsupported` when the manager has none.
+async fn kcs_interface<B: Bmc>(cx: &OpCx<'_, B>) -> Result<KcsInterface<B>, PlatformError> {
     cx.manager()
         .await?
         .oem_supermicro()
@@ -158,12 +199,7 @@ pub(super) async fn kcs_privilege<B: Bmc>(
         .kcs_interface()
         .await
         .map_err(|error| cx.map_redfish_error(error))?
-        .ok_or(PlatformError::Unsupported)?
-        .privilege()
-        .map(Some)
-        .ok_or_else(|| PlatformError::InvalidResponse {
-            message: "Supermicro KCSInterface does not report Privilege".to_string(),
-        })
+        .ok_or(PlatformError::Unsupported)
 }
 
 /// Sets host KCS access; on MGX C2 this is the system `IPMIHostInterface`,
@@ -184,15 +220,8 @@ pub(super) async fn set_kcs_privilege<B: Bmc>(
             .map(DriverOutcome::from)
             .map_err(|error| cx.map_redfish_error(error));
     }
-    cx.manager()
+    kcs_interface(cx)
         .await?
-        .oem_supermicro()
-        .map_err(|error| cx.map_redfish_error(error))?
-        .ok_or(PlatformError::Unsupported)?
-        .kcs_interface()
-        .await
-        .map_err(|error| cx.map_redfish_error(error))?
-        .ok_or(PlatformError::Unsupported)?
         .set_privilege(privilege)
         .await
         .map(DriverOutcome::from)

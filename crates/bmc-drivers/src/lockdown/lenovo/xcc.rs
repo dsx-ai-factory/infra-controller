@@ -13,9 +13,10 @@ use nv_redfish::core::Bmc;
 use nv_redfish::ethernet_interface::{EthernetInterface, EthernetInterfaceUpdate};
 use nv_redfish::manager::Manager;
 use nv_redfish::oem::lenovo::computer_system::{
-    FpMode, LenovoSystemPropertiesUpdate, PortSwitchingTo, UsbManagementPortAssignmentUpdate,
+    FpMode, LenovoComputerSystem, LenovoSystemPropertiesUpdate, PortSwitchingTo,
+    UsbManagementPortAssignmentUpdate,
 };
-use nv_redfish::oem::lenovo::manager::KcsState;
+use nv_redfish::oem::lenovo::manager::{KcsState, LenovoManager};
 use nv_redfish::oem::lenovo::security_service::{FwRollbackState, LenovoSecurityService};
 use nv_redfish::oem::lenovo::{LenovoBios, LenovoBiosUpdate, LenovoBiosUpdateExt as _};
 
@@ -33,7 +34,9 @@ const HOST_INTERFACE_ID: &str = "ToHost";
 /// firmware from 2.97 reports these last two controls, and each is used only
 /// when reported, so earlier firmware has no BMC-side lock. `UEFIVariablesRO`
 /// is left as the BMC has it: read-only UEFI variables stop a tenant OS
-/// installer from registering its boot entry.
+/// installer from registering its boot entry. The host controls are found
+/// before the first write of a change, so an XCC missing one is left as it
+/// was rather than half locked.
 pub(crate) struct XccLockdown;
 
 async fn host_interface<B: Bmc>(
@@ -98,13 +101,63 @@ async fn update_bios<B: Bmc>(
         .map_err(|error| cx.map_redfish_error(error))
 }
 
-async fn set_host<B: Bmc>(cx: &OpCx<'_, B>, enabled: bool) -> Result<DriverOutcome, PlatformError> {
+fn lenovo_manager<B: Bmc>(
+    cx: &OpCx<'_, B>,
+    manager: &Manager<B>,
+) -> Result<LenovoManager<B>, PlatformError> {
+    manager
+        .oem_lenovo()
+        .map_err(|error| cx.map_redfish_error(error))?
+        .ok_or(PlatformError::Unsupported)
+}
+
+/// The resources the host lockdown writes. Each carries the ETag its update
+/// is conditioned on, so they are found again after other writes.
+struct HostControls<B: Bmc> {
+    lenovo: LenovoManager<B>,
+    security: LenovoSecurityService<B>,
+    to_host: EthernetInterface<B>,
+    lenovo_system: LenovoComputerSystem<B>,
+    front_panel: LenovoSystemPropertiesUpdate,
+}
+
+/// XCC 2 changes the manager's ETag on its own within seconds, so the
+/// manager the KCS write is conditioned on is read last, just before it.
+async fn find_host_controls<B: Bmc>(
+    cx: &OpCx<'_, B>,
+    enabled: bool,
+) -> Result<HostControls<B>, PlatformError> {
     let manager = cx.manager().await?;
-    let lenovo = manager
+    let security = lenovo_manager(cx, manager)?
+        .security()
+        .await
+        .map_err(|error| cx.map_redfish_error(error))?
+        .ok_or(PlatformError::Unsupported)?;
+    let to_host = host_interface(cx, manager)
+        .await?
+        .ok_or(PlatformError::Unsupported)?;
+    let lenovo_system = cx
+        .system()
+        .await?
         .oem_lenovo()
         .map_err(|error| cx.map_redfish_error(error))?
         .ok_or(PlatformError::Unsupported)?;
-    let kcs = lenovo
+    let front_panel = front_panel_update(&lenovo_system, enabled)?;
+    let fresh = cx.fresh();
+    let lenovo = lenovo_manager(cx, fresh.manager().await?)?;
+    Ok(HostControls {
+        lenovo,
+        security,
+        to_host,
+        lenovo_system,
+        front_panel,
+    })
+}
+
+async fn set_host<B: Bmc>(cx: &OpCx<'_, B>, enabled: bool) -> Result<DriverOutcome, PlatformError> {
+    let controls = find_host_controls(cx, enabled).await?;
+    let kcs = controls
+        .lenovo
         .set_kcs_enabled(!enabled)
         .await
         .map_err(|error| cx.map_redfish_error(error))?
@@ -113,11 +166,8 @@ async fn set_host<B: Bmc>(cx: &OpCx<'_, B>, enabled: bool) -> Result<DriverOutco
             message: "XCC manager does not report KCSEnabled".to_string(),
         })?;
 
-    let rollback = lenovo
-        .security()
-        .await
-        .map_err(|error| cx.map_redfish_error(error))?
-        .ok_or(PlatformError::Unsupported)?
+    let rollback = controls
+        .security
         .set_fw_rollback(if enabled {
             FwRollbackState::Disabled
         } else {
@@ -127,36 +177,34 @@ async fn set_host<B: Bmc>(cx: &OpCx<'_, B>, enabled: bool) -> Result<DriverOutco
         .map(DriverOutcome::from)
         .map_err(|error| cx.map_redfish_error(error))?;
 
-    let to_host = host_interface(cx, manager)
-        .await?
-        .ok_or(PlatformError::Unsupported)?;
     let body = EthernetInterfaceUpdate::builder()
         .with_interface_enabled(!enabled)
         .build();
-    let to_host = to_host
+    let to_host = controls
+        .to_host
         .update(&body)
         .await
         .map(DriverOutcome::from)
         .map_err(|error| cx.map_redfish_error(error))?;
 
-    let front_panel = set_front_panel(cx, enabled).await?;
+    let front_panel = controls
+        .lenovo_system
+        .update(&controls.front_panel)
+        .await
+        .map(DriverOutcome::from)
+        .map_err(|error| cx.map_redfish_error(error))?;
     Ok(kcs.merge(rollback).merge(to_host).merge(front_panel))
 }
 
-/// Dedicates the front-panel USB port to the server, or shares it.
+/// The update that dedicates the front-panel USB port to the server, or
+/// shares it.
 ///
 /// Newer XCC renamed `FrontPanelUSB` to `USBManagementPortAssignment`;
 /// `FrontPanelUSB` is written whenever the system reports it.
-async fn set_front_panel<B: Bmc>(
-    cx: &OpCx<'_, B>,
+fn front_panel_update<B: Bmc>(
+    lenovo: &LenovoComputerSystem<B>,
     enabled: bool,
-) -> Result<DriverOutcome, PlatformError> {
-    let lenovo = cx
-        .system()
-        .await?
-        .oem_lenovo()
-        .map_err(|error| cx.map_redfish_error(error))?
-        .ok_or(PlatformError::Unsupported)?;
+) -> Result<LenovoSystemPropertiesUpdate, PlatformError> {
     let assignment = UsbManagementPortAssignmentUpdate::builder()
         .with_fp_mode(if enabled {
             FpMode::Server
@@ -176,11 +224,7 @@ async fn set_front_panel<B: Bmc>(
                 .to_string(),
         });
     };
-    lenovo
-        .update(&update.build())
-        .await
-        .map(DriverOutcome::from)
-        .map_err(|error| cx.map_redfish_error(error))
+    Ok(update.build())
 }
 
 /// Prohibits, or allows, firmware updates and BIOS settings changes.
@@ -339,6 +383,7 @@ impl<B: Bmc> Lockdown<B> for XccLockdown {
                     let host = set_host(cx, enabled).await?;
                     Ok(host.merge(bmc().await?))
                 } else {
+                    find_host_controls(cx, enabled).await?;
                     let bmc = bmc().await?;
                     Ok(bmc.merge(set_host(cx, enabled).await?))
                 }
@@ -373,6 +418,10 @@ mod tests {
     /// An SR650 V4 BMC as captured from XCC 3, reduced to the lockdown
     /// resources.
     async fn xcc(controls: Controls) -> FixtureBmc {
+        xcc_fixture(controls).build().await
+    }
+
+    fn xcc_fixture(controls: Controls) -> Fixture {
         let locked = controls.legacy_locked;
         let state = |locked| if locked { "Disabled" } else { "Enabled" };
         let mut security = json!({
@@ -434,8 +483,42 @@ mod tests {
                 json!({"@odata.id": BIOS, "Id": "Bios", "Name": "Bios", "Attributes": {},
                        "Oem": {"Lenovo": lenovo_bios}}),
             )
+    }
+
+    /// Without the host-facing interface a full lockdown or unlock writes
+    /// nothing, rather than changing some controls and reporting the rest
+    /// unsupported; the unlock would otherwise lift the BMC locks first.
+    #[tokio::test]
+    async fn a_missing_host_control_leaves_every_control_unwritten() {
+        for (scenario, locked, desired) in [
+            ("full lockdown", false, LockdownDesiredState::Enabled),
+            ("full unlock", true, LockdownDesiredState::Disabled),
+        ] {
+            let bmc = xcc_fixture(Controls {
+                legacy_locked: locked,
+                xcc3: Some((locked, locked, locked)),
+            })
+            .document(
+                INTERFACES,
+                json!({
+                    "@odata.id": INTERFACES,
+                    "@odata.type": "#EthernetInterfaceCollection.EthernetInterfaceCollection",
+                    "Name": "Ethernet Interfaces",
+                    "Members": [],
+                }),
+            )
             .build()
-            .await
+            .await;
+            let cx = bmc.cx().await;
+
+            let result = XccLockdown.set(&cx, LockdownScope::All, desired).await;
+
+            assert!(
+                matches!(result, Err(PlatformError::Unsupported)),
+                "{scenario}: {result:?}"
+            );
+            assert!(bmc.writes().is_empty(), "{scenario}");
+        }
     }
 
     /// Each scope writes only its controls, skips controls the firmware does

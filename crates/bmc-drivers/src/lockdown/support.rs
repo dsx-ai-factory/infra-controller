@@ -68,6 +68,10 @@ pub(super) trait RedfishLockdownExt<B: Bmc> {
     /// is enabled unless it reports otherwise.
     async fn host_interface_state(&self) -> Result<(LockdownState, Option<bool>), PlatformError>;
 
+    /// Fails as [`Self::set_first_host_interface`] would when the manager
+    /// lists no host interface to write.
+    async fn require_host_interface(&self) -> Result<(), PlatformError>;
+
     async fn set_first_host_interface(&self, enabled: bool)
     -> Result<DriverOutcome, PlatformError>;
 
@@ -99,6 +103,13 @@ impl<B: Bmc> RedfishLockdownExt<B> for OpCx<'_, B> {
             .first()
             .map(|interface| interface.interface_enabled().unwrap_or(true));
         Ok((state_from_signals(&[signal(enabled, false, true)]), enabled))
+    }
+
+    async fn require_host_interface(&self) -> Result<(), PlatformError> {
+        if self.host_interfaces().await?.is_empty() {
+            return Err(PlatformError::NoContent);
+        }
+        Ok(())
     }
 
     async fn set_first_host_interface(

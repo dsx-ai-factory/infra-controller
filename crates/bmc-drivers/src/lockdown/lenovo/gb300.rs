@@ -26,7 +26,9 @@ struct LockedAttribute {
 }
 
 /// Lenovo GB300 AMI: like MegaRAC, except this BIOS prefixes enum values
-/// with the attribute name and exposes no KCS access control.
+/// with the attribute name and exposes no KCS access control. A full change
+/// finds the host interface before staging the BIOS, so a BMC without one is
+/// left as it was.
 pub(crate) struct Gb300Lockdown;
 
 const HOST: &[LockedAttribute] = &[LockedAttribute {
@@ -78,6 +80,9 @@ impl<B: Bmc> Lockdown<B> for Gb300Lockdown {
             return Err(PlatformError::Unsupported);
         }
         let enabled = desired == LockdownDesiredState::Enabled;
+        if scope == LockdownScope::All {
+            cx.require_host_interface().await?;
+        }
         let mut outcome = DriverOutcome::complete();
         if matches!(scope, LockdownScope::Host | LockdownScope::All) {
             let attributes: BTreeMap<String, Value> = HOST

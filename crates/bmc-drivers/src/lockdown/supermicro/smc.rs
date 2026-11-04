@@ -12,8 +12,8 @@ use nv_redfish::core::Bmc;
 use nv_redfish::oem::supermicro::kcs_interface::Privilege;
 
 use crate::lockdown::supermicro::support::{
-    host_interface_enabled, kcs_privilege, kcs_signal, set_host_interfaces, set_kcs_privilege,
-    set_sys_lockdown, sys_lockdown, sys_lockdown_scope,
+    find_controls, host_interface_enabled, kcs_privilege, kcs_signal, set_host_interfaces,
+    set_kcs_privilege, set_sys_lockdown, sys_lockdown, sys_lockdown_scope,
 };
 use crate::lockdown::support::{reported, signal, state_from_signals, status};
 
@@ -22,8 +22,11 @@ use crate::lockdown::support::{reported, signal, state_from_signals, status};
 /// Host lockdown disables the host interfaces and then drops KCS to callback
 /// privilege, and unlocking reverses that order; BMC lockdown is the OEM
 /// `SysLockdown` switch, which must be cleared before any other write and set
-/// after them. With [`Quirk::SupermicroHostInterfaceRequired`] the host
-/// interfaces stay up while locked and are only re-enabled on unlock.
+/// after them, so a lock clears a switch that is already on. With
+/// [`Quirk::SupermicroHostInterfaceRequired`] the host interfaces stay up
+/// while locked and are only re-enabled on unlock. Every control a change
+/// writes is found before the first write, so a BMC missing one is left as
+/// it was rather than half locked.
 pub(crate) struct SmcLockdown;
 
 #[async_trait]
@@ -61,8 +64,9 @@ impl<B: Bmc> Lockdown<B> for SmcLockdown {
     ) -> Result<DriverOutcome, PlatformError> {
         let sys_lockdown = sys_lockdown_scope(scope)?;
         let enabled = desired == LockdownDesiredState::Enabled;
+        let switch_on = find_controls(cx, scope, enabled).await?;
         let mut outcome = DriverOutcome::complete();
-        if !enabled && sys_lockdown {
+        if sys_lockdown && (!enabled || switch_on) {
             outcome = outcome.merge(set_sys_lockdown(cx, false).await?);
         }
         if matches!(scope, LockdownScope::Host | LockdownScope::All) {
@@ -90,12 +94,112 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::test_support::{Fixture, path};
+    use crate::test_support::{Fixture, body, path};
 
     const MANAGER: &str = "/redfish/v1/Managers/1";
     const HOST_INTERFACES: &str = "/redfish/v1/Managers/1/HostInterfaces";
     const HOST_INTERFACE: &str = "/redfish/v1/Managers/1/HostInterfaces/1";
     const SYSTEM: &str = "/redfish/v1/Systems/1";
+    const KCS: &str = "/redfish/v1/Managers/1/Oem/Supermicro/KCSInterface";
+    const SYS_LOCKDOWN: &str = "/redfish/v1/Managers/1/Oem/Supermicro/SysLockdown";
+
+    /// A full lockdown clears a switch that is already on before the writes it
+    /// blocks, and writes nothing when the BMC lacks the KCS control.
+    #[tokio::test]
+    async fn full_lockdown_clears_the_switch_first_and_needs_every_control() {
+        let interface = (HOST_INTERFACE, json!({"InterfaceEnabled": false}));
+        let kcs = (KCS, json!({"Privilege": "Callback"}));
+        let switch = |enabled| (SYS_LOCKDOWN, json!({"SysLockdownEnabled": enabled}));
+        for (scenario, switch_on, has_kcs, expected) in [
+            (
+                "switch off",
+                false,
+                true,
+                Ok(vec![interface.clone(), kcs.clone(), switch(true)]),
+            ),
+            (
+                "switch already on",
+                true,
+                true,
+                Ok(vec![
+                    switch(false),
+                    interface.clone(),
+                    kcs.clone(),
+                    switch(true),
+                ]),
+            ),
+            ("no KCS control", true, false, Err(())),
+        ] {
+            let mut supermicro = json!({"SysLockdown": {"@odata.id": SYS_LOCKDOWN}});
+            if has_kcs {
+                supermicro["KCSInterface"] = json!({"@odata.id": KCS});
+            }
+            let bmc = Fixture::new("Supermicro", "", "1", "1")
+                .document(
+                    MANAGER,
+                    json!({
+                        "@odata.id": MANAGER,
+                        "Id": "1",
+                        "Name": "Manager",
+                        "HostInterfaces": {"@odata.id": HOST_INTERFACES},
+                        "Oem": {"Supermicro": supermicro},
+                    }),
+                )
+                .document(
+                    HOST_INTERFACES,
+                    json!({
+                        "@odata.id": HOST_INTERFACES,
+                        "@odata.type": "#HostInterfaceCollection.HostInterfaceCollection",
+                        "Name": "Host Interface Collection",
+                        "Members": [{"@odata.id": HOST_INTERFACE}],
+                    }),
+                )
+                .document(
+                    HOST_INTERFACE,
+                    json!({
+                        "@odata.id": HOST_INTERFACE,
+                        "Id": "1",
+                        "Name": "Host Interface",
+                        "InterfaceEnabled": true,
+                    }),
+                )
+                .document(
+                    KCS,
+                    json!({"@odata.id": KCS, "Id": "KCSInterface", "Name": "KCS Interface",
+                           "Privilege": "Administrator"}),
+                )
+                .document(
+                    SYS_LOCKDOWN,
+                    json!({"@odata.id": SYS_LOCKDOWN, "Id": "SysLockdown",
+                           "Name": "System Lockdown", "SysLockdownEnabled": switch_on}),
+                )
+                .build()
+                .await;
+            let cx = bmc.cx().await;
+
+            let result = SmcLockdown
+                .set(&cx, LockdownScope::All, LockdownDesiredState::Enabled)
+                .await;
+            let recorded = bmc.writes();
+            let writes: Vec<(&str, serde_json::Value)> = recorded
+                .iter()
+                .map(|write| (path(write), body(write)))
+                .collect();
+            match expected {
+                Ok(expected) => {
+                    result.unwrap_or_else(|error| panic!("{scenario}: {error}"));
+                    assert_eq!(writes, expected, "{scenario}");
+                }
+                Err(()) => {
+                    assert!(
+                        matches!(result, Err(PlatformError::Unsupported)),
+                        "{scenario}: {result:?}"
+                    );
+                    assert!(writes.is_empty(), "{scenario}: {writes:?}");
+                }
+            }
+        }
+    }
 
     #[tokio::test]
     async fn host_lockdown_leaves_a_required_host_interface_up() {

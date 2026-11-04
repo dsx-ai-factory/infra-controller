@@ -65,13 +65,17 @@ where
 }
 
 /// Lifts the BIOS restrictions on the next reset; some iDRACs report them
-/// read-only, which leaves nothing to lift.
+/// read-only, which leaves nothing to lift. Nothing is written once the lift
+/// is staged, since iDRAC refuses a second job while the first is queued.
 async fn unlock_bios<B: Bmc>(cx: &OpCx<'_, B>) -> Result<DriverOutcome, PlatformError> {
-    let body = bios_update(&attribute_map([
+    let attributes = attribute_map([
         ("InBandManageabilityInterface", json!("Enabled")),
         ("UefiVariableAccess", json!("Standard")),
-    ]))?
-    .with_settings_apply_time(dell::on_reset());
+    ]);
+    if cx.unstaged_bios_attributes(&attributes).await?.is_empty() {
+        return Ok(DriverOutcome::complete());
+    }
+    let body = bios_update(&attributes)?.with_settings_apply_time(dell::on_reset());
     match cx.update_bios_settings(&body).await {
         Ok(response) => dell::job_outcome(cx, response).await,
         Err(error) if dell::is_read_only_attribute(&error) => Ok(DriverOutcome::complete()),
@@ -80,7 +84,8 @@ async fn unlock_bios<B: Bmc>(cx: &OpCx<'_, B>) -> Result<DriverOutcome, Platform
 }
 
 /// System lockdown takes effect at once and rejects later writes, so the
-/// other restrictions are staged first.
+/// other restrictions are staged first, and a lockdown that is already on
+/// comes off before restrictions that differ are written.
 async fn lock_bmc<B: Bmc>(cx: &OpCx<'_, B>) -> Result<DriverOutcome, PlatformError> {
     let boot_device = first_boot_device(cx).await?;
     let restriction_attributes = attribute_map([
@@ -89,11 +94,24 @@ async fn lock_bmc<B: Bmc>(cx: &OpCx<'_, B>) -> Result<DriverOutcome, PlatformErr
         ("ServerBoot.1.BootOnce", json!("Disabled")),
     ]);
     let lockdown_attributes = attribute_map([(dell::SYSTEM_LOCKDOWN, json!("Enabled"))]);
+    let mut target = restriction_attributes.clone();
+    target.extend(lockdown_attributes.clone());
+    let names: Vec<&str> = target.keys().map(String::as_str).collect();
+    let reported = dell::manager_attribute_values(cx, &names).await?;
+    if reported == target {
+        return Ok(DriverOutcome::complete());
+    }
+
+    let locked = reported.get(dell::SYSTEM_LOCKDOWN) == Some(&json!("Enabled"));
+    let mut outcome = DriverOutcome::complete();
+    if locked {
+        outcome = set_system_lockdown(cx, false).await?;
+    }
     let on_reset = Some(ManagerApplyTime::OnReset);
     let restrictions =
         dell::patch_manager_attributes(cx, &restriction_attributes, on_reset).await?;
     let lockdown = dell::patch_manager_attributes(cx, &lockdown_attributes, on_reset).await?;
-    Ok(restrictions.merge(lockdown))
+    Ok(outcome.merge(restrictions).merge(lockdown))
 }
 
 /// Flips only the system-lockdown switch, which takes effect at once.
@@ -186,13 +204,146 @@ where
 #[cfg(test)]
 mod tests {
     use axum::http::Method;
+    use serde_json::Value;
 
     use super::*;
-    use crate::test_support::{Fixture, body, path};
+    use crate::test_support::{Fixture, FixtureBmc, body, path};
 
     const MANAGER: &str = "/redfish/v1/Managers/iDRAC.Embedded.1";
     const ATTRIBUTES: &str =
         "/redfish/v1/Managers/iDRAC.Embedded.1/Oem/Dell/DellAttributes/iDRAC.Embedded.1";
+    const BIOS_SETTINGS: &str = "/redfish/v1/Systems/System.Embedded.1/Bios/Settings";
+
+    /// An iDRAC whose manager attributes are `attributes` and whose BIOS
+    /// reports `current` and stages `pending`.
+    async fn idrac(attributes: Value, current: Value, pending: Value) -> FixtureBmc {
+        Fixture::new(
+            "Dell",
+            "Integrated Dell Remote Access Controller",
+            "System.Embedded.1",
+            "iDRAC.Embedded.1",
+        )
+        .document(
+            MANAGER,
+            json!({
+                "@odata.id": MANAGER,
+                "Id": "iDRAC.Embedded.1",
+                "Name": "Manager",
+                "Links": {"Oem": {"Dell": {"DellAttributes": [{"@odata.id": ATTRIBUTES}]}}},
+            }),
+        )
+        .document(
+            ATTRIBUTES,
+            json!({
+                "@odata.id": ATTRIBUTES,
+                "Id": "iDRAC.Embedded.1",
+                "Name": "Manager Attributes",
+                "Attributes": attributes,
+            }),
+        )
+        .bios("System.Embedded.1", current, pending)
+        .build()
+        .await
+    }
+
+    /// The `Attributes` each write sends, by resource.
+    fn written_attributes(bmc: &FixtureBmc) -> Vec<(String, Value)> {
+        bmc.writes()
+            .iter()
+            .map(|write| (path(write).to_string(), body(write)["Attributes"].clone()))
+            .collect()
+    }
+
+    /// A lock that already holds writes nothing, and one whose restrictions
+    /// drifted lifts system lockdown first, since it rejects the other writes.
+    #[tokio::test]
+    async fn lock_writes_only_what_differs_and_lifts_lockdown_first() {
+        let restrictions = json!({
+            "Racadm.1.Enable": "Disabled",
+            "ServerBoot.1.FirstBootDevice": "PXE",
+            "ServerBoot.1.BootOnce": "Disabled",
+        });
+        let lockdown = |value| json!({dell::SYSTEM_LOCKDOWN: value});
+        for (scenario, reported, expected) in [
+            (
+                "unlocked",
+                json!({dell::SYSTEM_LOCKDOWN: "Disabled", "Racadm.1.Enable": "Enabled",
+                       "ServerBoot.1.FirstBootDevice": "Normal",
+                       "ServerBoot.1.BootOnce": "Enabled"}),
+                vec![restrictions.clone(), lockdown("Enabled")],
+            ),
+            (
+                "already locked",
+                json!({dell::SYSTEM_LOCKDOWN: "Enabled", "Racadm.1.Enable": "Disabled",
+                       "ServerBoot.1.FirstBootDevice": "PXE",
+                       "ServerBoot.1.BootOnce": "Disabled"}),
+                vec![],
+            ),
+            (
+                "locked with racadm enabled",
+                json!({dell::SYSTEM_LOCKDOWN: "Enabled", "Racadm.1.Enable": "Enabled",
+                       "ServerBoot.1.FirstBootDevice": "PXE",
+                       "ServerBoot.1.BootOnce": "Disabled"}),
+                vec![
+                    lockdown("Disabled"),
+                    restrictions.clone(),
+                    lockdown("Enabled"),
+                ],
+            ),
+        ] {
+            let bmc = idrac(reported, json!({}), json!({})).await;
+            let cx = bmc.cx().await;
+
+            IdracLockdown
+                .set(&cx, LockdownScope::All, LockdownDesiredState::Enabled)
+                .await
+                .unwrap_or_else(|error| panic!("{scenario}: {error}"));
+
+            let expected: Vec<(String, Value)> = expected
+                .into_iter()
+                .map(|attributes| (ATTRIBUTES.to_string(), attributes))
+                .collect();
+            assert_eq!(written_attributes(&bmc), expected, "{scenario}");
+        }
+    }
+
+    /// A full unlock stages the BIOS lift once: with the lift already pending,
+    /// a second job would be refused while the first is queued.
+    #[tokio::test]
+    async fn full_unlock_stages_the_bios_lift_once() {
+        let unlocked = json!({dell::SYSTEM_LOCKDOWN: "Disabled", "Racadm.1.Enable": "Enabled",
+                              "ServerBoot.1.FirstBootDevice": "PXE",
+                              "ServerBoot.1.BootOnce": "Disabled"});
+        let restricted = json!({"InBandManageabilityInterface": "Disabled",
+                                "UefiVariableAccess": "Controlled"});
+        let lifted = json!({"InBandManageabilityInterface": "Enabled",
+                            "UefiVariableAccess": "Standard"});
+        for (scenario, pending, expected) in [
+            (
+                "nothing staged",
+                json!({}),
+                vec![
+                    (ATTRIBUTES.to_string(), unlocked.clone()),
+                    (BIOS_SETTINGS.to_string(), lifted.clone()),
+                ],
+            ),
+            (
+                "lift already staged",
+                lifted.clone(),
+                vec![(ATTRIBUTES.to_string(), unlocked.clone())],
+            ),
+        ] {
+            let bmc = idrac(json!({}), restricted.clone(), pending).await;
+            let cx = bmc.cx().await;
+
+            IdracLockdown
+                .set(&cx, LockdownScope::All, LockdownDesiredState::Disabled)
+                .await
+                .unwrap_or_else(|error| panic!("{scenario}: {error}"));
+
+            assert_eq!(written_attributes(&bmc), expected, "{scenario}");
+        }
+    }
 
     /// A full unlock is done only once UEFI variable access is lifted too;
     /// locking leaves it open, so the BMC alone decides it.
