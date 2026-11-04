@@ -214,9 +214,12 @@ test-site-agent: core-mock-server-start flow-mock-server-start
 	cd site-agent/pkg/components && CGO_ENABLED=1 go test -race -p 1 ./... -count=1 ; \
 	ret=$$? ; cd ../../.. && $(MAKE) core-mock-server-stop flow-mock-server-stop ; exit $$ret
 
+# Optional package scope for the API and Flow test targets.
+TEST_PACKAGES ?= ./...
+
 test-api:
 	$(MAKE) ensure-postgres
-	cd api && go test -p 1 ./... -count=1
+	cd api && go test -p 1 $(TEST_PACKAGES) -count=1
 
 test-auth:
 	$(MAKE) ensure-postgres
@@ -246,7 +249,7 @@ test-flow:
 		DB_USER=$(POSTGRES_USER) \
 		DB_PASSWORD=$(POSTGRES_PASSWORD) \
 		DB_NAME=$(POSTGRES_DB) \
-		go test -p 1 ./... -count=1
+		go test -p 1 $(TEST_PACKAGES) -count=1
 
 test-powershelf-manager:
 	$(MAKE) ensure-postgres
