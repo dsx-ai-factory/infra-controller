@@ -8,6 +8,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/google/uuid"
@@ -22,6 +23,7 @@ import (
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
 	cdbp "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
 
+	swe "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/error"
 	sc "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/client/site"
 	"github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/queue"
 	"github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/util"
@@ -211,7 +213,7 @@ func (mskg ManageSSHKeyGroup) SyncSSHKeyGroupViaSiteAgent(ctx context.Context, s
 				status = cdbm.SSHKeyGroupSiteAssociationStatusError
 				statusMessage = fmt.Sprintf("failed to %s SSHKeyGroup, timeout occurred executing workflow on Site.", workflowMethod)
 				err = nil // Clear error so function returns nil after updating status
-			} else if strings.Contains(err.Error(), util.ErrMsgSiteControllerDuplicateEntryFound) {
+			} else if isAlreadyExistsOnSite(err) {
 				// Handle duplicate key error - record error and fail workflow for retry
 				// On retry, IsSSHKeyGroupCreatedOnSite will return true because the Error status detail
 				// contains ErrMsgSiteControllerDuplicateEntryFound, causing the update path to be taken
@@ -713,6 +715,17 @@ func (mskg ManageSSHKeyGroup) IsSSHKeyGroupCreatedOnSite(ctx context.Context, tx
 		}
 	}
 	return cwutil.GetPtr(false), nil
+}
+
+// isAlreadyExistsOnSite reports whether a Site workflow failed because the keyset already exists.
+// Sites running an older Core report a duplicate as Internal with the raw database error text
+// rather than AlreadyExists, so the text is still matched for them.
+func isAlreadyExistsOnSite(err error) bool {
+	var appErr *tsdk.ApplicationError
+	if errors.As(err, &appErr) && slices.Contains(swe.AlreadyExistsErrTypes(), appErr.Type()) {
+		return true
+	}
+	return strings.Contains(err.Error(), util.ErrMsgSiteControllerDuplicateEntryFound)
 }
 
 // NewManageSSHKeyGroup returns a new ManageSSHKeyGroup activity

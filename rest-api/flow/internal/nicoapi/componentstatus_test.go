@@ -46,8 +46,11 @@ func TestMapComponentOperationStatus_Compute(t *testing.T) {
 		{"rotating_host_uefi", "RotatingHostUefi/Init", types.PhaseInUse, allComputeOps()},
 		{"rotating_dpu_uefi", "RotatingDpuUefi/machine-1", types.PhaseInUse, allComputeOps()},
 		{"rotating_nic_lockdown", "RotatingNicLockdown", types.PhaseInUse, allComputeOps()},
+		// Firmware reconciliation must exclude competing power and firmware work.
+		{"nic_firmware_updating", "NicFirmwareUpdating/Reobserving", types.PhaseInUse, allComputeOps()},
 
 		// Terminal.
+		{"nic_firmware_failed", "NicFirmwareUpdating/Failed", types.PhaseError, allComputeOps()},
 		{"failed", "Failed/SomeCause", types.PhaseError, allComputeOps()},
 		{"decommissioning", "Decommissioning/SuppressingSiteExplorer", types.PhaseDeleting, allComputeOps()},
 		{"force_deletion", "ForceDeletion", types.PhaseDeleting, allComputeOps()},

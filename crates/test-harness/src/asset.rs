@@ -23,6 +23,7 @@ use carbide_uuid::switch::{SwitchId, SwitchIdSource, SwitchType};
 use model::power_shelf::{NewPowerShelf, PowerShelfConfig, power_shelf_id};
 use model::rack::RackConfig;
 use model::switch::{NewSwitch, SwitchConfig, switch_id};
+use uuid::Uuid;
 
 use crate::rpc::forge::forge_server::Forge as _;
 use crate::{Api, TestHarness, rpc};
@@ -98,10 +99,21 @@ impl TestSwitch {
 /// An expected-switch fixture identified by its Forge API record.
 pub struct TestExpectedSwitch {
     api: Arc<Api>,
-    id: rpc::common::Uuid,
+    id: Uuid,
 }
 
 impl TestExpectedSwitch {
+    /// Loads the current expected-switch record through the caller's connection.
+    pub async fn db_record(
+        &self,
+        txn: &mut sqlx::PgConnection,
+    ) -> model::expected_switch::ExpectedSwitch {
+        db::expected_switch::find_by_id(txn, self.id)
+            .await
+            .expect("expected switch lookup should succeed")
+            .expect("expected switch should exist")
+    }
+
     pub(crate) async fn create(
         test_harness: &TestHarness,
         expected_switch: rpc::forge::ExpectedSwitch,
@@ -122,7 +134,10 @@ impl TestExpectedSwitch {
             .into_inner();
         let id = expected_switch
             .expected_switch_id
-            .expect("created expected switch should have an id");
+            .expect("created expected switch should have an id")
+            .value
+            .parse()
+            .expect("expected switch API should return a UUID");
 
         Self { api, id }
     }
@@ -131,7 +146,9 @@ impl TestExpectedSwitch {
         self.api
             .get_expected_switch(tonic::Request::new(rpc::forge::ExpectedSwitchRequest {
                 bmc_mac_address: String::new(),
-                expected_switch_id: Some(self.id.clone()),
+                expected_switch_id: Some(rpc::common::Uuid {
+                    value: self.id.to_string(),
+                }),
             }))
             .await
             .expect("expected switch should be found")

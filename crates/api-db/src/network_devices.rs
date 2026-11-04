@@ -114,18 +114,21 @@ async fn create(
     txn: &mut PgConnection,
     data: &LldpSwitchData,
 ) -> Result<NetworkDevice, DatabaseError> {
-    let query = "INSERT INTO network_devices(id, name, description, ip_addresses)
+    let query = format!(
+        "INSERT INTO network_devices(id, name, description, ip_addresses)
                  VALUES($1, $2, $3, $4::inet[])
-                 RETURNING id, name, description, ip_addresses, device_type, discovered_via";
+                 RETURNING {}",
+        NetworkDevice::db_table_columns(),
+    );
 
-    sqlx::query_as(query)
+    sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
         .bind(&data.id)
         .bind(&data.name)
         .bind(&data.description)
         .bind(&data.ip_address)
         .fetch_one(txn)
         .await
-        .map_err(|e| DatabaseError::query(query, e))
+        .map_err(|e| DatabaseError::query(&query, e))
 }
 
 pub async fn get_or_create_network_device(
@@ -161,14 +164,17 @@ pub async fn lock_network_device_table(txn: &mut PgTransaction<'_>) -> Result<()
 /// delete port_to_network_device_map call.
 pub async fn cleanup_unused_switches(txn: &mut PgTransaction<'_>) -> Result<(), DatabaseError> {
     lock_network_device_table(txn).await?;
-    let query = "DELETE FROM network_devices
+    let query = format!(
+        "DELETE FROM network_devices
                  WHERE id NOT IN (SELECT network_device_id FROM port_to_network_device_map)
-                 RETURNING id, name, description, ip_addresses, device_type, discovered_via";
+                 RETURNING {}",
+        NetworkDevice::db_table_columns(),
+    );
 
-    let result = sqlx::query_as::<_, NetworkDevice>(query)
+    let result = sqlx::query_as::<_, NetworkDevice>(sqlx::AssertSqlSafe(query.as_str()))
         .fetch_all(txn.deref_mut())
         .await
-        .map_err(|e| DatabaseError::query(query, e))?;
+        .map_err(|e| DatabaseError::query(&query, e))?;
 
     if !result.is_empty() {
         let ids = result.iter().map(|x| x.id()).join(",");

@@ -27,6 +27,7 @@ use carbide_uuid::power_shelf::PowerShelfId;
 use hyper::http::StatusCode;
 use rpc::forge::forge_server::Forge;
 
+use super::firmware_inventory::FirmwareInventory;
 use super::state_history::StateHistoryTable;
 use super::{Base, filters};
 
@@ -116,6 +117,7 @@ struct PowerShelfDetail {
     capacity: String,
     voltage: String,
     bmc_info: Option<rpc::forge::BmcInfo>,
+    firmware_inventory: FirmwareInventory,
     metadata_detail: super::MetadataDetail,
     health_detail: super::HealthDetail,
     history: StateHistoryTable,
@@ -164,6 +166,7 @@ impl PowerShelfDetail {
                 .map(|v| v.to_string())
                 .unwrap_or_else(|| "N/A".to_string()),
             bmc_info: shelf.bmc_info,
+            firmware_inventory: FirmwareInventory::default(),
             metadata_detail,
             health_detail,
             history,
@@ -208,7 +211,12 @@ pub(super) async fn detail(
         }
     };
 
-    let detail = PowerShelfDetail::new(shelf, history);
+    let mut detail = PowerShelfDetail::new(shelf, history);
+    detail.firmware_inventory = FirmwareInventory::load(
+        &api,
+        detail.bmc_info.as_ref().and_then(|bmc| bmc.ip.as_deref()),
+    )
+    .await;
     (StatusCode::OK, Html(detail.render().unwrap())).into_response()
 }
 

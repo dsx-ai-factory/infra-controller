@@ -695,7 +695,7 @@ An instance in NICo is a bare-metal machine assigned to a tenant within a VPC. C
 | `--instance-type-id` | no | Pick from the pool of machines of this type (alternative to `--machine-id`) |
 | `--operating-system-id` | no | OS for PXE provisioning; see [Templated iPXE Operating Systems](templated-ipxe-operating-systems.md) |
 | `--allow-unhealthy-machine` | no | Override health checks |
-| `--ipxe-script` | no | Custom iPXE script |
+| `--ipxe-script` | no | Custom iPXE script that can use [iPXE script variables](../provisioning/ipxe-script-variables.md). |
 | `--user-data` | no | cloud-init style user data |
 | `--phone-home-enabled` | no | Whether to wait for the OS to phone home for `BootCompleted` |
 | `--network-security-group-id` | no | NSG to apply |
@@ -770,6 +770,44 @@ nicocli instance status-history <instance-id>
 ```
 
 The instance detail response is rich -- it includes `interfaces[]` with assigned IP addresses and VPC prefix info, `ipxeScript` showing the live boot script, `serialConsoleUrl` for console access, full machine and SKU metadata, and any active `deprecations[]` warnings. The API uses inline `deprecations[]` arrays to flag fields scheduled for removal -- watch for these in your responses.
+
+### Network settings in cloud-init user-data
+
+For tenant boots using NICo's NoCloud datasource, NICo extracts a top-level
+`network:` value from user data and serves it as the separate `network-config`
+document. In a `#cloud-config` block mapping, an unindented `network:` entry is
+also removed from the served `user-data` when it can be separated safely. The
+remaining YAML source is preserved. Layouts that cannot be safely rewritten
+remain in user-data, while network extraction is still attempted. These changes
+apply to the boot responses; the stored user data is unchanged.
+
+A `#cloud-config-archive` can carry the same settings inside its cloud-config
+parts. NICo supports static parts declared as `text/cloud-config`, parts beginning
+with a `#cloud-config` header, and untyped parts containing an unmarked YAML
+mapping or a mapping preceded by a comment starting with `#` and a space. Explicit MIME types take
+precedence over content headers. Header matching is case-insensitive and permits
+leading whitespace. Under the default merge rules, the last part defining
+`network` supplies the entire network configuration. NICo removes that key from
+each supported cloud-config part; a network-only part becomes an empty
+cloud-config mapping. Script parts with a `text/x-shellscript` type (including its
+frequency suffixes), untyped scripts beginning with `#!`, and parts explicitly
+typed as `text/cloud-boothook` are preserved. An untyped `#cloud-boothook` part is
+unsupported and causes the entire archive to use the fallback below. Phone-home
+settings and nested installer settings such as `autoinstall.network` are preserved.
+
+When an archive is split, its envelope is rendered as JSON, which is valid YAML.
+String-valued part metadata and the remaining embedded YAML strings are preserved,
+but envelope comments and formatting are not. Use quoted strings for filenames
+and other MIME header metadata to avoid YAML scalar interpretation differences.
+Unquoted metadata values can change meaning under cloud-init's YAML 1.1 rules
+when NICo rewrites the archive as JSON. An archive without network settings is
+served unchanged. Archives with custom merge rules, launch-index filters,
+templates, unsupported part types or layouts, malformed content, metadata that
+cannot survive JSON conversion (such as YAML tags), or references that prevent
+safe splitting are also served unchanged. In these archive fallback cases, the
+separate network response supplies NICo's default DHCPv4 and DHCPv6 configuration
+for interfaces matching `en*` and `eth*`. Do not rely on archive-contained static
+network settings when the archive requires one of these unsupported features.
 
 ### Phone-home
 
@@ -934,7 +972,7 @@ nicocli instance delete <instance-id>
 
 In TUI mode, `instance delete` prompts for confirmation before proceeding. Deletion triggers the full sanitization workflow: secure erase of NVMe storage, GPU and system memory wipe, TPM reset, re-attestation, and network isolation teardown. The machine returns to the available pool once sanitization completes.
 
-### Machine-Level Emergency Operations (gRPC Only)
+### Machine-Level Emergency Operations
 
 If a machine is stuck or unresponsive, operators can use `nico-admin-cli` for
 recovery. Choose the operation that matches the problem:

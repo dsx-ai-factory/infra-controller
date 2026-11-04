@@ -34,7 +34,15 @@ pub async fn create(
         .bind(value.version.to_string())
         .fetch_one(txn)
         .await
-        .map_err(|e| DatabaseError::query(query, e))
+        .map_err(|error| match error {
+            sqlx::Error::Database(db_error) if db_error.is_unique_violation() => {
+                DatabaseError::AlreadyFoundError {
+                    kind: "keyset",
+                    id: format!("{:?}", value.keyset_identifier),
+                }
+            }
+            error => DatabaseError::query(query, error),
+        })
 }
 
 pub async fn find_ids(

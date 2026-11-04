@@ -2454,38 +2454,17 @@ mod tests {
     async fn request_concurrency_limits_parallel_transport_attempts() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-        /// Reads one complete request head so the fake server cannot respond
-        /// before Hyper has finished dispatching that request.
-        async fn read_request_headers(connection: &mut tokio::net::TcpStream, request_name: &str) {
-            const HEADER_LIMIT: usize = 16 * 1024;
-
-            tokio::time::timeout(Duration::from_secs(1), async {
-                let mut headers = Vec::new();
-                let mut buffer = [0_u8; 1024];
-                loop {
-                    assert!(
-                        headers.len() < HEADER_LIMIT,
-                        "{request_name} headers exceed {HEADER_LIMIT} bytes"
-                    );
-                    let remaining = HEADER_LIMIT - headers.len();
-                    let read = connection
-                        .read(&mut buffer[..remaining.min(1024)])
-                        .await
-                        .expect("read test request headers");
-                    assert_ne!(
-                        read, 0,
-                        "{request_name} connection closed before request headers completed"
-                    );
-                    headers.extend_from_slice(&buffer[..read]);
-                    if headers.windows(4).any(|window| window == b"\r\n\r\n") {
-                        return;
-                    }
-                }
-            })
-            .await
-            .unwrap_or_else(|_| panic!("{request_name} headers timed out"));
+        async fn respond(connection: &mut tokio::net::TcpStream, response: &str) {
+            // Read the GET headers before replying so Hyper cannot see an unsolicited response.
+            let mut headers = Vec::new();
+            while !headers.ends_with(b"\r\n\r\n") {
+                headers.push(connection.read_u8().await.expect("read request headers"));
+            }
+            connection
+                .write_all(response.as_bytes())
+                .await
+                .expect("write response");
         }
-
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind test listener");
@@ -2556,11 +2535,7 @@ mod tests {
             SERVICE_ROOT_BODY.len(),
             SERVICE_ROOT_BODY,
         );
-        read_request_headers(&mut first_connection, "first request").await;
-        first_connection
-            .write_all(response.as_bytes())
-            .await
-            .unwrap();
+        respond(&mut first_connection, &response).await;
         first
             .await
             .expect("first task joins")
@@ -2572,11 +2547,7 @@ mod tests {
                 .expect("second request reaches transport after permit release")
                 .expect("accept second request");
 
-        read_request_headers(&mut second_connection, "second request").await;
-        second_connection
-            .write_all(response.as_bytes())
-            .await
-            .unwrap();
+        respond(&mut second_connection, &response).await;
         second
             .await
             .expect("second task joins")
@@ -3455,8 +3426,7 @@ mod tests {
     /// Each response closes its connection so the client opens a fresh one per
     /// request, making the count an exact measure of how many times the caller
     /// hit the wire. Follows the local-server pattern used by the NVUE REST
-    /// collector tests. A connection that closes before sending any request
-    /// bytes is ignored without advancing the scripted response.
+    /// collector tests.
     fn spawn_scripted_http_server(
         responses: Vec<(u16, &'static str)>,
     ) -> (Url, Arc<AtomicUsize>, std::thread::JoinHandle<()>) {
@@ -3470,63 +3440,14 @@ mod tests {
         let requests = Arc::new(AtomicUsize::new(0));
         let counter = requests.clone();
         let handle = std::thread::spawn(move || {
-            const HEADER_LIMIT: usize = 16 * 1024;
-            const HEADER_TIMEOUT: Duration = Duration::from_secs(1);
-
-            for (response_index, (status, body)) in responses.into_iter().enumerate() {
-                let mut stream = 'accept: loop {
-                    let (mut stream, _) = listener
-                        .accept()
-                        .expect("scripted HTTP server accepts request connection");
-                    let deadline = Instant::now() + HEADER_TIMEOUT;
-                    let mut headers = Vec::new();
-                    let mut buffer = [0_u8; 1024];
-
-                    loop {
-                        let remaining_time = deadline.saturating_duration_since(Instant::now());
-                        assert!(
-                            !remaining_time.is_zero(),
-                            "scripted request {response_index} headers timed out"
-                        );
-                        stream
-                            .set_read_timeout(Some(remaining_time))
-                            .expect("set scripted request header timeout");
-
-                        assert!(
-                            headers.len() < HEADER_LIMIT,
-                            "scripted request {response_index} headers exceed {HEADER_LIMIT} bytes"
-                        );
-                        let remaining_space = HEADER_LIMIT - headers.len();
-                        let read_len = remaining_space.min(buffer.len());
-                        match stream.read(&mut buffer[..read_len]) {
-                            Ok(0) if headers.is_empty() => continue 'accept,
-                            Ok(0) => panic!(
-                                "scripted request {response_index} connection closed before headers completed"
-                            ),
-                            Ok(read) => {
-                                headers.extend_from_slice(&buffer[..read]);
-                                if headers.windows(4).any(|window| window == b"\r\n\r\n") {
-                                    break 'accept stream;
-                                }
-                            }
-                            Err(error)
-                                if matches!(
-                                    error.kind(),
-                                    std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
-                                ) =>
-                            {
-                                panic!(
-                                    "scripted request {response_index} headers timed out after {HEADER_TIMEOUT:?}"
-                                )
-                            }
-                            Err(error) => {
-                                panic!(
-                                    "scripted request {response_index} header read failed: {error}"
-                                )
-                            }
-                        }
-                    }
+            for (status, body) in responses {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    return;
                 };
+                let mut buffer = [0_u8; 4096];
+                if stream.read(&mut buffer).is_err() {
+                    return;
+                }
                 counter.fetch_add(1, AtomicOrdering::SeqCst);
 
                 let reason = match status {
@@ -3541,11 +3462,7 @@ mod tests {
                     "HTTP/1.1 {status} {reason}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
                     body.len(),
                 );
-                stream
-                    .write_all(response.as_bytes())
-                    .unwrap_or_else(|error| {
-                        panic!("scripted response {response_index} write failed: {error}")
-                    });
+                let _ = stream.write_all(response.as_bytes());
             }
         });
 

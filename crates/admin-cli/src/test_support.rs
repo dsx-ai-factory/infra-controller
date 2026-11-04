@@ -15,15 +15,23 @@
  * limitations under the License.
  */
 
-//! Test-only helpers for exercising command-line parsing without exposing
-//! implementation fields outside the modules that own them.
+//! Test-only helpers for command-line parsing and mock gRPC responses.
+//! Parsing helpers avoid exposing implementation fields outside their owning modules.
 //!
 //! Prefer typed [`ArgMatches`] accessors when the parsed value's type is part
 //! of the assertion. The raw-value helpers are intended for fields that are
 //! genuinely strings.
 
+use std::convert::Infallible;
+
 use clap::error::ErrorKind;
 use clap::{ArgMatches, CommandFactory, FromArgMatches};
+use futures::stream;
+use http_body_util::combinators::UnsyncBoxBody;
+use http_body_util::{BodyExt, StreamBody};
+use hyper::body::{Bytes, Frame};
+use hyper::{Response, header};
+use prost::Message;
 
 /// Parses `argv`, validates that it constructs `T`, and returns the matches at
 /// the requested nested subcommand path.
@@ -88,4 +96,22 @@ pub(crate) fn raw_values(matches: &ArgMatches, id: &str) -> Vec<String> {
         .flatten()
         .map(|value| value.to_string_lossy().into_owned())
         .collect()
+}
+
+/// Encodes a successful unary gRPC response for a mock server.
+pub(crate) fn grpc_response(message: impl Message) -> Response<UnsyncBoxBody<Bytes, Infallible>> {
+    let mut data = vec![0];
+    data.extend_from_slice(&u32::try_from(message.encoded_len()).unwrap().to_be_bytes());
+    message.encode(&mut data).unwrap();
+    let mut trailers = hyper::HeaderMap::new();
+    trailers.insert("grpc-status", header::HeaderValue::from_static("0"));
+    let body = StreamBody::new(stream::iter([
+        Ok::<_, Infallible>(Frame::data(Bytes::from(data))),
+        Ok(Frame::trailers(trailers)),
+    ]))
+    .boxed_unsync();
+    Response::builder()
+        .header(header::CONTENT_TYPE, "application/grpc+tonic")
+        .body(body)
+        .unwrap()
 }

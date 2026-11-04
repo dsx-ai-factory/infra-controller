@@ -124,3 +124,14 @@ selector:
   matchLabels:
     app.kubernetes.io/metrics: {{ .name }}
 {{- end }}
+
+{{/* Fail unless terminationGracePeriodSeconds exceeds hardware-health's shutdown_timeout. */}}
+{{- define "nico-hardware-health.validateTerminationGracePeriod" -}}
+{{- $shutdownTimeout := "20s" -}}
+{{- if and (kindIs "map" .Values.env) (hasKey .Values.env "CARBIDE_HEALTH__SHUTDOWN_TIMEOUT") -}}
+{{- $shutdownTimeout = toString (index .Values.env "CARBIDE_HEALTH__SHUTDOWN_TIMEOUT") -}}
+{{- end -}}
+{{- if and (regexMatch "^[0-9]+s$" $shutdownTimeout) (le (int .Values.terminationGracePeriodSeconds) (int (trimSuffix "s" $shutdownTimeout))) -}}
+{{- fail (printf "terminationGracePeriodSeconds (%v) must exceed hardware-health's shutdown_timeout (%s)" .Values.terminationGracePeriodSeconds $shutdownTimeout) -}}
+{{- end -}}
+{{- end -}}

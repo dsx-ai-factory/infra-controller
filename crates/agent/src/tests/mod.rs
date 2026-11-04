@@ -16,6 +16,7 @@
  */
 mod bootstrap_ca;
 pub(crate) mod common;
+pub(crate) use common::{respond, respond_then_stall_before_trailers};
 mod full;
 mod lldp_collector;
 mod metrics;

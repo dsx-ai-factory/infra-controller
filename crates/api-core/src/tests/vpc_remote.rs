@@ -4,13 +4,16 @@
 //! VPC creation and deletion against remote VNI pools, injected below the
 //! production selection gate.
 
+use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
+use carbide_network::virtualization::VpcVirtualizationType;
 use carbide_resource_pool::PoolDefinitionSource;
 use carbide_resource_pool_api::v1;
 use carbide_uuid::vpc::VpcId;
 use db::resource_pool::remote;
+use db::test_support::postgres::wait_for_blocked_queries;
 use model::resource_pool::OwnerType;
 use model::resource_pool::allocation::{
     AllocationSource, AllocationState, AssignmentMode, ResourcePoolAllocation, ResourcePoolValue,
@@ -19,6 +22,7 @@ use model::resource_pool::common::{EXTERNAL_VPC_VNI, VPC_VNI};
 use model::resource_pool::remote::{
     AllocationResult, AllocationSelection, CompletionAuthority, ProviderRouteTargetMode,
 };
+use model::vpc::VpcDefinition;
 use rpc::forge;
 use rpc::forge::forge_server::Forge;
 use sqlx::PgPool;
@@ -581,5 +585,410 @@ async fn remote_vpc_cancels_an_unsupported_provider_policy(database: PgPool) -> 
         AllocationState::Cancelled
     );
     assert_eq!(fixture.provider.local.provisioned_count(), 0);
+    fixture.stop().await
+}
+
+/// A later seed failure preserves earlier commits. Recovery cleans only the
+/// failed attempt even when the next startup removes or changes its definition.
+#[crate::sqlx_test]
+async fn configured_vpcs_resume_after_partial_creation(database: PgPool) -> eyre::Result<()> {
+    let mut fixture = RemotePoolFixture::start_with(database, &VPC_POOLS, None).await?;
+    // Leave a third value eligible so the replacement can attach before the
+    // original request has finished cancellation.
+    fixture
+        .definitions
+        .get_mut(VPC_VNI)
+        .expect("VNI definition")
+        .ranges[0]
+        .end = (VPC_POOLS[0].start + 3).to_string();
+    fixture
+        .initialize(PoolDefinitionSource::SeedConfiguration)
+        .await?;
+    let definition = VpcDefinition {
+        organization_id: Some("initial-tenant".into()),
+        network_virtualization_type: VpcVirtualizationType::Flat,
+        routing_profile_type: None,
+        routing_profile_overrides: None,
+        vni: None,
+    };
+    let mut definitions = HashMap::from([
+        ("a-created".into(), definition.clone()),
+        ("z-failed".into(), definition),
+    ]);
+    sqlx::query("ALTER TABLE vpcs ADD CONSTRAINT reject_initial_vpc CHECK (name <> 'z-failed')")
+        .execute(&fixture.env.pool)
+        .await?;
+    let error = crate::db_init::create_initial_vpcs(&fixture.env.api, &definitions)
+        .await
+        .expect_err("the second configured VPC cannot be inserted");
+    assert!(error.to_string().contains("reject_initial_vpc"), "{error}");
+    let created = db::vpc::find_by_name(&fixture.env.pool, "a-created").await?;
+    assert_eq!(created.len(), 1);
+    assert_eq!(
+        receipt(&fixture, created[0].id).await?.state,
+        AllocationState::Attached
+    );
+    assert!(
+        db::vpc::find_by_name(&fixture.env.pool, "z-failed")
+            .await?
+            .is_empty()
+    );
+    let cancelled_ids: Vec<uuid::Uuid> = sqlx::query_scalar(
+        "SELECT allocation_id FROM resource_pool_allocations WHERE state = 'cancel_requested'",
+    )
+    .fetch_all(&fixture.env.pool)
+    .await?;
+    assert_eq!(cancelled_ids.len(), 1);
+    let cancelled_id = cancelled_ids[0];
+    let cancelled = remote::load(&fixture.env.pool, cancelled_id)
+        .await?
+        .expect("saved cancellation");
+    assert_eq!(fixture.provider.local.provisioned_count(), 2);
+
+    // Removing the failed entry does not dispatch another attempt or touch the
+    // already committed VPC. The old request remains available for recovery.
+    let mut changed = definitions.remove("z-failed").expect("failed definition");
+    let allocations = fixture.provider.allocations.load(Ordering::SeqCst);
+    assert_eq!(allocations, 2);
+    fixture.initialize(PoolDefinitionSource::ListenOnly).await?;
+    crate::db_init::create_initial_vpcs(&fixture.env.api, &definitions).await?;
+    assert_eq!(
+        fixture.provider.allocations.load(Ordering::SeqCst),
+        allocations
+    );
+    assert_eq!(
+        db::vpc::find_by_name(&fixture.env.pool, "a-created").await?,
+        created
+    );
+    // The replacement definition gets its own owner and survives cleanup of
+    // the original request, which must never cancel a later allocation.
+    sqlx::query("ALTER TABLE vpcs DROP CONSTRAINT reject_initial_vpc")
+        .execute(&fixture.env.pool)
+        .await?;
+    changed.organization_id = Some("replacement-tenant".into());
+    definitions.insert("z-failed".into(), changed);
+    crate::db_init::create_initial_vpcs(&fixture.env.api, &definitions).await?;
+    let replacement = db::vpc::find_by_name(&fixture.env.pool, "z-failed").await?;
+    assert_eq!(replacement.len(), 1);
+    assert_eq!(
+        replacement[0].config.tenant_organization_id,
+        "replacement-tenant"
+    );
+    let attached = receipt(&fixture, replacement[0].id).await?;
+    assert_eq!(attached.state, AllocationState::Attached);
+    assert_ne!(attached.allocation_id, cancelled.allocation_id);
+    assert_ne!(attached.owner_id, cancelled.owner_id);
+    assert_eq!(fixture.provider.local.provisioned_count(), 3);
+    fixture
+        .remote(VPC_VNI)
+        .reconcile(cancelled_id, &fixture.cancel)
+        .await?;
+    assert_eq!(receipt(&fixture, replacement[0].id).await?, attached);
+    assert_eq!(
+        remote::load(&fixture.env.pool, cancelled_id)
+            .await?
+            .expect("old request")
+            .state,
+        AllocationState::Cancelled,
+    );
+    assert_eq!(fixture.provider.local.provisioned_count(), 2);
+    fixture.stop().await
+}
+
+/// Two startups can reserve independently, but serialize their final name
+/// check. The loser cancels its reservation without changing the winning VPC.
+#[crate::sqlx_test]
+async fn configured_vpcs_converge_on_one_name(database: PgPool) -> eyre::Result<()> {
+    let fixture = vpc_fixture(database, None).await?;
+    let definitions = HashMap::from([(
+        "concurrent-initial".into(),
+        VpcDefinition {
+            organization_id: None,
+            network_virtualization_type: VpcVirtualizationType::Fnn,
+            routing_profile_type: Some("EXTERNAL".into()),
+            routing_profile_overrides: None,
+            vni: None,
+        },
+    )]);
+    let mut blocker = fixture.env.pool.begin().await?;
+    let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *blocker)
+        .await?;
+    db::vpc::lock_initial_name(&mut blocker, "concurrent-initial").await?;
+    let (first, second) = {
+        let creation = async {
+            tokio::join!(
+                crate::db_init::create_initial_vpcs(&fixture.env.api, &definitions),
+                crate::db_init::create_initial_vpcs(&fixture.env.api, &definitions),
+            )
+        };
+        tokio::pin!(creation);
+        tokio::select! {
+            result = &mut creation => panic!("creation bypassed the final name lock: {result:?}"),
+            _ = wait_for_blocked_queries(&fixture.env.pool, blocker_pid, "initial-vpc:", 2) => {}
+        }
+        assert_eq!(fixture.provider.local.provisioned_count(), 2);
+        blocker.commit().await?;
+        tokio::time::timeout(Duration::from_secs(10), creation).await?
+    };
+    first?;
+    second?;
+    let created = db::vpc::find_by_name(&fixture.env.pool, "concurrent-initial").await?;
+    assert_eq!(created.len(), 1);
+    let created = &created[0];
+    uuid::Uuid::parse_str(&created.config.tenant_organization_id)?;
+    assert_eq!(
+        created.config.routing_profile_type.as_deref(),
+        Some("EXTERNAL")
+    );
+    let attached = receipt(&fixture, created.id).await?;
+    assert_eq!(attached.pool_name, VPC_VNI);
+    assert_eq!(attached.state, AllocationState::Attached);
+    let AllocationSource::Remote {
+        result: Some(AllocationResult::Allocated(assignment)),
+        ..
+    } = &attached.source
+    else {
+        panic!("attached provider assignment: {attached:?}");
+    };
+    let ResourcePoolValue::Integer(vni) = assignment.value else {
+        panic!("integer VNI: {assignment:?}");
+    };
+    assert_eq!(created.config.vni, Some(i32::try_from(vni)?));
+    assert_eq!(created.status.vni, Some(i32::try_from(vni)?));
+    let cancelled_ids: Vec<uuid::Uuid> = sqlx::query_scalar(
+        "SELECT allocation_id FROM resource_pool_allocations WHERE state = 'cancel_requested'",
+    )
+    .fetch_all(&fixture.env.pool)
+    .await?;
+    assert_eq!(cancelled_ids.len(), 1);
+    let cancelled_id = cancelled_ids[0];
+    fixture
+        .remote(VPC_VNI)
+        .reconcile(cancelled_id, &fixture.cancel)
+        .await?;
+    assert_eq!(fixture.provider.local.provisioned_count(), 1);
+    assert_eq!(receipt(&fixture, created.id).await?, attached);
+    crate::db_init::create_initial_vpcs(&fixture.env.api, &definitions).await?;
+    assert_eq!(fixture.provider.allocations.load(Ordering::SeqCst), 2);
+    fixture.stop().await
+}
+
+/// A configured manual VNI must reach the provider's requested partition and
+/// be saved in both fields, just as configured Integrated allocations are.
+#[crate::sqlx_test]
+async fn configured_vpc_preserves_a_requested_vni(database: PgPool) -> eyre::Result<()> {
+    let mut fixture = RemotePoolFixture::start_with(
+        database,
+        &[RemotePool {
+            name: VPC_VNI,
+            start: 20_001,
+            auto_assign: false,
+        }],
+        None,
+    )
+    .await?;
+    fixture
+        .initialize(PoolDefinitionSource::SeedConfiguration)
+        .await?;
+    let definitions = HashMap::from([(
+        "requested-initial".into(),
+        VpcDefinition {
+            organization_id: Some("initial-tenant".into()),
+            network_virtualization_type: VpcVirtualizationType::Flat,
+            routing_profile_type: None,
+            routing_profile_overrides: None,
+            vni: Some(20_001),
+        },
+    )]);
+    crate::db_init::create_initial_vpcs(&fixture.env.api, &definitions).await?;
+    let created = db::vpc::find_by_name(&fixture.env.pool, "requested-initial").await?;
+    assert_eq!(created.len(), 1);
+    assert_eq!(created[0].config.vni, Some(20_001));
+    assert_eq!(created[0].status.vni, Some(20_001));
+    let attached = receipt(&fixture, created[0].id).await?;
+    assert_eq!(attached.state, AllocationState::Attached);
+    let AllocationSource::Remote {
+        request,
+        result: Some(AllocationResult::Allocated(assignment)),
+        ..
+    } = &attached.source
+    else {
+        panic!("requested provider assignment: {attached:?}");
+    };
+    assert_eq!(
+        request.selection,
+        AllocationSelection::Requested(ResourcePoolValue::Integer(20_001))
+    );
+    assert_eq!(assignment.value, ResourcePoolValue::Integer(20_001));
+    assert_eq!(assignment.assignment_mode, AssignmentMode::Manual);
+    fixture.stop().await
+}
+
+/// Lookup errors must remain SELECT failures. Before preparation they must
+/// prevent dispatch; after preparation they must leave the assignment for cleanup.
+#[crate::sqlx_test]
+async fn configured_vpc_lookup_failures_preserve_cleanup(database: PgPool) -> eyre::Result<()> {
+    let fixture = vpc_fixture(database, None).await?;
+    let definitions = HashMap::from([(
+        "lookup-failure".into(),
+        VpcDefinition {
+            organization_id: Some("initial-tenant".into()),
+            network_virtualization_type: VpcVirtualizationType::Flat,
+            routing_profile_type: None,
+            routing_profile_overrides: None,
+            vni: None,
+        },
+    )]);
+    for after_preparation in [false, true] {
+        let error = if after_preparation {
+            // Let the initial lookup and provider reservation succeed before
+            // making the final, locked name lookup fail.
+            let pause = fixture.provider.allocate_pause.clone();
+            pause.pause_next.store(true, Ordering::SeqCst);
+            let creation = crate::db_init::create_initial_vpcs(&fixture.env.api, &definitions);
+            tokio::pin!(creation);
+            tokio::select! {
+                result = &mut creation => panic!("creation bypassed the reply gate: {result:?}"),
+                reached = tokio::time::timeout(Duration::from_secs(5), pause.entered.notified()) => reached?,
+            }
+            assert_eq!(fixture.provider.local.provisioned_count(), 1);
+            sqlx::query("ALTER TABLE vpcs RENAME TO unavailable_vpcs").execute(&fixture.env.pool).await?;
+            pause.resume.notify_one();
+            tokio::time::timeout(Duration::from_secs(5), creation).await?
+        } else {
+            // The first lookup fails while the provider is otherwise usable.
+            sqlx::query("ALTER TABLE vpcs RENAME TO unavailable_vpcs").execute(&fixture.env.pool).await?;
+            crate::db_init::create_initial_vpcs(&fixture.env.api, &definitions).await
+        }.expect_err("name lookup must fail");
+        let crate::CarbideError::DBError(annotated) = &error else {
+            panic!("expected the original lookup error: {error:?}");
+        };
+        assert_eq!(
+            annotated
+                .source
+                .as_database_error()
+                .and_then(|e| e.code())
+                .as_deref(),
+            Some("42P01")
+        );
+        let diagnostic = format!("{annotated:?}");
+        assert!(diagnostic.contains("SELECT"), "{diagnostic}");
+        assert!(!diagnostic.contains("INSERT"), "{diagnostic}");
+        sqlx::query("ALTER TABLE unavailable_vpcs RENAME TO vpcs")
+            .execute(&fixture.env.pool)
+            .await?;
+        assert!(
+            db::vpc::find_by_name(&fixture.env.pool, "lookup-failure")
+                .await?
+                .is_empty()
+        );
+        assert_eq!(
+            fixture.provider.allocations.load(Ordering::SeqCst),
+            usize::from(after_preparation)
+        );
+        let ids: Vec<uuid::Uuid> = sqlx::query_scalar(
+            "SELECT allocation_id FROM resource_pool_allocations WHERE state = 'cancel_requested'",
+        )
+        .fetch_all(&fixture.env.pool)
+        .await?;
+        assert_eq!(ids.len(), usize::from(after_preparation));
+        if let Some(id) = ids.first() {
+            fixture
+                .remote(VPC_VNI)
+                .reconcile(*id, &fixture.cancel)
+                .await?;
+            assert_eq!(
+                remote::load(&fixture.env.pool, *id)
+                    .await?
+                    .expect("failed request")
+                    .state,
+                AllocationState::Cancelled
+            );
+        }
+        assert_eq!(fixture.provider.local.provisioned_count(), 0);
+    }
+    fixture.stop().await
+}
+
+/// A stalled startup must not hold another startup indefinitely. Both the
+/// server deadline and shutdown interrupt its lock wait before saving cleanup.
+#[crate::sqlx_test]
+async fn configured_vpc_name_wait_is_bounded_and_cancellable(database: PgPool) -> eyre::Result<()> {
+    let fixture = vpc_fixture(database, None).await?;
+    // With no operator limit, only the configured completion transaction can
+    // stop the SQL wait. This proof intentionally waits for its five-second bound.
+    let timeout: String = sqlx::query_scalar("SHOW statement_timeout")
+        .fetch_one(&fixture.env.pool)
+        .await?;
+    assert_eq!(timeout, "0");
+    for shutdown in [false, true] {
+        let name = if shutdown {
+            "cancelled-name-wait"
+        } else {
+            "expired-name-wait"
+        };
+        let definitions = HashMap::from([(
+            name.into(),
+            VpcDefinition {
+                organization_id: Some("initial-tenant".into()),
+                network_virtualization_type: VpcVirtualizationType::Flat,
+                routing_profile_type: None,
+                routing_profile_overrides: None,
+                vni: None,
+            },
+        )]);
+        let mut blocker = fixture.env.pool.begin().await?;
+        let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *blocker)
+            .await?;
+        db::vpc::lock_initial_name(&mut blocker, name).await?;
+        let error = {
+            let creation = crate::db_init::create_initial_vpcs(&fixture.env.api, &definitions);
+            tokio::pin!(creation);
+            tokio::select! {
+                result = &mut creation => panic!("creation bypassed the name lock: {result:?}"),
+                _ = wait_for_blocked_queries(&fixture.env.pool, pid, "initial-vpc:", 1) => {},
+            }
+            assert_eq!(fixture.provider.local.provisioned_count(), 1);
+            if shutdown {
+                // Cancel only once PostgreSQL confirms the operation is blocked.
+                fixture.env.api.cancel_token.cancel();
+            }
+            tokio::time::timeout(Duration::from_secs(8), creation)
+                .await?
+                .expect_err("blocked creation must stop")
+        };
+        if shutdown {
+            assert_eq!(tonic::Status::from(error).code(), Code::Cancelled);
+        } else {
+            assert!(error.to_string().contains("statement timeout"), "{error:?}");
+        }
+        assert!(
+            db::vpc::find_by_name(&fixture.env.pool, name)
+                .await?
+                .is_empty()
+        );
+        let ids: Vec<uuid::Uuid> = sqlx::query_scalar(
+            "SELECT allocation_id FROM resource_pool_allocations WHERE state = 'cancel_requested'",
+        )
+        .fetch_all(&fixture.env.pool)
+        .await?;
+        assert_eq!(ids.len(), 1);
+        // Keep the blocker held through the result and cleanup-intent checks.
+        blocker.commit().await?;
+        fixture
+            .remote(VPC_VNI)
+            .reconcile(ids[0], &fixture.cancel)
+            .await?;
+        assert_eq!(
+            remote::load(&fixture.env.pool, ids[0])
+                .await?
+                .expect("interrupted request")
+                .state,
+            AllocationState::Cancelled
+        );
+        assert_eq!(fixture.provider.local.provisioned_count(), 0);
+    }
     fixture.stop().await
 }

@@ -81,6 +81,8 @@ impl InternalRBACRules {
         x.perm("FindVpcIds", vec![SiteAgent, ForgeAdminCLI, Machineatron]);
         x.perm("FindVpcsByIds", vec![ForgeAdminCLI, SiteAgent]);
         x.perm("GetVpcRoutingState", vec![ForgeAdminCLI, SiteAgent]);
+        x.perm("FindRoutingProfileNames", vec![ForgeAdminCLI, SiteAgent]);
+        x.perm("FindRoutingProfilesByNames", vec![ForgeAdminCLI, SiteAgent]);
         x.perm("CreateSitePrefix", vec![ForgeAdminCLI, SiteAgent]);
         x.perm("UpdateSitePrefix", vec![ForgeAdminCLI, SiteAgent]);
         x.perm("DeleteSitePrefix", vec![ForgeAdminCLI, SiteAgent]);
@@ -347,7 +349,10 @@ impl InternalRBACRules {
         x.perm("FindExploredManagedHostsByIds", vec![ForgeAdminCLI, Flow]);
         x.perm("FindExploredMlxDeviceHostIds", vec![ForgeAdminCLI]);
         x.perm("FindExploredMlxDevicesByIds", vec![ForgeAdminCLI]);
-        x.perm("AdminForceDeleteMachine", vec![ForgeAdminCLI, Machineatron]);
+        x.perm(
+            "AdminForceDeleteMachine",
+            vec![ForgeAdminCLI, Machineatron, SiteAgent],
+        );
         x.perm("AdminFindReservedAddressIds", vec![ForgeAdminCLI]);
         x.perm("AdminFindReservedAddressesByIds", vec![ForgeAdminCLI]);
         x.perm("AdminReleaseReservedAddresses", vec![ForgeAdminCLI]);
@@ -563,6 +568,14 @@ impl InternalRBACRules {
             vec![ForgeAdminCLI],
         );
         x.perm("ReWrapSecrets", vec![ForgeAdminCLI]);
+        // Register the contract RPCs without granting access before tenant/site
+        // authorization and the external-validation workflow are implemented.
+        x.perm("FindExternalValidationHoldIds", vec![]);
+        x.perm("FindExternalValidationHoldsByIds", vec![]);
+        x.perm("StartExternalValidation", vec![]);
+        x.perm("CancelExternalValidation", vec![]);
+        x.perm("CompleteExternalValidation", vec![]);
+        x.perm("RemoveExternalValidationHold", vec![]);
         x.perm("GetIpxeTemplate", vec![ForgeAdminCLI, SiteAgent]);
         x.perm("ListIpxeTemplates", vec![ForgeAdminCLI, SiteAgent]);
         x.perm("FindRackStateHistories", vec![ForgeAdminCLI, Machineatron]);
@@ -1362,6 +1375,39 @@ mod rbac_rule_tests {
         }
     }
 
+    #[test]
+    fn routing_profile_inventory_permissions() {
+        for (principal, allowed) in [
+            (
+                Principal::ExternalUser(ExternalUserInfo::new(
+                    None,
+                    "nico-cli-client".into(),
+                    None,
+                )),
+                true,
+            ),
+            (
+                Principal::SpiffeServiceIdentifier("elektra-site-agent".into()),
+                true,
+            ),
+            (Principal::SpiffeServiceIdentifier("nico-dns".into()), false),
+            (Principal::SpiffeMachineIdentifier("dpu".into()), false),
+            (Principal::Anonymous, false),
+        ] {
+            for method in ["FindRoutingProfileNames", "FindRoutingProfilesByNames"] {
+                assert_eq!(
+                    InternalRBACRules::allowed_from_static(
+                        method,
+                        std::slice::from_ref(&principal)
+                    ),
+                    allowed,
+                    "{method}: {}",
+                    principal.as_identifier()
+                );
+            }
+        }
+    }
+
     /// Power details belong to operator and Flow callers; unrelated device and
     /// site services must not gain access through this additive RPC.
     #[test]
@@ -1770,6 +1816,7 @@ mod rbac_rule_tests {
 
         // REST admin operations proxy to Core as the site agent (issue #4597).
         for method in [
+            "AdminForceDeleteMachine",
             "AdminBmcReset",
             "AdminPowerControl",
             "TriggerDpuReprovisioning",
@@ -1960,6 +2007,22 @@ mod rbac_rule_tests {
         }
 
         Ok(())
+    }
+
+    /// Contract publication must not authorize any internal principal.
+    #[test]
+    fn external_validation_contract_has_no_static_grants() {
+        let rules = InternalRBACRules::new();
+        for method in [
+            "FindExternalValidationHoldIds",
+            "FindExternalValidationHoldsByIds",
+            "StartExternalValidation",
+            "CancelExternalValidation",
+            "CompleteExternalValidation",
+            "RemoveExternalValidationHold",
+        ] {
+            assert!(rules.perms[method].principals.is_empty(), "{method}");
+        }
     }
 
     #[test]

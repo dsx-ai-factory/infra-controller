@@ -138,6 +138,8 @@ navigation:
           path: provisioning/site-setup-api-parity.md
         - page: Boot Interfaces and DPU Policies
           path: provisioning/boot-interfaces-and-dpu-modes.md
+        - page: iPXE Script Variables
+          path: provisioning/ipxe-script-variables.md
         - page: Machine Validation
           path: provisioning/machine-validation.md
         - page: SKU Validation
@@ -269,6 +271,8 @@ navigation:
           path: operations/leak-detection-handling.md
         - section: Managing VPCs
           contents:
+            - page: Tenant Connectivity and Shared Services
+              path: manuals/vpc/tenant_connectivity.md
             - page: VPC Routing Profiles
               path: manuals/vpc/vpc_routing_profiles.md
             - page: Changing a VPC Routing Profile
@@ -407,6 +411,12 @@ navigation:
               path: development/tls.md
             - page: nico-admin-cli
               path: manuals/nico-admin-cli.md
+            - section: Routing Profile CLI Reference
+              contents:
+                - link: Routing Profile Overview
+                  href: https://github.com/dsx-ai-factory/infra-controller/blob/main/docs/manuals/nico-admin-cli/commands/routing-profile/routing-profile.md
+                - link: Show Routing Profiles
+                  href: https://github.com/dsx-ai-factory/infra-controller/blob/main/docs/manuals/nico-admin-cli/commands/routing-profile/routing-profile-show.md
             - section: NIC Firmware CLI Reference
               contents:
                 - link: NIC Firmware Overview

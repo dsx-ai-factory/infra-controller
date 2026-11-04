@@ -64,6 +64,8 @@ COMPLETE_WORKFLOW = textwrap.dedent(
           - build
         steps:
           - run: true
+      prune-sccache:
+        runs-on: ubuntu-latest
     """
 )
 
@@ -198,6 +200,39 @@ class InventoryTests(unittest.TestCase):
             _read_job_condition("rest", "build-and-push-pr"),
             "${{ startsWith(github.ref, 'refs/heads/pull-request/') }}",
         )
+
+    def test_publishing_checks_do_not_add_prerequisite_jobs_to_changes(self) -> None:
+        """Keep `changes` without prerequisite jobs and guard its publishing steps.
+
+        Ordinary pushes must remain schedulable without running publishing
+        authorization or Node setup.
+        """
+        # Read the existing detector and the publishing steps from the shipped workflow.
+        changes = _read_job_yaml("core", "changes")
+        cases = (
+            # Authorization API calls are limited to publishing requests.
+            "Validate PR publishing request",
+            # Node installation must leave ordinary CI setup unchanged.
+            "Set up Node for PR publishing tests",
+            # The publishing test suite must not become a requirement for ordinary pushes.
+            "Test PR publishing authorization",
+        )
+
+        # Keep change detection free of prerequisite jobs and event restrictions.
+        self.assertNotIn("\n    needs:", changes)
+        self.assertEqual(_read_job_condition("core", "changes"), "")
+        for step_name in cases:
+            with self.subTest(step=step_name):
+                # Locate the shipped step before checking its event restriction.
+                marker = f"      - name: {step_name}\n"
+                self.assertIn(marker, changes)
+                step = changes.split(marker, 1)[1].split("\n      - ", 1)[0]
+
+                # Skip the publishing work during every ordinary push.
+                self.assertEqual(
+                    re.findall(r"^        if: (.+)$", step, re.MULTILINE),
+                    ["github.event_name == 'workflow_dispatch'"],
+                )
 
     def test_ci_workflow_edits_select_lint_police(self) -> None:
         # A `ci.yaml` change must select lint through `source_files`. A match
@@ -536,6 +571,11 @@ class ResultTests(unittest.TestCase):
         )
 
     def test_core_jobs_follow_prepare_outputs(self) -> None:
+        """Permit only the skips selected by each prepare output.
+
+        Separate image and release decisions let PRs publish manifests without
+        requiring Helm uploads or production promotion to pass Core CI.
+        """
         for output_name, jobs in CORE_JOBS_BY_PREPARE_OUTPUT.items():
             with self.subTest(output_name):
                 skipped_jobs = set(jobs)
@@ -543,10 +583,13 @@ class ResultTests(unittest.TestCase):
                     # Publication stays enabled, but the manifest cannot run
                     # when its architecture builds were not selected.
                     skipped_jobs.add("merge-manifests-machine-lifecycle-test")
+                # Start with successful jobs except those selected by this output.
                 job_results, environment = _build_result_context(
                     "core", skipped_jobs=skipped_jobs
                 )
+                # Disable only this decision to prove independent publication controls.
                 job_results["prepare"]["outputs"][output_name] = "false"
+                # Accept the selected skips while every other selected job succeeds.
                 self.assertEqual(
                     result_errors(job_results, "core", environment=environment),
                     [],
@@ -563,10 +606,13 @@ class ResultTests(unittest.TestCase):
         )
 
     def test_every_gated_job_rejects_an_unexpected_skip(self) -> None:
+        """Reject skips of selected jobs so required CI checks cannot be bypassed."""
+        # Start with successful jobs and enabled build decisions to require each selected job.
         core_results, core_environment = _build_result_context("core")
         for job in _read_gate_dependencies("core"):
             with self.subTest(workflow="core", job=job):
                 mutated = copy.deepcopy(core_results)
+                # Skip the selected job to prove its omission blocks the final gate.
                 mutated[job]["result"] = "skipped"
                 self.assertIn(
                     f"`{job}` was unexpectedly skipped",

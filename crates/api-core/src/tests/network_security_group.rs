@@ -1479,6 +1479,7 @@ async fn test_vpc_network_security_group_propagation_includes_addressless_interf
                 ..Default::default()
             }),
             allow_unhealthy_machine: false,
+            external_validation_request_id: None,
         }))
         .await?;
 
@@ -1674,6 +1675,7 @@ async fn test_network_security_group_propagation_impl(
                 labels: vec![],
             }),
             allow_unhealthy_machine: false,
+            external_validation_request_id: None,
         }))
         .await
         .unwrap();
@@ -1910,6 +1912,7 @@ async fn test_network_security_group_propagation_impl(
                 labels: vec![],
             }),
             allow_unhealthy_machine: false,
+            external_validation_request_id: None,
         }))
         .await
         .unwrap();

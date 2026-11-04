@@ -80,6 +80,21 @@ impl CallError {
             CallError::Timeout | CallError::Pushback { .. } | CallError::Transport(_)
         )
     }
+
+    /// nico-api does not serve the called RPC: UNIMPLEMENTED, or the
+    /// PERMISSION_DENIED its RBAC answers for a method it has no rule for.
+    pub(crate) fn is_unserved_rpc(&self) -> bool {
+        self.is_unimplemented() || self.is_permission_denied()
+    }
+
+    /// UNIMPLEMENTED: the nico-api has no such RPC.
+    pub(crate) fn is_unimplemented(&self) -> bool {
+        matches!(self, CallError::Status(code) if code == "gRPC Unimplemented")
+    }
+
+    fn is_permission_denied(&self) -> bool {
+        matches!(self, CallError::Status(code) if code == "gRPC PermissionDenied")
+    }
 }
 
 impl fmt::Display for CallError {
@@ -638,6 +653,17 @@ mod tests {
             CallError::Status("gRPC PermissionDenied".to_string())
         );
         assert!(!format!("{denied} {}", denied.category()).contains("SENTINEL"));
+        assert!(denied.is_unserved_rpc() && !denied.is_unimplemented());
+        let unimplemented = classify_grpc(&tonic::Status::unimplemented(""));
+        assert!(unimplemented.is_unserved_rpc() && unimplemented.is_unimplemented());
+        for other in [
+            classify_grpc(&tonic::Status::internal("")),
+            classify_grpc(&tonic::Status::unavailable("")),
+            classify_grpc(&tonic::Status::unauthenticated("")),
+            CallError::Status("HTTP 403".to_string()),
+        ] {
+            assert!(!other.is_unserved_rpc(), "{other:?}");
+        }
     }
 
     #[tokio::test(start_paused = true)]

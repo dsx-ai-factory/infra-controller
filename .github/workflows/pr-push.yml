@@ -1,0 +1,92 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: PR image publishing
+
+on:
+  issue_comment:
+    types: [created]
+  workflow_run:
+    workflows: ["NICo Core CI"]
+    types: [completed]
+
+permissions: {}
+
+jobs:
+  request:
+    if: >-
+      github.event_name == 'issue_comment'
+      && github.repository == 'dsx-ai-factory/infra-controller'
+      && github.event.issue.pull_request
+      && startsWith(github.event.comment.body, '/ok to push')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+      issues: write
+      actions: write
+    steps:
+      # issue_comment selects the default branch; PR code never runs in this job.
+      - name: Checkout command handler
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          ref: ${{ github.sha }}
+
+      - name: Authorize and dispatch PR image build
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { authorizePush } = require('./.github/ci/pr_push.cjs');
+            const issue_number = context.issue.number;
+            let approved;
+            try {
+              // Record the approved SHA before dispatching the mutable mirror branch.
+              approved = await authorizePush({
+                github, ...context.repo, prNumber: issue_number,
+                commentId: context.payload.comment.id,
+              });
+              await github.rest.actions.createWorkflowDispatch({
+                ...context.repo, workflow_id: 'ci.yaml', ref: approved.ref,
+                inputs: { expected_sha: approved.sha, comment_id: String(context.payload.comment.id) },
+              });
+            } catch (error) {
+              core.setFailed(error.message);
+              await github.rest.issues.createComment({
+                ...context.repo, issue_number,
+                body: 'PR image publishing could not be queued: ' + error.message,
+              });
+              return;
+            }
+            await github.rest.issues.createComment({
+              ...context.repo, issue_number,
+              body: 'Queued PR image publishing for `' + approved.sha + '`. ' +
+                'The build rechecks this authorization before running. ' +
+                '[View Core CI runs](' + context.serverUrl + '/' +
+                context.repo.owner + '/' + context.repo.repo + '/actions/workflows/ci.yaml).',
+            });
+
+  report:
+    if: >-
+      github.event_name == 'workflow_run'
+      && github.repository == 'dsx-ai-factory/infra-controller'
+      && github.event.workflow_run.event == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      issues: write
+    steps:
+      # Use GitHub's run metadata without downloading or executing PR artifacts.
+      - name: Report PR image build result
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const run = context.payload.workflow_run;
+            const match = /^pull-request\/([1-9][0-9]*)$/.exec(run.head_branch);
+            if (!match) return;
+            await github.rest.issues.createComment({
+              ...context.repo, issue_number: Number(match[1]),
+              body: 'PR image build for `' + run.head_sha + '`: **' + run.conclusion + '**. ' +
+                '[View the build and published image tags and digests](' + run.html_url + ').',
+            });

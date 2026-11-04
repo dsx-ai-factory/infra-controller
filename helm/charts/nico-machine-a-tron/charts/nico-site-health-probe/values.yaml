@@ -59,7 +59,8 @@ serviceMonitor:
 
 ## nico-api client certificate (ca.crt, tls.crt, tls.key) for the state
 ## readers. Required while a nico-api reader is on: the probe's SPIFFE
-## identity may call only FindMachineIds and FindMachinesByIds. The
+## identity may call only FindMachineIds, FindMachinesByIds and
+## FindHostStatesByIds. The
 ## certificate must map to an external user through a trusted issuer.
 nicoApiClientCert:
   existingSecret: ""
@@ -69,7 +70,8 @@ nicoApiClientCert:
 ## namespace defaults to the release namespace; set identityNamespace only
 ## when nico-api runs in a different namespace than this probe. The service
 ## name must stay "nico-site-health-probe" — nico-api's internal RBAC grants
-## exactly this identity read access to FindMachineIds/FindMachinesByIds.
+## exactly this identity read access to FindMachineIds, FindMachinesByIds
+## and FindHostStatesByIds.
 certificate:
   identityNamespace: ""
   spiffeServiceName: nico-site-health-probe
@@ -134,9 +136,10 @@ state:
     maxBackoff: 30s
   nicoApi:
     target: "nico-api.nico-system.svc.cluster.local:1079"
-    ## full: FindMachinesByIds. compact and auto need nico-api's compact
-    ## host read.
-    hostRead: full
+    ## auto: the compact host read (FindHostStatesByIds), or FindMachinesByIds
+    ## for the life of the pod when nico-api does not implement it, and for
+    ## 10 sweeps at a time when it denies it. full and compact pin one read.
+    hostRead: auto
     batchSize: 100
     maxDecodingMessageSize: 67108864
   ## nico-rest-api, GET only. Each identity uses client credentials
@@ -165,6 +168,18 @@ state:
       enabled: false
       interval: 120s
       timeout: 600s
+  ## /v1/config names the stored series for clients that read them back:
+  ## a selector and the scrape cadence. With serviceMonitor.enabled the
+  ## cadence is serviceMonitor.interval, and the selector defaults to the
+  ## scrape job (the metrics Service) and the release namespace. Override it
+  ## only when the store relabels them, for example {job: site-probe,
+  ## cluster: c1}. For another scraper, set scrapeInterval (a quoted
+  ## Prometheus duration) and the selector its series carry. Labels starting
+  ## with __ and the probe's own series labels (type, family, ...) are
+  ## refused.
+  metrics:
+    selector: {}
+    scrapeInterval: ""
   ## A replaced snapshot that a /v1/units cursor points into stays readable
   ## this long for the paging client. Others are dropped when replaced.
   paging:

@@ -63,6 +63,10 @@ struct State {
     accepted_lldp_snapshot_fingerprint: Option<Vec<u8>>,
     reject_dhcp_update: bool,
     dhcp_updates: Vec<(bool, Bytes)>,
+    // Enables the fixed listener and reservation only in the DHCP retry scenario.
+    include_service_vpc: bool,
+    // Changes one reservation field without changing any explicit network version.
+    service_mac_address: &'static str,
     include_ipv6_tenant: bool,
     quarantine_host: bool,
     post_config_wait_seen: bool,
@@ -97,10 +101,13 @@ async fn test_fnn_l3() -> eyre::Result<()> {
     test_nvue_generic(VpcVirtualizationType::Fnn, expected).await
 }
 
-/// A transient DHCP rejection must leave the desired version pending, then
-/// retry the identical request after the endpoint recovers.
+/// Verifies the agent leaves Tenant configuration pending and preserves the NVUE startup file
+/// during a transient service-reservation submission failure when the DPU's primary loopback is
+/// IPv6, then retries the complete replacement.
+/// Later unchanged and MAC-only responses must still reach the control transport so sidecar
+/// restart repair and service MAC changes do not depend on version bumps.
 #[tokio::test(flavor = "multi_thread")]
-async fn dhcp_unavailability_retries_the_same_ipv6_network_configuration() -> eyre::Result<()> {
+async fn service_dhcp_unavailability_retries_the_same_network_configuration() -> eyre::Result<()> {
     network_update_retries_the_same_configuration(false).await
 }
 
@@ -321,8 +328,10 @@ async fn astra_failure_reports_without_blocking_network_configuration_and_recove
     result
 }
 
-/// Exercise both network failure boundaries through the real agent and Core
-/// status RPCs, with child-local environment overrides instead of global writes.
+/// Exercises DHCP rejection or FMDS readiness and route failures through the real agent and Core
+/// status RPCs with child-local environment overrides instead of global writes.
+/// The DHCP case also verifies unchanged-request resubmission for sidecar restart repair and
+/// same-version service MAC replacements received by the DHCP control mock.
 async fn network_update_retries_the_same_configuration(fail_fmds_route: bool) -> eyre::Result<()> {
     let repo_root = std::env::var("REPO_ROOT")
         .or_else(|_| std::env::var("CONTAINER_REPO_ROOT"))
@@ -356,7 +365,7 @@ async fn network_update_retries_the_same_configuration(fail_fmds_route: bool) ->
                 if fail_fmds_route {
                     "tests::full::fmds_failure_applies_quarantine_and_retries_the_same_network_configuration"
                 } else {
-                    "tests::full::dhcp_unavailability_retries_the_same_ipv6_network_configuration"
+                    "tests::full::service_dhcp_unavailability_retries_the_same_network_configuration"
                 },
                 "--nocapture",
             ])
@@ -388,10 +397,14 @@ async fn network_update_retries_the_same_configuration(fail_fmds_route: bool) ->
 
     let state = Arc::new(Mutex::new(State {
         virtualization_type: VpcVirtualizationType::EthernetVirtualizer,
+        // Keep both scenarios IPv6-primary to exercise the DHCP-before-NVUE acceptance check.
         loopback_ip_override: Some("2001:db8::1"),
         reject_next_network_status: true,
         reject_dhcp_update: !fail_fmds_route,
-        include_ipv6_tenant: fail_fmds_route,
+        // Only the DHCP failure branch carries the service replacement under retry.
+        include_service_vpc: !fail_fmds_route,
+        service_mac_address: "02:00:00:00:00:01", // Seed the later MAC-only replacement.
+        include_ipv6_tenant: true,
         quarantine_host: fail_fmds_route,
         ..Default::default()
     }));
@@ -430,6 +443,7 @@ async fn network_update_retries_the_same_configuration(fail_fmds_route: bool) ->
         }
         fs::create_dir_all(directory.path().join("var/support/forge-dhcp/conf"))?;
         let startup_path = directory.path().join(crate::nvue::PATH);
+        // Seed an existing startup file to observe whether a failed update replaces it.
         const PREVIOUS_NETWORK: &str = "previous network configuration\n";
         fs::write(&startup_path, PREVIOUS_NETWORK)?;
 
@@ -445,8 +459,8 @@ async fn network_update_retries_the_same_configuration(fail_fmds_route: bool) ->
             }
         });
         let result = async {
-            // DHCP rejection still gates NVUE. FMDS readiness failure must leave
-            // the version pending without withholding the quarantine update.
+            // IPv6-primary DHCP rejection withholds NVUE and acknowledgment. FMDS readiness failure
+            // leaves the version pending without withholding the quarantine update.
             let expected_error = if fail_fmds_route {
                 "duplicate address detection failed for fd00:76b9::254"
             } else {
@@ -486,11 +500,15 @@ async fn network_update_retries_the_same_configuration(fail_fmds_route: bool) ->
                 assert!(config["interface"]["pf0hpf_if"]["acl"][quarantine_acl]["outbound"].is_mapping(),
                     "quarantine ACL is not attached: {:#?}", config["interface"]);
                 let directory = std::path::PathBuf::from(std::env::var("FMDS_TEST_COMMAND_DIR")?);
+                // Verify that quarantine applies its required OVS restart while FMDS is failing.
                 assert_eq!(fs::read_to_string(directory.join("ovs-restarts"))?, "restart ovs-vswitchd.service\n");
+                // Verify that applying NVUE still starts the post-config health wait.
                 assert!(state.lock().await.post_config_wait_seen,
                     "an applied NVUE update must retain the post-config health wait after FMDS failure");
+                // Verify that failed DAD prevents route application.
                 assert!(!directory.join("attempts").exists(), "DAD failure must precede route application");
             } else {
+                // DHCP acceptance must precede replacing the existing IPv6-primary network.
                 eyre::ensure!(
                     fs::read_to_string(&startup_path)? == PREVIOUS_NETWORK,
                     "DHCP rejection overwrote the existing network configuration"
@@ -559,16 +577,20 @@ async fn network_update_retries_the_same_configuration(fail_fmds_route: bool) ->
             } else {
                 state.lock().await.reject_dhcp_update = false;
             }
+            // Wait for a later iteration to acknowledge the same desired versions after recovery.
             let applied = wait_for_network_status(&state, |status| {
                 status.network_config_version.as_deref() == Some(DHCP_GATE_CONFIG_VERSION)
                     && status.instance_network_config_version.as_deref()
                         == Some(DHCP_GATE_CONFIG_VERSION)
             })
             .await?;
+            // Verify that the recovered acknowledgment no longer reports a network error.
             eyre::ensure!(
                 applied.network_config_error.is_none(),
                 "acknowledged configuration still reports an error: {applied:?}"
             );
+            // Verify that recovery replaced the startup file with parseable YAML instead of only
+            // reporting versions.
             let startup = fs::read_to_string(&startup_path)?;
             eyre::ensure!(
                 startup != PREVIOUS_NETWORK,
@@ -595,18 +617,85 @@ async fn network_update_retries_the_same_configuration(fail_fmds_route: bool) ->
                 assert_eq!(fs::read_to_string(directory.join("ovs-restarts"))?, "restart ovs-vswitchd.service\n",
                     "retrying FMDS must not repeat an already-completed OVS transition");
             } else {
-                let state = state.lock().await;
-                let rejected_request = state
-                    .dhcp_updates
-                    .iter()
-                    .find(|(rejected, _)| *rejected)
-                    .expect("DHCP received a rejected update");
-                let accepted_request = state
-                    .dhcp_updates
-                    .iter()
-                    .find(|(rejected, _)| !rejected)
-                    .expect("DHCP received an accepted retry");
-                assert_eq!(rejected_request.1, accepted_request.1);
+                // The recovery must resubmit the byte-identical complete service replacement,
+                // including its fixed listener and reservation rather than only host state.
+                let (accepted_request, accepted_update_count) = {
+                    let state = state.lock().await;
+                    let rejected_request = state
+                        .dhcp_updates
+                        .iter()
+                        .find(|(rejected, _)| *rejected)
+                        .expect("DHCP received a rejected update");
+                    let accepted_request = state
+                        .dhcp_updates
+                        .iter()
+                        .find(|(rejected, _)| !rejected)
+                        .expect("DHCP received an accepted retry");
+                    assert_eq!(rejected_request.1, accepted_request.1);
+                    (accepted_request.1.clone(), state.dhcp_updates.len())
+                };
+                assert!(
+                    accepted_request
+                        .windows(b"iface_svc_0".len())
+                        .any(|window| window == b"iface_svc_0"),
+                    "retried DHCP request omitted the fixed service listener"
+                );
+                assert!(
+                    accepted_request
+                        .windows(b"02:00:00:00:00:01".len())
+                        .any(|window| window == b"02:00:00:00:00:01"),
+                    "retried DHCP request omitted the service reservation"
+                );
+
+                // An unchanged later tick must resubmit the same complete state for sidecar restart repair.
+                let unchanged_request = tokio::time::timeout(Duration::from_secs(10), async {
+                    loop {
+                        let state = state.lock().await;
+                        if let Some((_, request)) =
+                            state.dhcp_updates.get(accepted_update_count)
+                        {
+                            break request.clone();
+                        }
+                        drop(state);
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                    }
+                })
+                .await?;
+                assert_eq!(unchanged_request, accepted_request);
+
+                // Change only the service MAC while retaining every explicit response version.
+                let changed_update_count = {
+                    let mut state = state.lock().await;
+                    state.service_mac_address = "02:00:00:00:00:03";
+                    state.dhcp_updates.len()
+                };
+                // Wait for the MAC-only response to reach the DHCP control transport.
+                let changed_request = tokio::time::timeout(Duration::from_secs(10), async {
+                    loop {
+                        let state = state.lock().await;
+                        if let Some((_, request)) = state.dhcp_updates[changed_update_count..]
+                            .iter()
+                            .find(|(_, request)| {
+                                request
+                                    .windows(b"02:00:00:00:00:03".len())
+                                    .any(|window| window == b"02:00:00:00:00:03")
+                            })
+                        {
+                            break request.clone();
+                        }
+                        drop(state);
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                    }
+                })
+                .await?;
+                // Verify that the changed replacement removes the previous reservation MAC.
+                assert_ne!(changed_request, accepted_request);
+                assert!(
+                    !changed_request
+                        .windows(b"02:00:00:00:00:01".len())
+                        .any(|window| window == b"02:00:00:00:00:01"),
+                    "MAC-only replacement retained the previous reservation"
+                );
             }
             Ok::<_, eyre::Report>(())
         }
@@ -1121,7 +1210,8 @@ async fn handle_version() -> impl IntoResponse {
     })
 }
 
-// This mock omits `addresses` to exercise the rolling-upgrade fallback for older Core versions.
+// This mock omits `addresses` by default to exercise the rolling-upgrade fallback for older Core
+// versions. IPv6 tenant fixtures populate `addresses`.
 #[allow(deprecated)]
 async fn handle_netconf(AxumState(state): AxumState<Arc<Mutex<State>>>) -> impl IntoResponse {
     {
@@ -1138,6 +1228,8 @@ async fn handle_netconf(AxumState(state): AxumState<Arc<Mutex<State>>>) -> impl 
         quarantine_host,
         accepted_lldp_snapshot_fingerprint,
         astra_config,
+        include_service_vpc,
+        service_mac_address,
     ) = {
         let state = state.lock().await;
         (
@@ -1147,6 +1239,8 @@ async fn handle_netconf(AxumState(state): AxumState<Arc<Mutex<State>>>) -> impl 
             state.quarantine_host,
             state.accepted_lldp_snapshot_fingerprint.clone(),
             state.astra_config.clone(),
+            state.include_service_vpc,
+            state.service_mac_address,
         )
     };
     let config_version = if loopback_ip_override.is_some() {
@@ -1225,9 +1319,9 @@ async fn handle_netconf(AxumState(state): AxumState<Arc<Mutex<State>>>) -> impl 
         vpc_peer_vnis,
         prefix: Some("192.168.1.1/32".to_string()),
         fqdn: "host1".to_string(),
-        // The quarantined tenant needs the same explicit IPv6 boot URL as the
-        // admin fixture; its IPv4-only service discovery cannot generate one.
-        booturl: quarantine_host.then(|| "http://[2001:db8::80]/boot.efi".to_string()),
+        // IPv6-primary tenants need the same explicit IPv6 boot URL as the admin fixture;
+        // their IPv4-only service discovery cannot generate one.
+        booturl: loopback_ip_override.map(|_| "http://[2001:db8::80]/boot.efi".to_string()),
         svi_ip: get_svi_ip(&Some(svi_ip), virtualization_type, false, 28)
             .unwrap()
             .map(|ip| ip.to_string()),
@@ -1383,8 +1477,8 @@ async fn handle_netconf(AxumState(state): AxumState<Arc<Mutex<State>>>) -> impl 
     };
 
     if include_ipv6_tenant {
-        // Keep the existing IPv4 projection while giving FMDS a real canonical
-        // IPv6 tenant prefix to route. Only the FMDS retry case needs this input.
+        // Preserve the IPv4 fields when populating `tenant_interface.addresses` and add the
+        // canonical IPv6 tenant prefix for FMDS to route in both retry scenarios.
         tenant_interface.addresses = vec![
             rpc::forge::InterfaceAddressConfig {
                 address_family: rpc::forge::AddressFamily::V4.into(),
@@ -1623,9 +1717,44 @@ async fn handle_netconf(AxumState(state): AxumState<Arc<Mutex<State>>>) -> impl 
         nvlink_config_version: "V1-T1748645613333260".to_string(),
     };
 
+    // The DHCP retry scenario adds one endpoint and its fixed slot; the remaining fields provide
+    // the shared complete network response used by both failure branches.
     let netconf = rpc::forge::ManagedHostNetworkConfigResponse {
-        service_interfaces: vec![],
-        service_vpc_slot_inventory: None,
+        service_interfaces: include_service_vpc
+            .then(|| rpc::forge::ManagedHostServiceInterfaceConfig {
+                service_id: "storage-service".to_string(),
+                // Keep attachment identity stable while the test changes only the client MAC.
+                attachment_id: Some(rpc_common::Uuid {
+                    value: "11111111-1111-1111-1111-111111111111".to_string(),
+                }),
+                interface_ordinal: 0,
+                // Bind the endpoint to the only fixed listener in this response.
+                slot_index: 0,
+                vpc_id: Some(
+                    "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+                        .parse()
+                        .expect("service VPC ID"),
+                ),
+                // Use an IPv6 `/127` so this IPv6-primary DPU can submit the reservation without
+                // a DHCPv4 server identity.
+                link_prefix: "2001:db8::10/127".to_string(),
+                mac_address: service_mac_address.to_string(), // Varies without a version change.
+                // Retain the server-side correlation identity across the MAC-only replacement.
+                internal_uuid: Some(rpc_common::Uuid {
+                    value: "22222222-2222-2222-2222-222222222222".to_string(),
+                }),
+                ..Default::default()
+            })
+            .into_iter()
+            .collect(),
+        service_vpc_slot_inventory: include_service_vpc.then(|| {
+            rpc::forge::ServiceVpcSlotInventory {
+                slots: vec![rpc::forge::ServiceVpcSlot {
+                    slot_index: 0,
+                    hbn_interface_name: "iface_svc_0".to_string(),
+                }],
+            }
+        }),
         accepted_lldp_snapshot_fingerprint,
         bgp_leaf_session_password: Some("this_is_not_a_real_password".to_string()),
         site_global_vpc_vni: None,
@@ -1675,7 +1804,8 @@ async fn handle_netconf(AxumState(state): AxumState<Arc<Mutex<State>>>) -> impl 
             }),
         }),
         managed_host_config_version: config_version.clone(),
-        use_admin_network: !quarantine_host,
+        // Primary service endpoints are supplied only after switching from Admin to Tenant.
+        use_admin_network: !(quarantine_host || include_service_vpc),
         admin_interface: Some(admin_interface),
         tenant_interfaces: vec![tenant_interface],
         network_security_policy_overrides,

@@ -1,12 +1,156 @@
 ---
-tags: ["unreleased", "security", "deployment"]
+tags: ["unreleased", "deployment", "dpu", "nvlink", "provisioning", "rack-level-administration", "rest-api", "security"]
 ---
 
-## KMIP KEK provider — unreleased
+## NVIDIA Infra Controller v2.4 — unreleased
+
+These changes are merged into `main` and collected for v2.4. They are not included in [v2.3.0](https://github.com/dsx-ai-factory/infra-controller/releases/tag/v2.3.0). Review the compatibility and upgrade requirements below before deploying a build that includes them.
+
+<span id="changelog-2026-10-19" />
+<span id="2026-10-19-expected-switch-nvos-declarations--unreleased" />
+
+### Expected Switch NVOS declarations
+
+<span id="2026-10-19-rest-api-compatibility-exception" />
+
+#### REST API compatibility exception
+
+The Expected Switch primary-port change tracked in [issue #7310](https://github.com/dsx-ai-factory/infra-controller/issues/7310) intentionally tightens the REST create and replace-all contracts:
+
+- `POST /v2/org/{org}/nico/expected-switch` requires a non-empty `nvosInterfaces` array.
+- `PUT /v2/org/{org}/nico/expected-switch/all` requires a non-empty `nvosInterfaces` array in every `expectedSwitches` entry. An empty top-level `expectedSwitches` array still clears the inventory.
+
+Omitting a port set or supplying an empty one returns HTTP 400. This is a breaking-change exception: zero-port declarations cannot initialize successfully because Site Explorer no longer fills or overwrites operator-declared NVOS ports. Existing zero-port records are not repaired automatically.
+
+Before deploying this change, update clients and inventory templates to send `nvosInterfaces` entries with `macAddress` and select the primary (eth0) port with `isPrimary: true`. REST defaults the first entry to primary if none is marked; a single port is always primary. For example, the port field can be:
+
+```json
+{
+  "nvosInterfaces": [
+    { "macAddress": "02:00:00:00:00:01", "isPrimary": true }
+  ]
+}
+```
+
+The deprecated `nvosMacAddresses` request field remains accepted but ignored regardless of its JSON value; it does not satisfy the new requirement. This also breaks clients that relied on that field to configure ports. Sending both fields is allowed, but only `nvosInterfaces` takes effect. PATCH requests may omit `nvosInterfaces` to preserve stored ports; an explicit empty array is rejected.
+
+<span id="2026-10-19-client-and-inventory-file-migration" />
+
+#### Client and inventory-file migration
+
+Update automation that uses the old NVOS names:
+
+| Surface | Old name | Replacement and behavior |
+| --- | --- | --- |
+| REST requests | `nvosMacAddresses` | Use `nvosInterfaces` objects with `macAddress` and `isPrimary`. The old field is ignored, including on PATCH; an otherwise valid legacy-only PATCH can succeed without changing ports. |
+| REST responses | `nvosMacAddresses` | Read `nvosInterfaces` for primary selection. Responses still include the deprecated flat `nvosMacAddresses` list; it has not been removed. |
+| `nico-admin-cli expected-switch add` and `update` | `--nvos-mac-address` | Use repeated `--nvos-interface MAC[,primary]` flags. Append `,primary` to the eth0 MAC. The old flag has no alias and is rejected. |
+| `nico-admin-cli expected-switch replace-all` JSON | `nvos_mac_addresses` | Use `nvos_interfaces` objects with `mac_address` and `is_primary`. An old-only file is rejected for missing `nvos_interfaces` before the replacement RPC is sent; it does not clear stored ports. |
+
+The CLI replacement file uses snake_case, not the REST API's camelCase. Its top-level object contains an `expected_switches` array. Each entry requires `bmc_mac_address`, `bmc_username`, `bmc_password`, `switch_serial_number`, and a non-empty `nvos_interfaces` array. For example:
+
+```json
+{
+  "expected_switches": [
+    {
+      "bmc_mac_address": "02:00:00:00:00:10",
+      "bmc_username": "admin",
+      "bmc_password": "REPLACE_WITH_BMC_PASSWORD",
+      "switch_serial_number": "SWITCH-001",
+      "nvos_interfaces": [
+        { "mac_address": "02:00:00:00:00:01", "is_primary": true },
+        { "mac_address": "02:00:00:00:00:02", "is_primary": false }
+      ]
+    }
+  ]
+}
+```
+
+Protect this file because it contains credentials. `is_primary` defaults to `false`; if no entry is marked, the CLI selects the first port. More than one marked primary is rejected. The optional top-level `expected_switches_count` must equal the array length when supplied. Replacement removes records omitted from the file; `{"expected_switches": []}` clears the entire expected-switch inventory.
+
+<span id="2026-10-19-dpf-provisioning-site-explorer-suppression" />
+
+### DPF provisioning: Site Explorer suppression
+
+[PR #7775](https://github.com/dsx-ai-factory/infra-controller/pull/7775) pauses periodic Site Explorer scans during DPF provisioning. Report-refresh requests are saved and return the cached report marked as pending. Periodic scans and queued refreshes run after all Site Explorer suppressions are cleared. Re-exploration requests are rejected rather than queued; operators must retry them after suppression clears.
+
+<span id="2026-10-19-upgrade-compatibility" />
+
+#### Upgrade compatibility
+
+Older `nico-api` binaries cannot decode suppression rows with source `dpf_provisioning`. While these rows exist, an older replica fails its Site Explorer suppression read and cannot complete exploration cycles.
+
+Upgrade every `nico-api` replica before starting DPF provisioning. At sites already using DPF, plan an API maintenance window: stop all old replicas before starting updated replicas. The default rolling update can overlap old and new binaries and does not meet this requirement.
+
+When upgrading from a version without this feature, machines already provisioning are not retroactively suppressed. Suppression is created when a managed host transitions from having no DPU in `WaitingForReady` or `HandleReboot` to having at least one DPU in either state. Existing suppression rows remain effective across restarts.
+
+<span id="2026-10-19-downgrading-to-a-binary-without-dpf-suppression-support" />
+
+#### Downgrading to a binary without DPF suppression support
+
+Stop all updated `nico-api` replicas first, so their controllers cannot recreate the suppression rows. Then run this statement against the NICo Core database before starting older replicas:
+
+```sql
+DELETE FROM bmc_suppressions
+WHERE source = 'dpf_provisioning';
+```
+
+This preserves suppression rows owned by other workflows. Removing these rows clears the DPF exploration pause; it does not stop provisioning by the DPF operator.
+
+<span id="changelog-2026-10-23" />
+<span id="2026-10-23-nvlink-partitioning-configuration-defaults--unreleased" />
+
+### NVLink partitioning configuration defaults
+
+NVLink partitioning remains opt-in, but a site deployed with the nico-api Helm chart now needs only `nvlink_config.enabled = true`. When the NMX-C TLS keys are unset, `nico-api` uses the client certificate that the chart mounts at `/var/run/secrets/nvswitch-client`, `ca.crt` from that Secret or else `/var/run/secrets/nico-roots/ca.crt`, and `initial_domain_name` as the TLS authority. For the authority default to work, `initial_domain_name` must match a DNS SAN of the certificate NMX-C presents; on RMS-managed switches that is RMS's `apiServer.dnsDomain`.
+
+<span id="2026-10-23-before-upgrading" />
+
+#### Before upgrading
+
+<Warning title="Certificate monitor now follows partitioning">
+`nvlink_config.nmx_c_certificate_rotation.enabled` previously defaulted to `false`. When it is unset, it now follows `nvlink_config.enabled`. A site that already sets `nvlink_config.enabled = true` without setting `nmx_c_certificate_rotation.enabled` starts the NMX-C certificate monitor after upgrading, and the monitor can request full-rack `ConfigureNmxCluster` maintenance when a served certificate enters its rotation window. To keep the previous behavior, set `nvlink_config.nmx_c_certificate_rotation.enabled = false` before upgrading.
+</Warning>
+
+<Warning title="NMX-C client certificate issued by default">
+The nico-api chart now enables `nvSwitchTls.nicoClient` by default and mounts its Secret into the `nico-api` Pod, so the Pod does not start until cert-manager issues the certificate. The certificate uses `nvSwitchTls.issuerRef`, which now defaults to `global.certificate.issuerRef`. The issuer and any cert-manager approver policy must allow the `client auth` usage and the URI SAN `spiffe://<global.spiffe.trustDomain>/<namespace>/sa/nico-nmxc`. To skip the certificate, set `nico-api.nvSwitchTls.nicoClient.enabled: false`.
+</Warning>
+
+<span id="2026-10-23-rest-api-compatibility-exception" />
+
+#### REST API compatibility exception
+
+The Site capability `nvLinkPartition` is now owned by Site configuration inventory, like `flow` and `vpcSlaac`:
+
+- `PATCH /v2/org/{org}/nico/site/{siteId}` rejects `capabilities.nvLinkPartition` with HTTP 400. Remove the field from Site update requests. It is no longer part of `SiteCapabilitiesUpdateRequest` in the OpenAPI spec or the Go SDK.
+- Core reports its effective `nvlink_config.enabled` setting, and the REST service copies it into the Site's `nvLinkPartition` capability on each Site configuration inventory. An older Core that does not report the setting leaves the stored value unchanged, so existing Sites keep their current value.
+- New Sites start with `nvLinkPartition = false` until their Core reports the setting. A new Site managed by a Core without this change stays `false`, so NVLink logical partitions and VPC NVLink settings are rejected until Core is upgraded.
+
+<span id="2026-10-23-new-and-changed-configuration" />
+
+#### NVLink configuration changes
+
+| Setting | Change |
+| --- | --- |
+| `nvlink_config.allow_insecure` | Defaults to `false` when omitted instead of being required in `[nvlink_config]`. |
+| `nvlink_config.nmx_c_certificate_rotation.enabled` | Optional. Unset follows `nvlink_config.enabled`; set it to run or stop the certificate monitor independently. |
+| `nvlink_config.nmx_c_tls_ca_cert_path` | When unset and NMX-C is reached over HTTPS, defaults to the mounted client certificate's `ca.crt` or else `/var/run/secrets/nico-roots/ca.crt`, regardless of the other TLS keys. |
+| `nvlink_config.nmx_c_tls_client_cert_path`, `nmx_c_tls_client_key_path`, `nmx_c_tls_authority` | When `allow_insecure` is `false` and none of the four `nmx_c_tls_*` keys is set, default to the mounted client certificate and `initial_domain_name`. Setting any `nmx_c_tls_*` key disables these defaults. |
+| nico-api chart `nvlink.enabled` | New. When set, rendered as `nvlink_config.enabled` in the base configuration; the site configuration takes precedence. |
+| nico-api chart `nvSwitchTls.nicoClient.enabled` | Now `true` by default. Empty `uris` derive the SPIFFE URI SAN from the trust domain and namespace. |
+| nico-api chart `nvSwitchTls.issuerRef` | Empty by default; falls back to `global.certificate.issuerRef`. |
+
+<Note>
+Enabling NVLink partitioning on a rack with running instances removes the NMX-C default partition on the first monitor pass, so those instances lose NVLink connectivity until tenants configure NVLink partitions through NICo.
+</Note>
+
+<span id="2026-10-27-kmip-kek-provider--unreleased" />
+
+### KMIP KEK provider
 
 `nico-api` can wrap the data-encryption keys of its PostgreSQL credential store with a key held in a KMIP 1.4 server, as an alternative to Vault/OpenBao Transit. A `kmip` provider under `[secrets.kms.providers]` names the server endpoint, the mutual-TLS files, and the server key behind each `kek_id`. The key never leaves the server: `nico-api` sends only the per-record key to the server's `Encrypt` and `Decrypt` operations, and at startup it verifies the protocol version, the operations, each key's state and attributes, and a wrap and unwrap round trip. Rotation and migration from Transit use the existing routing and `nico-admin-cli secrets re-wrap` flow. No KMIP server product is qualified yet; qualification is tracked in [issue #3253](https://github.com/dsx-ai-factory/infra-controller/issues/3253). See [KMIP KEK Provider](../../docs/configuration/kmip-kek-provider.md).
 
-### New and changed configuration
+#### New and changed configuration
 
 | Setting | Change |
 | --- | --- |
