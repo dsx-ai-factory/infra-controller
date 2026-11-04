@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-.PHONY: build test vet lint fmt-check devsite-test
+.PHONY: build test vet lint fmt-check devsite-test devcluster-test
 
 build:
 	go build -o bin/scale-test ./cmd/scale-test
@@ -22,3 +22,7 @@ lint:
 
 fmt-check:
 	@test -z "$$(gofmt -l . | tee /dev/stderr)"
+
+# Runs the Kubernetes adapter against a real API server in SCALE_TEST_NAMESPACE.
+devcluster-test:
+	go test -tags devcluster -count=1 -run TestAgainstARealCluster ./internal/cluster/
