@@ -730,17 +730,17 @@ complete `carbide-api.forge` and `carbide-pxe.forge` hostnames with
 `nico-api.nico` and `nico-pxe.nico` in the loop and the reachability checks.
 If `external_api_url` is set, also check its hostname from the
 static-assignments segment.
-Before running it, replace `nico-static-pxe.nico` with the hostname from
-Scout's effective full-image URL, and add the hostname from its effective
-update URL if different. The `newrootfs=` and `pxe_uri=` arguments select
-these URLs independently. Check `carbide-static-pxe.forge` for each stock
-fallback still in use. Omit the DNS check for any URL containing a literal IP
-address. An unused `nico-static-pxe.nico` alias does not need to resolve.
+The loop checks `carbide-static-pxe.forge`, Scout's stock fallback. If
+Scout's effective full-image or update URL names a different host, add that
+hostname, and drop the fallback once no URL uses it. The `newrootfs=` and
+`pxe_uri=` arguments select these URLs independently. Omit the DNS check for
+any URL containing a literal IP address. An unused `nico-static-pxe.nico`
+alias does not need to resolve.
 Refer to the [Static Boot Asset Server reference](../configuration/dns-service-endpoints.md#nico-static-pxenico---static-boot-asset-server)
 for URL selection.
 
 ```bash
-for name in carbide-api.forge carbide-pxe.forge nico-static-pxe.nico \
+for name in carbide-api.forge carbide-pxe.forge carbide-static-pxe.forge \
             unbound.nico otel-receiver.forge; do
     printf "%-30s -> %s\n" "$name" "$(dig +short "$name" @<UNBOUND_VIP> || echo 'FAILED')"
 done

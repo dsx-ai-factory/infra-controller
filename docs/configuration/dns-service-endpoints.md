@@ -333,17 +333,17 @@ hostname queried by the deployed agent when DHCPv6 option 56 is required.
 
 After configuring DNS, verify the required records from a host or DPU on the
 OOB management network. The DNS and HTTP examples below assume stock agents
-and that your deployment publishes the listed records. For Scout, substitute the hostnames from
-its effective full-image and update URLs for `nico-static-pxe.nico` in the
-DNS loop. Check both hostnames if they differ, and check
-`carbide-static-pxe.forge` for each stock fallback still in use. Omit DNS
-checks for literal IP URLs; an unused `.nico` alias does not need to resolve.
+and that your deployment publishes the listed records. The loop checks
+`carbide-static-pxe.forge`, Scout's stock fallback. If Scout's effective
+full-image or update URL names a different host, check that hostname too, and
+drop the fallback once no URL uses it. Omit DNS checks for literal IP URLs; an
+unused `.nico` alias does not need to resolve.
 The loop checks A records; for IPv6 Scout endpoints, check AAAA records for
 the selected hostname instead. The [Static Boot Asset Server reference](#nico-static-pxenico---static-boot-asset-server)
 describes how `newrootfs=` and `pxe_uri=` select the URLs independently.
 
 ```bash
-for name in carbide-api.forge carbide-pxe.forge nico-static-pxe.nico \
+for name in carbide-api.forge carbide-pxe.forge carbide-static-pxe.forge \
             unbound.nico otel-receiver.forge socks.forge; do
     printf "%-30s -> %s\n" "$name" "$(dig +short "$name" @<UNBOUND_VIP> || echo 'FAILED')"
 done
@@ -375,7 +375,7 @@ openssl s_client -connect carbide-api.forge:443 </dev/null 2>/dev/null | grep -E
 curl -sf --max-time 5 http://carbide-pxe.forge/ -o /dev/null && echo "nico-pxe OK" || echo "nico-pxe FAILED"
 
 # Static PXE service
-curl -sf --max-time 5 http://nico-static-pxe.nico/ -o /dev/null && echo "nico-static-pxe OK" || echo "nico-static-pxe FAILED"
+curl -sf --max-time 5 http://carbide-static-pxe.forge/ -o /dev/null && echo "nico-static-pxe OK" || echo "nico-static-pxe FAILED"
 
 # NTP
 ntpdate -q carbide-ntp.forge
