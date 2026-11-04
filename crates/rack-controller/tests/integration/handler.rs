@@ -3066,8 +3066,31 @@ async fn test_firmware_upgrade_wait_for_complete_recovers_power_blocked_machine(
     Ok(())
 }
 
-#[sqlx_test]
-async fn test_rack_maintenance_termination_unwinds_all_scoped_device_state(
+// This multi-device fixture exceeds the default test-thread stack. Keep the
+// larger stack local to this test, as in the firmware completion test below.
+#[test]
+fn test_rack_maintenance_termination_unwinds_all_scoped_device_state() {
+    let mut args = ::sqlx::testing::TestArgs::new(concat!(
+        module_path!(),
+        "::test_rack_maintenance_termination_unwinds_all_scoped_device_state"
+    ));
+    args.fixtures(Box::leak(Box::new(vec![])));
+
+    let test_fn: fn(sqlx::PgPool) -> _ =
+        test_rack_maintenance_termination_unwinds_all_scoped_device_state_body;
+
+    std::thread::Builder::new()
+        .stack_size(16 * 1024 * 1024)
+        .spawn(move || {
+            sqlx_testing::TestFn::run_test(test_fn, args)
+                .expect("rack maintenance termination test failed")
+        })
+        .expect("failed to spawn the rack maintenance termination test thread")
+        .join()
+        .expect("rack maintenance termination test thread panicked");
+}
+
+async fn test_rack_maintenance_termination_unwinds_all_scoped_device_state_body(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let env = create_test_env_with_overrides(
@@ -3626,8 +3649,8 @@ async fn test_firmware_upgrade_wait_for_complete_transitions_to_error_on_job_fai
 /// that wait state and at least one failed.
 ///
 /// Expanded by hand instead of using `#[sqlx_test]` so the body runs on
-/// a thread with a larger stack. This is the widest future in the crate's
-/// suite and does not fit the default one. Same shape as the measurement test
+/// a thread with a larger stack. This large future does not fit the default
+/// test-thread stack. Same shape as the measurement test
 /// in carbide-api-core's `tests::instance`.
 #[test]
 fn test_firmware_upgrade_wait_for_complete_waits_for_all_nodes_to_be_terminal_before_error() {
