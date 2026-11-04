@@ -40,6 +40,15 @@ pub(crate) struct LenovoGB300Nvl<'a> {
 }
 
 impl LenovoGB300Nvl<'_> {
+    pub(crate) fn service_root_config(&self) -> redfish::service_root::Config {
+        redfish::service_root::Config {
+            vendor: redfish::oem::BmcVendor::Ami,
+            product: Some("AMI Redfish Server"),
+            redfish_version: "1.21.1",
+            exposes_computer_systems: true,
+        }
+    }
+
     pub(crate) fn event_service_config(&self) -> Option<crate::EventServiceConfig> {
         Some(crate::EventServiceConfig::default())
     }
