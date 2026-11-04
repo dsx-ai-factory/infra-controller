@@ -52,7 +52,7 @@ fn waiting_reprovision_state(upgrade_task_id: &str) -> HostReprovisionState {
         power_drains_needed: None,
         started_at: chrono::Utc::now(),
         deadline: chrono::Utc::now() + chrono::TimeDelta::minutes(60),
-        delivery: None,
+        delivered_at: None,
         task_json: String::new(),
         result: None,
     }
@@ -70,220 +70,6 @@ fn assigned_waiting_state(upgrade_task_id: &str) -> ManagedHostState {
         instance_state: InstanceState::HostReprovision {
             reprovision_state: waiting_reprovision_state(upgrade_task_id),
         },
-    }
-}
-
-#[sqlx_test]
-async fn acknowledgement_starts_full_budget_once_for_ready_and_assigned_hosts(pool: PgPool) {
-    let TestContext { env, mh } = init(pool).await;
-    for make_state in [waiting_state, assigned_waiting_state] {
-        let mut state = make_state("accepted-task");
-        let reprovision_state = match &mut state {
-            ManagedHostState::HostReprovision {
-                reprovision_state, ..
-            }
-            | ManagedHostState::Assigned {
-                instance_state: InstanceState::HostReprovision { reprovision_state },
-            } => reprovision_state,
-            _ => unreachable!(),
-        };
-        let HostReprovisionState::WaitingForScoutUpgrade {
-            started_at,
-            deadline,
-            delivery,
-            ..
-        } = reprovision_state
-        else {
-            unreachable!()
-        };
-        *started_at = chrono::Utc::now() - chrono::TimeDelta::minutes(29);
-        *deadline = *started_at + chrono::TimeDelta::minutes(40);
-        *delivery = Some(model::machine::ScoutUpgradeDelivery {
-            deadline: *started_at + chrono::TimeDelta::minutes(30),
-            accepted_at: None,
-        });
-        mh.advance_state(state.clone()).await;
-
-        let error = env
-            .api()
-            .report_scout_firmware_upgrade_status(Request::new(status_request(
-                &mh,
-                "accepted-task",
-            )))
-            .await
-            .unwrap_err();
-        assert_eq!(error.code(), tonic::Code::FailedPrecondition);
-        assert_eq!(
-            error.message(),
-            "scout firmware task has not been acknowledged"
-        );
-        assert_eq!(
-            error.metadata().get("nico-error-code").unwrap(),
-            "NICO-API-412"
-        );
-        assert_eq!(
-            error.metadata().get("nico-error-text").unwrap(),
-            error.message()
-        );
-        assert_eq!(mh.host.machine().await.current_state(), &state);
-
-        let acknowledgement = rpc::forge::ScoutFirmwareUpgradeAcknowledgement {
-            machine_id: Some(mh.host.id),
-            upgrade_task_id: "accepted-task".into(),
-        };
-        env.api()
-            .acknowledge_scout_firmware_upgrade(Request::new(acknowledgement.clone()))
-            .await
-            .unwrap();
-        let accepted_machine = mh.host.machine().await;
-        let accepted_state = accepted_machine.current_state();
-        let reprovision_state = match accepted_state {
-            ManagedHostState::HostReprovision {
-                reprovision_state, ..
-            }
-            | ManagedHostState::Assigned {
-                instance_state: InstanceState::HostReprovision { reprovision_state },
-            } => reprovision_state,
-            _ => panic!("unexpected state: {accepted_state:?}"),
-        };
-        let HostReprovisionState::WaitingForScoutUpgrade {
-            deadline,
-            delivery: Some(delivery),
-            result,
-            ..
-        } = reprovision_state
-        else {
-            panic!("unexpected state")
-        };
-        assert_eq!(
-            *deadline - delivery.accepted_at.unwrap(),
-            chrono::TimeDelta::minutes(40)
-        );
-        assert!(result.is_none());
-
-        // A lost acknowledgement response may cause a retry, never a fresh budget.
-        env.api()
-            .acknowledge_scout_firmware_upgrade(Request::new(acknowledgement))
-            .await
-            .unwrap();
-        let repeated = mh.host.machine().await;
-        assert_eq!(repeated.current_state(), accepted_machine.current_state());
-        assert_eq!(repeated.state.version, accepted_machine.state.version);
-
-        env.api()
-            .report_scout_firmware_upgrade_status(Request::new(status_request(
-                &mh,
-                "accepted-task",
-            )))
-            .await
-            .unwrap();
-        let completed = mh.host.machine().await;
-        // The result handler must retain the acceptance metadata it races with.
-        let reprovision_state = match completed.current_state() {
-            ManagedHostState::HostReprovision {
-                reprovision_state, ..
-            }
-            | ManagedHostState::Assigned {
-                instance_state: InstanceState::HostReprovision { reprovision_state },
-            } => reprovision_state,
-            other => panic!("unexpected state: {other:?}"),
-        };
-        let HostReprovisionState::WaitingForScoutUpgrade {
-            deadline: completed_deadline,
-            delivery: completed_delivery,
-            result,
-            ..
-        } = reprovision_state
-        else {
-            panic!("unexpected state")
-        };
-        assert_eq!(completed_deadline, deadline);
-        assert_eq!(completed_delivery.as_ref(), Some(delivery));
-        assert!(result.as_ref().unwrap().success);
-    }
-}
-
-#[sqlx_test]
-async fn rejected_acknowledgements_preserve_state(pool: PgPool) {
-    let TestContext { env, mh } = init(pool).await;
-    let now = chrono::Utc::now();
-    for (
-        scenario,
-        task_id,
-        delivery_deadline,
-        accepted_at,
-        completion_deadline,
-        expected_message,
-    ) in [
-        (
-            "stale task",
-            "stale",
-            now + chrono::TimeDelta::minutes(1),
-            None,
-            now + chrono::TimeDelta::minutes(2),
-            "scout firmware task is stale or already complete",
-        ),
-        (
-            "expired delivery",
-            "current",
-            now - chrono::TimeDelta::minutes(1),
-            None,
-            now + chrono::TimeDelta::minutes(2),
-            "scout firmware task delivery deadline has expired",
-        ),
-        (
-            "expired accepted task",
-            "current",
-            now - chrono::TimeDelta::minutes(2),
-            Some(now - chrono::TimeDelta::minutes(2)),
-            now - chrono::TimeDelta::minutes(1),
-            "scout firmware task completion deadline has expired",
-        ),
-    ] {
-        let state = ManagedHostState::HostReprovision {
-            retry_count: 2,
-            reprovision_state: HostReprovisionState::WaitingForScoutUpgrade {
-                delivery: Some(model::machine::ScoutUpgradeDelivery {
-                    deadline: delivery_deadline,
-                    accepted_at,
-                }),
-                deadline: completion_deadline,
-                upgrade_task_id: "current".into(),
-                firmware_type: FirmwareComponentType::Bmc,
-                final_version: "1.2.3".into(),
-                power_drains_needed: None,
-                started_at: now - chrono::TimeDelta::minutes(3),
-                task_json: String::new(),
-                result: None,
-            },
-        };
-        mh.advance_state(state.clone()).await;
-        let version = mh.host.machine().await.state.version;
-        let error = env
-            .api()
-            .acknowledge_scout_firmware_upgrade(Request::new(
-                rpc::forge::ScoutFirmwareUpgradeAcknowledgement {
-                    machine_id: Some(mh.host.id),
-                    upgrade_task_id: task_id.into(),
-                },
-            ))
-            .await
-            .unwrap_err();
-        assert_eq!(error.code(), tonic::Code::FailedPrecondition, "{scenario}");
-        assert_eq!(error.message(), expected_message, "{scenario}");
-        assert_eq!(
-            error.metadata().get("nico-error-code").unwrap(),
-            "NICO-API-412",
-            "{scenario}"
-        );
-        assert_eq!(
-            error.metadata().get("nico-error-text").unwrap(),
-            expected_message,
-            "{scenario}"
-        );
-        let unchanged = mh.host.machine().await;
-        assert_eq!(unchanged.current_state(), &state, "{scenario}");
-        assert_eq!(unchanged.state.version, version, "{scenario}");
     }
 }
 
@@ -326,9 +112,15 @@ async fn stores_successful_result(pool: PgPool) {
     else {
         panic!("Not in HostReprovision");
     };
-    let HostReprovisionState::WaitingForScoutUpgrade { result, .. } = reprovision_state else {
+    let HostReprovisionState::WaitingForScoutUpgrade {
+        result,
+        delivered_at,
+        ..
+    } = reprovision_state
+    else {
         panic!("Not in WaitingForScoutUpgrade");
     };
+    assert!(delivered_at.is_none());
     let result = result.as_ref().expect("result should be set");
     assert!(result.success);
     assert_eq!(result.exit_code, 0);
@@ -360,9 +152,15 @@ async fn stores_successful_result_for_assigned_host(pool: PgPool) {
     else {
         panic!("assigned host reprovision wrapper was not preserved");
     };
-    let HostReprovisionState::WaitingForScoutUpgrade { result, .. } = reprovision_state else {
+    let HostReprovisionState::WaitingForScoutUpgrade {
+        result,
+        delivered_at,
+        ..
+    } = reprovision_state
+    else {
         panic!("Not in WaitingForScoutUpgrade");
     };
+    assert!(delivered_at.is_none());
     let result = result.as_ref().expect("result should be set");
     assert!(result.success);
     assert_eq!(result.stdout, "assigned upgrade complete");
@@ -396,9 +194,15 @@ async fn stores_failed_result(pool: PgPool) {
     else {
         panic!("Not in HostReprovision");
     };
-    let HostReprovisionState::WaitingForScoutUpgrade { result, .. } = reprovision_state else {
+    let HostReprovisionState::WaitingForScoutUpgrade {
+        result,
+        delivered_at,
+        ..
+    } = reprovision_state
+    else {
         panic!("Not in WaitingForScoutUpgrade");
     };
+    assert!(delivered_at.is_none());
     let result = result.as_ref().expect("result should be set");
     assert!(!result.success);
     assert_eq!(result.exit_code, 1);
@@ -513,11 +317,102 @@ async fn truncates_result_output(pool: PgPool) {
     else {
         panic!("Not in HostReprovision");
     };
-    let HostReprovisionState::WaitingForScoutUpgrade { result, .. } = reprovision_state else {
+    let HostReprovisionState::WaitingForScoutUpgrade {
+        result,
+        delivered_at,
+        ..
+    } = reprovision_state
+    else {
         panic!("Not in WaitingForScoutUpgrade");
     };
+    assert!(delivered_at.is_none());
     let result = result.as_ref().expect("result should be set");
     assert!(result.stdout.len() <= 1500);
     assert!(result.stderr.len() <= 1500);
     assert!(result.error.len() <= 1500);
+}
+
+#[sqlx_test]
+async fn concurrent_completion_preserves_result_against_stale_poll(pool: PgPool) {
+    let TestContext { env, mh } = init(pool.clone()).await;
+    let task = rpc::scout_firmware_upgrade::ScoutFirmwareUpgradeTask {
+        upgrade_task_id: "concurrent-task".into(),
+        ..Default::default()
+    };
+    let mut waiting = waiting_reprovision_state(&task.upgrade_task_id);
+    if let HostReprovisionState::WaitingForScoutUpgrade { task_json, .. } = &mut waiting {
+        *task_json = serde_json::to_string(&task).unwrap();
+    }
+    mh.advance_state(ManagedHostState::HostReprovision {
+        retry_count: 0,
+        reprovision_state: waiting.clone(),
+    })
+    .await;
+    let before = mh.host.machine().await;
+    if let HostReprovisionState::WaitingForScoutUpgrade { result, .. } = &mut waiting {
+        *result = Some(model::machine::ScoutUpgradeResult {
+            success: true,
+            exit_code: 0,
+            stdout: "completed".into(),
+            stderr: String::new(),
+            error: String::new(),
+        });
+    }
+    let completed = ManagedHostState::HostReprovision {
+        retry_count: 0,
+        reprovision_state: waiting,
+    };
+    let mut txn = pool.begin().await.unwrap();
+    let host_id = mh.host.id.try_into().unwrap();
+    let write = db::machine::try_update_controller_state(
+        &mut txn,
+        &host_id,
+        before.state.version,
+        before.state.version.increment(),
+        &completed,
+    )
+    .await
+    .unwrap();
+    assert_eq!(write, db::ConditionalWrite::Applied(()));
+
+    // The poll reads the committed pending state, then waits behind the completion
+    // writer's history lock. Committing that writer makes the poll's version stale.
+    let api = env.api_arc();
+    let machine_id = mh.host.id;
+    let poll = tokio::spawn(async move {
+        api.forge_agent_control(Request::new(rpc::forge::ForgeAgentControlRequest {
+            machine_id: Some(machine_id),
+        }))
+        .await
+    });
+    let waiting_for_lock = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let blocked: bool = sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM pg_stat_activity \
+                 WHERE datname = current_database() AND wait_event_type = 'Lock' \
+                 AND query LIKE 'INSERT INTO machine_state_history%')",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            if blocked {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    txn.commit().await.unwrap();
+    let result = tokio::time::timeout(std::time::Duration::from_secs(5), poll)
+        .await
+        .expect("poll should finish after completion commits")
+        .unwrap();
+    waiting_for_lock.expect("poll should wait behind the completion writer");
+    assert_eq!(result.unwrap_err().code(), tonic::Code::Aborted);
+    let after = mh.host.machine().await;
+    assert_eq!(after.current_state(), &completed);
+    assert_eq!(
+        after.status.last_scout_contact_time,
+        before.status.last_scout_contact_time
+    );
 }

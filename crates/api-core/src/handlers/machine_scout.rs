@@ -208,12 +208,33 @@ pub(crate) async fn forge_agent_control(
         let (machine, mut txn) = api
             .load_machine(&machine_id, MachineSearchConfig::default())
             .await?;
-        db::machine::update_scout_contact_time(&machine_id, &mut txn)
-            .await
-            .map_err(CarbideError::from)?;
         let host_machine = HostMachine::try_from(machine.clone())
             .map_err(|error| CarbideError::internal(format!("invalid host machine: {error}")))?;
         let state = host_machine.current_state();
+        let pending_firmware = matches!(
+            state,
+            ManagedHostState::HostReprovision {
+                reprovision_state: HostReprovisionState::WaitingForScoutUpgrade {
+                    result: None,
+                    ..
+                },
+                ..
+            } | ManagedHostState::Assigned {
+                instance_state: InstanceState::HostReprovision {
+                    reprovision_state: HostReprovisionState::WaitingForScoutUpgrade {
+                        result: None,
+                        ..
+                    },
+                },
+            }
+        );
+        // Firmware delivery writes history before the machine row, matching the
+        // controller's lock order. Other polls only update the contact column.
+        if !pending_firmware {
+            db::machine::update_scout_contact_time(&machine_id, &mut txn)
+                .await
+                .map_err(CarbideError::from)?;
+        }
 
         match state {
             ManagedHostState::NicFirmwareUpdating { operation } => {
@@ -457,7 +478,8 @@ pub(crate) async fn forge_agent_control(
                     HostReprovisionState::WaitingForScoutUpgrade {
                         task_json,
                         deadline,
-                        delivery,
+                        delivered_at,
+                        started_at,
                         result: None,
                         ..
                     },
@@ -470,26 +492,45 @@ pub(crate) async fn forge_agent_control(
                             HostReprovisionState::WaitingForScoutUpgrade {
                                 task_json,
                                 deadline,
-                                delivery,
+                                delivered_at,
+                                started_at,
                                 result: None,
                                 ..
                             },
                     },
             } => {
-                let active_deadline = delivery.as_ref().map(|delivery| {
-                    if delivery.accepted_at.is_some() {
-                        (*deadline, "completion")
-                    } else {
-                        (delivery.deadline, "delivery")
-                    }
-                });
+                let poll_time: chrono::DateTime<chrono::Utc> = sqlx::query_scalar("SELECT NOW()")
+                    .fetch_one(txn.as_pgconn())
+                    .await
+                    .map_err(|error| {
+                        CarbideError::from(db::DatabaseError::query("scout poll timestamp", error))
+                    })?;
+                let now = chrono::Utc::now();
+                let delivery_deadline = *started_at + chrono::Duration::minutes(30);
+                // The controller may not have observed the preceding poll yet.
+                let contact = machine
+                    .status
+                    .last_scout_contact_time
+                    .filter(|contact| *contact > *started_at && *contact <= delivery_deadline)
+                    .or_else(|| {
+                        (poll_time > *started_at && poll_time <= delivery_deadline)
+                            .then_some(poll_time)
+                    });
+                let (active_deadline, deadline_type) = if delivered_at.is_some() {
+                    (*deadline, "completion")
+                } else if let Some(contact) = contact {
+                    (
+                        *deadline + contact.signed_duration_since(*started_at),
+                        "completion",
+                    )
+                } else {
+                    (delivery_deadline, "delivery")
+                };
                 let action = match (
                     serde_json::from_str::<sfu::ScoutFirmwareUpgradeTask>(task_json),
                     active_deadline,
                 ) {
-                    (Ok(task), Some((deadline, deadline_type)))
-                        if chrono::Utc::now() > deadline =>
-                    {
+                    (Ok(task), deadline) if now > deadline => {
                         tracing::info!(
                             machine_id = %machine.id,
                             upgrade_task_id = %task.upgrade_task_id,
@@ -505,10 +546,7 @@ pub(crate) async fn forge_agent_control(
                             upgrade_task_id = %task.upgrade_task_id,
                             "Preparing firmware upgrade task for scout",
                         );
-                        Action::FirmwareUpgrade(fac::FirmwareUpgrade {
-                            task: Some(task),
-                            requires_acknowledgement: delivery.is_some(),
-                        })
+                        Action::FirmwareUpgrade(fac::FirmwareUpgrade { task: Some(task) })
                     }
                     (Err(e), _) => {
                         tracing::warn!(
@@ -518,6 +556,46 @@ pub(crate) async fn forge_agent_control(
                         Action::noop()
                     }
                 };
+                if delivered_at.is_none()
+                    && let Some(contact) = contact
+                {
+                    // Save delivery before a later retry overwrites the contact column.
+                    let mut next_state = state.clone();
+                    if let ManagedHostState::HostReprovision {
+                        reprovision_state, ..
+                    }
+                    | ManagedHostState::Assigned {
+                        instance_state: InstanceState::HostReprovision { reprovision_state },
+                    } = &mut next_state
+                        && let HostReprovisionState::WaitingForScoutUpgrade {
+                            delivered_at,
+                            deadline,
+                            ..
+                        } = reprovision_state
+                    {
+                        *delivered_at = Some(contact);
+                        *deadline = active_deadline;
+                    }
+                    let version = machine.state.version;
+                    if matches!(
+                        db::machine::try_update_controller_state(
+                            &mut txn,
+                            &host_machine.id,
+                            version,
+                            version.increment(),
+                            &next_state,
+                        )
+                        .await?,
+                        db::ConditionalWrite::NotApplied(_)
+                    ) {
+                        return Err(Status::aborted(
+                            "scout firmware task state changed; retry poll",
+                        ));
+                    }
+                }
+                db::machine::update_scout_contact_time(&machine_id, &mut txn)
+                    .await
+                    .map_err(CarbideError::from)?;
                 (action, Some(txn))
             }
 
@@ -544,25 +622,9 @@ pub(crate) async fn forge_agent_control(
         txn.commit().await?;
     }
 
-    Ok(Response::new(build_agent_control_response(
-        action,
-        request.supports_firmware_upgrade_ack,
-    )?))
-}
-
-/// Build the poll response only when Scout can execute its required contract.
-fn build_agent_control_response(
-    action: fac::Action,
-    supports_firmware_upgrade_ack: bool,
-) -> Result<ForgeAgentControlResponse, CarbideError> {
-    if matches!(&action, fac::Action::FirmwareUpgrade(task) if task.requires_acknowledgement)
-        && !supports_firmware_upgrade_ack
-    {
-        return Err(CarbideError::FailedPrecondition(
-            "scout does not support firmware upgrade acknowledgement".into(),
-        ));
-    }
-    ForgeAgentControlResponse::build_and_fill_legacy_fields(action)
+    Ok(Response::new(
+        ForgeAgentControlResponse::build_and_fill_legacy_fields(action)?,
+    ))
 }
 
 /// Records reboot duration metric for a machine if applicable

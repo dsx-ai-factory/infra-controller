@@ -237,36 +237,6 @@ fn scout_firmware_upgrade_deadline(
     started_at + Duration::seconds(deadline_seconds)
 }
 
-/// New tasks require acknowledgement; persisted legacy tasks retain their original protocol.
-fn create_scout_firmware_upgrade_state(
-    task: ScoutFirmwareUpgradeTask,
-    firmware_type: FirmwareComponentType,
-    power_drains_needed: Option<u32>,
-) -> HostReprovisionState {
-    let started_at = Utc::now();
-    let deadline = scout_firmware_upgrade_deadline(
-        started_at,
-        task.execution_timeout_seconds,
-        task.artifact_download_timeout_seconds,
-        task.file_artifacts.len(),
-    );
-    HostReprovisionState::WaitingForScoutUpgrade {
-        upgrade_task_id: task.upgrade_task_id.clone(),
-        firmware_type,
-        final_version: task.target_version.clone(),
-        power_drains_needed,
-        started_at,
-        deadline,
-        delivery: Some(model::machine::ScoutUpgradeDelivery {
-            deadline: started_at + Duration::minutes(30),
-            accepted_at: None,
-        }),
-        // Safety: The #[derive(Serialize)] impl does not fail.
-        task_json: serde_json::to_string(&task).expect("BUG: derived Serialize impl failed?"),
-        result: None,
-    }
-}
-
 /// Reachability params to check if DPU is up or not.
 #[derive(Copy, Clone, Debug)]
 pub struct ReachabilityParams {
@@ -11327,7 +11297,8 @@ impl HostUpgradeState {
                 final_version,
                 power_drains_needed,
                 deadline,
-                delivery,
+                delivered_at,
+                started_at,
                 result,
                 ..
             } => {
@@ -11370,21 +11341,44 @@ impl HostUpgradeState {
                             state.managed_state.get_host_repro_retry_count(),
                         )))
                     }
-                } else if Utc::now()
-                    > delivery
-                        .as_ref()
-                        .filter(|d| d.accepted_at.is_none())
-                        .map_or(*deadline, |d| d.deadline)
-                {
-                    let reason = match delivery {
-                        Some(delivery) if delivery.accepted_at.is_none() => format!(
-                            "scout firmware task delivery timed out without acceptance (deadline {})",
-                            delivery.deadline
-                        ),
-                        Some(_) => format!(
-                            "scout firmware upgrade completion report missing (deadline {deadline}); execution outcome unknown"
-                        ),
-                        None => format!("scout firmware upgrade timed out (deadline {deadline})"),
+                } else {
+                    let delivery_deadline = *started_at + Duration::minutes(30);
+                    if delivered_at.is_none()
+                        && let Some(contact) = state.host_snapshot.status.last_scout_contact_time
+                        && contact > *started_at
+                        && contact <= delivery_deadline
+                    {
+                        let mut next_state = host_reprovision_state.clone();
+                        if let HostReprovisionState::WaitingForScoutUpgrade {
+                            delivered_at,
+                            deadline,
+                            ..
+                        } = &mut next_state
+                        {
+                            *delivered_at = Some(contact);
+                            *deadline += contact.signed_duration_since(*started_at);
+                        }
+                        return Ok(StateHandlerOutcome::transition(scenario.actual_new_state(
+                            next_state,
+                            state.managed_state.get_host_repro_retry_count(),
+                        )));
+                    }
+                    let active_deadline = if delivered_at.is_some() {
+                        *deadline
+                    } else {
+                        delivery_deadline
+                    };
+                    if Utc::now() <= active_deadline {
+                        return Ok(StateHandlerOutcome::do_nothing());
+                    }
+                    let reason = if delivered_at.is_none() {
+                        format!(
+                            "scout firmware task delivery timed out without contact (deadline {active_deadline})"
+                        )
+                    } else {
+                        format!(
+                            "scout firmware upgrade completion report missing (deadline {active_deadline}); execution outcome unknown"
+                        )
                     };
                     tracing::warn!(
                         machine_id = %state.host_snapshot.id,
@@ -11399,8 +11393,6 @@ impl HostUpgradeState {
                         },
                         state.managed_state.get_host_repro_retry_count(),
                     )))
-                } else {
-                    Ok(StateHandlerOutcome::do_nothing())
                 }
             }
             HostReprovisionState::FailedFirmwareUpgrade {
@@ -11707,8 +11699,9 @@ impl HostUpgradeState {
                         .trim_end_matches('/');
 
                     let upgrade_task_id = uuid::Uuid::new_v4().to_string();
+                    let file_artifact_count = to_install.files.len();
                     let task = ScoutFirmwareUpgradeTask {
-                        upgrade_task_id,
+                        upgrade_task_id: upgrade_task_id.clone(),
                         component_type: firmware_type.to_string(),
                         target_version: to_install.version.clone(),
                         script: Some(FileArtifact {
@@ -11731,14 +11724,33 @@ impl HostUpgradeState {
                             .collect::<Result<Vec<_>, StateHandlerError>>()?,
                     };
 
-                    return Ok(StateHandlerOutcome::transition(scenario.actual_new_state(
-                        create_scout_firmware_upgrade_state(
-                            task,
-                            firmware_type,
-                            to_install.power_drains_needed,
+                    // Scout uses a fixed timeout for the script download and applies the artifact
+                    // download timeout per file
+                    let started_at = Utc::now();
+                    let deadline = scout_firmware_upgrade_deadline(
+                        started_at,
+                        scout_script.execution_timeout_seconds,
+                        scout_script.artifact_download_timeout_seconds,
+                        file_artifact_count,
+                    );
+                    return Ok(StateHandlerOutcome::transition(
+                        scenario.actual_new_state(
+                            HostReprovisionState::WaitingForScoutUpgrade {
+                                upgrade_task_id,
+                                firmware_type,
+                                final_version: to_install.version,
+                                power_drains_needed: to_install.power_drains_needed,
+                                started_at,
+                                deadline,
+                                delivered_at: None,
+                                // Safety: The #[derive(Serialize)] impl does not fail
+                                task_json: serde_json::to_string(&task)
+                                    .expect("BUG: derived Serialize impl failed?"),
+                                result: None,
+                            },
+                            state.managed_state.get_host_repro_retry_count(),
                         ),
-                        state.managed_state.get_host_repro_retry_count(),
-                    )));
+                    ));
                 }
 
                 if to_install.script.is_some() {
@@ -16157,50 +16169,6 @@ mod tests {
             metrics.counter_delta("carbide_host_reprovision_retries_total", &[]),
             1.0
         );
-    }
-
-    #[test]
-    fn scout_firmware_upgrade_creation_requires_acknowledgement() {
-        let task = ScoutFirmwareUpgradeTask {
-            upgrade_task_id: "rollout-task".into(),
-            target_version: "1.2.3".into(),
-            execution_timeout_seconds: 300,
-            artifact_download_timeout_seconds: 120,
-            file_artifacts: vec![FileArtifact {
-                url: "https://pxe.example/firmware.bin".into(),
-                sha256: "00".repeat(32),
-            }],
-            ..Default::default()
-        };
-        let state =
-            create_scout_firmware_upgrade_state(task.clone(), FirmwareComponentType::Bmc, Some(2));
-        let HostReprovisionState::WaitingForScoutUpgrade {
-            upgrade_task_id,
-            firmware_type,
-            final_version,
-            power_drains_needed,
-            started_at,
-            deadline,
-            delivery,
-            task_json,
-            result,
-        } = state
-        else {
-            panic!("unexpected state")
-        };
-        let delivery = delivery.expect("new tasks must require acknowledgement");
-        assert_eq!(delivery.deadline - started_at, Duration::minutes(30));
-        assert!(delivery.accepted_at.is_none());
-        assert_eq!(deadline - started_at, Duration::seconds(2250));
-        assert_eq!(upgrade_task_id, task.upgrade_task_id);
-        assert_eq!(final_version, task.target_version);
-        assert_eq!(firmware_type, FirmwareComponentType::Bmc);
-        assert_eq!(power_drains_needed, Some(2));
-        assert_eq!(
-            serde_json::from_str::<ScoutFirmwareUpgradeTask>(&task_json).unwrap(),
-            task,
-        );
-        assert!(result.is_none());
     }
 
     #[test]

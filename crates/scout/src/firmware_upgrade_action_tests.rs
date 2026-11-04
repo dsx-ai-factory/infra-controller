@@ -18,49 +18,32 @@
 use std::sync::{Arc, Mutex};
 
 use axum::Router;
-use axum::body::Body;
+use axum::body::{Body, Bytes};
 use axum::extract::State;
 use axum::http::{Response, Uri};
 use axum::routing::get;
 use clap::Parser;
-use futures_util::StreamExt;
 use sha2::{Digest, Sha256};
-use tokio::sync::Notify;
 
 use super::*;
 
 #[derive(Default)]
 struct Calls {
-    requires_acknowledgement: bool,
-    accepted: bool,
-    acknowledgements: usize,
-    reports: usize,
-    lose_ack_once: bool,
+    reports: Vec<Bytes>,
     lose_report_once: bool,
-    stall_path: Option<&'static str>,
-    stalled: Arc<Notify>,
 }
 
-async fn grpc_stub(State(calls): State<Arc<Mutex<Calls>>>, uri: Uri) -> Response<Body> {
+async fn grpc_stub(
+    State(calls): State<Arc<Mutex<Calls>>>,
+    uri: Uri,
+    body: Bytes,
+) -> Response<Body> {
     let mut calls = calls.lock().unwrap();
     let status = match uri.path() {
         "/forge.Forge/Version" => None,
-        "/forge.Forge/AcknowledgeScoutFirmwareUpgrade" => {
-            calls.acknowledgements += 1;
-            calls.accepted = true;
-            if std::mem::take(&mut calls.lose_ack_once) {
-                Some(tonic::Status::unavailable("injected lost ack response"))
-            } else {
-                None
-            }
-        }
         "/forge.Forge/ReportScoutFirmwareUpgradeStatus" => {
-            calls.reports += 1;
-            if calls.requires_acknowledgement && !calls.accepted {
-                Some(tonic::Status::failed_precondition(
-                    "scout firmware task has not been acknowledged",
-                ))
-            } else if std::mem::take(&mut calls.lose_report_once) {
+            calls.reports.push(body);
+            if std::mem::take(&mut calls.lose_report_once) {
                 Some(tonic::Status::unavailable("injected lost report response"))
             } else {
                 None
@@ -68,23 +51,6 @@ async fn grpc_stub(State(calls): State<Arc<Mutex<Calls>>>, uri: Uri) -> Response
         }
         other => panic!("unexpected RPC {other}"),
     };
-    if calls.stall_path == Some(uri.path()) {
-        calls.stall_path = None;
-        let stalled = calls.stalled.clone();
-        // Version stalls before its message; acknowledgement sends its message
-        // but never finishes the stream or supplies grpc-status trailers.
-        let message = (uri.path() == "/forge.Forge/AcknowledgeScoutFirmwareUpgrade")
-            .then(|| Ok::<_, std::io::Error>(vec![0_u8; 5]));
-        let body =
-            futures_util::stream::iter(message).chain(futures_util::stream::once(async move {
-                stalled.notify_one();
-                std::future::pending::<Result<Vec<u8>, std::io::Error>>().await
-            }));
-        return Response::builder()
-            .header("content-type", "application/grpc")
-            .body(Body::from_stream(body))
-            .unwrap();
-    }
     match status {
         Some(status) => status.into_http::<Body>(),
         None => Response::builder()
@@ -185,145 +151,37 @@ fn run_in_subprocess(test_name: &str) -> bool {
 
 /// Run the production action handler and RPC client against loopback stubs.
 #[test]
-fn firmware_action_recovers_lost_responses() {
-    if run_in_subprocess("firmware_upgrade_action_tests::firmware_action_recovers_lost_responses") {
+fn firmware_action_recovers_lost_report() {
+    if run_in_subprocess("firmware_upgrade_action_tests::firmware_action_recovers_lost_report") {
         return;
     }
-
     tokio::runtime::Runtime::new().unwrap().block_on(async {
         tokio::time::timeout(Duration::from_secs(30), async {
-            // Each task retains its protocol across retries, including legacy tasks.
-            for requires_acknowledgement in [true, false] {
-                let calls = Arc::new(Mutex::new(Calls {
-                    requires_acknowledgement,
-                    lose_ack_once: true,
-                    lose_report_once: true,
-                    ..Default::default()
-                }));
-                let (config, task, _directory, marker) = setup(calls.clone()).await;
-                let machine = "fm100ht038bg3qsho433vkg684heguv282qaggmrsh2ugn1qk096n2c6hcg"
-                    .parse()
-                    .unwrap();
-                let mut state = firmware_upgrade::ScoutFirmwareUpgradeState::default();
-                let action = fac::FirmwareUpgrade {
-                    task: Some(task),
-                    requires_acknowledgement,
-                };
-                if requires_acknowledgement {
-                    // Losing the acknowledgement response must prevent execution.
-                    check_status(
-                        handle_firmware_upgrade_action(
-                            &config,
-                            &machine,
-                            action.clone(),
-                            &mut state,
-                        )
-                        .await,
-                        tonic::Code::Unavailable,
-                    );
-                    assert!(!marker.exists());
-                    assert_eq!(calls.lock().unwrap().acknowledgements, 1);
-                    assert_eq!(calls.lock().unwrap().reports, 0);
-                }
-
-                // A lost completion report must retain the result for redelivery.
-                check_status(
-                    handle_firmware_upgrade_action(&config, &machine, action.clone(), &mut state)
-                        .await,
-                    tonic::Code::Unavailable,
-                );
-                assert_eq!(std::fs::read_to_string(&marker).unwrap(), "run");
-                assert_eq!(calls.lock().unwrap().reports, 1);
-                handle_firmware_upgrade_action(&config, &machine, action, &mut state)
-                    .await
-                    .unwrap();
-                assert_eq!(std::fs::read_to_string(&marker).unwrap(), "run");
-                let calls = calls.lock().unwrap();
-                assert_eq!(calls.accepted, requires_acknowledgement);
-                assert_eq!(
-                    calls.acknowledgements,
-                    if requires_acknowledgement { 2 } else { 0 }
-                );
-                assert_eq!(calls.reports, 2);
-            }
+            let calls = Arc::new(Mutex::new(Calls {
+                lose_report_once: true,
+                ..Default::default()
+            }));
+            let (config, task, _directory, marker) = setup(calls.clone()).await;
+            let machine = "fm100ht038bg3qsho433vkg684heguv282qaggmrsh2ugn1qk096n2c6hcg"
+                .parse()
+                .unwrap();
+            let mut state = firmware_upgrade::ScoutFirmwareUpgradeState::default();
+            let task = Some(task);
+            check_status(
+                handle_firmware_upgrade_action(&config, &machine, task.clone(), &mut state).await,
+                tonic::Code::Unavailable,
+            );
+            assert_eq!(std::fs::read_to_string(&marker).unwrap(), "run");
+            assert_eq!(calls.lock().unwrap().reports.len(), 1);
+            handle_firmware_upgrade_action(&config, &machine, task, &mut state)
+                .await
+                .unwrap();
+            assert_eq!(std::fs::read_to_string(&marker).unwrap(), "run");
+            let calls = calls.lock().unwrap();
+            assert_eq!(calls.reports.len(), 2);
+            assert_eq!(calls.reports[0], calls.reports[1]);
         })
         .await
         .expect("firmware action recovery must finish within 30 seconds");
     });
-}
-
-#[test]
-fn firmware_action_times_out_stalled_acknowledgement_and_retries() {
-    if run_in_subprocess(
-        "firmware_upgrade_action_tests::firmware_action_times_out_stalled_acknowledgement_and_retries",
-    ) {
-        return;
-    }
-    tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap()
-        .block_on(async {
-            for (path, acknowledgements_before_retry) in [
-                ("/forge.Forge/Version", 0),
-                ("/forge.Forge/AcknowledgeScoutFirmwareUpgrade", 1),
-            ] {
-                let calls = Arc::new(Mutex::new(Calls {
-                    requires_acknowledgement: true,
-                    stall_path: Some(path),
-                    ..Default::default()
-                }));
-                let stalled = calls.lock().unwrap().stalled.clone();
-                let (config, task, _directory, marker) = setup(calls.clone()).await;
-                let machine = "fm100ht038bg3qsho433vkg684heguv282qaggmrsh2ugn1qk096n2c6hcg"
-                    .parse()
-                    .unwrap();
-                let mut state = firmware_upgrade::ScoutFirmwareUpgradeState::default();
-                let action = fac::FirmwareUpgrade {
-                    task: Some(task),
-                    requires_acknowledgement: true,
-                };
-                {
-                    let attempt = handle_firmware_upgrade_action(
-                        &config,
-                        &machine,
-                        action.clone(),
-                        &mut state,
-                    );
-                    tokio::pin!(attempt);
-                    tokio::select! {
-                        result = &mut attempt => panic!("{path}: returned before stall: {result:?}"),
-                        () = stalled.notified() => {},
-                        () = tokio::time::sleep(Duration::from_secs(5)) => panic!("{path}: no RPC"),
-                    }
-                    // Advance only after real transport I/O reaches the stall,
-                    // so the regression exercises the complete production caller.
-                    tokio::time::pause();
-                    tokio::time::advance(FIRMWARE_ACKNOWLEDGEMENT_TIMEOUT).await;
-                    let result = tokio::time::timeout(Duration::from_secs(1), attempt)
-                        .await
-                        .expect("acknowledgement attempt must return at its deadline");
-                    tokio::time::resume();
-                    let Err(CarbideClientError::TonicStatusError(status)) = result else {
-                        panic!("{path}: expected deadline error, got {result:?}");
-                    };
-                    assert_eq!(status.code(), tonic::Code::DeadlineExceeded, "{path}");
-                    assert_eq!(status.message(), "firmware task acknowledgement attempt timed out");
-                }
-                assert!(!marker.exists(), "{path}: must not execute before acceptance");
-                assert_eq!(calls.lock().unwrap().reports, 0, "{path}");
-                assert_eq!(calls.lock().unwrap().acknowledgements, acknowledgements_before_retry, "{path}");
-
-                tokio::time::timeout(Duration::from_secs(5), handle_firmware_upgrade_action(
-                    &config, &machine, action, &mut state,
-                ))
-                .await
-                .expect("retry must finish")
-                .unwrap();
-                assert_eq!(std::fs::read_to_string(&marker).unwrap(), "run", "{path}");
-                let calls = calls.lock().unwrap();
-                assert_eq!(calls.acknowledgements, acknowledgements_before_retry + 1, "{path}");
-                assert_eq!(calls.reports, 1, "{path}");
-            }
-        });
 }
