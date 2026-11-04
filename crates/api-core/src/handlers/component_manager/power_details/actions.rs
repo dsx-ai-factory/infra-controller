@@ -136,7 +136,9 @@ fn machine_operation(operation: &MachineMaintenanceOperation) -> rpc::ComponentP
         MachineMaintenanceOperation::PowerOff { graceful } => {
             (Operation::PowerOff, Some(*graceful), None)
         }
-        MachineMaintenanceOperation::Reset => (Operation::Reset, None, None),
+        MachineMaintenanceOperation::Reset
+        | MachineMaintenanceOperation::AcPowercycle
+        | MachineMaintenanceOperation::DisableOnboardNics { .. } => (Operation::Reset, None, None),
         MachineMaintenanceOperation::ChassisReset { chassis_id } => {
             (Operation::ChassisReset, None, Some(chassis_id.clone()))
         }
@@ -301,6 +303,38 @@ mod tests {
         );
     }
 
+    /// The continuation retains AC-cycle identity and admitted metadata, and
+    /// must not report the still-pending original request a second time.
+    #[test]
+    fn machine_nic_recovery_keeps_ac_cycle_active() {
+        let request = MachineMaintenanceRequest {
+            requested_at: "2026-10-01T00:00:00Z".parse().unwrap(),
+            initiator: "operator".into(),
+            operation: MachineMaintenanceOperation::AcPowercycle,
+        };
+        let state = ManagedHostState::Maintenance {
+            operation: MachineMaintenanceOperation::DisableOnboardNics {
+                disable_onboard_nics_state:
+                    model::machine::DisableOnboardNicsState::WaitForConfigToBeApplied {
+                        onboard_nics_disabled: true,
+                    },
+            },
+            request: Some(request.clone()),
+        };
+        let details = machine(&state, Some(&request));
+        assert_eq!(details.error, None);
+        assert_eq!(
+            details.actions,
+            vec![rpc::ComponentPowerAction {
+                status: Status::Active as i32,
+                operation: Operation::Reset as i32,
+                requested_at: Some(request.requested_at.into()),
+                initiator: Some(request.initiator),
+                ..Default::default()
+            }]
+        );
+    }
+
     /// Switch and shelf requests have independent equality paths. A changed
     /// initiator must survive, and legacy shutdown JSON must preserve forced off
     /// without inventing active metadata or hiding a same-operation request.
@@ -443,6 +477,14 @@ mod tests {
                 Check {
                     scenario: "component reset",
                     input: MachineMaintenanceOperation::Reset,
+                    expect: rpc::ComponentPowerAction {
+                        operation: Operation::Reset as i32,
+                        ..Default::default()
+                    },
+                },
+                Check {
+                    scenario: "AC power cycle",
+                    input: MachineMaintenanceOperation::AcPowercycle,
                     expect: rpc::ComponentPowerAction {
                         operation: Operation::Reset as i32,
                         ..Default::default()

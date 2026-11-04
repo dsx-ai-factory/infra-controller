@@ -2928,10 +2928,19 @@ pub enum MachineMaintenanceOperation {
         #[serde(default)]
         graceful: bool,
     },
-    /// Reset the host (restart / AC power cycle).
+    /// Restart the host. Legacy saved AC-cycle requests also use this variant.
     Reset,
+    /// Apply an AC power cycle through the compute-tray component manager.
+    AcPowercycle,
     /// Reset the identified Redfish chassis through the host BMC.
     ChassisReset { chassis_id: String },
+    /// Continue a successful AC cycle by restoring onboard NIC isolation on
+    /// Vera Rubin hosts with managed DPUs. The admitted request retains the
+    /// original power operation until this continuation completes.
+    DisableOnboardNics {
+        /// The next write or application wait in the enable/disable sequence.
+        disable_onboard_nics_state: DisableOnboardNicsState,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

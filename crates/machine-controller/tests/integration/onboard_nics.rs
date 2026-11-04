@@ -38,7 +38,7 @@ fn onboard_state(state: DisableOnboardNicsState) -> ManagedHostState {
     }
 }
 
-async fn setup_host(env: &Env, config: ManagedHostConfig) -> (TestManagedHost, String) {
+pub(super) async fn setup_host(env: &Env, config: ManagedHostConfig) -> (TestManagedHost, String) {
     let domain = env.test_harness.test_domain().await;
     let network_controller = env.test_harness.network_controller();
     let underlay = network_controller.create_underlay_segment(&domain).await;
@@ -53,7 +53,7 @@ async fn setup_host(env: &Env, config: ManagedHostConfig) -> (TestManagedHost, S
     (host, data.host_bmc_ip().to_string())
 }
 
-async fn expire_wait(env: &Env, host: &TestManagedHost) {
+pub(super) async fn expire_wait(env: &Env, host: &TestManagedHost) {
     let machine = host.host.machine().await;
     let version: ConfigVersion = format!(
         "V{}-T{}",
