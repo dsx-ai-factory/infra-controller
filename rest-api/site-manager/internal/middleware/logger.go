@@ -1,8 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-// Package middleware holds Site Manager's Echo middleware: the API name,
-// request logging and request metrics.
+// Package middleware holds Site Manager's Echo middleware: request logging
+// and request metrics.
 package middleware
 
 import (

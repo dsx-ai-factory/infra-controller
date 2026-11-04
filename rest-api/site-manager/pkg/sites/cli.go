@@ -111,7 +111,11 @@ func NewCommand() *cli.Command {
 				otpDuration:    time.Duration(otpHrs) * time.Hour,
 			}
 			log.Info().Msg("configuring Site Manager server")
-			s, err := NewSiteManager(ctx, o)
+			crdClient, err := newCRDClient()
+			if err != nil {
+				return err
+			}
+			s, err := NewSiteManager(ctx, o, crdClient)
 			if err != nil {
 				return err
 			}

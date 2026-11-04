@@ -21,8 +21,8 @@ import (
 // TestNewCommandAcceptsSentryDSN checks that existing invocations with the
 // deprecated --sentry-dsn flag still start. The flag only logs a warning.
 func TestNewCommandAcceptsSentryDSN(t *testing.T) {
-	// Outside a cluster the Action returns from NewSiteManager instead of
-	// serving. The warning is logged before that.
+	// Outside a cluster the Action fails to build its Site CRD client instead
+	// of serving. The warning is logged before that.
 	t.Setenv("KUBERNETES_SERVICE_HOST", "")
 	t.Setenv("SENTRY_DSN", "")
 

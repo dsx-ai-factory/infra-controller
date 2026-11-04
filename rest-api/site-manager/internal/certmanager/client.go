@@ -102,9 +102,9 @@ func (c *Client) IssueCertificate(ctx context.Context, name, app string, ttl int
 	if err != nil {
 		return nil, errors.Wrap(err, "http.NewRequestWithContext")
 	}
-	content, err := c.roundTrip(req)
+	content, err := c.request(req)
 	if err != nil {
-		return nil, errors.Wrap(err, "c.roundTrip(req)")
+		return nil, errors.Wrap(err, "c.request(req)")
 	}
 
 	if content == nil {
@@ -125,9 +125,9 @@ func (c *Client) GetCA(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", errors.Wrap(err, "http.NewRequestWithContext")
 	}
-	content, err := c.roundTrip(req)
+	content, err := c.request(req)
 	if err != nil {
-		return "", errors.Wrap(err, "c.roundTrip(req)")
+		return "", errors.Wrap(err, "c.request(req)")
 	}
 
 	if content == nil {
@@ -137,9 +137,9 @@ func (c *Client) GetCA(ctx context.Context) (string, error) {
 	return string(content), nil
 }
 
-// roundTrip sends req and returns the response body. A status outside 200 to
+// request sends req and returns the response body. A status outside 200 to
 // 226 is an error with the status and body. `204` returns nil.
-func (c *Client) roundTrip(req *http.Request) ([]byte, error) {
+func (c *Client) request(req *http.Request) ([]byte, error) {
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return nil, err

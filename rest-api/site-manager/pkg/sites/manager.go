@@ -50,36 +50,14 @@ type Options struct {
 // SiteManager defines an instance of Site Manager
 type SiteManager struct {
 	Options
-	crdClient   crdclient.Interface
 	echo        *echo.Echo
 	certManager *certmanager.Client
 	l           net.Listener
 }
 
-// NewSiteManager creates an instance of SiteManager
-func NewSiteManager(ctx context.Context, o Options) (*SiteManager, error) {
-	cfg, err := rest.InClusterConfig()
-	if err != nil {
-		return nil, errors.Wrap(err, "rest.InClusterConfig()")
-	}
-
-	// wrap the transport with otel
-	otelWrapper := func(rt http.RoundTripper) http.RoundTripper {
-		return otelhttp.NewTransport(rt, otelhttp.WithSpanNameFormatter(func(string, *http.Request) string {
-			return crdClientName
-		}))
-	}
-
-	cfg.WrapTransport = otelWrapper
-	c, err := crdclient.NewForConfig(cfg)
-	if err != nil {
-		return nil, errors.Wrap(err, "crdclient.NewForConfig(cfg)")
-	}
-
-	return newSiteManager(ctx, o, c)
-}
-
-func newSiteManager(ctx context.Context, o Options, c crdclient.Interface) (*SiteManager, error) {
+// NewSiteManager creates an instance of SiteManager that stores Sites
+// through crdClient.
+func NewSiteManager(ctx context.Context, o Options, crdClient crdclient.Interface) (*SiteManager, error) {
 	certManager, err := certmanager.NewClient(o.credsMgrURL, o.credsMgrCAPath)
 	if err != nil {
 		return nil, errors.Wrap(err, "certmanager.NewClient")
@@ -90,19 +68,39 @@ func newSiteManager(ctx context.Context, o Options, c crdclient.Interface) (*Sit
 		certManager: certManager,
 	}
 
-	s.crdClient = c
-
 	err = s.tlsSetup(ctx)
 	if err != nil {
 		return nil, errors.Wrap(err, "tlsSetup")
 	}
-	sites := c.ForgeV1().Sites(s.namespace)
+	sites := crdClient.ForgeV1().Sites(s.namespace)
 	s.echo = server.InitSiteManagerServer(
 		"nico_rest_site_manager",
 		api.NewSystemRoutes(metadata.Version),
 		api.NewSiteRoutes(sites, s.otpDuration, certManager),
 	)
 	return s, nil
+}
+
+// newCRDClient returns a Site CRD client for the cluster Site Manager runs in.
+// Its requests are traced.
+func newCRDClient() (crdclient.Interface, error) {
+	cfg, err := rest.InClusterConfig()
+	if err != nil {
+		return nil, errors.Wrap(err, "rest.InClusterConfig()")
+	}
+
+	// wrap the transport with otel
+	cfg.WrapTransport = func(rt http.RoundTripper) http.RoundTripper {
+		return otelhttp.NewTransport(rt, otelhttp.WithSpanNameFormatter(func(string, *http.Request) string {
+			return crdClientName
+		}))
+	}
+
+	c, err := crdclient.NewForConfig(cfg)
+	if err != nil {
+		return nil, errors.Wrap(err, "crdclient.NewForConfig(cfg)")
+	}
+	return c, nil
 }
 
 // Start starts the manager

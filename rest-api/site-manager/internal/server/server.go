@@ -23,8 +23,7 @@ import (
 )
 
 const (
-	// serviceName identifies the server to the Echo tracing middleware. Error
-	// responses report it as their source.
+	// serviceName identifies the server to the Echo tracing middleware.
 	serviceName = "nico-rest-site-manager"
 
 	// readTimeout, writeTimeout and idleTimeout are the http.Server limits of
@@ -60,7 +59,6 @@ func InitSiteManagerServer(metricsNamespace string, systemRoutes, siteRoutes []a
 	e.Server.WriteTimeout = writeTimeout
 	e.Server.IdleTimeout = idleTimeout
 
-	e.Use(middleware.APIName(serviceName))
 	e.Use(echoMiddleware.Recover())
 	if cotel.TransportEnabled() {
 		e.Use(otelecho.Middleware(serviceName))

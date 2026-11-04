@@ -259,7 +259,7 @@ func TestManagerCreateSite() (*Suite, error) {
 
 	runCtx, cancel := context.WithCancel(context.Background())
 	ts.cancel = cancel
-	m, err := newSiteManager(runCtx, o, fcrd)
+	m, err := NewSiteManager(runCtx, o, fcrd)
 	if err != nil {
 		return ts, err
 	}
