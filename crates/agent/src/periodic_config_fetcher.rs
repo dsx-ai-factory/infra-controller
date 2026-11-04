@@ -1533,6 +1533,8 @@ mod tests {
             "absent V4 SVI clears the legacy value" {
                 legacy_interface(vec![ipv4_without_svi]) => Yields(expected_ipv4_without_svi),
             }
+        );
+        scenarios!(run = normalized_interface;
             "absent V6 SVI clears the legacy sidecar value" {
                 legacy_interface(vec![ipv4_address(), ipv6_without_svi]) => Yields(dual_stack_without_ipv6_svi),
             }

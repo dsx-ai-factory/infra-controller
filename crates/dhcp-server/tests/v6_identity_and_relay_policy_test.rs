@@ -44,6 +44,10 @@ fn config() -> carbide_dhcp_server::Config {
         prefix: Some("192.0.2.0/24".to_string()),
         fqdn: "host.example.com".to_string(),
         booturl: None,
+        booturl_v4: None,
+        booturl_v6: None,
+        dns_servers_v4: vec![],
+        dns_servers_v6: vec![],
         mtu: Some(9000),
         ipv6: Some(InterfaceInfoV6 {
             address: Some("2001:db8::20".parse().unwrap()),
