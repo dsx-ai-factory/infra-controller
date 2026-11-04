@@ -27,7 +27,7 @@ use serde_json::json;
 
 use crate::bmc_state::BmcState;
 use crate::json::JsonExt;
-use crate::{Callbacks, http, redfish};
+use crate::{ActionError, Callbacks, ResourceResetType, http, redfish};
 
 #[derive(Clone)]
 pub(crate) enum BluefieldState {
@@ -122,6 +122,11 @@ pub(crate) fn add_routes<C: Callbacks>(r: Router<BmcState<C>>) -> Router<BmcStat
         post(mode_set::<C>),
     )
     .route(
+        // BF-4 OEM DPU OS restart. Firmware serves it without advertising it.
+        "/redfish/v1/Chassis/{chassis_id}/Actions/Oem/NvidiaChassis.Reset",
+        post(nvidia_chassis_reset::<C>),
+    )
+    .route(
         "/redfish/v1/Managers/{manager_id}/Oem/Nvidia",
         patch(patch_managers_oem_nvidia::<C>),
     )
@@ -199,9 +204,172 @@ fn parse_requested_mode(body: &serde_json::Value) -> Option<bool> {
     }
 }
 
+/// BF-4 OEM `NvidiaChassis.Reset` with `ResetType` `ArmReset`: a graceful
+/// restart of the Arm cores that run the DPU OS. The DPU chassis shares its id
+/// with the DPU system, so the action restarts that system, simulated and logged
+/// like a `ComputerSystem.Reset` with `GracefulRestart`.
+async fn nvidia_chassis_reset<C: Callbacks>(
+    State(state): State<BmcState<C>>,
+    Path(chassis_id): Path<String>,
+    body: Result<axum::Json<serde_json::Value>, axum::extract::rejection::JsonRejection>,
+) -> Response {
+    let supported = matches!(
+        state.oem_state,
+        redfish::oem::State::NvidiaBluefield(BluefieldState::Bluefield4)
+    ) && state.system_state.find(&chassis_id).is_some();
+    let Some(callbacks) = state.callbacks.as_ref().filter(|_| supported) else {
+        return http::not_found();
+    };
+    let Ok(axum::Json(body)) = body else {
+        return http::bad_request("NvidiaChassis.Reset requires a JSON body");
+    };
+    if body.get("ResetType").and_then(serde_json::Value::as_str) != Some("ArmReset") {
+        return http::bad_request("NvidiaChassis.Reset requires a `ResetType` of `ArmReset`");
+    }
+    let reset_type = ResourceResetType::GracefulRestart;
+    match callbacks.computer_system_reset(reset_type).await {
+        Ok(()) => {
+            state.record_event(redfish::log_service::LogEntryDraft::reset_requested(
+                &redfish::computer_system::resource(&chassis_id).odata_id,
+                reset_type,
+            ));
+            json!({}).into_ok_response()
+        }
+        Err(ActionError::BadRequest(error)) => http::bad_request(&error.to_string()),
+        Err(ActionError::Internal(error)) => {
+            tracing::error!(%error, chassis_id, "NvidiaChassis.Reset failed");
+            http::redfish_error(
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                "NvidiaChassis.Reset failed",
+            )
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use axum::body::{Body, to_bytes};
+    use axum::http::header::CONTENT_TYPE;
+    use axum::http::{Request, StatusCode};
+    use tower::ServiceExt;
+
     use super::*;
+    use crate::machine_info::DpuSettings;
+    use crate::test_support::{TEST_MAC_POOL, TestBmcConfig, create_test_bmc};
+    use crate::{DpuMachineInfo, HardwareType, MachineInfo, MachineRouterOptions};
+
+    /// Only a BF-4 serves `NvidiaChassis.Reset`, and only for `ArmReset`. An
+    /// accepted reset restarts the system and logs it like `ComputerSystem.Reset`.
+    #[tokio::test]
+    async fn nvidia_chassis_reset_restarts_only_a_bluefield4() {
+        struct Case {
+            scenario: &'static str,
+            hardware: HardwareType,
+            chassis_id: &'static str,
+            body: &'static str,
+            status: StatusCode,
+            resets: &'static [ResourceResetType],
+        }
+        let cases = [
+            Case {
+                scenario: "BF-4 ArmReset",
+                hardware: HardwareType::NvidiaDgxVr,
+                chassis_id: "BlueField_0",
+                body: r#"{"ResetType":"ArmReset"}"#,
+                status: StatusCode::OK,
+                resets: &[ResourceResetType::GracefulRestart],
+            },
+            Case {
+                scenario: "BF-4 other reset type",
+                hardware: HardwareType::NvidiaDgxVr,
+                chassis_id: "BlueField_0",
+                body: r#"{"ResetType":"ForceRestart"}"#,
+                status: StatusCode::BAD_REQUEST,
+                resets: &[],
+            },
+            Case {
+                scenario: "BF-4 chassis that is not the system",
+                hardware: HardwareType::NvidiaDgxVr,
+                chassis_id: "BlueField_BMC_0",
+                body: r#"{"ResetType":"ArmReset"}"#,
+                status: StatusCode::NOT_FOUND,
+                resets: &[],
+            },
+            Case {
+                // The BF-3's own system id, so only the BF-4 check rejects it.
+                scenario: "BF-3",
+                hardware: HardwareType::DellPowerEdgeR750,
+                chassis_id: "Bluefield",
+                body: r#"{"ResetType":"ArmReset"}"#,
+                status: StatusCode::NOT_FOUND,
+                resets: &[],
+            },
+        ];
+        for case in cases {
+            let dpu = DpuMachineInfo::new(
+                case.hardware,
+                &mut TEST_MAC_POOL.lock().unwrap(),
+                DpuSettings::default(),
+            );
+            let (router, state) = create_test_bmc(
+                &MachineInfo::Dpu(dpu),
+                TestBmcConfig::default(),
+                "test-dpu-id".to_string(),
+                false,
+                MachineRouterOptions::default(),
+            );
+            let response = router
+                .clone()
+                .oneshot(
+                    Request::post(format!(
+                        "/redfish/v1/Chassis/{}/Actions/Oem/NvidiaChassis.Reset",
+                        case.chassis_id
+                    ))
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(case.body))
+                    .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), case.status, "{}", case.scenario);
+            assert_eq!(
+                *state.callbacks.as_ref().unwrap().commands.lock().unwrap(),
+                case.resets,
+                "{}",
+                case.scenario
+            );
+
+            let system = format!("/redfish/v1/Systems/{}", case.chassis_id);
+            // Entries land in the DPU system's log, whatever id the request named.
+            let dpu_system = state.system_state.primary_system_odata_id().unwrap();
+            let response = router
+                .oneshot(
+                    Request::get(format!("{dpu_system}/LogServices/EventLog/Entries"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let entries: serde_json::Value =
+                serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap())
+                    .unwrap();
+            let logged: Vec<_> = entries["Members"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|entry| entry["Links"]["OriginOfCondition"]["@odata.id"] == system)
+                .map(|entry| entry["Message"].as_str().unwrap())
+                .collect();
+            let expected: Vec<_> = case
+                .resets
+                .iter()
+                .map(|&reset| {
+                    redfish::log_service::LogEntryDraft::reset_requested(&system, reset).message
+                })
+                .collect();
+            assert_eq!(logged, expected, "{}", case.scenario);
+        }
+    }
 
     #[test]
     fn mode_set_is_staged_and_applied_on_power_on() {
