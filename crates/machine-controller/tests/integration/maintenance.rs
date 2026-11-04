@@ -176,6 +176,7 @@ fn expected_action(operation: MachineMaintenanceOperation) -> PowerAction {
         MachineMaintenanceOperation::PowerOff { graceful: true } => PowerAction::GracefulShutdown,
         MachineMaintenanceOperation::PowerOff { graceful: false } => PowerAction::ForceOff,
         MachineMaintenanceOperation::Reset => PowerAction::ForceRestart,
+        MachineMaintenanceOperation::Reboot => PowerAction::GracefulRestart,
         MachineMaintenanceOperation::ChassisReset { .. } => {
             unreachable!("chassis resets do not use the compute-tray backend")
         }
@@ -291,6 +292,12 @@ async fn reconcile(
         ));
     }
 
+    if matches!(case.entry_state, EntryState::Failed)
+        && entered.status.failure_details.cause != FailureCause::NoError
+    {
+        return Err("accepting maintenance did not clear the stale host failure".into());
+    }
+
     // Second iteration reconciles the operation with the backend.
     env.run_single_iteration().await;
     let machine = host.host.machine().await;
@@ -314,6 +321,7 @@ fn backend_cases() -> Vec<Case<ReconciliationCase, Observation, String>> {
         MachineMaintenanceOperation::PowerOff { graceful: true },
         MachineMaintenanceOperation::PowerOff { graceful: false },
         MachineMaintenanceOperation::Reset,
+        MachineMaintenanceOperation::Reboot,
     ] {
         for entry_state in [EntryState::Ready, EntryState::Failed] {
             for backend_outcome in [
