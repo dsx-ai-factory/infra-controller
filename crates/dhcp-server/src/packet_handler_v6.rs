@@ -540,6 +540,21 @@ fn encode_mode_reply(
         _ => None,
     };
 
+    // The record's DNS servers replace the site's when present.
+    let nameservers: Vec<Ipv6Addr> = match &outcome {
+        V6Outcome::Stateful(record) | V6Outcome::OptionsOnly(record) => record
+            .dns_servers
+            .iter()
+            .filter_map(|server| server.parse().ok())
+            .collect(),
+        V6Outcome::NoAddress => Vec::new(),
+    };
+    let nameservers = if nameservers.is_empty() {
+        config.dhcp_config.carbide_nameservers_v6.clone()
+    } else {
+        nameservers
+    };
+
     let booturl = match &outcome {
         V6Outcome::Stateful(record) | V6Outcome::OptionsOnly(record) => record
             .booturl
@@ -575,8 +590,7 @@ fn encode_mode_reply(
         if requested.opts.contains(&OptionCode::VendorClass)
             && let Ok(boot_uri) = booturl.parse::<Uri>()
             && matches!(boot_uri.scheme_str(), Some("http" | "https"))
-            && (!config.dhcp_config.carbide_nameservers_v6.is_empty()
-                || boot_url_has_ipv6_host(&boot_uri))
+            && (!nameservers.is_empty() || boot_url_has_ipv6_host(&boot_uri))
             && let Some(vendor) = request.http_vendor_class()
         {
             // UEFI clients need this marker to recognize an HTTP boot offer.
@@ -595,7 +609,13 @@ fn encode_mode_reply(
 
     match outcome {
         V6Outcome::Stateful(record) => {
-            add_config_options(&mut reply, Some(&record.fqdn), requested_fqdn_flags, config)?;
+            add_config_options(
+                &mut reply,
+                Some(&record.fqdn),
+                requested_fqdn_flags,
+                &nameservers,
+                config,
+            )?;
             let association = request
                 .ia_na()?
                 .ok_or(DhcpError::MissingOptionV6(OptionCode::IANA))?;
@@ -616,10 +636,16 @@ fn encode_mode_reply(
             }));
         }
         V6Outcome::OptionsOnly(record) => {
-            add_config_options(&mut reply, Some(&record.fqdn), requested_fqdn_flags, config)?;
+            add_config_options(
+                &mut reply,
+                Some(&record.fqdn),
+                requested_fqdn_flags,
+                &nameservers,
+                config,
+            )?;
         }
         V6Outcome::NoAddress => {
-            add_config_options(&mut reply, None, requested_fqdn_flags, config)?;
+            add_config_options(&mut reply, None, requested_fqdn_flags, &nameservers, config)?;
             let association = request
                 .ia_na()?
                 .ok_or(DhcpError::MissingOptionV6(OptionCode::IANA))?;
@@ -742,12 +768,13 @@ fn add_config_options(
     reply: &mut Message,
     fqdn: Option<&str>,
     requested_fqdn_flags: Option<u8>,
+    nameservers: &[Ipv6Addr],
     config: &Config,
 ) -> Result<(), DhcpError> {
-    if !config.dhcp_config.carbide_nameservers_v6.is_empty() {
-        reply.opts_mut().insert(DhcpOption::DomainNameServers(
-            config.dhcp_config.carbide_nameservers_v6.clone(),
-        ));
+    if !nameservers.is_empty() {
+        reply
+            .opts_mut()
+            .insert(DhcpOption::DomainNameServers(nameservers.to_vec()));
     }
     if !config.dhcp_config.carbide_ntpservers_v6.is_empty() {
         reply.opts_mut().insert(DhcpOption::NtpServer(
@@ -1226,7 +1253,7 @@ mod tests {
             ],
             |fqdn| {
                 let mut reply = Message::new_with_id(MessageType::Reply, [0, 0, 0]);
-                add_config_options(&mut reply, Some(&fqdn), Some(1), &config).map_err(drop)?;
+                add_config_options(&mut reply, Some(&fqdn), Some(1), &[], &config).map_err(drop)?;
 
                 // Return the payload boundary, preserved flags, and terminating root.
                 let payload = match reply.opts().get(OptionCode::ClientFqdn) {

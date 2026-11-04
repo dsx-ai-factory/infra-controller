@@ -329,8 +329,17 @@ pub extern "C" fn machine_get_next_server(ctx: *mut Machine) -> u32 {
 pub extern "C" fn machine_get_nameservers(ctx: *mut Machine) -> *mut libc::c_char {
     assert!(!ctx.is_null());
 
-    let nameservers =
-        CString::new(crate::format_ipv4_list(&CONFIG.read().unwrap().nameservers)).unwrap();
+    // SAFETY: Initial lint enablement: this C ABI contract needs owner review.
+    // Kea retains this Rust-allocated Machine for the synchronous getter call.
+    let machine = unsafe { &*ctx };
+
+    let nameservers_csv = if !machine.inner.dns_servers.is_empty() {
+        machine.inner.dns_servers.join(",")
+    } else {
+        crate::format_ipv4_list(&CONFIG.read().unwrap().nameservers)
+    };
+
+    let nameservers = CString::new(nameservers_csv).unwrap();
     log::debug!("Nameservers are {nameservers:?}");
 
     nameservers.into_raw()
@@ -356,12 +365,26 @@ pub extern "C" fn machine_get_ntpservers(ctx: *mut Machine) -> *mut libc::c_char
     ntpservers.into_raw()
 }
 
-/// Return DHCPv6 option 23 payload bytes for configured DNS servers.
+/// Return DHCPv6 option 23 payload bytes for the record's or configured DNS servers.
 #[unsafe(no_mangle)]
 pub extern "C" fn machine_get_dns_servers_ipv6(ctx: *mut Machine) -> DhcpByteBuffer {
     assert!(!ctx.is_null());
 
-    let servers = CONFIG.read().unwrap().dns_servers_ipv6.clone();
+    // SAFETY: Initial lint enablement: this C ABI contract needs owner review.
+    // Kea retains this Rust-allocated Machine for the synchronous getter call.
+    let machine = unsafe { &*ctx };
+
+    let servers: Vec<Ipv6Addr> = machine
+        .inner
+        .dns_servers
+        .iter()
+        .filter_map(|server| server.parse().ok())
+        .collect();
+    let servers = if servers.is_empty() {
+        CONFIG.read().unwrap().dns_servers_ipv6.clone()
+    } else {
+        servers
+    };
     DhcpByteBuffer::from_vec(flatten_ipv6_addresses(&servers))
 }
 

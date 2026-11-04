@@ -649,12 +649,21 @@ fn create_dhcp_reply_packet(
     msg.opts_mut().insert(DhcpOption::SubnetMask(prefix));
     msg.opts_mut()
         .insert(DhcpOption::Router(vec![relay_address]));
-    msg.opts_mut().insert(DhcpOption::NameServer(
-        config.dhcp_config.carbide_nameservers.clone(),
-    ));
-    msg.opts_mut().insert(DhcpOption::DomainNameServer(
-        config.dhcp_config.carbide_nameservers.clone(),
-    ));
+    // The record's DNS servers replace the site's when present.
+    let nameservers: Vec<Ipv4Addr> = forge_response
+        .dns_servers
+        .iter()
+        .filter_map(|server| server.parse().ok())
+        .collect();
+    let nameservers = if nameservers.is_empty() {
+        config.dhcp_config.carbide_nameservers.clone()
+    } else {
+        nameservers
+    };
+    msg.opts_mut()
+        .insert(DhcpOption::NameServer(nameservers.clone()));
+    msg.opts_mut()
+        .insert(DhcpOption::DomainNameServer(nameservers));
     msg.opts_mut()
         .insert(DhcpOption::DomainName(forge_response.fqdn.clone()));
     msg.opts_mut()
@@ -821,6 +830,10 @@ mod test {
             prefix: Some("24".to_string()),
             fqdn: "fqdn1".to_string(),
             booturl: None,
+            booturl_v4: None,
+            booturl_v6: None,
+            dns_servers_v4: vec![],
+            dns_servers_v6: vec![],
             mtu: None,
             ipv6: None,
         };
@@ -838,6 +851,10 @@ mod test {
             prefix: Some("16".to_string()),
             fqdn: "fqdn2".to_string(),
             booturl: None,
+            booturl_v4: None,
+            booturl_v6: None,
+            dns_servers_v4: vec![],
+            dns_servers_v6: vec![],
             mtu: Some(9000),
             ipv6: None,
         };

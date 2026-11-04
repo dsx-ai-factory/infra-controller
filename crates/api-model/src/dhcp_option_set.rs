@@ -103,6 +103,50 @@ impl DhcpOptions {
     }
 }
 
+/// Values that replace NICo's DHCP defaults for one host; unset values keep NICo's.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct DhcpOverrides {
+    pub boot_url_v4: Option<String>,
+    pub boot_url_v6: Option<String>,
+    pub dns_servers_v4: Vec<Ipv4Addr>,
+    pub dns_servers_v6: Vec<Ipv6Addr>,
+}
+
+impl DhcpOverrides {
+    /// Takes each value from the instance's option set, else the VPC's.
+    pub fn resolve(instance: Option<&DhcpOptions>, vpc: Option<&DhcpOptions>) -> Self {
+        let instance_v4 = instance.and_then(|o| o.v4.as_ref());
+        let instance_v6 = instance.and_then(|o| o.v6.as_ref());
+        let vpc_v4 = vpc.and_then(|o| o.v4.as_ref());
+        let vpc_v6 = vpc.and_then(|o| o.v6.as_ref());
+        Self {
+            boot_url_v4: instance_v4
+                .and_then(|o| o.boot_url.clone())
+                .or_else(|| vpc_v4.and_then(|o| o.boot_url.clone())),
+            boot_url_v6: instance_v6
+                .and_then(|o| o.boot_url.clone())
+                .or_else(|| vpc_v6.and_then(|o| o.boot_url.clone())),
+            dns_servers_v4: first_non_empty(
+                instance_v4.map(|o| &o.dns_servers),
+                vpc_v4.map(|o| &o.dns_servers),
+            ),
+            dns_servers_v6: first_non_empty(
+                instance_v6.map(|o| &o.dns_servers),
+                vpc_v6.map(|o| &o.dns_servers),
+            ),
+        }
+    }
+}
+
+fn first_non_empty<T: Clone>(instance: Option<&Vec<T>>, vpc: Option<&Vec<T>>) -> Vec<T> {
+    [instance, vpc]
+        .into_iter()
+        .flatten()
+        .find(|servers| !servers.is_empty())
+        .cloned()
+        .unwrap_or_default()
+}
+
 fn validate_boot_url(boot_url: &Option<String>) -> Result<(), ConfigValidationError> {
     let Some(boot_url) = boot_url else {
         return Ok(());

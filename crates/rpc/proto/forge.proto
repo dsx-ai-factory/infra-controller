@@ -4051,6 +4051,8 @@ message InstanceOperatingSystemConfig {
     // Reference any operating system definition by ID (any variant except OS image).
     // On read the actual variant (iPXE / ipxe_os_definition) is resolved from the row.
     common.OperatingSystemId operating_system_id = 4;
+    // Boot from the boot URL of the instance's or VPC's DHCP option set.
+    DhcpOptionSetBoot dhcp_option_set = 5;
   }
 
   // If this flag is set to `true` the instance will not transition to a Ready state until
@@ -4078,6 +4080,12 @@ message InstanceOperatingSystemConfig {
   bool run_provisioning_instructions_on_every_boot = 12;
   // tenant cloud-init script for any type of OS, preferred
   optional string user_data = 13;
+}
+
+// Selects booting from the DHCP option set's boot URL; carries no settings.
+message DhcpOptionSetBoot {
+  option (carbide.codegen.v1.message_derive) = "serde::Deserialize";
+  option (carbide.codegen.v1.message_derive) = "serde::Serialize";
 }
 
 message InlineIpxe {
@@ -5703,6 +5711,9 @@ message DhcpRecord {
 
   // Per site NTP server IPs
   repeated string ntp_servers = 13;
+
+  // DNS servers for this record; empty uses the DHCP server's configured servers.
+  repeated string dns_servers = 16;
 }
 
 message NetworkSegmentList {
@@ -6316,6 +6327,15 @@ message FlatInterfaceConfig {
 
   // A UUID used to associate a network status with an interface config.
   optional common.UUID internal_uuid = 108;
+
+  // Tenant boot URL for DHCPv4 replies; when unset, booturl is used.
+  optional string booturl_v4 = 109;
+  // Tenant boot URL for DHCPv6 replies; when unset, booturl is used.
+  optional string booturl_v6 = 110;
+  // Tenant DNS servers for DHCPv4 replies; empty uses the site's servers.
+  repeated string dns_servers_v4 = 111;
+  // Tenant DNS servers for DHCPv6 replies; empty uses the site's servers.
+  repeated string dns_servers_v6 = 112;
 }
 
 message FlatInterfaceRoutingProfile {

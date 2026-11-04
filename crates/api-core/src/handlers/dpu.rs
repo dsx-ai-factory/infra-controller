@@ -729,6 +729,20 @@ async fn get_managed_host_network_config_inner(
                 _ => false,
             };
 
+            let use_tenant_dhcp_options = snapshot.use_tenant_dhcp_options();
+            let instance_dhcp_options = match instance.config.dhcp_option_set_id {
+                Some(id) if use_tenant_dhcp_options => db::dhcp_option_set::find_by_ids(
+                    &mut txn,
+                    std::slice::from_ref(&id),
+                    None,
+                    false,
+                )
+                .await?
+                .pop()
+                .map(|set| set.options),
+                _ => None,
+            };
+
             // Check if there's an NSG on the instance.
             let network_security_group_details = if !suppress_tenant_security_groups
                 && let Some((tenant_id, Some(nsg_id))) = snapshot.instance.as_ref().map(|i| {
@@ -898,6 +912,8 @@ async fn get_managed_host_network_config_inner(
                     },
                     &booturl_override,
                     api.runtime_config.fnn.as_ref(),
+                    use_tenant_dhcp_options,
+                    instance_dhcp_options.as_ref(),
                 )
                 .await?;
 

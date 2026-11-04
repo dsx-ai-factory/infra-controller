@@ -453,6 +453,23 @@ impl ManagedHostStateSnapshot {
             .unwrap_or(true)
     }
 
+    /// Returns `true` if the instance's DHCP option sets replace NICo's DHCP values.
+    pub fn use_tenant_dhcp_options(&self) -> bool {
+        // Only a Ready instance whose OS boots via its DHCP option set uses tenant DHCP values.
+        self.instance.as_ref().is_some_and(|instance| {
+            instance.deleted.is_none()
+                && matches!(
+                    instance.config.os.variant,
+                    crate::os::OperatingSystemVariant::DhcpOptionSet
+                )
+        }) && matches!(
+            &self.managed_state,
+            ManagedHostState::Assigned {
+                instance_state: InstanceState::Ready
+            }
+        )
+    }
+
     /// Returns the MAC address the host should boot from, if one can be
     /// determined from this snapshot.
     ///
