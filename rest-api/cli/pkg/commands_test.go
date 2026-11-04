@@ -631,7 +631,7 @@ func TestRunGeneratedCommand(t *testing.T) {
 	})
 }
 
-func TestNewApp_VpcRoutingProfileCommands(t *testing.T) {
+func testNewApp_VpcRoutingProfileCommands(t *testing.T) {
 	tests := []struct {
 		action string
 		flags  []string
@@ -668,7 +668,7 @@ func TestNewApp_VpcRoutingProfileCommands(t *testing.T) {
 	}
 }
 
-func TestNewApp_VpcPrefixCreateSelectors(t *testing.T) {
+func testNewApp_VpcPrefixCreateSelectors(t *testing.T) {
 	app, err := NewApp(openapi.Spec)
 	require.NoError(t, err)
 	vpcPrefix := app.Command("vpc-prefix")
@@ -695,7 +695,7 @@ func TestNewApp_VpcPrefixCreateSelectors(t *testing.T) {
 	assert.Contains(t, output.String(), "exactly one of --prefix or --prefix-length is required")
 }
 
-func TestNewApp_VpcPrefixCreateSelectorValidation(t *testing.T) {
+func testNewApp_VpcPrefixCreateSelectorValidation(t *testing.T) {
 	requestCount := 0
 	requestBody := ""
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
@@ -1087,11 +1087,11 @@ func TestBuildRequestBody_VpcPrefixSelectors(t *testing.T) {
 	}
 }
 
-// TestNewApp_DpuExtensionServiceCreate_DoesNotPanic loads the real embedded
+// testNewApp_DpuExtensionServiceCreate_DoesNotPanic loads the real embedded
 // OpenAPI spec and runs `nicocli dpu-extension-service create --help`. Prior
 // to the reserved-flag fix this invocation panics with
 // "create flag redefined: data" during urfave/cli flag-set construction.
-func TestNewApp_DpuExtensionServiceCreate_DoesNotPanic(t *testing.T) {
+func testNewApp_DpuExtensionServiceCreate_DoesNotPanic(t *testing.T) {
 	app, err := NewApp(openapi.Spec)
 	require.NoError(t, err, "NewApp failed")
 
@@ -1133,7 +1133,7 @@ func TestBuildActionCommand_UsageTextUsesBinaryName(t *testing.T) {
 		"UsageText must not start with the literal word 'cli '; got %q", cmd.UsageText)
 }
 
-func TestNewApp_RackGetUsageShowsOptionsBeforeID(t *testing.T) {
+func testNewApp_RackGetUsageShowsOptionsBeforeID(t *testing.T) {
 	app, err := NewApp(openapi.Spec)
 	require.NoError(t, err)
 
@@ -1423,7 +1423,7 @@ func TestBuildTagSubcommands_AliasCollisionIsOrderIndependent(t *testing.T) {
 		"command surface must not depend on the order primaryOps is built in")
 }
 
-// TestNewApp_CurrentSingletonCommandSurface walks the embedded production spec
+// testNewApp_CurrentSingletonCommandSurface walks the embedded production spec
 // and asserts that the get-current-<resource> singletons expose the `current`
 // action (and `stats` for their -stats endpoints) instead of the bare `get`
 // action or the full operationId. Because `current` and `stats` are distinct
@@ -1432,7 +1432,7 @@ func TestBuildTagSubcommands_AliasCollisionIsOrderIndependent(t *testing.T) {
 // regression guard for NVBug 6100988 (`tenant current` must be runnable from
 // the command line, matching what the interactive TUI prints) and replaces the
 // old guard that asserted the colliding pair expanded to full operationIds.
-func TestNewApp_CurrentSingletonCommandSurface(t *testing.T) {
+func testNewApp_CurrentSingletonCommandSurface(t *testing.T) {
 	app, err := NewApp(openapi.Spec)
 	require.NoError(t, err, "NewApp failed")
 
@@ -1469,7 +1469,7 @@ func TestNewApp_CurrentSingletonCommandSurface(t *testing.T) {
 	}
 }
 
-func TestNewApp_UEFICredentialCreateCommand(t *testing.T) {
+func testNewApp_UEFICredentialCreateCommand(t *testing.T) {
 	app, err := NewApp(openapi.Spec)
 	require.NoError(t, err, "NewApp failed")
 
@@ -1638,7 +1638,7 @@ func TestBuildCommands_AllocationConstraintIsUpdateOnly(t *testing.T) {
 			"removed from the OpenAPI spec because the server never registered those routes (NVBug 6232163)")
 }
 
-func TestNewApp_ListAllEmptyCollectionOutputsArray(t *testing.T) {
+func testNewApp_ListAllEmptyCollectionOutputsArray(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
 		assert.Equal(t, "100", request.URL.Query().Get("pageSize"))
 		assert.Equal(t, "1", request.URL.Query().Get("pageNumber"))
@@ -1841,7 +1841,7 @@ func testNewAppListAllPreservesRepeatedFilters(t *testing.T) {
 	assert.Equal(t, "2", queries[1].Get("pageNumber"))
 }
 
-func TestNewApp_VpcPeeringList(t *testing.T) {
+func testNewApp_VpcPeeringList(t *testing.T) {
 	const response = `[
 		{
 			"id": "peering-id",
@@ -1994,7 +1994,7 @@ func TestAddDefaultTableRelations(t *testing.T) {
 	}
 }
 
-func TestNewApp_MachineValidationCommandSurface(t *testing.T) {
+func testNewApp_MachineValidationCommandSurface(t *testing.T) {
 	app, err := NewApp(openapi.Spec)
 	require.NoError(t, err)
 
@@ -2050,7 +2050,7 @@ func TestNewApp_MachineValidationCommandSurface(t *testing.T) {
 	}
 }
 
-func TestNewApp_MachineValidationStartExecutesRESTRequest(t *testing.T) {
+func testNewApp_MachineValidationStartExecutesRESTRequest(t *testing.T) {
 	var method, path, authorization, body string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
 		method = request.Method
@@ -2096,7 +2096,7 @@ func normalizedOptionHelpLine(output, option string) string {
 	return ""
 }
 
-func TestNewApp_MachineValidationReadCommandsExecuteRESTRequests(t *testing.T) {
+func testNewApp_MachineValidationReadCommandsExecuteRESTRequests(t *testing.T) {
 	tests := []struct {
 		name         string
 		resource     string
@@ -2147,17 +2147,41 @@ func TestNewApp_MachineValidationReadCommandsExecuteRESTRequests(t *testing.T) {
 	}
 }
 
-// TestNewApp keeps the generated power-state command separate
-// from the existing mutation alias, so inspecting power cannot change it.
 func TestNewApp(t *testing.T) {
 	clearAllNicoEnv(t)
 	previousConfigPath := configOverridePath
 	SetConfigPath(filepath.Join(t.TempDir(), "config.yaml"))
 	t.Cleanup(func() { SetConfigPath(previousConfigPath) })
 
-	t.Run("preserves repeated query flags", testNewAppPreservesRepeatedQueryFlags)
-	t.Run("preserves repeated filters across pages", testNewAppListAllPreservesRepeatedFilters)
+	tests := []struct {
+		name string
+		run  func(*testing.T)
+	}{
+		{name: "VPC routing profile commands", run: testNewApp_VpcRoutingProfileCommands},
+		{name: "VPC prefix create selectors", run: testNewApp_VpcPrefixCreateSelectors},
+		{name: "VPC prefix selector validation", run: testNewApp_VpcPrefixCreateSelectorValidation},
+		{name: "DPU extension service create", run: testNewApp_DpuExtensionServiceCreate_DoesNotPanic},
+		{name: "rack get usage", run: testNewApp_RackGetUsageShowsOptionsBeforeID},
+		{name: "singleton command surface", run: testNewApp_CurrentSingletonCommandSurface},
+		{name: "UEFI credential create command", run: testNewApp_UEFICredentialCreateCommand},
+		{name: "empty list-all output", run: testNewApp_ListAllEmptyCollectionOutputsArray},
+		{name: "VPC peering list output", run: testNewApp_VpcPeeringList},
+		{name: "machine validation command surface", run: testNewApp_MachineValidationCommandSurface},
+		{name: "machine validation start request", run: testNewApp_MachineValidationStartExecutesRESTRequest},
+		{name: "machine validation read requests", run: testNewApp_MachineValidationReadCommandsExecuteRESTRequests},
+		{name: "rejects invalid output format", run: testNewApp_OutputFlagRejectsUnknownValueAtRuntime},
+		{name: "site bootstrap command", run: testNewAppIncludesSiteBootstrapCommand},
+		{name: "preserves repeated query flags", run: testNewAppPreservesRepeatedQueryFlags},
+		{name: "preserves repeated filters across pages", run: testNewAppListAllPreservesRepeatedFilters},
+		{name: "power commands", run: testNewAppPowerCommands},
+	}
 
+	for _, tt := range tests {
+		t.Run(tt.name, tt.run)
+	}
+}
+
+func testNewAppPowerCommands(t *testing.T) {
 	const siteID = "550e8400-e29b-41d4-a716-446655440000"
 	const trayID = "aa:bb:cc:dd:ee:ff"
 	tests := []struct {

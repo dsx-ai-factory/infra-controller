@@ -178,6 +178,13 @@ func TestClient_Do(t *testing.T) {
 				require.True(t, body.closed)
 			},
 		},
+		{name: "refreshes token on unauthorized and retries", run: testClientDoRefreshesTokenOnUnauthorizedAndRetries},
+		{name: "retries unauthorized at most three times", run: testClientDoRetriesUnauthorizedAtMostThreeTimes},
+		{name: "does not replay non-idempotent request after unauthorized", run: testClientDoDoesNotReplayNonIdempotentRequestAfterUnauthorized},
+		{name: "returns refresh error without retrying", run: testClientDoReturnsRefreshErrorWithoutRetrying},
+		{name: "returns empty token error without retrying", run: testClientDoReturnsEmptyTokenErrorWithoutRetrying},
+		{name: "returns unauthorized without refresh function", run: testClientDoReturnsUnauthorizedWhenNoRefreshFunc},
+		{name: "does not refresh on forbidden", run: testClientDoDoesNotRefreshOnForbidden},
 	}
 
 	for _, tt := range tests {
@@ -185,7 +192,7 @@ func TestClient_Do(t *testing.T) {
 	}
 }
 
-func TestClientDoRefreshesTokenOnUnauthorizedAndRetries(t *testing.T) {
+func testClientDoRefreshesTokenOnUnauthorizedAndRetries(t *testing.T) {
 	requests := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requests++
@@ -215,7 +222,7 @@ func TestClientDoRefreshesTokenOnUnauthorizedAndRetries(t *testing.T) {
 	require.Equal(t, 1, refreshes)
 }
 
-func TestClientDoRetriesUnauthorizedAtMostThreeTimes(t *testing.T) {
+func testClientDoRetriesUnauthorizedAtMostThreeTimes(t *testing.T) {
 	requests := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		requests++
@@ -253,7 +260,7 @@ func TestClientDoRetriesUnauthorizedAtMostThreeTimes(t *testing.T) {
 	}
 }
 
-func TestClientDoDoesNotReplayNonIdempotentRequestAfterUnauthorized(t *testing.T) {
+func testClientDoDoesNotReplayNonIdempotentRequestAfterUnauthorized(t *testing.T) {
 	requests := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		requests++
@@ -283,7 +290,7 @@ func TestClientDoDoesNotReplayNonIdempotentRequestAfterUnauthorized(t *testing.T
 	require.Equal(t, http.MethodPost, events[0].Method)
 }
 
-func TestClientDoReturnsRefreshErrorWithoutRetrying(t *testing.T) {
+func testClientDoReturnsRefreshErrorWithoutRetrying(t *testing.T) {
 	requests := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		requests++
@@ -305,7 +312,7 @@ func TestClientDoReturnsRefreshErrorWithoutRetrying(t *testing.T) {
 	require.Equal(t, 1, refreshes)
 }
 
-func TestClientDoReturnsEmptyTokenErrorWithoutRetrying(t *testing.T) {
+func testClientDoReturnsEmptyTokenErrorWithoutRetrying(t *testing.T) {
 	requests := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		requests++
@@ -327,7 +334,7 @@ func TestClientDoReturnsEmptyTokenErrorWithoutRetrying(t *testing.T) {
 	require.Equal(t, 1, refreshes)
 }
 
-func TestClientDoReturnsUnauthorizedWhenNoRefreshFunc(t *testing.T) {
+func testClientDoReturnsUnauthorizedWhenNoRefreshFunc(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		http.Error(w, `{"message":"expired"}`, http.StatusUnauthorized)
 	}))
@@ -340,7 +347,7 @@ func TestClientDoReturnsUnauthorizedWhenNoRefreshFunc(t *testing.T) {
 	require.Equal(t, http.StatusUnauthorized, apiErr.StatusCode)
 }
 
-func TestClientDoDoesNotRefreshOnForbidden(t *testing.T) {
+func testClientDoDoesNotRefreshOnForbidden(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		http.Error(w, `{"message":"forbidden"}`, http.StatusForbidden)
 	}))
