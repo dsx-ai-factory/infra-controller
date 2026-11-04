@@ -16,6 +16,7 @@ use model::switch::FabricManagerStatus;
 use crate::component_common::{ComponentPowerStateResult, PowerStateSource};
 use crate::error::ComponentManagerError;
 use crate::firmware_inventory::{ComponentFirmwareInventoryResult, FirmwareInventorySource};
+use crate::firmware_jobs::{ComponentFirmwareJobsResult, FirmwareJobSource};
 use crate::types::FirmwareUpdateOptions;
 
 /// Selects which `NvSwitchManager` backend is used
@@ -309,6 +310,31 @@ pub trait NvSwitchManager: Send + Sync + Debug + 'static {
     /// or invoking a getter without that capability, such as NSM or mock.
     fn power_state_source(&self) -> Option<PowerStateSource> {
         None
+    }
+
+    /// Identifies passive job reads. `None` means callers report
+    /// [`ComponentManagerError::Unsupported`]; `get_firmware_status` serves executors
+    /// and does not provide this passive contract.
+    fn firmware_job_source(&self) -> Option<FirmwareJobSource> {
+        None
+    }
+
+    /// Observes known jobs in the supplied MAC order, including repeated MACs,
+    /// without registering devices, submitting work, advancing staged updates,
+    /// or writing tracking. Missing tracking, missing jobs, and read failures
+    /// remain distinct; one job's failure must preserve its peers and staged work.
+    /// Accepts BMC MACs only; job tracking needs no hardware credentials or inventory.
+    /// Unsupported backends return [`ComponentManagerError::Unsupported`] without I/O.
+    /// Implementations document admission/deadline bounds and return
+    /// [`ComponentManagerError::InvalidArgument`] for excess input.
+    async fn get_firmware_jobs(
+        &self,
+        _macs: &[MacAddress],
+    ) -> Result<Vec<ComponentFirmwareJobsResult>, ComponentManagerError> {
+        Err(ComponentManagerError::Unsupported(format!(
+            "passive firmware jobs are not supported by the {} backend",
+            self.name()
+        )))
     }
 
     /// Identifies a backend that can read firmware inventory without registering

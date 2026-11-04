@@ -15,6 +15,8 @@
  * limitations under the License.
  */
 
+mod firmware_jobs;
+
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::future::Future;
 use std::net::IpAddr;
@@ -62,6 +64,7 @@ use crate::compute_tray_manager::{
 };
 use crate::config::ComponentManagerConfig;
 use crate::error::ComponentManagerError;
+use crate::firmware_jobs::{ComponentFirmwareJobsResult, FirmwareJobSource};
 use crate::machine_info_provider::{
     MachineInfoProvider, MachineLocationError, MachineLocationObservation, MachineLocationTarget,
 };
@@ -273,6 +276,28 @@ fn rms_node_descriptor_config_error(
 /// identity is unavailable; this fallback requires a declared rack. Switch
 /// reads require an ingested switch. Reads pass endpoint details directly to
 /// RMS without registering devices or changing their power state.
+///
+/// # Passive firmware jobs
+///
+/// `get_firmware_jobs` accepts at most 64 management MACs to bound retained and
+/// queued work. Eight endpoint workflows each allow two concurrent known-job
+/// polls, for at most 16 concurrent RMS RPCs per request. Supported in-memory
+/// jobs are scheduled before database fallbacks so a tracking-store stall does
+/// not consume their workflow slots. Results retain caller order and repeats.
+///
+/// Each fallback reads one MAC in a read-only snapshot. At most one fallback
+/// session is active per request; a full request can use 64 sessions in sequence.
+/// Queueing, acquisition, setup and both RMS protocols share ten seconds.
+/// Subsequent SQL statements have a five-second cap after snapshot setup,
+/// preserving tighter site limits. Completed results survive deadline expiry.
+/// Dropping the reader drops unfinished local work without retries.
+///
+/// Empty input performs no I/O. Reads prefer supported in-memory IDs, falling
+/// back to recognized persisted kinds only when that set is empty. The reader
+/// neither merges the two sets nor refreshes tracking maps. The staged phase is
+/// sampled before RPCs and can change before response time; only switches have
+/// it. `None` never establishes completion or whether a phase was requested
+/// before restart. No apply payloads or operation history are exposed.
 ///
 /// # Compute power and firmware commands
 ///
@@ -2116,6 +2141,19 @@ impl PowerShelfManager for RmsBackend {
         "rms"
     }
 
+    fn firmware_job_source(&self) -> Option<FirmwareJobSource> {
+        Some(FirmwareJobSource::Rms)
+    }
+
+    #[instrument(skip(self, macs), fields(backend = "rms"))]
+    async fn get_firmware_jobs(
+        &self,
+        macs: &[MacAddress],
+    ) -> Result<Vec<ComponentFirmwareJobsResult>, ComponentManagerError> {
+        let deadline = Instant::now() + firmware_jobs::READ_TIMEOUT;
+        self.observe_firmware_jobs(macs, false, deadline).await
+    }
+
     fn supports_firmware_object_json(&self) -> bool {
         true
     }
@@ -3538,6 +3576,19 @@ impl NvSwitchManager for RmsBackend {
 
     fn name(&self) -> &str {
         "rms"
+    }
+
+    fn firmware_job_source(&self) -> Option<FirmwareJobSource> {
+        Some(FirmwareJobSource::Rms)
+    }
+
+    #[instrument(skip(self, macs), fields(backend = "rms"))]
+    async fn get_firmware_jobs(
+        &self,
+        macs: &[MacAddress],
+    ) -> Result<Vec<ComponentFirmwareJobsResult>, ComponentManagerError> {
+        let deadline = Instant::now() + firmware_jobs::READ_TIMEOUT;
+        self.observe_firmware_jobs(macs, true, deadline).await
     }
 
     fn supports_password_rotation(&self) -> bool {
@@ -5731,6 +5782,19 @@ impl ComputeTrayManager for RmsBackend {
 
     fn name(&self) -> &str {
         "rms"
+    }
+
+    fn firmware_job_source(&self) -> Option<FirmwareJobSource> {
+        Some(FirmwareJobSource::Rms)
+    }
+
+    #[instrument(skip(self, macs), fields(backend = "rms"))]
+    async fn get_firmware_jobs(
+        &self,
+        macs: &[MacAddress],
+    ) -> Result<Vec<ComponentFirmwareJobsResult>, ComponentManagerError> {
+        let deadline = Instant::now() + firmware_jobs::READ_TIMEOUT;
+        self.observe_firmware_jobs(macs, false, deadline).await
     }
 
     fn backend(&self) -> ComputeTrayBackend {
@@ -10969,6 +11033,388 @@ mod tests {
             .await
             .unwrap();
         assert!(results[0].success);
+    }
+
+    /// Includes `created` so an upsert of the same IDs cannot masquerade as a
+    /// passive read. Both stories compare the real persistence boundary.
+    async fn firmware_tracking_snapshot(pool: &PgPool) -> Vec<(String, String, String, String)> {
+        sqlx::query_as(
+            "SELECT bmc_mac::text, job_kind, job_id, created::text \
+             FROM direct_dispatch_rms_jobs ORDER BY bmc_mac, job_kind",
+        )
+        .fetch_all(pool)
+        .await
+        .expect("snapshot firmware tracking")
+    }
+
+    /// NVOS completion is only one job's result. A passive read must leave the
+    /// still-queued firmware-object phase and all submission tracking untouched.
+    #[carbide_macros::sqlx_test]
+    async fn sw_passive_jobs_do_not_advance_completed_nvos(pool: sqlx::PgPool) {
+        use crate::firmware_jobs::{FirmwareJobKind as ObservedJobKind, StagedFirmwareJob};
+        const PRIVATE_TOKEN: &str = "staged-firmware-private-access-token";
+        let (mock, mut backend, _, _, _, sw1, _) = make_backend(&pool).await;
+        // This fixture creates two switches and two shelves, with no compute
+        // trays. Keep the profile aligned with that inventory during submission.
+        let capabilities = &mut Arc::make_mut(&mut backend.rack_profiles)
+            .rack_profiles
+            .get_mut(TEST_RACK_PROFILE_ID)
+            .expect("fixture rack profile")
+            .rack_capabilities;
+        capabilities.switch.count = 2;
+        capabilities.power_shelf.count = 2;
+        let endpoints = [make_sw_endpoint(SW_MAC_1)];
+        let options = FirmwareUpdateOptions {
+            access_token: Some(PRIVATE_TOKEN.into()),
+            force_update: true,
+        };
+        queue_mixed_switch_update(
+            &mock,
+            &backend,
+            &sw1.to_string(),
+            &endpoints,
+            &options,
+            "image-job",
+        )
+        .await;
+        let persisted = firmware_tracking_snapshot(&pool).await;
+        assert_eq!(
+            persisted.len(),
+            1,
+            "the passive comparison must include actual persisted tracking"
+        );
+        let macs = [endpoints[0].bmc_mac];
+        let tracked = tracked_jobs(&backend, SW_MAC_1);
+        for _ in 0..2 {
+            mock.enqueue_get_switch_system_image_job_status(Ok(
+                rms::GetSwitchSystemImageJobStatusResponse {
+                    job_id: "image-job".into(),
+                    ..MockRmsApi::switch_system_image_job_status_ok("completed")
+                },
+            ))
+            .await;
+        }
+
+        let (observations, logs) = capture_logs_async(async {
+            let first = NvSwitchManager::get_firmware_jobs(&backend, &macs)
+                .await
+                .expect("first passive poll");
+            let second = NvSwitchManager::get_firmware_jobs(&backend, &macs)
+                .await
+                .expect("repeated passive poll");
+            assert_eq!(first, second);
+            second
+        })
+        .await;
+
+        assert_eq!(observations[0].mac_address, endpoints[0].bmc_mac);
+        let jobs = observations[0].jobs.as_ref().expect("known NVOS job");
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(
+            (jobs[0].kind, jobs[0].job_id.as_str(), jobs[0].state),
+            (
+                ObservedJobKind::SwitchSystemImage,
+                "image-job",
+                Ok(FirmwareState::Completed)
+            )
+        );
+        assert_eq!(
+            observations[0].staged,
+            Some(StagedFirmwareJob::Queued {
+                system_image_job_id: "image-job".into()
+            })
+        );
+        assert!(!format!("{observations:?}").contains(PRIVATE_TOKEN));
+        assert!(!format!("{observations:?}").contains("fw-json"));
+        assert!(logs.iter().all(|log| {
+            !log.message.contains(PRIVATE_TOKEN)
+                && log
+                    .fields
+                    .iter()
+                    .all(|(_, value)| !value.contains(PRIVATE_TOKEN))
+        }));
+        assert!(mock.apply_firmware_object_calls().await.is_empty());
+        assert_eq!(mock.apply_switch_system_image_calls().await.len(), 1);
+        assert_eq!(
+            mock.get_switch_system_image_job_status_calls()
+                .await
+                .iter()
+                .map(|call| call.job_id.clone())
+                .collect::<Vec<_>>(),
+            ["image-job", "image-job"]
+        );
+        assert!(mock.get_firmware_job_status_calls().await.is_empty());
+        assert_eq!(tracked_jobs(&backend, SW_MAC_1), tracked);
+        assert_eq!(firmware_tracking_snapshot(&pool).await, persisted);
+        let staged = backend.staged_firmware_objects.lock().unwrap();
+        let Some(StagedFirmwareObject::Staged {
+            options,
+            config_json,
+            ..
+        }) = staged.get(&macs[0])
+        else {
+            panic!("passive reads must leave the original queued phase");
+        };
+        assert_eq!(options.access_token.as_deref(), Some(PRIVATE_TOKEN));
+        assert_eq!(config_json, r#"{"Id":"fw-json"}"#);
+    }
+
+    /// Persisted recovery needs no rack identity or credential I/O, does not
+    /// refresh memory, and preserves independent jobs, absent tracking and DB failure.
+    #[carbide_macros::sqlx_test]
+    async fn passive_jobs_recover_persisted_ids_without_rewriting_tracking(pool: sqlx::PgPool) {
+        use db::direct_dispatch_rms_job::RmsJobKind as StoredJobKind;
+
+        use crate::firmware_jobs::{
+            FirmwareJobKind as ObservedJobKind, FirmwareJobReadError, StagedFirmwareJob,
+        };
+        let mock = Arc::new(MockRmsApi::new());
+        // Closing this pool simulates unavailable tracking while the fixture
+        // pool remains usable for checking that persisted rows stayed intact.
+        let read_pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect_with(pool.connect_options().as_ref().clone())
+            .await
+            .expect("reader pool");
+        let backend = RmsBackend::new(
+            mock.clone(),
+            Some(mock.clone()),
+            read_pool.clone(),
+            Arc::default(),
+            true,
+        );
+        for (mac, kind, id) in [
+            (CT_MAC_1, StoredJobKind::FirmwareObject, "compute-job"),
+            // Shared persistence may include a foreign role's supported kind;
+            // compute must neither expose nor poll that NVOS job.
+            (CT_MAC_1, StoredJobKind::SwitchSystemImage, "foreign-image"),
+            (PS_MAC_1, StoredJobKind::FirmwareObject, "shelf-job"),
+            (SW_MAC_1, StoredJobKind::SwitchSystemImage, "image-job"),
+            (SW_MAC_1, StoredJobKind::FirmwareObject, "switch-job"),
+            // The renamed shared store also tracks resets. They must neither
+            // accompany firmware nor turn a reset-only device into a firmware job.
+            (
+                CT_MAC_1,
+                StoredJobKind::SwitchSdnFactoryReset,
+                "compute-reset",
+            ),
+            (
+                UNKNOWN_MAC,
+                StoredJobKind::SwitchSdnFactoryReset,
+                "reset-only",
+            ),
+        ] {
+            db::direct_dispatch_rms_job::save(
+                &pool,
+                mac.parse().expect("management MAC"),
+                kind,
+                id,
+            )
+            .await
+            .expect("persist job");
+        }
+        let persisted = firmware_tracking_snapshot(&pool).await;
+        for id in ["compute-job", "shelf-job"] {
+            mock.enqueue_get_firmware_job_status(Ok(rms::GetFirmwareJobStatusResponse {
+                job_id: id.into(),
+                ..MockRmsApi::firmware_job_status_ok(rms::FirmwareJobState::Completed)
+            }))
+            .await;
+        }
+        for _ in 0..2 {
+            mock.enqueue_get_firmware_job_status(Err(tonic::Status::internal(
+                "private-response-body",
+            )
+            .into()))
+                .await;
+            mock.enqueue_get_switch_system_image_job_status(Ok(
+                rms::GetSwitchSystemImageJobStatusResponse {
+                    job_id: "image-job".into(),
+                    ..MockRmsApi::switch_system_image_job_status_ok("completed")
+                },
+            ))
+            .await;
+        }
+        let ct = [CT_MAC_1.parse::<MacAddress>().expect("compute MAC")];
+        let ps = [PS_MAC_1.parse::<MacAddress>().expect("shelf MAC")];
+        let switch_mac = SW_MAC_1.parse::<MacAddress>().expect("switch MAC");
+        let switches = [
+            switch_mac,
+            UNKNOWN_MAC.parse().expect("MAC without firmware tracking"),
+            switch_mac,
+        ];
+
+        let compute = ComputeTrayManager::get_firmware_jobs(&backend, &ct)
+            .await
+            .expect("compute jobs");
+        let shelf = PowerShelfManager::get_firmware_jobs(&backend, &ps)
+            .await
+            .expect("shelf jobs");
+        let switch = NvSwitchManager::get_firmware_jobs(&backend, &switches)
+            .await
+            .expect("switch jobs");
+
+        // Recovered IDs do not create a local stage. In particular, a missing
+        // stage must not become a fabricated Failed phase for any tray type.
+        assert!(
+            compute
+                .iter()
+                .chain(&shelf)
+                .chain(&switch)
+                .all(|result| result.staged.is_none()),
+            "recovered jobs have no local staged phase"
+        );
+
+        for (result, mac, id) in [
+            (&compute[0], ct[0], "compute-job"),
+            (&shelf[0], ps[0], "shelf-job"),
+        ] {
+            assert_eq!(result.mac_address, mac);
+            let jobs = result.jobs.as_ref().expect("persisted job");
+            assert_eq!(jobs.len(), 1);
+            assert_eq!(
+                (jobs[0].kind, jobs[0].job_id.as_str(), jobs[0].state),
+                (
+                    ObservedJobKind::FirmwareObject,
+                    id,
+                    Ok(FirmwareState::Completed)
+                )
+            );
+        }
+        assert_eq!(
+            switch
+                .iter()
+                .map(|result| result.mac_address)
+                .collect::<Vec<_>>(),
+            switches
+        );
+        assert_eq!(switch[0], switch[2]);
+        assert_eq!(switch[1].jobs, Ok(Vec::new()));
+        let jobs = switch[0].jobs.as_ref().expect("independent switch jobs");
+        assert_eq!(
+            jobs.iter()
+                .map(|job| (job.kind, job.job_id.as_str(), job.state))
+                .collect::<Vec<_>>(),
+            [
+                (
+                    ObservedJobKind::FirmwareObject,
+                    "switch-job",
+                    Err(FirmwareJobReadError::PollFailed)
+                ),
+                (
+                    ObservedJobKind::SwitchSystemImage,
+                    "image-job",
+                    Ok(FirmwareState::Completed)
+                ),
+            ]
+        );
+        assert!(backend.firmware_jobs.lock().unwrap().is_empty());
+        assert_eq!(firmware_tracking_snapshot(&pool).await, persisted);
+
+        // A current submission can be known only in memory after persistence
+        // fails. Its full set supersedes both conflicting stored kinds; no merge.
+        let memory_jobs = vec![RmsTrackedFirmwareJob::FirmwareObject("memory-job".into())];
+        backend
+            .firmware_jobs
+            .lock()
+            .unwrap()
+            .insert(switch_mac, memory_jobs.clone());
+        mock.enqueue_get_firmware_job_status(Ok(rms::GetFirmwareJobStatusResponse {
+            job_id: "memory-job".into(),
+            ..MockRmsApi::firmware_job_status_ok(rms::FirmwareJobState::Completed)
+        }))
+        .await;
+
+        let current = NvSwitchManager::get_firmware_jobs(&backend, &[switch_mac])
+            .await
+            .expect("current memory tracking");
+
+        assert_eq!(
+            current[0]
+                .jobs
+                .as_ref()
+                .expect("memory job")
+                .iter()
+                .map(|job| (job.kind, job.job_id.as_str(), job.state))
+                .collect::<Vec<_>>(),
+            [(
+                ObservedJobKind::FirmwareObject,
+                "memory-job",
+                Ok(FirmwareState::Completed)
+            )]
+        );
+        assert_eq!(
+            backend.firmware_jobs.lock().unwrap().get(&switch_mac),
+            Some(&memory_jobs)
+        );
+        assert_eq!(firmware_tracking_snapshot(&pool).await, persisted);
+        assert_eq!(
+            mock.get_firmware_job_status_calls()
+                .await
+                .iter()
+                .map(|call| call.job_id.clone())
+                .collect::<Vec<_>>(),
+            [
+                "compute-job",
+                "shelf-job",
+                "switch-job",
+                "switch-job",
+                "memory-job"
+            ]
+        );
+        assert_eq!(
+            mock.get_switch_system_image_job_status_calls()
+                .await
+                .iter()
+                .map(|call| call.job_id.clone())
+                .collect::<Vec<_>>(),
+            ["image-job", "image-job"]
+        );
+
+        // Losing tracking storage cannot erase a local terminal phase or turn
+        // unavailable tracking into an empty successful observation.
+        backend.staged_firmware_objects.lock().unwrap().insert(
+            switches[1],
+            StagedFirmwareObject::Failed("private-staged-error".into()),
+        );
+        read_pool.close().await;
+
+        let (unavailable, logs) = capture_logs_async(NvSwitchManager::get_firmware_jobs(
+            &backend,
+            &switches[1..2],
+        ))
+        .await;
+        let unavailable = unavailable.expect("per-endpoint tracking error");
+
+        assert_eq!(
+            unavailable[0].jobs,
+            Err(FirmwareJobReadError::TrackingReadFailed)
+        );
+        assert_eq!(unavailable[0].staged, Some(StagedFirmwareJob::Failed));
+        assert!(!format!("{unavailable:?}{logs:?}").contains("private-staged-error"));
+        let diagnostic = logs
+            .iter()
+            .find(|log| log.message == "firmware job tracking read failed")
+            .expect("safe tracking context");
+        assert_eq!(
+            diagnostic.field("failure_class"),
+            Some("TrackingReadFailed")
+        );
+        assert_eq!(
+            diagnostic.field("management_mac_address"),
+            Some(switches[1].to_string().as_str())
+        );
+        assert_eq!(
+            diagnostic.fields.len(),
+            3,
+            "only fixed classes and requested MAC are diagnostic fields"
+        );
+        assert_eq!(
+            diagnostic.field("database_error_class"),
+            Some("pool_closed")
+        );
+        assert!(mock.apply_firmware_object_calls().await.is_empty());
+        assert!(mock.apply_switch_system_image_calls().await.is_empty());
     }
 
     // RMS runs one job per node, so a mixed NVOS + firmware-object update must
