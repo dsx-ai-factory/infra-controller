@@ -7,8 +7,9 @@ NICo (ncx-infrastructure-controller) depends on a set of well-known hostnames in
 Before deploying NICo, you must configure DNS A records that resolve each
 `.nico` hostname to the appropriate service virtual IP (VIP) on your
 out-of-band (OOB) management network. Configure AAAA records for services that
-must be discovered over IPv6; in particular, DHCPv6 option 56 requires an AAAA
-record for the NTP hostname. A site-local recursive resolver (Unbound or
+must be discovered over IPv6. The DPU-local DHCPv6 option-56 fallback requires
+an AAAA record for the NTP hostname when `siteConfig.ntp_servers` has no valid
+IPv6 entry. A site-local recursive resolver (Unbound or
 equivalent) running on your site controller is the recommended approach.
 
 Stock DPU-agent images query `carbide-ntp.forge`. The rebranded
@@ -124,13 +125,14 @@ preserving the generated `pxe_uri=`.
 
 Provides NTP time synchronisation for DPU agents and managed hosts. The bundled
 service is backed by three pods for redundancy. Configure multiple DNS A
-records pointing to its IPv4 VIPs. To advertise the service through DHCPv6
-option 56, also configure one or more AAAA records pointing to reachable IPv6
-NTP endpoints.
+records pointing to its IPv4 VIPs. For the service-discovered DHCPv6 option-56
+fallback, also configure one or more AAAA records pointing to reachable IPv6
+NTP endpoints. Valid site-configured addresses take precedence independently
+for each family.
 
 **Consumers:**
 
-- `nico-agent` (DPU agent) - stock images resolve `carbide-ntp.forge` at startup to discover NTP server addresses; images rebuilt with the rebranded name resolve `nico-ntp.nico`. IPv4 and IPv6 results are advertised to managed hosts through DHCP options 42 and 56, respectively
+- `nico-agent` (DPU agent) - stock images resolve `carbide-ntp.forge` at startup to discover NTP server addresses; images rebuilt with the rebranded name resolve `nico-ntp.nico`. IPv4 and IPv6 results are fallbacks for managed hosts through DHCP options 42 and 56, respectively, used only when the corresponding family has no valid entry in `siteConfig.ntp_servers`
 
 **Configurability:** The stock DPU agent resolves `carbide-ntp.forge` directly
 via DNS (`crates/agent/src/util.rs`). **This lookup is not overridable via
@@ -138,7 +140,8 @@ config in the compiled agent.** Using `nico-ntp.nico` requires an image rebuilt
 with that hostname.
 
 > **Warning:** `carbide-ntp.forge` is hardcoded in the stock `nico-agent`
-> binary. That exact DNS record must resolve correctly on the OOB network.
+> binary. That exact DNS record must resolve correctly on the OOB network when
+> service-discovered NTP fallback is needed.
 > Changing the hostname requires rebuilding the DPU agent.
 
 **Multiple records (recommended):** Configure one A record per IPv4 NTP pod
@@ -289,7 +292,8 @@ Unbound Deployment after changing `unbound.localData`.
 Any DNS server that can serve authoritative responses for the required `.nico`
 and `.forge` names on your OOB management network is supported. Create A
 records for each applicable hostname and an AAAA record for the exact NTP
-hostname queried by the deployed agent when DHCPv6 option 56 is required.
+hostname queried by the deployed agent when the DHCPv6 option-56 fallback is
+needed because `siteConfig.ntp_servers` has no valid IPv6 entry.
 
 > **Note:** `.nico` and `.forge` are private service zones in this deployment.
 > They should not be forwarded to public resolvers. Configure your DNS server

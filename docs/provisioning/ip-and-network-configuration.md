@@ -738,7 +738,8 @@ for name in nico-api.nico nico-pxe.nico nico-static-pxe.nico \
     printf "%-30s -> %s\n" "$name" "$(dig +short "$name" @<UNBOUND_VIP> || echo 'FAILED')"
 done
 
-# Stock agent: A is the IPv4 fallback; AAAA is required for DHCPv6 option 56.
+# Stock agent: DNS supplies NTP fallback for families without a site-configured address.
+# A supplies the IPv4 fallback; AAAA supplies the DHCPv6 option-56 fallback.
 dig +short A carbide-ntp.forge @<UNBOUND_VIP>
 dig +short AAAA carbide-ntp.forge @<UNBOUND_VIP>
 ```
@@ -747,9 +748,11 @@ NTP is checked separately because stock agents query the exact
 `carbide-ntp.forge` name. Do not derive it by replacing only the TLD. For an
 image rebuilt to query `nico-ntp.nico`, replace the complete NTP hostname in
 both commands. The loop checks A records; for IPv6 Scout endpoints, check
-AAAA records for the selected hostname instead. For dual-stack NTP service,
-the explicit AAAA query must also return at least one address. Otherwise, the
-DPU server has no service-discovered IPv6 NTP address for DHCPv6 option 56.
+AAAA records for the selected hostname instead. When `siteConfig.ntp_servers`
+has no valid IPv6 entry and you need the service-discovered NTP fallback, the
+explicit AAAA query must return at least one address. An empty result leaves
+the DPU server without that fallback for DHCPv6 option 56; it does not prevent
+the use of site-configured IPv6 NTP addresses.
 A `FAILED` or empty result for a required record type needs investigation:
 check resolver reachability and the hostname's authoritative records or
 forwarding configuration. Custom Scout hostnames do not necessarily use
