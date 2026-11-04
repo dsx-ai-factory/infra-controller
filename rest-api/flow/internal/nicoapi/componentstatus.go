@@ -46,6 +46,12 @@ func mapComputeStatus(raw string) types.ComponentOperationStatus {
 		head = raw[:i]
 	}
 
+	// The terminal firmware substate reports an error while retaining the same
+	// operation exclusions as active firmware recovery.
+	if raw == "NicFirmwareUpdating/Failed" {
+		return mappedStatus(types.PhaseError, raw, types.ComponentTypeCompute)
+	}
+
 	phase, ok := computePhaseByState[head]
 	if ok {
 		return mappedStatus(phase, raw, types.ComponentTypeCompute)
@@ -139,6 +145,7 @@ var computePhaseByState = map[string]types.Phase{
 	"RotatingHostUefi":      types.PhaseInUse,
 	"RotatingDpuUefi":       types.PhaseInUse,
 	"RotatingNicLockdown":   types.PhaseInUse,
+	"NicFirmwareUpdating":   types.PhaseInUse,
 	"Failed":                types.PhaseError,
 	"Decommissioning":       types.PhaseDeleting,
 	"ForceDeletion":         types.PhaseDeleting,

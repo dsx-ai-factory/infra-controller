@@ -8,6 +8,7 @@ package forge;
 import "common_nico.proto";
 import "console_log_nico.proto";
 import "dns_nico.proto";
+import "external_validation_nico.proto";
 import "google/protobuf/duration.proto";
 import "google/protobuf/empty.proto";
 import "google/protobuf/field_mask.proto";
@@ -387,6 +388,9 @@ service Forge {
 
   // Force deletes a Machine and the associated DPU from NICo databases,
   // with the intention of rediscovering the host later on.
+  // The attached-Instance override removes the attached Instance control-plane
+  // record without first requesting a graceful workload shutdown. Force-delete
+  // cleanup may forcibly restart the host.
   // By default, cleanup does not wait for DPU network acknowledgement. Set
   // wait_for_instance_dpu to request Admin networking when an Instance exists
   // and retain the records until every attached DPU acknowledges it. While
@@ -1310,6 +1314,34 @@ service Forge {
   // Each call reads this server's loaded configuration, without a snapshot
   // guarantee across list and fetch calls or between server replicas.
   rpc FindRoutingProfilesByNames(RoutingProfilesByNamesRequest) returns (NamedRoutingProfileList);
+
+  // External-validation contract only: these methods are not implemented until
+  // durable holds and attempts are delivered. With internal RBAC enabled, the
+  // explicit empty grants deny callers with an AuthContext before dispatch
+  // (PERMISSION_DENIED). Missing AuthContext is also rejected before dispatch;
+  // no gRPC wire status for that branch is promised here. With RBAC bypassed,
+  // the stubs return UNIMPLEMENTED. Runtime implementation must grant SiteAgent
+  // all six RPCs, including removal: REST calls Core as that service. REST
+  // authorizes the end user's role and Tenant scope, and audits the end user;
+  // Core authorizes/audits the service caller and checks resource/policy bindings.
+  // Core cannot infer a Provider Admin role from the SiteAgent identity. Direct
+  // Core callers need explicit method/site permissions. Request IDs grant none.
+  // Returns all matching hold IDs (active by default) in (created_at, hold_id)
+  // order. Fetch their current state in max_find_by_ids-bounded batches.
+  rpc FindExternalValidationHoldIds(ExternalValidationHoldSearchFilter) returns (ExternalValidationHoldIdList);
+  // Fetches current holds, including Satisfied, with an optional tenant filter.
+  rpc FindExternalValidationHoldsByIds(ExternalValidationHoldsByIdsRequest) returns (ExternalValidationHoldList);
+  // Atomically opens one attempt or replays the attempt identified by the key.
+  rpc StartExternalValidation(StartExternalValidationRequest) returns (StartExternalValidationResponse);
+  // Cancels only a NotStarted allocation; Creating or Created must be reconciled.
+  rpc CancelExternalValidation(CancelExternalValidationRequest) returns (ExternalValidationAttempt);
+  // Records a result for the bound instance; never clears the hold immediately.
+  rpc CompleteExternalValidation(CompleteExternalValidationRequest) returns (ExternalValidationAttempt);
+  // Privileged audited recovery, fenced by the expected hold ID. For REST calls,
+  // REST enforces Provider Admin authorization; Core sees the SiteAgent caller.
+  // Unresolved allocation or cleanup returns FAILED_PRECONDITION. Successful
+  // removal atomically closes/fences any attempt and removes the matching gate.
+  rpc RemoveExternalValidationHold(RemoveExternalValidationHoldRequest) returns (google.protobuf.Empty);
 }
 
 // Indicates the lifecycle state of a resource that is controlled by a state controller
@@ -2915,6 +2947,8 @@ message ExpectedPowerShelf {
   string bmc_password = 3;
   string shelf_serial_number = 4;
   // BMC IPv4 or IPv6 address; malformed values fail INVALID_ARGUMENT when applied.
+  // Unspecified, multicast, and IPv4 limited-broadcast addresses, including
+  // their IPv4-mapped IPv6 forms, also fail INVALID_ARGUMENT.
   // Empty or omitted means no inventory address on add, full update, or
   // replace-all. Masked updates apply this field only when selected.
   // Clearing the inventory address does not remove existing interface addresses.
@@ -3176,6 +3210,8 @@ message ExpectedSwitch {
   reserved 10;
   reserved "nvos_mac_addresses";
   // BMC IPv4 or IPv6 address; malformed values fail INVALID_ARGUMENT when applied.
+  // Unspecified, multicast, and IPv4 limited-broadcast addresses, including
+  // their IPv4-mapped IPv6 forms, also fail INVALID_ARGUMENT.
   // Empty or omitted means no inventory address on add, full update, or
   // replace-all. Masked updates apply this field only when selected.
   // Clearing the inventory address does not remove existing interface addresses.
@@ -3184,7 +3220,9 @@ message ExpectedSwitch {
   // factory-default credentials in Vault as-is.
   optional bool bmc_retain_credentials = 12;
   // Static IP reservation for the single wired NVOS port. Only meaningful
-  // when `nvos_interfaces` has exactly one entry.
+  // when `nvos_interfaces` has exactly one entry. Unspecified, multicast, and
+  // IPv4 limited-broadcast addresses, including their IPv4-mapped IPv6 forms,
+  // fail INVALID_ARGUMENT.
   optional string nvos_ip_address = 13;
   // The switch's NVOS ethernet ports. Create and replace-all entries require
   // at least one port. Exactly one entry must be flagged
@@ -3614,6 +3652,23 @@ message InstanceAllocationRequest {
 
   // Allow allocation on unhealthy machines
   bool allow_unhealthy_machine = 13;
+
+  // Request ID returned by StartExternalValidation. It binds this allocation
+  // to that attempt and only works with AllocateInstance, not batch requests.
+  // Set machine_id to the held machine and allow_unhealthy_machine to true,
+  // leave instance_type_id empty, and make config.tenant.tenant_organization_id
+  // match the site policy. The ID grants no access on its own.
+  // It only bypasses the external-validation hold. Other blocking health
+  // alerts and repair checks still apply at allocation commit.
+  // A retry with the same ID and inputs, including instance_id when set,
+  // returns the original instance. Changed inputs return ALREADY_EXISTS.
+  // While allocation is still in progress, the call returns UNAVAILABLE with
+  // trailing metadata external-validation-allocation-state: creating. To
+  // recover, retry with the same ID and inputs, or read the hold's allocation
+  // state. Core also reconciles durable Creating records without caller retries.
+  // Leave it unset for ordinary allocations. Until binding is implemented,
+  // any value returns FAILED_PRECONDITION.
+  common.ExternalValidationRequestId external_validation_request_id = 14;
 }
 
 // Batch instance allocation request
@@ -5960,6 +6015,17 @@ message AdminForceDeleteMachineRequest {
   // so a retry during a rolling upgrade or after a downgrade can delete without
   // acknowledgement.
   bool wait_for_instance_dpu = 9;
+
+  // False or omitted rejects deletion while the Machine is associated with an
+  // Instance Type. True permits deletion and removes that association with the
+  // Machine.
+  bool allow_delete_with_instance_type = 10;
+
+  // False or omitted rejects deletion while an Instance is attached to the
+  // Machine. True permits deletion and removes the attached Instance
+  // control-plane record without first requesting a graceful workload
+  // shutdown; later cleanup may forcibly restart the host.
+  bool allow_delete_with_instance = 11;
 }
 
 // A parked address reservation owned by its MAC with no active interface row.
@@ -7548,6 +7614,9 @@ message ExpectedHostNic {
   // Legacy free-form segment hint (bf3, onboard, oob, ...). Kept for backward
   // compatibility; declare `network_segment_type` instead, which wins.
   optional string nic_type = 2;
+  // Address that NICo reserves for this interface. Unspecified, multicast, and
+  // IPv4 limited-broadcast addresses, including their IPv4-mapped IPv6 forms,
+  // fail INVALID_ARGUMENT.
   optional string fixed_ip = 3;
   optional string fixed_mask = 4;
   optional string fixed_gateway = 5;
@@ -7671,7 +7740,9 @@ message ExpectedMachine {
   // switches and power shelves; external IPs use the static-assignments
   // segment. Single and batch update omission preserves the effective Host BMC
   // setting; an explicit empty string clears it. Replace-all keeps its earlier
-  // replacement semantics for legacy-only rows.
+  // replacement semantics for legacy-only rows. Unspecified, multicast, and
+  // IPv4 limited-broadcast addresses, including their IPv4-mapped IPv6 forms,
+  // fail INVALID_ARGUMENT.
   optional string bmc_ip_address = 14;
   // When true, site-explorer skips BMC password rotation and stores the
   // factory-default credentials in Vault as-is.
@@ -10961,6 +11032,10 @@ message ComponentPowerControlRequest {
   // When true, bypass the state controller and dispatch directly to the
   // configured HAL backend (NSM, PSM, Redfish, etc.).
   bool bypass_state_controller = 5;
+  // Used only for directly dispatched targets; ignored for targets queued
+  // through the state controller. Does not change routing. Use
+  // bypass_state_controller to dispatch ingested targets directly when needed.
+  optional ComponentCredentialOverrides credential_overrides = 9;
 }
 
 message ComponentPowerControlResponse {
@@ -11086,6 +11161,12 @@ message UpdateComponentFirmwareRequest {
   // configured HAL backend (NSM, PSM, Redfish, etc.).
   // Not supported for rack-level firmware updates.
   bool bypass_state_controller = 8;
+  // Used only for directly dispatched targets; ignored for state-controller
+  // operations, rack updates, and standalone compute reprovisioning.
+  // Does not change routing. Use bypass_state_controller for
+  // ingested component targets that support direct firmware dispatch.
+  // Status/version requests use their existing credential lookup.
+  optional ComponentCredentialOverrides credential_overrides = 9;
 }
 
 message UpdateComponentFirmwareResponse {
@@ -12964,4 +13045,17 @@ message NamedRoutingProfileConfig {
 message NamedRoutingProfileList {
   repeated NamedRoutingProfile profiles = 1;
 
+}
+
+// Device credentials for direct dispatch. Each supplied pair applies to every
+// directly dispatched target and takes precedence over Vault and expected inventory. Core
+// does not write these credentials; backend registration may persist them (NSM/PSM
+// store them in Vault). Omitted pairs retain the existing lookup. Authentication
+// failures never fall back to stored credentials. At least one pair is required;
+// each supplied pair must have a nonempty username and password.
+message ComponentCredentialOverrides {
+  // Compute BMC, switch BMC, or power-shelf PMC credentials.
+  optional UsernamePassword bmc = 1;
+  // Switch NVOS credentials. Ignored for compute and power-shelf targets.
+  optional UsernamePassword nvos = 2;
 }

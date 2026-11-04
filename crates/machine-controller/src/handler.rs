@@ -150,6 +150,7 @@ mod host_boot_config;
 mod host_uefi_rotation;
 mod machine_validation;
 mod maintenance;
+mod nic_firmware;
 mod nic_lockdown_rotation;
 mod power;
 mod reset;
@@ -924,6 +925,18 @@ impl MachineStateHandler {
             }
         }
 
+        // Active firmware recovery must retain its receipts and avoid competing
+        // resets. Only safe, restored failure may honor an operator's reset.
+        if let ManagedHostState::NicFirmwareUpdating { operation } = &mh_state
+            && !(matches!(
+                operation.phase,
+                model::machine::nic_firmware::NicFirmwarePhase::Failed { .. }
+            ) && managed_host_reset_needed(mh_snapshot))
+        {
+            // Box both NIC dispatch paths to limit the shared transition's stack use.
+            return Box::pin(nic_firmware::handle(mh_snapshot, operation, ctx)).await;
+        }
+
         // `ReadyBootConfigState::Prepare` must consume a snapshot with current
         // DPU `MachineNetworkStatusObservation` values before
         // `handle_restart_verification` can issue another reboot. A pending
@@ -1111,6 +1124,9 @@ impl MachineStateHandler {
         }
 
         match &mh_state {
+            ManagedHostState::NicFirmwareUpdating { operation } => {
+                Box::pin(nic_firmware::handle(mh_snapshot, operation, ctx)).await
+            }
             ManagedHostState::ConfigureAstra {
                 configure_astra_state,
             } => {
@@ -3430,7 +3446,11 @@ impl StateHandler for MachineStateHandler {
             && mh_snapshot.dpu_snapshots.is_empty()
         {
             let can_continue_without_dpu =
-                ready_boot_config_handles_missing_dpu_snapshots(&mh_snapshot.managed_state);
+                ready_boot_config_handles_missing_dpu_snapshots(&mh_snapshot.managed_state)
+                    || matches!(
+                        mh_snapshot.managed_state,
+                        ManagedHostState::NicFirmwareUpdating { .. }
+                    );
             if !can_continue_without_dpu {
                 tracing::error!(machine_id = %host_machine_id, "No DPU snapshot found for host");
                 return Err(StateHandlerError::GenericError(eyre!(
@@ -3438,12 +3458,13 @@ impl StateHandler for MachineStateHandler {
                 )));
             }
 
-            // `ManagedHostState::BootConfiguring` performs the complete topology
-            // DPU check. Later states return through `LockHost`, while `Prepare`
-            // waits without touching the host until the snapshot is complete.
+            // BootConfiguring performs its own topology checks. NIC firmware
+            // retains its frozen targets and must still be able to restore
+            // their original lockdown policies when DPU snapshots are missing.
             tracing::warn!(
                 machine_id = %host_machine_id,
-                "Continuing ManagedHostState::BootConfiguring with missing DPU snapshots",
+                machine_state = %mh_snapshot.managed_state,
+                "Continuing hardware recovery with missing DPU snapshots",
             );
         }
 
@@ -6335,7 +6356,8 @@ async fn trigger_reboot_if_needed_with_policy(
             %action,
             "Redfish setting host power state"
         );
-        handler_host_power_control_with_location(state, ctx, action, trigger_location).await?;
+        handler_host_power_control_with_location(state, ctx, action, trigger_location, None)
+            .await?;
         return Ok(RebootStatus {
             increase_retry_count: false,
             status: format!("Set power state to {action} using Redfish API"),
@@ -6419,8 +6441,14 @@ async fn trigger_reboot_if_needed_with_policy(
                     SystemPowerControl::ForceOff
                 };
 
-                handler_host_power_control_with_location(state, ctx, action, trigger_location)
-                    .await?;
+                handler_host_power_control_with_location(
+                    state,
+                    ctx,
+                    action,
+                    trigger_location,
+                    None,
+                )
+                .await?;
 
                 format!(
                     "{vendor} has not come up after {time_elapsed_since_state_change} minutes, trying {action}, cycle: {cycle}",
@@ -6445,6 +6473,7 @@ async fn trigger_reboot_if_needed_with_policy(
                         ctx,
                         SystemPowerControl::ForceRestart,
                         trigger_location,
+                        None,
                     )
                     .await?;
                 }
@@ -13799,14 +13828,24 @@ pub fn handler_host_power_control(
     action: SystemPowerControl,
 ) -> impl Future<Output = Result<(), StateHandlerError>> {
     let trigger_location = std::panic::Location::caller();
-    handler_host_power_control_with_location(managedhost_snapshot, ctx, action, trigger_location)
+    handler_host_power_control_with_location(
+        managedhost_snapshot,
+        ctx,
+        action,
+        trigger_location,
+        None,
+    )
 }
 
+/// Preserve an optional durable request timestamp through both Redfish and
+/// IPMI paths. Firmware activation supplies its committed database-clock intent;
+/// ordinary power callers keep their existing Core-clock timestamp.
 pub async fn handler_host_power_control_with_location(
     managedhost_snapshot: &ManagedHostStateSnapshot,
     ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
     action: SystemPowerControl,
     location: &std::panic::Location<'_>,
+    requested_at: Option<DateTime<Utc>>,
 ) -> Result<(), StateHandlerError> {
     let mut action = action;
     let redfish_client = ctx
@@ -13840,7 +13879,7 @@ pub async fn handler_host_power_control_with_location(
             || action == SystemPowerControl::GracefulRestart;
 
         if is_restart && needs_ipmi_restart(machine, ctx).await? {
-            do_ipmi_restart(machine, ctx, action, location).await?;
+            do_ipmi_restart(machine, ctx, action, location, requested_at).await?;
         } else {
             host_power_control_with_location(
                 redfish_client.as_ref(),
@@ -13848,6 +13887,7 @@ pub async fn handler_host_power_control_with_location(
                 action,
                 ctx,
                 location,
+                requested_at,
             )
             .await
             .map_err(|e| {
@@ -14007,6 +14047,7 @@ async fn do_ipmi_restart(
     ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
     action: SystemPowerControl,
     trigger_location: &std::panic::Location<'_>,
+    requested_at: Option<DateTime<Utc>>,
 ) -> Result<(), StateHandlerError> {
     tracing::info!(
         machine_id = machine.id.to_string(),
@@ -14014,7 +14055,7 @@ async fn do_ipmi_restart(
         trigger_location = %trigger_location,
         "IPMI Host Power Control"
     );
-    let requested_at = Utc::now();
+    let requested_at = requested_at.unwrap_or_else(Utc::now);
 
     let bmc_mac = machine
         .status

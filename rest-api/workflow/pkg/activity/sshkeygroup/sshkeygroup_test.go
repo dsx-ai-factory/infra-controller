@@ -14,6 +14,7 @@ import (
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
 	cdbp "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
+	swe "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/error"
 	sc "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/client/site"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
@@ -31,6 +32,7 @@ import (
 
 	"go.temporal.io/sdk/client"
 	tmocks "go.temporal.io/sdk/mocks"
+	tsdk "go.temporal.io/sdk/temporal"
 
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	"go.temporal.io/sdk/testsuite"
@@ -46,15 +48,15 @@ func TestManageSSHKeyGroup_SyncSSHKeyGroupViaSiteAgent(t *testing.T) {
 	}
 
 	type args struct {
-		ctx                                context.Context
-		siteID                             uuid.UUID
-		skgID                              uuid.UUID
-		skgsaID                            uuid.UUID
-		requestedVersion                   *string
-		IsSSHKeyGroupDeleting              *bool
-		IsSSHKeyGroupFailedOnInitialCreate *bool
-		createRequest                      *corev1.CreateTenantKeysetRequest
-		updateRequest                      *corev1.UpdateTenantKeysetRequest
+		ctx                   context.Context
+		siteID                uuid.UUID
+		skgID                 uuid.UUID
+		skgsaID               uuid.UUID
+		requestedVersion      *string
+		IsSSHKeyGroupDeleting *bool
+		initialCreateErr      error
+		createRequest         *corev1.CreateTenantKeysetRequest
+		updateRequest         *corev1.UpdateTenantKeysetRequest
 	}
 
 	dbSession := util.TestInitDB(t)
@@ -86,6 +88,10 @@ func TestManageSSHKeyGroup_SyncSSHKeyGroupViaSiteAgent(t *testing.T) {
 	// below processes only the association written by that failed Sync call.
 	st3 := util.TestBuildSite(t, dbSession, ip, "test-site-3", cdbm.SiteStatusRegistered, nil, ipu)
 	assert.NotNil(t, st3)
+
+	// Likewise for the AlreadyExists recovery.
+	st4 := util.TestBuildSite(t, dbSession, ip, "test-site-4", cdbm.SiteStatusRegistered, nil, ipu)
+	assert.NotNil(t, st4)
 
 	// Build SSHKeyGroup1
 	skg1 := util.TestBuildSSHKeyGroup(t, dbSession, "test-sshkeygroup-1", tnOrg, cutil.GetPtr("test1"), tn.ID, cutil.GetPtr("122345"), cdbm.SSHKeyGroupStatusSynced, tnu.ID)
@@ -201,6 +207,15 @@ func TestManageSSHKeyGroup_SyncSSHKeyGroupViaSiteAgent(t *testing.T) {
 	assert.NotNil(t, ska8)
 	ska9 := util.TestBuildSSHKeyAssociation(t, dbSession, skg7.ID, sshKey2.ID, tnu.ID)
 	assert.NotNil(t, ska9)
+
+	// Build SSHKeyGroup8 for initial AlreadyExists failure test
+	skg8 := util.TestBuildSSHKeyGroup(t, dbSession, "test-sshkeygroup-8", tnOrg, cutil.GetPtr("test8"), tn.ID, cutil.GetPtr("122349"), cdbm.SSHKeyGroupStatusSyncing, tnu.ID)
+	assert.NotNil(t, skg8)
+
+	// Build SSHKeyGroupSiteAssociation8 - starts in Syncing, no status detail (simulates first create attempt)
+	skgsa8 := util.TestBuildSSHKeyGroupSiteAssociation(t, dbSession, skg8.ID, st4.ID, cutil.GetPtr("1141"), cdbm.SSHKeyGroupSiteAssociationStatusSyncing, tnu.ID)
+	assert.NotNil(t, skgsa8)
+	assert.NotNil(t, util.TestBuildSSHKeyAssociation(t, dbSession, skg8.ID, sshKey1.ID, tnu.ID))
 
 	// Build  SSH key:group associations for SSHKeyGroup4
 	assert.NotNil(t, util.TestBuildSSHKeyAssociation(t, dbSession, skg5.ID, sshKey3.ID, tnu.ID))
@@ -475,13 +490,14 @@ func TestManageSSHKeyGroup_SyncSSHKeyGroupViaSiteAgent(t *testing.T) {
 				env:            env,
 			},
 			args: args{
-				ctx:                                context.Background(),
-				siteID:                             st3.ID,
-				skgID:                              skg7.ID,
-				skgsaID:                            skgsa7.ID,
-				requestedVersion:                   skgsa7.Version,
-				IsSSHKeyGroupFailedOnInitialCreate: cutil.GetPtr(true),
+				ctx:              context.Background(),
+				siteID:           st3.ID,
+				skgID:            skg7.ID,
+				skgsaID:          skgsa7.ID,
+				requestedVersion: skgsa7.Version,
 				// This test simulates the initial create attempt that fails with duplicate key
+				// on a Core that reports it as Internal rather than AlreadyExists
+				initialCreateErr: status.Error(codes.Internal, "internal database error: duplicate key value violates unique constraint"),
 				createRequest: &corev1.CreateTenantKeysetRequest{
 					KeysetIdentifier: &corev1.TenantKeysetIdentifier{
 						KeysetId:       skg7.ID.String(),
@@ -504,6 +520,39 @@ func TestManageSSHKeyGroup_SyncSSHKeyGroupViaSiteAgent(t *testing.T) {
 			},
 			wantErr: true, // Expect error to be returned for duplicate key
 		},
+		{
+			name: "test SSHKeyGroup create fails with AlreadyExists on initial attempt",
+			fields: fields{
+				dbSession:      dbSession,
+				siteClientPool: tSiteClientPool,
+				env:            env,
+			},
+			args: args{
+				ctx:              context.Background(),
+				siteID:           st4.ID,
+				skgID:            skg8.ID,
+				skgsaID:          skgsa8.ID,
+				requestedVersion: skgsa8.Version,
+				initialCreateErr: fmt.Errorf("workflow execution error: %w", tsdk.NewNonRetryableApplicationError(
+					"rpc error: code = AlreadyExists desc = keyset already exists", swe.ErrTypeNICoAlreadyExists, nil)),
+				createRequest: &corev1.CreateTenantKeysetRequest{
+					KeysetIdentifier: &corev1.TenantKeysetIdentifier{
+						KeysetId:       skg8.ID.String(),
+						OrganizationId: skg8.Org,
+					},
+					KeysetContent: &corev1.TenantKeysetContent{
+						PublicKeys: []*corev1.TenantPublicKey{
+							{
+								PublicKey: sshKey1.PublicKey,
+								Comment:   sshKey1.Fingerprint,
+							},
+						},
+					},
+					Version: *skgsa8.Version,
+				},
+			},
+			wantErr: true,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -523,9 +572,8 @@ func TestManageSSHKeyGroup_SyncSSHKeyGroupViaSiteAgent(t *testing.T) {
 			mockWorkflowRun.On("GetRunID").Return(testRunID)
 
 			// Handle duplicate key error case for initial create failure
-			if tt.args.IsSSHKeyGroupFailedOnInitialCreate != nil && *tt.args.IsSSHKeyGroupFailedOnInitialCreate {
-				duplicateKeyError := status.Error(codes.Internal, "internal database error: duplicate key value violates unique constraint")
-				mockWorkflowRun.On("Get", mock.Anything, mock.Anything).Return(duplicateKeyError).Once()
+			if tt.args.initialCreateErr != nil {
+				mockWorkflowRun.On("Get", mock.Anything, mock.Anything).Return(tt.args.initialCreateErr).Once()
 				mtc.On("ExecuteWorkflow", mock.Anything, mock.MatchedBy(func(opts client.StartWorkflowOptions) bool {
 					return opts.ID == "site-ssh-key-group-create-"+tt.args.skgID.String()+"-"+*tt.args.requestedVersion
 				}), "CreateSSHKeyGroupV2", tt.args.createRequest).Return(mockWorkflowRun, nil).Once()
@@ -551,7 +599,7 @@ func TestManageSSHKeyGroup_SyncSSHKeyGroupViaSiteAgent(t *testing.T) {
 			assert.Equal(t, tt.wantErr, err != nil)
 
 			// Verify duplicate key error handling
-			if tt.args.IsSSHKeyGroupFailedOnInitialCreate != nil && *tt.args.IsSSHKeyGroupFailedOnInitialCreate {
+			if tt.args.initialCreateErr != nil {
 				require.Error(t, err)
 				assert.Contains(t, err.Error(), "duplicate key constraint")
 				assert.Contains(t, err.Error(), "workflow will retry")

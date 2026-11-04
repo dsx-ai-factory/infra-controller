@@ -70,7 +70,8 @@ use crate::instance::{
     InstanceAllocationRequest, allocate_ib_port_guid, allocate_instance, allocate_network,
     allocate_spx_port_mac, assign_implicit_instance_vfs_from_effective_dpu_inventory,
     expected_machine_declares_cx9, ib_memberships_from_config, instance_vf_inventory_source,
-    load_extension_services, load_ib_partition_pkeys, requests_implicit_vf_allocation,
+    load_extension_services, load_ib_partition_pkeys,
+    reject_unsupported_external_validation_binding, requests_implicit_vf_allocation,
     validate_ib_partition_ownership, validate_instance_extension_services,
     validate_instance_vfs_against_effective_dpu_inventory, validate_os_definition_usable,
     validate_spx_partition_ownership, validate_tenant_nic_firmware_preparation,
@@ -157,6 +158,8 @@ pub(crate) async fn allocate(
     log_request_data(&request);
     let mut request = request.into_inner();
 
+    reject_unsupported_external_validation_binding(&request)?;
+
     if request.needs_hydration_from_deprecated_fields() {
         api.with_txn(|txn| request.hydrate_from_deprecated_fields(txn).boxed())
             .await??;
@@ -192,6 +195,11 @@ pub(crate) async fn batch_allocate(
         instance_request_count = batch_request.instance_requests.len(),
         "Received batch instance allocation request"
     );
+
+    // Check every entry before hydrating any legacy request in the batch.
+    for request in &batch_request.instance_requests {
+        reject_unsupported_external_validation_binding(request)?;
+    }
 
     if batch_request.needs_hydration_from_deprecated_fields() {
         api.with_txn(|txn| batch_request.hydrate_from_deprecated_fields(txn).boxed())
@@ -1077,6 +1085,15 @@ pub(crate) async fn invoke_power(
     let instance_id = request
         .instance_id
         .ok_or(CarbideError::MissingArgument("instance_id"))?;
+    // Power changes write the Instance before the Machine. Read again after
+    // both locks so an earlier snapshot cannot bypass admitted firmware work.
+    let locked_instance = db::instance::find_by_id_for_update(txn.as_mut(), instance_id)
+        .await?
+        .ok_or(CarbideError::NotFoundError {
+            kind: "instance",
+            id: instance_id.to_string(),
+        })?;
+    db::machine::lock_by_id_for_update(txn.as_mut(), &locked_instance.machine_id.into()).await?;
     let snapshot = db::managed_host::load_by_instance_ids(
         &mut txn,
         &[instance_id],
@@ -1090,6 +1107,16 @@ pub(crate) async fn invoke_power(
     })?;
     let machine_id = snapshot.host_snapshot.id;
     log_machine_id(&machine_id);
+
+    if matches!(
+        snapshot.managed_state,
+        ManagedHostState::NicFirmwareUpdating { .. }
+    ) {
+        return Err(CarbideError::FailedPrecondition(
+            "instance power control is blocked by its NIC firmware operation".into(),
+        )
+        .into());
+    }
 
     // Log tenant organization ID
     if let Some(ref instance) = snapshot.instance {

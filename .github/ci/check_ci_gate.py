@@ -337,6 +337,7 @@ CORE_JOBS_BY_PREPARE_OUTPUT: Mapping[str, frozenset[str]] = {
             "build-mat-k8s-controller",
             "build-site-health-probe",
             "test-mat-k8s-controller",
+            "test-scale-test",
             "lint-police",
         }
     ),
