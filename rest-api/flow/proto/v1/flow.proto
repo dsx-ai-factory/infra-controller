@@ -634,6 +634,8 @@ message UpgradeFirmwareRequest {
     // the selected component backend supports those operations. It does not
     // bypass readiness checks or state-controller routing.
     bool override_version_check = 11;
+    // Defaults to STRICT. Unknown values are rejected. See TargetResolutionMode.
+    TargetResolutionMode target_resolution_mode = 12;
 }
 
 // FirmwareAuthenticationData selects either one value shared by every target
@@ -796,6 +798,18 @@ message QueueOptions {
     int32 queue_timeout_seconds = 2;
 }
 
+// TargetResolutionMode controls addressability validation after component type filtering.
+// It does not override readiness gates, authorization, rule validation, or execution failures.
+enum TargetResolutionMode {
+    // Omission and UNSPECIFIED use STRICT for compatibility.
+    TARGET_RESOLUTION_MODE_UNSPECIFIED = 0;
+    // Reject the entire request before task creation if any selected component is unaddressable.
+    TARGET_RESOLUTION_MODE_STRICT = 1;
+    // Skip unaddressable components and record their Flow identities and positions in task reports.
+    // Every selected rack must retain at least one addressable component; otherwise reject the request.
+    TARGET_RESOLUTION_MODE_BEST_EFFORT = 2;
+}
+
 message PowerOnRackRequest {
     OperationTargetSpec target_spec = 1;  // Target racks or NVLink domains with an optional type filter, or specific components
     string description = 2;               // optional task description
@@ -808,6 +822,8 @@ message PowerOnRackRequest {
     // maintenance where tenant impact has been acknowledged out-of-band;
     // the bypass is recorded in the server log.
     bool override_readiness_check = 5;
+    // Defaults to STRICT. Unknown values are rejected. See TargetResolutionMode.
+    TargetResolutionMode target_resolution_mode = 6;
 }
 
 message PowerOffRackRequest {
@@ -823,6 +839,8 @@ message PowerOffRackRequest {
     // maintenance where tenant impact has been acknowledged out-of-band;
     // the bypass is recorded in the server log.
     bool override_readiness_check = 6;
+    // Defaults to STRICT. Unknown values are rejected. See TargetResolutionMode.
+    TargetResolutionMode target_resolution_mode = 7;
 }
 
 message PowerResetRackRequest {
@@ -838,6 +856,8 @@ message PowerResetRackRequest {
     // maintenance where tenant impact has been acknowledged out-of-band;
     // the bypass is recorded in the server log.
     bool override_readiness_check = 6;
+    // Defaults to STRICT. Unknown values are rejected. See TargetResolutionMode.
+    TargetResolutionMode target_resolution_mode = 7;
 }
 
 message ACPowerCycleRackRequest {
@@ -852,6 +872,8 @@ message ACPowerCycleRackRequest {
     // maintenance where tenant impact has been acknowledged out-of-band;
     // the bypass is recorded in the server log.
     bool override_readiness_check = 5;
+    // Defaults to STRICT. Unknown values are rejected. See TargetResolutionMode.
+    TargetResolutionMode target_resolution_mode = 6;
 }
 
 message BringUpRackRequest {
@@ -865,6 +887,8 @@ message BringUpRackRequest {
     // tenant impact has been acknowledged out-of-band; the bypass is
     // recorded in the server log.
     bool override_readiness_check = 4;
+    // Defaults to STRICT. Unknown values are rejected. See TargetResolutionMode.
+    TargetResolutionMode target_resolution_mode = 5;
 }
 
 message IngestRackRequest {
@@ -872,6 +896,8 @@ message IngestRackRequest {
     repeated Filter filters = 2;          // Filter conditions for component queries (e.g. by type, name)
     string description = 3;               // optional task description
     optional UUID rule_id = 4;            // optional: override rule resolution with a specific rule
+    // Defaults to STRICT. Unknown values are rejected. See TargetResolutionMode.
+    TargetResolutionMode target_resolution_mode = 5;
 }
 
 message DecommissionRackRequest {
@@ -879,6 +905,8 @@ message DecommissionRackRequest {
     string description = 2;               // optional task description
     optional QueueOptions queue_options = 3; // optional queue policy overrides
     optional UUID rule_id = 4;            // optional: override rule resolution with a specific rule
+    // Defaults to STRICT. Unknown values are rejected. See TargetResolutionMode.
+    TargetResolutionMode target_resolution_mode = 5;
 }
 
 // ListTasks - list Tasks with optional filters.

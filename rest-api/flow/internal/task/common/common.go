@@ -110,6 +110,9 @@ type OperationRuleListOptions struct {
 // TaskAttributes holds flexible task metadata stored as a single jsonb
 // column. New fields can be added here without requiring a DB migration.
 type TaskAttributes struct {
+	// TargetResolution is absent on tasks created before explicit resolution modes.
+	TargetResolution *TargetResolution `json:"target_resolution,omitempty"`
+
 	// ComponentsByType maps each targeted component type to its UUIDs.
 	// Nil means the task targets no specific components.
 	ComponentsByType map[devicetypes.ComponentType][]uuid.UUID `json:"components_by_type,omitempty"` //nolint:lll

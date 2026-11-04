@@ -550,11 +550,14 @@ type APIBringUpRackRequest struct {
 	// as not ready by their persisted status. Intended for operator-supervised
 	// maintenance.
 	OverrideReadinessCheck bool `json:"overrideReadinessCheck,omitempty"`
+	// TargetResolutionMode defaults to Strict; BestEffort records unaddressable targets as skipped.
+	TargetResolutionMode TargetResolutionMode `json:"targetResolutionMode,omitempty"`
 }
 
 // Validate validates the bring up request
 func (r *APIBringUpRackRequest) Validate() error {
 	return validation.ValidateStruct(r,
+		validation.Field(&r.TargetResolutionMode),
 		validation.Field(&r.SiteID, validation.Required.Error("siteId is required")),
 		validation.Field(&r.RuleID, validationis.UUID.Error(validationErrorInvalidUUID)),
 	)
@@ -599,11 +602,14 @@ type APIBatchBringUpRackRequest struct {
 	// OverrideReadinessCheck applies the readiness-gate bypass to every task
 	// spawned by this batch. See APIBringUpRackRequest for semantics.
 	OverrideReadinessCheck bool `json:"overrideReadinessCheck,omitempty"`
+	// TargetResolutionMode defaults to Strict; BestEffort records unaddressable targets as skipped.
+	TargetResolutionMode TargetResolutionMode `json:"targetResolutionMode,omitempty"`
 }
 
 // Validate checks required fields.
 func (r *APIBatchBringUpRackRequest) Validate() error {
 	return validation.ValidateStruct(r,
+		validation.Field(&r.TargetResolutionMode),
 		validation.Field(&r.SiteID, validation.Required.Error("siteId is required")),
 		validation.Field(&r.RuleID, validationis.UUID.Error(validationErrorInvalidUUID)),
 	)

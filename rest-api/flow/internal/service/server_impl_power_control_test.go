@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/operation"
+	taskcommon "github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/common"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/operations"
 	pb "github.com/NVIDIA/infra-controller/rest-api/flow/pkg/proto/v1"
 )
@@ -33,11 +34,13 @@ func TestFlowServerImpl_ACPowerCycleRack(t *testing.T) {
 		},
 		Description:            "AC power cycle test",
 		OverrideReadinessCheck: true,
+		TargetResolutionMode:   pb.TargetResolutionMode_TARGET_RESOLUTION_MODE_BEST_EFFORT,
 	})
 
 	require.NoError(t, err)
 	require.Len(t, response.GetTaskIds(), 1)
 	require.NotNil(t, manager.request)
+	require.Equal(t, taskcommon.TargetResolutionBestEffort, manager.request.TargetResolutionMode)
 	assert.Equal(t, "AC power cycle test", manager.request.Description)
 
 	var info operations.PowerControlTaskInfo

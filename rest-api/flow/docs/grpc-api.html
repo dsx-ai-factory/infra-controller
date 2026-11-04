@@ -1156,6 +1156,10 @@
                 </li>
 
                 <li>
+                  <a href="#v1.TargetResolutionMode"><span class="badge">E</span>TargetResolutionMode</a>
+                </li>
+
+                <li>
                   <a href="#v1.TaskExecutorType"><span class="badge">E</span>TaskExecutorType</a>
                 </li>
 
@@ -1236,6 +1240,13 @@ rack) are reported as not ready for the operation by their
 persisted ComponentOperationStatus. Intended for operator-supervised
 maintenance where tenant impact has been acknowledged out-of-band;
 the bypass is recorded in the server log. </p></td>
+                </tr>
+
+                <tr>
+                  <td>target_resolution_mode</td>
+                  <td><a href="#v1.TargetResolutionMode">TargetResolutionMode</a></td>
+                  <td></td>
+                  <td><p>Defaults to STRICT. Unknown values are rejected. See TargetResolutionMode. </p></td>
                 </tr>
 
             </tbody>
@@ -1520,6 +1531,13 @@ scope is reported as not ready for the operation by its persisted
 ComponentOperationStatus. Intended for operator-supervised maintenance where
 tenant impact has been acknowledged out-of-band; the bypass is
 recorded in the server log. </p></td>
+                </tr>
+
+                <tr>
+                  <td>target_resolution_mode</td>
+                  <td><a href="#v1.TargetResolutionMode">TargetResolutionMode</a></td>
+                  <td></td>
+                  <td><p>Defaults to STRICT. Unknown values are rejected. See TargetResolutionMode. </p></td>
                 </tr>
 
             </tbody>
@@ -2514,6 +2532,13 @@ execution policy, and operation template. </p></td>
                   <td><a href="#v1.UUID">UUID</a></td>
                   <td>optional</td>
                   <td><p>optional: override rule resolution with a specific rule </p></td>
+                </tr>
+
+                <tr>
+                  <td>target_resolution_mode</td>
+                  <td><a href="#v1.TargetResolutionMode">TargetResolutionMode</a></td>
+                  <td></td>
+                  <td><p>Defaults to STRICT. Unknown values are rejected. See TargetResolutionMode. </p></td>
                 </tr>
 
             </tbody>
@@ -4668,6 +4693,13 @@ and returns OperationRun.stats. </p></td>
                   <td><a href="#v1.UUID">UUID</a></td>
                   <td>optional</td>
                   <td><p>optional: override rule resolution with a specific rule </p></td>
+                </tr>
+
+                <tr>
+                  <td>target_resolution_mode</td>
+                  <td><a href="#v1.TargetResolutionMode">TargetResolutionMode</a></td>
+                  <td></td>
+                  <td><p>Defaults to STRICT. Unknown values are rejected. See TargetResolutionMode. </p></td>
                 </tr>
 
             </tbody>
@@ -7138,6 +7170,13 @@ maintenance where tenant impact has been acknowledged out-of-band;
 the bypass is recorded in the server log. </p></td>
                 </tr>
 
+                <tr>
+                  <td>target_resolution_mode</td>
+                  <td><a href="#v1.TargetResolutionMode">TargetResolutionMode</a></td>
+                  <td></td>
+                  <td><p>Defaults to STRICT. Unknown values are rejected. See TargetResolutionMode. </p></td>
+                </tr>
+
             </tbody>
           </table>
 
@@ -7193,6 +7232,13 @@ rack) are reported as not ready for the operation by their
 persisted ComponentOperationStatus. Intended for operator-supervised
 maintenance where tenant impact has been acknowledged out-of-band;
 the bypass is recorded in the server log. </p></td>
+                </tr>
+
+                <tr>
+                  <td>target_resolution_mode</td>
+                  <td><a href="#v1.TargetResolutionMode">TargetResolutionMode</a></td>
+                  <td></td>
+                  <td><p>Defaults to STRICT. Unknown values are rejected. See TargetResolutionMode. </p></td>
                 </tr>
 
             </tbody>
@@ -7288,6 +7334,13 @@ rack) are reported as not ready for the operation by their
 persisted ComponentOperationStatus. Intended for operator-supervised
 maintenance where tenant impact has been acknowledged out-of-band;
 the bypass is recorded in the server log. </p></td>
+                </tr>
+
+                <tr>
+                  <td>target_resolution_mode</td>
+                  <td><a href="#v1.TargetResolutionMode">TargetResolutionMode</a></td>
+                  <td></td>
+                  <td><p>Defaults to STRICT. Unknown values are rejected. See TargetResolutionMode. </p></td>
                 </tr>
 
             </tbody>
@@ -8976,6 +9029,13 @@ the selected component backend supports those operations. It does not
 bypass readiness checks or state-controller routing. </p></td>
                 </tr>
 
+                <tr>
+                  <td>target_resolution_mode</td>
+                  <td><a href="#v1.TargetResolutionMode">TargetResolutionMode</a></td>
+                  <td></td>
+                  <td><p>Defaults to STRICT. Unknown values are rejected. See TargetResolutionMode. </p></td>
+                </tr>
+
             </tbody>
           </table>
 
@@ -10261,6 +10321,36 @@ exceeded its documented bound.</p></td>
                 <td>SCHEDULE_SPEC_TYPE_ONE_TIME</td>
                 <td>3</td>
                 <td><p>spec is an RFC3339 timestamp</p></td>
+              </tr>
+
+          </tbody>
+        </table>
+
+        <h3 id="v1.TargetResolutionMode">TargetResolutionMode</h3>
+        <p>TargetResolutionMode controls addressability validation after component type filtering.</p><p>It does not override readiness gates, authorization, rule validation, or execution failures.</p>
+        <table class="enum-table">
+          <thead>
+            <tr><td>Name</td><td>Number</td><td>Description</td></tr>
+          </thead>
+          <tbody>
+
+              <tr>
+                <td>TARGET_RESOLUTION_MODE_UNSPECIFIED</td>
+                <td>0</td>
+                <td><p>Omission and UNSPECIFIED use STRICT for compatibility.</p></td>
+              </tr>
+
+              <tr>
+                <td>TARGET_RESOLUTION_MODE_STRICT</td>
+                <td>1</td>
+                <td><p>Reject the entire request before task creation if any selected component is unaddressable.</p></td>
+              </tr>
+
+              <tr>
+                <td>TARGET_RESOLUTION_MODE_BEST_EFFORT</td>
+                <td>2</td>
+                <td><p>Skip unaddressable components and record their Flow identities and positions in task reports.
+Every selected rack must retain at least one addressable component; otherwise reject the request.</p></td>
               </tr>
 
           </tbody>

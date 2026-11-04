@@ -95,13 +95,15 @@ func TestFlowMutationHelpersProxyRequests(t *testing.T) {
 		{
 			name: "power on",
 			execute: func(ctx context.Context, stc tclient.Client) (*flowv1.SubmitTaskResponse, *cutil.APIError) {
-				return ExecutePowerControlWorkflow(ctx, zerolog.Nop(), stc, mutationTargetSpec(rackID), cam.PowerControlStateOn, &ruleIDArg, false, workflowID, entityName)
+				return ExecutePowerControlWorkflow(ctx, zerolog.Nop(), stc, mutationTargetSpec(rackID), cam.PowerControlStateOn, &ruleIDArg, false, workflowID, entityName, cam.TargetResolutionBestEffort)
 			},
+			wantWorkflowID: workflowID + "-best-effort",
 			wantFullMethod: flowv1.Flow_PowerOnRack_FullMethodName,
 			wantRequest: &flowv1.PowerOnRackRequest{
-				TargetSpec:  mutationTargetSpec(rackID),
-				Description: "API power on rack r1",
-				RuleId:      &flowv1.UUID{Id: ruleID},
+				TargetResolutionMode: flowv1.TargetResolutionMode_TARGET_RESOLUTION_MODE_BEST_EFFORT,
+				TargetSpec:           mutationTargetSpec(rackID),
+				Description:          "API power on rack r1",
+				RuleId:               &flowv1.UUID{Id: ruleID},
 			},
 		},
 		{
@@ -168,10 +170,12 @@ func TestFlowMutationHelpersProxyRequests(t *testing.T) {
 		{
 			name: "bring up",
 			execute: func(ctx context.Context, stc tclient.Client) (*flowv1.SubmitTaskResponse, *cutil.APIError) {
-				return ExecuteBringUpRackWorkflow(ctx, zerolog.Nop(), stc, mutationTargetSpec(rackID), "API bring up rack r1", &ruleIDArg, true, workflowID, entityName)
+				return ExecuteBringUpRackWorkflow(ctx, zerolog.Nop(), stc, mutationTargetSpec(rackID), "API bring up rack r1", &ruleIDArg, true, workflowID, entityName, cam.TargetResolutionBestEffort)
 			},
+			wantWorkflowID: workflowID + "-best-effort",
 			wantFullMethod: flowv1.Flow_BringUpRack_FullMethodName,
 			wantRequest: &flowv1.BringUpRackRequest{
+				TargetResolutionMode:   flowv1.TargetResolutionMode_TARGET_RESOLUTION_MODE_BEST_EFFORT,
 				TargetSpec:             mutationTargetSpec(rackID),
 				Description:            "API bring up rack r1",
 				RuleId:                 &flowv1.UUID{Id: ruleID},
@@ -181,11 +185,12 @@ func TestFlowMutationHelpersProxyRequests(t *testing.T) {
 		{
 			name: "firmware update",
 			execute: func(ctx context.Context, stc tclient.Client) (*flowv1.SubmitTaskResponse, *cutil.APIError) {
-				return ExecuteFirmwareUpdateWorkflow(ctx, zerolog.Nop(), stc, mutationTargetSpec(rackID), &version, []string{"bmc", "nvos"}, nil, siteID, nil, false, true, workflowID, entityName)
+				return ExecuteFirmwareUpdateWorkflow(ctx, zerolog.Nop(), stc, mutationTargetSpec(rackID), &version, []string{"bmc", "nvos"}, nil, siteID, nil, false, true, workflowID, entityName, cam.TargetResolutionBestEffort)
 			},
 			wantFullMethod: flowv1.Flow_UpgradeFirmware_FullMethodName,
-			wantWorkflowID: workflowID + "-override-version-check",
+			wantWorkflowID: workflowID + "-best-effort-override-version-check",
 			wantRequest: &flowv1.UpgradeFirmwareRequest{
+				TargetResolutionMode: flowv1.TargetResolutionMode_TARGET_RESOLUTION_MODE_BEST_EFFORT,
 				TargetSpec:           mutationTargetSpec(rackID),
 				TargetVersion:        &version,
 				SubTargets:           []string{"bmc", "nvos"},

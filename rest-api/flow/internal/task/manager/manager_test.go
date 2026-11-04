@@ -1448,6 +1448,7 @@ func testIngestOperation(t *testing.T, ruleID *uuid.UUID) operation.Wrapper {
 }
 
 type managerTaskStore struct {
+	createdTasks                   []*taskdef.Task
 	activeTasksByRack              map[uuid.UUID][]*taskdef.Task
 	taskByIdempotencyKey           map[string]*taskdef.Task
 	listActiveCalls                int
@@ -1518,7 +1519,9 @@ func (s *managerTaskStore) RunInTransaction(
 	return s.transactionCommitErr
 }
 
-func (s *managerTaskStore) CreateTask(_ context.Context, _ *taskdef.Task) error {
+func (s *managerTaskStore) CreateTask(_ context.Context, task *taskdef.Task) error {
+	cloned := *task
+	s.createdTasks = append(s.createdTasks, &cloned)
 	s.createTaskCalls++
 	return nil
 }

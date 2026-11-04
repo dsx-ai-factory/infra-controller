@@ -76,6 +76,8 @@ type WorkflowComponent struct {
 type ExecutionInfo struct {
 	TaskID     uuid.UUID
 	Components []WorkflowComponent
+	// TargetResolution preserves the admission result through workflow retries.
+	TargetResolution *taskcommon.TargetResolution
 
 	// RuleDefinition is the resolved operation rule, determined at task
 	// creation time and carried through to the workflow unchanged.

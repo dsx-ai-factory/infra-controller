@@ -24,6 +24,7 @@ var _ MappedNullable = &BringUpRackRequest{}
 
 // BringUpRackRequest Request body for single-rack bring up operations
 type BringUpRackRequest struct {
+	TargetResolutionMode *TargetResolutionMode `json:"targetResolutionMode,omitempty"`
 	// ID of the Site
 	SiteId string `json:"siteId"`
 	// Optional description for the bring up operation
@@ -42,6 +43,8 @@ type _BringUpRackRequest BringUpRackRequest
 // will change when the set of required properties is changed
 func NewBringUpRackRequest(siteId string) *BringUpRackRequest {
 	this := BringUpRackRequest{}
+	var targetResolutionMode TargetResolutionMode = TARGETRESOLUTIONMODE_STRICT
+	this.TargetResolutionMode = &targetResolutionMode
 	this.SiteId = siteId
 	var overrideReadinessCheck bool = false
 	this.OverrideReadinessCheck = &overrideReadinessCheck
@@ -53,9 +56,43 @@ func NewBringUpRackRequest(siteId string) *BringUpRackRequest {
 // but it doesn't guarantee that properties required by API are set
 func NewBringUpRackRequestWithDefaults() *BringUpRackRequest {
 	this := BringUpRackRequest{}
+	var targetResolutionMode TargetResolutionMode = TARGETRESOLUTIONMODE_STRICT
+	this.TargetResolutionMode = &targetResolutionMode
 	var overrideReadinessCheck bool = false
 	this.OverrideReadinessCheck = &overrideReadinessCheck
 	return &this
+}
+
+// GetTargetResolutionMode returns the TargetResolutionMode field value if set, zero value otherwise.
+func (o *BringUpRackRequest) GetTargetResolutionMode() TargetResolutionMode {
+	if o == nil || IsNil(o.TargetResolutionMode) {
+		var ret TargetResolutionMode
+		return ret
+	}
+	return *o.TargetResolutionMode
+}
+
+// GetTargetResolutionModeOk returns a tuple with the TargetResolutionMode field value if set, nil otherwise
+// and a boolean to check if the value has been set.
+func (o *BringUpRackRequest) GetTargetResolutionModeOk() (*TargetResolutionMode, bool) {
+	if o == nil || IsNil(o.TargetResolutionMode) {
+		return nil, false
+	}
+	return o.TargetResolutionMode, true
+}
+
+// HasTargetResolutionMode returns a boolean if a field has been set.
+func (o *BringUpRackRequest) HasTargetResolutionMode() bool {
+	if o != nil && !IsNil(o.TargetResolutionMode) {
+		return true
+	}
+
+	return false
+}
+
+// SetTargetResolutionMode gets a reference to the given TargetResolutionMode and assigns it to the TargetResolutionMode field.
+func (o *BringUpRackRequest) SetTargetResolutionMode(v TargetResolutionMode) {
+	o.TargetResolutionMode = &v
 }
 
 // GetSiteId returns the SiteId field value
@@ -188,6 +225,9 @@ func (o BringUpRackRequest) MarshalJSON() ([]byte, error) {
 
 func (o BringUpRackRequest) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
+	if !IsNil(o.TargetResolutionMode) {
+		toSerialize["targetResolutionMode"] = o.TargetResolutionMode
+	}
 	toSerialize["siteId"] = o.SiteId
 	if !IsNil(o.Description) {
 		toSerialize["description"] = o.Description

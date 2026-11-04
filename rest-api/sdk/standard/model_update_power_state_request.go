@@ -24,6 +24,7 @@ var _ MappedNullable = &UpdatePowerStateRequest{}
 
 // UpdatePowerStateRequest Request body for single-resource power control operations
 type UpdatePowerStateRequest struct {
+	TargetResolutionMode *TargetResolutionMode `json:"targetResolutionMode,omitempty"`
 	// ID of the Site
 	SiteId string `json:"siteId"`
 	// Power control state to apply: - `On`: Power on the target(s) - `Off`: Graceful power off - `Cycle`: Graceful power cycle (restart) - `ForceOff`: Forced power off (immediate) - `ForceCycle`: Forced power cycle (immediate restart) - `ACPowerCycle`: Remove and restore AC power (unsupported on Viking systems)  Exact lowercase forms are also accepted for compatibility.
@@ -42,6 +43,8 @@ type _UpdatePowerStateRequest UpdatePowerStateRequest
 // will change when the set of required properties is changed
 func NewUpdatePowerStateRequest(siteId string, state string) *UpdatePowerStateRequest {
 	this := UpdatePowerStateRequest{}
+	var targetResolutionMode TargetResolutionMode = TARGETRESOLUTIONMODE_STRICT
+	this.TargetResolutionMode = &targetResolutionMode
 	this.SiteId = siteId
 	this.State = state
 	var overrideReadinessCheck bool = false
@@ -54,9 +57,43 @@ func NewUpdatePowerStateRequest(siteId string, state string) *UpdatePowerStateRe
 // but it doesn't guarantee that properties required by API are set
 func NewUpdatePowerStateRequestWithDefaults() *UpdatePowerStateRequest {
 	this := UpdatePowerStateRequest{}
+	var targetResolutionMode TargetResolutionMode = TARGETRESOLUTIONMODE_STRICT
+	this.TargetResolutionMode = &targetResolutionMode
 	var overrideReadinessCheck bool = false
 	this.OverrideReadinessCheck = &overrideReadinessCheck
 	return &this
+}
+
+// GetTargetResolutionMode returns the TargetResolutionMode field value if set, zero value otherwise.
+func (o *UpdatePowerStateRequest) GetTargetResolutionMode() TargetResolutionMode {
+	if o == nil || IsNil(o.TargetResolutionMode) {
+		var ret TargetResolutionMode
+		return ret
+	}
+	return *o.TargetResolutionMode
+}
+
+// GetTargetResolutionModeOk returns a tuple with the TargetResolutionMode field value if set, nil otherwise
+// and a boolean to check if the value has been set.
+func (o *UpdatePowerStateRequest) GetTargetResolutionModeOk() (*TargetResolutionMode, bool) {
+	if o == nil || IsNil(o.TargetResolutionMode) {
+		return nil, false
+	}
+	return o.TargetResolutionMode, true
+}
+
+// HasTargetResolutionMode returns a boolean if a field has been set.
+func (o *UpdatePowerStateRequest) HasTargetResolutionMode() bool {
+	if o != nil && !IsNil(o.TargetResolutionMode) {
+		return true
+	}
+
+	return false
+}
+
+// SetTargetResolutionMode gets a reference to the given TargetResolutionMode and assigns it to the TargetResolutionMode field.
+func (o *UpdatePowerStateRequest) SetTargetResolutionMode(v TargetResolutionMode) {
+	o.TargetResolutionMode = &v
 }
 
 // GetSiteId returns the SiteId field value
@@ -181,6 +218,9 @@ func (o UpdatePowerStateRequest) MarshalJSON() ([]byte, error) {
 
 func (o UpdatePowerStateRequest) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
+	if !IsNil(o.TargetResolutionMode) {
+		toSerialize["targetResolutionMode"] = o.TargetResolutionMode
+	}
 	toSerialize["siteId"] = o.SiteId
 	toSerialize["state"] = o.State
 	if !IsNil(o.RuleId) {

@@ -24,6 +24,7 @@ var _ MappedNullable = &BatchUpdateTrayPowerStateRequest{}
 
 // BatchUpdateTrayPowerStateRequest Request body for batch tray power control operations
 type BatchUpdateTrayPowerStateRequest struct {
+	TargetResolutionMode *TargetResolutionMode `json:"targetResolutionMode,omitempty"`
 	// ID of the Site
 	SiteId string `json:"siteId"`
 	// Filter that selects Trays whose power state should be updated
@@ -44,6 +45,8 @@ type _BatchUpdateTrayPowerStateRequest BatchUpdateTrayPowerStateRequest
 // will change when the set of required properties is changed
 func NewBatchUpdateTrayPowerStateRequest(siteId string, state string) *BatchUpdateTrayPowerStateRequest {
 	this := BatchUpdateTrayPowerStateRequest{}
+	var targetResolutionMode TargetResolutionMode = TARGETRESOLUTIONMODE_STRICT
+	this.TargetResolutionMode = &targetResolutionMode
 	this.SiteId = siteId
 	this.State = state
 	var overrideReadinessCheck bool = false
@@ -56,9 +59,43 @@ func NewBatchUpdateTrayPowerStateRequest(siteId string, state string) *BatchUpda
 // but it doesn't guarantee that properties required by API are set
 func NewBatchUpdateTrayPowerStateRequestWithDefaults() *BatchUpdateTrayPowerStateRequest {
 	this := BatchUpdateTrayPowerStateRequest{}
+	var targetResolutionMode TargetResolutionMode = TARGETRESOLUTIONMODE_STRICT
+	this.TargetResolutionMode = &targetResolutionMode
 	var overrideReadinessCheck bool = false
 	this.OverrideReadinessCheck = &overrideReadinessCheck
 	return &this
+}
+
+// GetTargetResolutionMode returns the TargetResolutionMode field value if set, zero value otherwise.
+func (o *BatchUpdateTrayPowerStateRequest) GetTargetResolutionMode() TargetResolutionMode {
+	if o == nil || IsNil(o.TargetResolutionMode) {
+		var ret TargetResolutionMode
+		return ret
+	}
+	return *o.TargetResolutionMode
+}
+
+// GetTargetResolutionModeOk returns a tuple with the TargetResolutionMode field value if set, nil otherwise
+// and a boolean to check if the value has been set.
+func (o *BatchUpdateTrayPowerStateRequest) GetTargetResolutionModeOk() (*TargetResolutionMode, bool) {
+	if o == nil || IsNil(o.TargetResolutionMode) {
+		return nil, false
+	}
+	return o.TargetResolutionMode, true
+}
+
+// HasTargetResolutionMode returns a boolean if a field has been set.
+func (o *BatchUpdateTrayPowerStateRequest) HasTargetResolutionMode() bool {
+	if o != nil && !IsNil(o.TargetResolutionMode) {
+		return true
+	}
+
+	return false
+}
+
+// SetTargetResolutionMode gets a reference to the given TargetResolutionMode and assigns it to the TargetResolutionMode field.
+func (o *BatchUpdateTrayPowerStateRequest) SetTargetResolutionMode(v TargetResolutionMode) {
+	o.TargetResolutionMode = &v
 }
 
 // GetSiteId returns the SiteId field value
@@ -215,6 +252,9 @@ func (o BatchUpdateTrayPowerStateRequest) MarshalJSON() ([]byte, error) {
 
 func (o BatchUpdateTrayPowerStateRequest) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
+	if !IsNil(o.TargetResolutionMode) {
+		toSerialize["targetResolutionMode"] = o.TargetResolutionMode
+	}
 	toSerialize["siteId"] = o.SiteId
 	if !IsNil(o.Filter) {
 		toSerialize["filter"] = o.Filter
