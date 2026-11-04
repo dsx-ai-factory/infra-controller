@@ -37,6 +37,96 @@ use rpc::forge::DhcpDiscovery;
 use crate::common;
 
 #[sqlx_test]
+async fn lenovo_preingestion_releases_firmware_lockdown(
+    pool: PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = TestHarness::builder(pool.clone()).build().await;
+    let domain = env.test_domain().await;
+    let nc = env.network_controller();
+    let underlay = nc.create_underlay_segment(&domain).await;
+    let config = default_config::get();
+    let sim = Arc::new(RedfishSim::default());
+    sim.set_lockdown(libredfish::EnabledDisabled::Enabled);
+    let manager = PreingestionManager::new(
+        pool.clone(),
+        config.preingestion_manager(),
+        sim.clone(),
+        env.test_meter.meter(),
+        None,
+        None,
+        None,
+        env.api().work_lock_manager_handle(),
+        config.ntp_servers.clone(),
+    );
+    let response = env
+        .api()
+        .discover_dhcp(
+            DhcpDiscovery::builder("02:00:00:00:01:32", underlay.relay_address)
+                .vendor_string("Lenovo")
+                .tonic_request(),
+        )
+        .await?
+        .into_inner();
+    let address: IpAddr = response.address.parse()?;
+    let mut firmware = HostFirmwareConfig::from(config.host_models.get("1").unwrap().clone());
+    firmware.vendor = bmc_vendor::BMCVendor::Lenovo;
+    firmware.model = "ThinkSystem SR650 V4".to_string();
+    let bmc = firmware
+        .components
+        .get_mut(&FirmwareComponentType::Bmc)
+        .unwrap();
+    bmc.preingest_upgrade_when_below = Some("2.97".to_string());
+    bmc.known_firmware = vec![FirmwareEntry::standard("2.97")];
+    let mut txn = pool.begin().await?;
+    common::insert_endpoint_version(&mut txn, &response.address, "2.03", "1.13.2", false).await?;
+    let mut endpoint = db::explored_endpoints::find_all_by_ip(address, &mut txn)
+        .await?
+        .remove(0);
+    endpoint.report.vendor = Some(bmc_vendor::BMCVendor::Lenovo);
+    endpoint.report.model = Some(firmware.model.clone());
+    for system in &mut endpoint.report.systems {
+        system.manufacturer = Some("Lenovo".to_string());
+        system.model = Some(firmware.model.clone());
+    }
+    assert_eq!(
+        db::explored_endpoints::try_update(
+            address,
+            endpoint.report_version,
+            &endpoint.report,
+            false,
+            &mut txn
+        )
+        .await?,
+        db::ConditionalWrite::Applied(())
+    );
+    db::host_firmware_config::upsert(&mut txn, &firmware).await?;
+    txn.commit().await?;
+
+    let mut uploaded = false;
+    for _ in 0..4 {
+        manager.run_single_iteration().await?;
+        let mut txn = pool.begin().await?;
+        let endpoints = db::explored_endpoints::find_all_by_ip(address, &mut txn).await?;
+        if matches!(
+            endpoints[0].preingestion_state,
+            PreingestionState::UpgradeFirmwareWait { .. }
+        ) {
+            uploaded = true;
+            break;
+        }
+    }
+    assert!(
+        uploaded,
+        "Lenovo should start uploading after releasing firmware lockdown"
+    );
+    assert!(
+        sim.lockdown_states()
+            .contains(&libredfish::EnabledDisabled::Disabled)
+    );
+    Ok(())
+}
+
+#[sqlx_test]
 async fn test_preingestion_bmc_upgrade(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
     let env = TestHarness::builder(pool.clone()).build().await;
     let domain = env.test_domain().await;

@@ -60,6 +60,14 @@ fn uefi_creds(password: &str) -> Credentials {
 /// Build a Ready pool host on the shared Redfish sim and return its BMC MAC (the
 /// key for host UEFI rotation bookkeeping).
 async fn ready_host(env: &Env, pool: &PgPool) -> (TestManagedHost, MacAddress) {
+    ready_host_with_config(env, pool, ManagedHostConfig::default()).await
+}
+
+async fn ready_host_with_config(
+    env: &Env,
+    pool: &PgPool,
+    config: ManagedHostConfig,
+) -> (TestManagedHost, MacAddress) {
     let domain = env.test_harness.test_domain().await;
     let network_controller = env.test_harness.network_controller();
     let underlay_segment = network_controller.create_underlay_segment(&domain).await;
@@ -68,7 +76,7 @@ async fn ready_host(env: &Env, pool: &PgPool) -> (TestManagedHost, MacAddress) {
     let mh = env
         .test_harness
         .managed_host_builder(&site_explorer, underlay_segment)
-        .with_config(ManagedHostConfig::default())
+        .with_config(config)
         .build()
         .await
         .0;
@@ -98,6 +106,70 @@ async fn ready_host(env: &Env, pool: &PgPool) -> (TestManagedHost, MacAddress) {
         .mac
         .expect("fixture host should have a BMC MAC");
     (mh, host_mac)
+}
+
+async fn ready_lenovo_host(
+    env: &Env,
+    pool: &PgPool,
+) -> Result<(TestManagedHost, MacAddress), Box<dyn std::error::Error>> {
+    let (mh, mac) = ready_host_with_config(
+        env,
+        pool,
+        ManagedHostConfig {
+            vendor: Some(bmc_vendor::BMCVendor::Lenovo),
+            ..ManagedHostConfig::default()
+        },
+    )
+    .await;
+    // The controller reads the vendor from Scout discovery, not exploration.
+    let mut hardware_info = mh.host.hardware_info();
+    hardware_info.dmi_data.as_mut().unwrap().sys_vendor = "Lenovo".to_string();
+    let mut txn = pool.begin().await?;
+    db::machine_topology::set_topology_update_needed(&mut txn, &mh.host.id.into(), true).await?;
+    db::machine_topology::create_or_update(&mut txn, &mh.host.id.into(), &hardware_info).await?;
+    txn.commit().await?;
+    assert_eq!(
+        mh.host.machine().await.bmc_vendor(),
+        bmc_vendor::BMCVendor::Lenovo
+    );
+    Ok((mh, mac))
+}
+
+#[sqlx_test]
+async fn lenovo_uefi_rotation_unlocks_and_restores_bmc_lockdown(
+    pool: PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut env = Env::builder(pool.clone())
+        .configure_runtime(|c| c.uefi_rotation_enabled = true)
+        .build()
+        .await;
+    let (mh, mac) = ready_lenovo_host(&env, &pool).await?;
+    stage_lagging_host_uefi(&env, &pool, mac).await?;
+    env.redfish_sim
+        .set_lockdown(libredfish::EnabledDisabled::Enabled);
+    env.run_single_iteration().await;
+    assert!(matches!(
+        mh.host.machine().await.state.value,
+        ManagedHostState::RotatingHostUefi { .. }
+    ));
+    env.run_single_iteration().await;
+    assert!(
+        env.redfish_sim
+            .lockdown_states()
+            .contains(&libredfish::EnabledDisabled::Disabled)
+    );
+    run_until_ready(&mut env, &mh).await;
+    assert!(
+        env.redfish_sim
+            .lockdown_states()
+            .iter()
+            .all(|state| *state == libredfish::EnabledDisabled::Enabled)
+    );
+    let status = device_rotation_status(&mut *pool.acquire().await?, HOST_UEFI, mac)
+        .await?
+        .unwrap();
+    assert!(status.converged);
+    Ok(())
 }
 
 /// Stage a site-wide host UEFI rotation to version 1 with the host lagging at the
@@ -352,6 +424,11 @@ async fn uefi_change_failure_quarantines_and_returns_to_ready(
         mh.host.machine().await.state.value,
     );
 
+    // Dell retains its existing best-effort re-lock behavior.
+    env.redfish_sim.fail_next_lockdown_bmc(
+        libredfish::EnabledDisabled::Enabled,
+        "Dell re-lock unavailable",
+    );
     // The failing change must land the host back in Ready rather than looping in
     // the state.
     run_until_ready(&mut env, &mh).await;
@@ -385,6 +462,72 @@ async fn uefi_change_failure_quarantines_and_returns_to_ready(
         );
     }
 
+    Ok(())
+}
+
+#[sqlx_test]
+async fn lenovo_failed_rotation_retries_only_relock_before_ready(
+    pool: PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut env = Env::builder(pool.clone())
+        .configure_runtime(|c| c.uefi_rotation_enabled = true)
+        .build()
+        .await;
+    let (mh, mac) = ready_lenovo_host(&env, &pool).await?;
+    stage_lagging_host_uefi(&env, &pool, mac).await?;
+    env.redfish_sim
+        .set_lockdown(libredfish::EnabledDisabled::Enabled);
+    env.redfish_sim
+        .set_uefi_password_change_error("rotation rejected");
+    env.redfish_sim
+        .fail_next_lockdown_bmc(libredfish::EnabledDisabled::Enabled, "relock unavailable");
+
+    // Enter rotation, unlock, then fail the password change and its cleanup.
+    for _ in 0..3 {
+        env.run_single_iteration().await;
+    }
+    let cleanup = mh.host.machine().await.state.value;
+    assert!(matches!(
+        cleanup,
+        ManagedHostState::RotatingHostUefi {
+            uefi_setup_info: model::machine::UefiSetupInfo {
+                uefi_setup_state: UefiSetupState::LockdownHost,
+                ..
+            }
+        }
+    ));
+    let failed = device_rotation_status(&mut *pool.acquire().await?, HOST_UEFI, mac)
+        .await?
+        .unwrap();
+    assert!(failed.quarantined);
+    assert!(!failed.converged);
+
+    env.redfish_sim
+        .fail_next_lockdown_bmc(libredfish::EnabledDisabled::Enabled, "still unavailable");
+    env.run_single_iteration().await;
+    assert_eq!(mh.host.machine().await.state.value, cleanup);
+    assert_eq!(
+        device_rotation_status(&mut *pool.acquire().await?, HOST_UEFI, mac)
+            .await?
+            .unwrap(),
+        failed
+    );
+
+    env.run_single_iteration().await;
+    assert_eq!(mh.host.machine().await.state.value, ManagedHostState::Ready);
+    assert!(
+        env.redfish_sim
+            .lockdown_states()
+            .iter()
+            .all(|state| *state == libredfish::EnabledDisabled::Enabled)
+    );
+    // Cleanup must neither retry/promote the password nor count another failure.
+    assert_eq!(
+        device_rotation_status(&mut *pool.acquire().await?, HOST_UEFI, mac)
+            .await?
+            .unwrap(),
+        failed
+    );
     Ok(())
 }
 

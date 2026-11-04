@@ -540,14 +540,20 @@ async fn cold_firmware_download_preserves_request_until_check_completes(pool: Pg
     env.run_single_iteration().await;
     let machine = mh.host.machine().await;
     assert!(machine.host_reprovision_requested.is_none());
+    let expected = ManagedHostState::HostInit {
+        machine_state: model::machine::MachineState::WaitingForLockdown {
+            lockdown_info: model::machine::LockdownInfo {
+                state: model::machine::LockdownState::PollingLockdownStatus,
+                mode: model::machine::LockdownMode::Enable,
+            },
+        },
+    };
+    assert_eq!(machine.current_state(), &expected);
     assert!(
-        matches!(
-            machine.current_state(),
-            ManagedHostState::HostInit {
-                machine_state: model::machine::MachineState::WaitingForLockdown { .. },
-            }
-        ),
-        "completed firmware check must hand the unlocked fixture back to lockdown"
+        env.redfish_sim
+            .lockdown_states()
+            .contains(&libredfish::EnabledDisabled::Enabled),
+        "completed firmware checks must restore lockdown before polling status"
     );
 
     // A host that is already locked down completes directly into Ready and
