@@ -27,7 +27,7 @@ repository = "https://github.com/dsx-ai-factory/infra-controller"
 
 [workspace.dependencies]
 clap = { version = "4", features = ["derive", "env"] }
-libredfish = { git = "https://github.com/NVIDIA/libredfish.git", rev = "4bdf564acee13b5d79d381d87cc05548f52022b9" }
+libredfish = { git = "https://github.com/NVIDIA/libredfish.git", rev = "506be6028dd47fb3bfa20edade22b07bc7df92f8" }
 librms = { git = "https://github.com/dsx-ai-factory/nv-rms-client.git", tag = "v0.11.0", features = ["server"] }
 ansi-to-html = "0.2.2"
 
