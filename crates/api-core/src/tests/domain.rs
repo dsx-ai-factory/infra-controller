@@ -522,6 +522,82 @@ async fn test_static_address_cleanup_preserves_existing_deleted_domain_reference
 }
 
 #[crate::sqlx_test]
+async fn test_interface_creation_checks_domain_liveness(pool: PgPool) {
+    let env = create_test_env_with_overrides(pool, TestEnvOverrides::no_network_segments()).await;
+    let domain_id = create_domain(&env, "interface-creation.example").await;
+    let segment_id = NetworkSegmentId::new();
+    env.api
+        .create_network_segment(Request::new(network_segment_request(
+            segment_id,
+            "interface-creation-segment",
+            "192.0.2.0/24",
+            "192.0.2.1",
+            Some(domain_id),
+        )))
+        .await
+        .unwrap();
+
+    let mut creation = env.api.txn_begin().await.unwrap();
+    let segments = db::network_segment::find_by(
+        &mut creation,
+        ObjectColumnFilter::One(db::network_segment::IdColumn, &segment_id),
+        NetworkSegmentSearchConfig::default(),
+    )
+    .await
+    .unwrap();
+    let live = db::machine_interface::create(
+        &mut creation,
+        &segments,
+        &"02:00:00:00:56:61".parse().unwrap(),
+        true,
+        model::address_selection_strategy::AddressSelectionStrategy::NextAvailableIp,
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(live.domain_id, Some(domain_id));
+    assert!(!live.addresses.is_empty());
+    creation.commit().await.unwrap();
+
+    // Reproduce a retained segment whose Domain was deleted by the old API.
+    let mut legacy_delete = env.api.txn_begin().await.unwrap();
+    let domain = db::dns::domain::find_by_uuid(&mut legacy_delete, domain_id)
+        .await
+        .unwrap()
+        .unwrap();
+    db::dns::domain::delete(domain, &mut legacy_delete)
+        .await
+        .unwrap();
+    legacy_delete.commit().await.unwrap();
+
+    let rejected_mac = "02:00:00:00:56:62".parse().unwrap();
+    let mut creation = env.api.txn_begin().await.unwrap();
+    let error = db::machine_interface::create(
+        &mut creation,
+        &segments,
+        &rejected_mac,
+        true,
+        model::address_selection_strategy::AddressSelectionStrategy::NextAvailableIp,
+        None,
+    )
+    .await
+    .expect_err("a new interface must not reference a deleted Domain");
+    assert!(
+        matches!(error, db::DatabaseError::NotFoundError { kind: "domain", ref id } if id == &domain_id.to_string()),
+        "{error:?}"
+    );
+    let inserted: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM machine_interfaces WHERE mac_address = $1)",
+    )
+    .bind(rejected_mac)
+    .fetch_one(&mut creation)
+    .await
+    .unwrap();
+    assert!(!inserted);
+    creation.rollback().await.unwrap();
+}
+
+#[crate::sqlx_test]
 async fn test_interface_domain_reference_changes_reject_deleted_targets(pool: PgPool) {
     #[derive(Clone, Copy, Debug)]
     enum ReferenceUpdate {
