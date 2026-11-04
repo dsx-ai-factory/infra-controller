@@ -9754,7 +9754,7 @@ paths:
           description: A resource conflict prevents the update.
           $ref: '#/components/responses/GenericHttpError'
         '412':
-          description: The Site's `dpsPowerManagement` capability is `false`, so a non-empty power profile cannot be accepted. Also returned when a graceful reboot precondition (Instance readiness, boot configuration, sufficient platform discovery, or host platform) is not met.
+          description: The Site's `dpsPowerManagement` capability is `false`, so a non-empty power profile cannot be accepted.
           $ref: '#/components/responses/GenericHttpError'
         '429':
           $ref: '#/components/responses/ResourceExhaustedError'
@@ -9770,11 +9770,6 @@ paths:
             schema:
               $ref: '#/components/schemas/InstanceUpdateRequest'
             examples:
-              graceful-reboot:
-                summary: Request a graceful host reboot
-                value:
-                  triggerReboot: true
-                  rebootMode: Graceful
               example-1:
                 value:
                   name: spark-monitor-1
@@ -9833,6 +9828,61 @@ paths:
         description: ''
       tags:
         - Instance
+  '/v2/org/{org}/nico/instance/{instanceId}/graceful-reboot':
+    parameters:
+      - schema:
+          type: string
+        name: org
+        in: path
+        required: true
+        description: Name of the Org
+      - schema:
+          type: string
+        name: instanceId
+        in: path
+        required: true
+        description: ID of the Instance
+    post:
+      summary: Request a graceful Instance reboot
+      operationId: graceful-reboot-instance
+      tags:
+        - Instance
+      description: |-
+        Request an OS-coordinated host restart with no hard-reset fallback. No request body is accepted, so configuration edits, custom iPXE boot requests, and update requests cannot be combined with this action.
+
+        Org must have a Tenant entity, the Instance must belong to that Tenant, and the User must have authorization role with `TENANT_ADMIN` suffix. The Site must be Registered and support the dedicated graceful restart Core RPC. Core requires an Assigned/Ready Instance without `alwaysBootWithCustomIpxe` enabled. Missing discovery or insufficient platform identifiers are rejected, as are known platforms requiring IPMI reset instead of Redfish restart. Passing this guard does not guarantee uninterrupted DPU power on every platform.
+
+        The dedicated REST route and Core RPC prevent older servers from interpreting this request as a hard reboot. Older REST servers do not provide this route. Recognized unsupported-method errors from the Site return 409; some older Site Agents report untyped unsupported-method failures as 500. Site authorization failures return 403, including when an older Core rejects unknown methods. Core precondition failures return 412. None of these errors triggers a hard reset.
+
+        Success reports request acceptance with status Rebooting, not completion of the operating system restart. When Core reports READY after the stale-inventory protection window, inventory reconciliation can add BootCompleted to `statusHistory[].status`; the top-level `Instance.status` returns to Ready when the lifecycle status is ready. This does not verify that a reboot occurred. An ignored graceful request can therefore appear completed. If inventory is unavailable or does not report READY, Rebooting may persist; there is no dedicated reboot-completion timeout.
+      responses:
+        '200':
+          description: Restart request accepted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Instance'
+        '400':
+          description: Invalid Instance ID, a non-empty request body, or a Site that is not Registered.
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+        '409':
+          description: Instance is terminating or missing on Site, or a recognized unsupported-method error prevents graceful reboot.
+          $ref: '#/components/responses/GenericHttpError'
+        '412':
+          description: A Core precondition for graceful reboot (readiness, boot configuration, sufficient discovery, or host platform) is not met.
+          $ref: '#/components/responses/GenericHttpError'
+        '429':
+          $ref: '#/components/responses/ResourceExhaustedError'
+        '500':
+          description: Internal failure, including untyped unsupported-method failures from older Site Agents.
+          $ref: '#/components/responses/GenericHttpError'
+        '504':
+          description: Timed out waiting for the Site. The request may still complete; it is not retried or changed to a hard reset.
+          $ref: '#/components/responses/GenericHttpError'
   '/v2/org/{org}/nico/instance/{instanceId}/status-history':
     parameters:
       - schema:
@@ -26046,14 +26096,7 @@ components:
           type:
             - boolean
             - 'null'
-          description: 'Request an Instance reboot. Requires Tenant Admin authorization. Omitted or null rebootMode retains the existing hard reboot. Success reports request acceptance with status Rebooting, not completion of the operating system restart. When Core reports READY after the stale-inventory protection window, inventory reconciliation can add BootCompleted to statusHistory[].status; the top-level Instance.status returns to Ready when the lifecycle status is ready. This does not verify that a reboot occurred. An ignored graceful request can therefore appear completed. If inventory is unavailable or does not report READY, Rebooting may persist; there is no dedicated reboot-completion timeout.'
-        rebootMode:
-          type:
-            - string
-            - 'null'
-          enum: [Hard, Graceful, null]
-          description: 'Reboot mode; omitted or null means Hard. A non-null value requires triggerReboot true. A reboot request cannot be combined with other Instance attribute updates, including userData or dpuExtensionServiceDeployments (even an empty list), in any mode. Graceful requests an OS-coordinated host restart with no hard-reset fallback and requires Site support, an Assigned/Ready Instance, and a supported host platform. It cannot be combined with rebootWithCustomIpxe true, applyUpdatesOnReboot true, or an Instance configured with alwaysBootWithCustomIpxe true. Missing discovery or insufficient platform identifiers are rejected, as are known platforms requiring IPMI reset instead of Redfish restart. Passing this guard does not guarantee uninterrupted DPU power on every platform. Recognized unsupported-method errors return 409; some older Site Agents report untyped unsupported-method failures as 500. Site authorization failures return 403, including when an older Core rejects unknown methods. Core precondition failures return 412.'
-          examples: [Graceful]
+          description: 'Request a hard Instance reboot. Requires Tenant Admin authorization. Cannot be combined with other Instance attribute updates, including userData or dpuExtensionServiceDeployments (even an empty list). For an OS-coordinated restart, use the dedicated graceful-reboot endpoint; rebootMode is not supported by this update operation. Success reports request acceptance, not completion of the operating system restart.'
         rebootWithCustomIpxe:
           type:
             - boolean

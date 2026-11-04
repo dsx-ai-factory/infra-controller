@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/netip"
 	"slices"
@@ -2246,7 +2247,7 @@ func NewUpdateInstanceHandler(dbSession *cdb.Session, tc temporalClient.Client, 
 // Graceful mode uses a dedicated Core RPC through the generic proxy so older
 // agents and Core builds cannot interpret it as a hard reset. Proxy errors roll
 // back the status update. Success confirms acceptance, not completion of the OS restart.
-func (uih UpdateInstanceHandler) handleReboot(c echo.Context, logger *zerolog.Logger, apiRequest *model.APIInstanceUpdateRequest, instance *cdbm.Instance) error {
+func (uih UpdateInstanceHandler) handleReboot(c echo.Context, logger *zerolog.Logger, apiRequest *model.APIInstanceUpdateRequest, instance *cdbm.Instance, graceful bool) error {
 	ctx := c.Request().Context()
 
 	// Get the temporal client for the site we are working with.
@@ -2255,8 +2256,6 @@ func (uih UpdateInstanceHandler) handleReboot(c echo.Context, logger *zerolog.Lo
 		logger.Error().Err(err).Msg("failed to retrieve Temporal client for Site")
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve client for Site", nil)
 	}
-
-	graceful := apiRequest.RebootMode != nil && *apiRequest.RebootMode == model.InstanceRebootModeGraceful
 
 	// Values populated inside the transaction closure that are needed for the response.
 	var ui *cdbm.Instance
@@ -2681,7 +2680,40 @@ func (uih UpdateInstanceHandler) buildInstanceUpdateRequestOsConfig(c echo.Conte
 // @Success 200 {object} model.APIInstance
 // @Router /v2/org/{org}/nico/instance/{id} [patch]
 func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Instance", "Update", c)
+	return uih.handle(c, false)
+}
+
+// GracefulRebootInstanceHandler requests an OS-coordinated restart without a hard-reset fallback.
+type GracefulRebootInstanceHandler struct {
+	UpdateInstanceHandler
+}
+
+// NewGracefulRebootInstanceHandler reuses Instance update authorization and reboot status handling.
+func NewGracefulRebootInstanceHandler(dbSession *cdb.Session, tc temporalClient.Client, scp *sc.ClientPool, cfg *config.Config, dps dpsclient.PowerProvisioner) GracefulRebootInstanceHandler {
+	return GracefulRebootInstanceHandler{UpdateInstanceHandler: NewUpdateInstanceHandler(dbSession, tc, scp, cfg, dps)}
+}
+
+// Handle godoc
+// @Summary Request a graceful Instance reboot
+// @Description Request an OS-coordinated restart. No request body is accepted. Success means acceptance, not completion.
+// @Tags Instance
+// @Produce json
+// @Security ApiKeyAuth
+// @Param org path string true "Name of NGC organization"
+// @Param id path string true "ID of Instance"
+// @Success 200 {object} model.APIInstance
+// @Router /v2/org/{org}/nico/instance/{id}/graceful-reboot [post]
+func (grih GracefulRebootInstanceHandler) Handle(c echo.Context) error {
+	return grih.handle(c, true)
+}
+
+// handle shares authorization, Instance lookup, and status handling across update and graceful reboot routes.
+func (uih UpdateInstanceHandler) handle(c echo.Context, graceful bool) error {
+	action := "Update"
+	if graceful {
+		action = "GracefulReboot"
+	}
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Instance", action, c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -2722,10 +2754,21 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 	// Validate request
 	// Bind request data to API model
 	apiRequest := model.APIInstanceUpdateRequest{}
-	err = c.Bind(&apiRequest)
-	if err != nil {
-		logger.Warn().Err(err).Msg("error binding request data into API model")
-		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Failed to parse request data, potentially invalid structure", nil)
+	if graceful {
+		// No body means no configuration edits or hard-reboot options can be combined with this action.
+		if c.Request().Body != nil {
+			body, readErr := io.ReadAll(io.LimitReader(c.Request().Body, 1))
+			if readErr != nil || len(body) != 0 {
+				return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Graceful reboot does not accept a request body", nil)
+			}
+		}
+		apiRequest.TriggerReboot = cutil.GetPtr(true)
+	} else {
+		err = c.Bind(&apiRequest)
+		if err != nil {
+			logger.Warn().Err(err).Msg("error binding request data into API model")
+			return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Failed to parse request data, potentially invalid structure", nil)
+		}
 	}
 
 	// Validate request attributes
@@ -2840,7 +2883,7 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 
 	// If this was only a reboot request, handle it and return.
 	if instanceRebootRequest {
-		return uih.handleReboot(c, &logger, &apiRequest, instance)
+		return uih.handleReboot(c, &logger, &apiRequest, instance, graceful)
 	}
 
 	// Otherwise, this is a real Instance config update.

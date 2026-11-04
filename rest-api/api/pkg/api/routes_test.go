@@ -5,6 +5,7 @@ package api
 
 import (
 	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/NVIDIA/infra-controller/rest-api/api/internal/config"
@@ -12,6 +13,7 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/handler/util/common"
 	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
+	"github.com/labstack/echo/v4"
 	"github.com/stretchr/testify/assert"
 
 	temporalClient "go.temporal.io/sdk/client"
@@ -48,7 +50,7 @@ func TestNewAPIRoutes(t *testing.T) {
 		"vpcpeering":                4,
 		"vpcprefix":                 5,
 		"ip-block":                  6,
-		"instance":                  8,
+		"instance":                  9,
 		"interface":                 1,
 		"infiniband-interface":      2,
 		"infiniband-partition":      5,
@@ -148,6 +150,33 @@ func TestNewAPIRoutes(t *testing.T) {
 			assertRouteExists(t, got, http.MethodPut, rackGroupPath+"/all")
 			assertRouteExists(t, got, http.MethodDelete, rackGroupPath+"/all")
 			assertRouteBefore(t, got, http.MethodDelete, rackGroupPath+"/all", http.MethodDelete, rackGroupPath+"/:id")
+
+			gracefulPath := "/org/:orgName/" + cfg.GetAPIName() + "/instance/:id/graceful-reboot"
+			assertRouteExists(t, got, http.MethodPost, gracefulPath)
+			for _, includeGraceful := range []bool{false, true} {
+				t.Run(map[bool]string{false: "older REST rejects graceful route", true: "graceful route selects dedicated handler"}[includeGraceful], func(t *testing.T) {
+					e := echo.New()
+					var selectedHandler interface{}
+					for _, route := range got {
+						if !includeGraceful && route.Path == gracefulPath {
+							continue
+						}
+						e.Add(route.Method, route.Path, func(c echo.Context) error {
+							selectedHandler = route.Handler
+							return c.NoContent(http.StatusNoContent)
+						})
+					}
+					rec := httptest.NewRecorder()
+					e.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/org/test/"+cfg.GetAPIName()+"/instance/00000000-0000-0000-0000-000000000001/graceful-reboot", nil))
+					if includeGraceful {
+						assert.Equal(t, http.StatusNoContent, rec.Code)
+						assert.IsType(t, apiHandler.GracefulRebootInstanceHandler{}, selectedHandler)
+					} else {
+						assert.Equal(t, http.StatusNotFound, rec.Code)
+						assert.Nil(t, selectedHandler)
+					}
+				})
+			}
 
 			bmcCredentialPath := "/org/:orgName/" + cfg.GetAPIName() + "/credential/bmc"
 			assertRouteExists(t, got, http.MethodPut, bmcCredentialPath)

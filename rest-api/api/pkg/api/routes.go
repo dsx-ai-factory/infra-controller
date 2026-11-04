@@ -389,6 +389,11 @@ func NewAPIRoutes(dbSession *cdb.Session, tc tClient.Client, tnc tClient.Namespa
 			Method:  http.MethodGet,
 			Handler: apiHandler.NewGetInstanceStatusDetailsHandler(dbSession),
 		},
+		{
+			Path:    apiPathPrefix + "/instance/:id/graceful-reboot",
+			Method:  http.MethodPost,
+			Handler: apiHandler.NewGracefulRebootInstanceHandler(dbSession, tc, scp, cfg, dpsc),
+		},
 		// Instance Type endpoints
 		{
 			Path:    apiPathPrefix + "/instance/type",

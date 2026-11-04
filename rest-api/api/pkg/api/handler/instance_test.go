@@ -4867,6 +4867,145 @@ func resetInstanceStatus(t *testing.T, dbSession *cdb.Session, instanceID uuid.U
 	assert.Nil(t, err)
 }
 
+func TestGracefulRebootInstanceHandler_Handle(t *testing.T) {
+	ctx := context.Background()
+	dbSession := testInstanceInitDB(t)
+	defer dbSession.Close()
+	common.TestSetupSchema(t, dbSession)
+
+	org := "graceful-tenant"
+	providerUser := testInstanceBuildUser(t, dbSession, "graceful-provider", "graceful-provider", []string{authz.ProviderAdminRole})
+	provider := testInstanceSiteBuildInfrastructureProvider(t, dbSession, "graceful-provider", "graceful-provider", providerUser)
+	site := testInstanceBuildSite(t, dbSession, provider, "graceful-site", cdbm.SiteStatusRegistered, false, providerUser)
+	admin := testInstanceBuildUser(t, dbSession, "graceful-admin", org, []string{authz.TenantAdminRole})
+	member := testInstanceBuildUser(t, dbSession, "graceful-member", org, nil)
+	foreignOrg := "graceful-foreign"
+	foreignAdmin := testInstanceBuildUser(t, dbSession, "graceful-foreign-admin", foreignOrg, []string{authz.TenantAdminRole})
+	tenant := testInstanceBuildTenant(t, dbSession, "graceful-tenant", org, admin)
+	vpc := testInstanceBuildVPC(t, dbSession, "graceful-vpc", provider, tenant, site, nil, nil, nil, nil, cdbm.VpcStatusReady, admin)
+	machine := testInstanceBuildMachine(t, dbSession, provider.ID, site.ID, cutil.GetPtr(true), nil)
+	instance := testInstanceBuildInstance(t, dbSession, "graceful-instance", tenant.ID, provider.ID, site.ID, nil, vpc.ID, &machine.ID, nil, nil, cdbm.InstanceStatusReady)
+	cfg := common.GetTestConfig()
+	instanceDAO := cdbm.NewInstanceDAO(dbSession)
+	statusDAO := cdbm.NewStatusDetailDAO(dbSession)
+
+	cases := []struct {
+		name       string
+		user       *cdbm.User
+		org        string
+		body       string
+		patch      bool
+		status     string
+		proxyError error
+		wantCode   int
+		wantProxy  bool
+	}{
+		{name: "accepted", wantCode: http.StatusOK, wantProxy: true},
+		{name: "foreign tenant", user: foreignAdmin, org: foreignOrg, wantCode: http.StatusForbidden},
+		{name: "member without tenant admin", user: member, wantCode: http.StatusForbidden},
+		{name: "terminating instance", status: cdbm.InstanceStatusTerminating, wantCode: http.StatusConflict},
+		{name: "body cannot carry configuration edits", body: `{"dpuExtensionServiceDeployments":[]}`, wantCode: http.StatusBadRequest},
+		{name: "body cannot select hard reset", body: `{"rebootMode":"Hard"}`, wantCode: http.StatusBadRequest},
+		{name: "PATCH rejects obsolete graceful mode", patch: true, body: `{"triggerReboot":true,"rebootMode":"Graceful"}`, wantCode: http.StatusBadRequest},
+		{name: "Core precondition rolls back status", proxyError: tp.NewNonRetryableApplicationError("precondition failed", swe.ErrTypeNICoFailedPrecondition, nil), wantCode: http.StatusPreconditionFailed, wantProxy: true},
+		{name: "Agent typed unsupported method", proxyError: tp.NewNonRetryableApplicationError("unknown proxied gRPC method", swe.ErrTypeNICoUnimplemented, nil), wantCode: http.StatusConflict, wantProxy: true},
+		// Use a real serialized activity envelope for legacy untyped descriptor failures.
+		{name: "older Agent untyped unsupported method", proxyError: skuProxyActivityError("InvokeCoreGRPCOnSite", fmt.Errorf("%w: %q on %q", errors.New("unknown proxied gRPC method"), "GracefulRestartInstance", "forge.Forge")), wantCode: http.StatusInternalServerError, wantProxy: true},
+		{name: "older Core", proxyError: tp.NewNonRetryableApplicationError("unimplemented", swe.ErrTypeCarbideUnimplemented, nil), wantCode: http.StatusConflict, wantProxy: true},
+		{name: "Core permission failure", proxyError: tp.NewNonRetryableApplicationError("permission denied", swe.ErrTypeNICoDenied, nil), wantCode: http.StatusForbidden, wantProxy: true},
+		{name: "failure never falls back to hard reset", proxyError: errors.New("restart failed"), wantCode: http.StatusInternalServerError, wantProxy: true},
+		{name: "timeout does not terminate proxy", proxyError: tp.NewTimeoutError(enums.TIMEOUT_TYPE_START_TO_CLOSE, nil, nil), wantCode: http.StatusGatewayTimeout, wantProxy: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			status := cdbm.InstanceStatusReady
+			if tc.status != "" {
+				status = tc.status
+			}
+			_, updateErr := instanceDAO.Update(ctx, nil, cdbm.InstanceUpdateInput{InstanceID: instance.ID, InstanceUpdateCommonInput: cdbm.InstanceUpdateCommonInput{Status: &status, PowerStatus: cutil.GetPtr(cdbm.InstancePowerStatusBootCompleted)}})
+			require.NoError(t, updateErr)
+			before, readErr := instanceDAO.GetByID(ctx, nil, instance.ID, nil)
+			require.NoError(t, readErr)
+			page := cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)}
+			historyBefore, _, readErr := statusDAO.GetAll(ctx, nil, cdbm.StatusDetailFilterInput{EntityIDs: []string{instance.ID.String()}}, page)
+			require.NoError(t, readErr)
+
+			siteClient := &tmocks.Client{}
+			// Only the cached mock client is used; no Temporal connection is created.
+			scp := sc.NewClientPool(nil)
+			scp.IDClientMap[site.ID.String()] = siteClient
+			var requests []*corev1.InstanceGracefulRestartRequest
+			if tc.wantProxy {
+				run := &tmocks.WorkflowRun{}
+				run.On("Get", mock.Anything, mock.Anything).Run(func(args mock.Arguments) {
+					if tc.proxyError == nil {
+						args.Get(1).(*grpcproxy.Response).ResponseJSON = []byte("{}")
+					}
+				}).Return(tc.proxyError).Once()
+				siteClient.On("ExecuteWorkflow", mock.Anything, mock.Anything, grpcproxy.Core.WorkflowName,
+					mock.MatchedBy(func(req grpcproxy.Request) bool {
+						return req.FullMethod == corev1.Forge_GracefulRestartInstance_FullMethodName
+					})).
+					Run(func(args mock.Arguments) {
+						var request corev1.InstanceGracefulRestartRequest
+						require.NoError(t, protojson.Unmarshal(args.Get(3).(grpcproxy.Request).RequestJSON, &request))
+						requests = append(requests, &request)
+					}).Return(run, nil).Once()
+			}
+			user, reqOrg := admin, org
+			if tc.user != nil {
+				user = tc.user
+			}
+			if tc.org != "" {
+				reqOrg = tc.org
+			}
+			method, path := http.MethodPost, "/v2/org/"+reqOrg+"/nico/instance/"+instance.ID.String()+"/graceful-reboot"
+			if tc.patch {
+				method, path = http.MethodPatch, strings.TrimSuffix(path, "/graceful-reboot")
+			}
+			req := httptest.NewRequest(method, path, strings.NewReader(tc.body))
+			req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
+			rec := httptest.NewRecorder()
+			ec := echo.New().NewContext(req, rec)
+			ec.SetPath(path)
+			ec.Set(cutil.APINameContextKey, "nico")
+			ec.SetParamNames("orgName", "id")
+			ec.SetParamValues(reqOrg, instance.ID.String())
+			ec.Set("user", user)
+			handler := NewGracefulRebootInstanceHandler(dbSession, nil, scp, cfg, nil)
+			if tc.patch {
+				require.NoError(t, handler.UpdateInstanceHandler.Handle(ec))
+			} else {
+				require.NoError(t, handler.Handle(ec))
+			}
+			assert.Equal(t, tc.wantCode, rec.Code, rec.Body.String())
+			siteClient.AssertExpectations(t)
+			// No legacy reboot or proxy termination call is mocked: either would fail this test.
+			siteClient.AssertNotCalled(t, "TerminateWorkflow", mock.Anything, mock.Anything, mock.Anything, mock.Anything)
+			if tc.wantProxy {
+				require.Len(t, requests, 1)
+				assert.Equal(t, instance.GetSiteID().String(), requests[0].InstanceId.Value)
+			} else {
+				assert.Empty(t, requests)
+			}
+			after, readErr := instanceDAO.GetByID(ctx, nil, instance.ID, nil)
+			require.NoError(t, readErr)
+			historyAfter, _, readErr := statusDAO.GetAll(ctx, nil, cdbm.StatusDetailFilterInput{EntityIDs: []string{instance.ID.String()}}, page)
+			require.NoError(t, readErr)
+			if tc.wantCode == http.StatusOK {
+				assert.Equal(t, cutil.GetPtr(cdbm.InstancePowerStatusRebooting), after.PowerStatus)
+				assert.Len(t, historyAfter, len(historyBefore)+1)
+				var response model.APIInstance
+				require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &response))
+				assert.Equal(t, instance.ID.String(), response.ID)
+			} else {
+				assert.Equal(t, before.PowerStatus, after.PowerStatus)
+				assert.Equal(t, historyBefore, historyAfter)
+			}
+		})
+	}
+}
+
 func TestUpdateInstanceHandler_Handle(t *testing.T) {
 	ctx := context.Background()
 	dbSession := testInstanceInitDB(t)
@@ -4893,9 +5032,6 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 	assert.NotNil(t, st3)
 
 	tnu1 := testInstanceBuildUser(t, dbSession, "test-starfleet-id-2", tnOrg1, tnOrgRoles1)
-	foreignOrg := "graceful-foreign-org"
-	foreignUser := testInstanceBuildUser(t, dbSession, "graceful-foreign-user", foreignOrg, []string{authz.TenantAdminRole})
-	nonAdmin := testInstanceBuildUser(t, dbSession, "graceful-non-admin", tnOrg1, []string{})
 	tn1 := testInstanceBuildTenant(t, dbSession, "test-tenant", tnOrg1, tnu1)
 
 	tnu2 := testInstanceBuildUser(t, dbSession, "test-starfleet-id-3", tnOrg1, tnOrgRoles1)
@@ -5661,28 +5797,7 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 	spectrumXRejectedSCP := sc.NewClientPool(tcfg)
 	spectrumXPartitionNotFound := fmt.Sprintf("SPX partition %s is not found", sxpReplacement.ID)
 
-	var rebootRequests []*corev1.InstancePowerRequest
-	tsc.On("ExecuteWorkflow", mock.Anything, mock.Anything, "RebootInstanceV2", mock.Anything).
-		Run(func(args mock.Arguments) {
-			rebootRequests = append(rebootRequests, args.Get(3).(*corev1.InstancePowerRequest))
-		}).Return(wrun, nil)
-	var gracefulError error
-	var gracefulRequests []*corev1.InstanceGracefulRestartRequest
-	gracefulRun := &tmocks.WorkflowRun{}
-	gracefulRun.On("GetID").Return("graceful-restart-workflow")
-	gracefulRun.On("Get", mock.Anything, mock.Anything).Run(func(args mock.Arguments) {
-		if gracefulError == nil {
-			args.Get(1).(*grpcproxy.Response).ResponseJSON = []byte("{}")
-		}
-	}).Return(func(_ context.Context, _ interface{}) error { return gracefulError })
-	tsc.On("ExecuteWorkflow", mock.Anything, mock.Anything, grpcproxy.Core.WorkflowName,
-		mock.MatchedBy(func(req grpcproxy.Request) bool {
-			return req.FullMethod == corev1.Forge_GracefulRestartInstance_FullMethodName
-		})).Run(func(args mock.Arguments) {
-		var request corev1.InstanceGracefulRestartRequest
-		require.NoError(t, protojson.Unmarshal(args.Get(3).(grpcproxy.Request).RequestJSON, &request))
-		gracefulRequests = append(gracefulRequests, &request)
-	}).Return(gracefulRun, nil)
+	tsc.On("ExecuteWorkflow", mock.Anything, mock.Anything, "RebootInstanceV2", mock.Anything).Return(wrun, nil)
 
 	// OTEL Spanner configuration
 	ctx = common.TestCommonTraceProviderSetup(t, ctx)
@@ -5736,8 +5851,7 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 		// When true with nvlinkInterfacesToDelete, still assert those rows are Deleting but skip Pending-row count/order checks.
 		nvLinkSkipPendingDBAssertions bool
 		// Optional hook after building the echo context and before Handle (e.g. adjust DB timestamps for time-sensitive branches).
-		beforeHandle  func(t *testing.T)
-		gracefulError error
+		beforeHandle func(t *testing.T)
 		// Optional hook after a successful Handle (e.g. assert persisted DB state).
 		afterHandle            func(t *testing.T)
 		ethernetReconciliation *ethernetReconciliationExpectation
@@ -5756,116 +5870,6 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 		verifySiteControllerRequest bool
 		verifyChildSpanner          bool
 	}{
-		{
-			name:   "graceful reboot rejects foreign tenant",
-			fields: fields{dbSession: dbSession, tc: tc, scp: scp, cfg: cfg},
-			args: args{
-				reqData:     &model.APIInstanceUpdateRequest{TriggerReboot: cutil.GetPtr(true), RebootMode: cutil.GetPtr(model.InstanceRebootModeGraceful)},
-				reqInstance: inst1.ID.String(), cleanInstanceToStatus: inst1.Status,
-				reqOrg: foreignOrg, reqUser: foreignUser, respCode: http.StatusForbidden,
-			},
-		},
-		{
-			name:   "graceful reboot rejects member without tenant admin",
-			fields: fields{dbSession: dbSession, tc: tc, scp: scp, cfg: cfg},
-			args: args{
-				reqData:     &model.APIInstanceUpdateRequest{TriggerReboot: cutil.GetPtr(true), RebootMode: cutil.GetPtr(model.InstanceRebootModeGraceful)},
-				reqInstance: inst1.ID.String(), cleanInstanceToStatus: inst1.Status,
-				reqOrg: tnOrg1, reqUser: nonAdmin, respCode: http.StatusForbidden,
-			},
-		},
-		{
-			name:   "graceful reboot rejects terminating instance",
-			fields: fields{dbSession: dbSession, tc: tc, scp: scp, cfg: cfg},
-			args: args{
-				reqData:     &model.APIInstanceUpdateRequest{TriggerReboot: cutil.GetPtr(true), RebootMode: cutil.GetPtr(model.InstanceRebootModeGraceful)},
-				reqInstance: inst3.ID.String(), cleanInstanceToStatus: inst3.Status,
-				reqOrg: tnOrg1, reqUser: tnu1, respCode: http.StatusConflict,
-			},
-		},
-		{
-			name:   "graceful Core rejection rolls back reboot status",
-			fields: fields{dbSession: dbSession, tc: tc, scp: scp, cfg: cfg},
-			args: args{
-				reqData:     &model.APIInstanceUpdateRequest{TriggerReboot: cutil.GetPtr(true), RebootMode: cutil.GetPtr(model.InstanceRebootModeGraceful)},
-				reqInstance: inst1.ID.String(), cleanInstanceToStatus: inst1.Status,
-				reqOrg: tnOrg1, reqUser: tnu1, respCode: http.StatusPreconditionFailed,
-				gracefulError: tp.NewNonRetryableApplicationError("graceful restart precondition failed", swe.ErrTypeNICoFailedPrecondition, nil),
-			},
-		},
-		{
-			name:   "graceful reboot accepted",
-			fields: fields{dbSession: dbSession, tc: tc, scp: scp, cfg: cfg},
-			args: args{
-				reqData:     &model.APIInstanceUpdateRequest{TriggerReboot: cutil.GetPtr(true), RebootMode: cutil.GetPtr(model.InstanceRebootModeGraceful)},
-				reqInstance: inst1.ID.String(), cleanInstanceToStatus: inst1.Status,
-				reqOrg: tnOrg1, reqUser: tnu1, respCode: http.StatusOK,
-			},
-		},
-
-		{
-			name:   "graceful reboot rejected by Agent with typed unsupported-method error",
-			fields: fields{dbSession: dbSession, tc: tc, scp: scp, cfg: cfg},
-			args: args{
-				reqData:     &model.APIInstanceUpdateRequest{TriggerReboot: cutil.GetPtr(true), RebootMode: cutil.GetPtr(model.InstanceRebootModeGraceful)},
-				reqInstance: inst1.ID.String(), cleanInstanceToStatus: inst1.Status,
-				reqOrg: tnOrg1, reqUser: tnu1, respCode: http.StatusConflict,
-				gracefulError: tp.NewNonRetryableApplicationError("unknown proxied gRPC method", swe.ErrTypeNICoUnimplemented, nil),
-			},
-		},
-
-		{
-			name:   "graceful reboot preserves older Agent untyped descriptor failure",
-			fields: fields{dbSession: dbSession, tc: tc, scp: scp, cfg: cfg},
-			args: args{
-				reqData:     &model.APIInstanceUpdateRequest{TriggerReboot: cutil.GetPtr(true), RebootMode: cutil.GetPtr(model.InstanceRebootModeGraceful)},
-				reqInstance: inst1.ID.String(), cleanInstanceToStatus: inst1.Status,
-				reqOrg: tnOrg1, reqUser: tnu1, respCode: http.StatusInternalServerError,
-				// Reuse the serialized activity envelope to model an Agent that
-				// returns a native wrapped error rather than typed Unimplemented.
-				gracefulError: skuProxyActivityError("InvokeCoreGRPCOnSite", fmt.Errorf("%w: %q on %q", errors.New("unknown proxied gRPC method"), "GracefulRestartInstance", "forge.Forge")),
-			},
-		},
-		{
-			name:   "graceful reboot rejected by older Core",
-			fields: fields{dbSession: dbSession, tc: tc, scp: scp, cfg: cfg},
-			args: args{
-				reqData:     &model.APIInstanceUpdateRequest{TriggerReboot: cutil.GetPtr(true), RebootMode: cutil.GetPtr(model.InstanceRebootModeGraceful)},
-				reqInstance: inst1.ID.String(), cleanInstanceToStatus: inst1.Status,
-				reqOrg: tnOrg1, reqUser: tnu1, respCode: http.StatusConflict,
-				gracefulError: tp.NewNonRetryableApplicationError("unimplemented", swe.ErrTypeCarbideUnimplemented, nil),
-			},
-		},
-		{
-			name:   "graceful reboot preserves Core permission failure",
-			fields: fields{dbSession: dbSession, tc: tc, scp: scp, cfg: cfg},
-			args: args{
-				reqData:     &model.APIInstanceUpdateRequest{TriggerReboot: cutil.GetPtr(true), RebootMode: cutil.GetPtr(model.InstanceRebootModeGraceful)},
-				reqInstance: inst1.ID.String(), cleanInstanceToStatus: inst1.Status,
-				reqOrg: tnOrg1, reqUser: tnu1, respCode: http.StatusForbidden,
-				gracefulError: tp.NewNonRetryableApplicationError("permission denied", swe.ErrTypeNICoDenied, nil),
-			},
-		},
-		{
-			name:   "graceful reboot failure has no hard fallback",
-			fields: fields{dbSession: dbSession, tc: tc, scp: scp, cfg: cfg},
-			args: args{
-				reqData:     &model.APIInstanceUpdateRequest{TriggerReboot: cutil.GetPtr(true), RebootMode: cutil.GetPtr(model.InstanceRebootModeGraceful)},
-				reqInstance: inst1.ID.String(), cleanInstanceToStatus: inst1.Status,
-				reqOrg: tnOrg1, reqUser: tnu1, respCode: http.StatusInternalServerError,
-				gracefulError: errors.New("restart failed"),
-			},
-		},
-		{
-			name:   "graceful reboot timeout rolls back without terminating proxy",
-			fields: fields{dbSession: dbSession, tc: tc, scp: scp, cfg: cfg},
-			args: args{
-				reqData:     &model.APIInstanceUpdateRequest{TriggerReboot: cutil.GetPtr(true), RebootMode: cutil.GetPtr(model.InstanceRebootModeGraceful)},
-				reqInstance: inst1.ID.String(), cleanInstanceToStatus: inst1.Status,
-				reqOrg: tnOrg1, reqUser: tnu1, respCode: http.StatusGatewayTimeout,
-				gracefulError: tp.NewTimeoutError(enums.TIMEOUT_TYPE_START_TO_CLOSE, nil, nil),
-			},
-		},
 		{
 			name: "test Instance update preserves persisted power profile when omitted",
 			fields: fields{
@@ -8882,9 +8886,6 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			rebootRequests = nil
-			gracefulRequests = nil
-			gracefulError = tt.args.gracefulError
 			uih := UpdateInstanceHandler{
 				dbSession: tt.fields.dbSession,
 				tc:        tt.fields.tc,
@@ -8941,38 +8942,8 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 				require.NotEmpty(t, beforeSpectrumXSSHAssociations)
 			}
 
-			var powerStatusBefore *string
-			var statusDetailsBefore []cdbm.StatusDetail
-			if tt.args.reqData.RebootMode != nil {
-				before, err := insDAO.GetByID(ctx, nil, uuid.MustParse(tt.args.reqInstance), nil)
-				require.NoError(t, err)
-				powerStatusBefore = before.PowerStatus
-				statusDetailsBefore, _, err = cdbm.NewStatusDetailDAO(dbSession).GetAll(ctx, nil, cdbm.StatusDetailFilterInput{EntityIDs: []string{tt.args.reqInstance}}, cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)})
-				require.NoError(t, err)
-			}
 			if err := uih.Handle(ec); (err != nil) != tt.wantErr {
 				t.Errorf("UpdateInstanceHandler.Handle() error = %v, wantErr %v", err, tt.wantErr)
-			}
-			if tt.args.reqData.RebootMode != nil {
-				// The legacy reboot workflow must never receive a graceful request,
-				// including when the new method is unavailable or fails.
-				assert.Empty(t, rebootRequests)
-				if tt.args.respCode == http.StatusOK || tt.args.gracefulError != nil {
-					require.Len(t, gracefulRequests, 1)
-					assert.Equal(t, inst1.GetSiteID().String(), gracefulRequests[0].InstanceId.Value)
-				} else {
-					assert.Empty(t, gracefulRequests)
-				}
-				persisted, err := insDAO.GetByID(ctx, nil, uuid.MustParse(tt.args.reqInstance), nil)
-				require.NoError(t, err)
-				if tt.args.respCode == http.StatusOK {
-					assert.Equal(t, cdbm.InstancePowerStatusRebooting, *persisted.PowerStatus)
-				} else {
-					assert.Equal(t, powerStatusBefore, persisted.PowerStatus)
-					statusDetailsAfter, _, err := cdbm.NewStatusDetailDAO(dbSession).GetAll(ctx, nil, cdbm.StatusDetailFilterInput{EntityIDs: []string{tt.args.reqInstance}}, cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)})
-					require.NoError(t, err)
-					assert.Len(t, statusDetailsAfter, len(statusDetailsBefore))
-				}
 			}
 
 			if tt.args.expectSpectrumXUnchanged {

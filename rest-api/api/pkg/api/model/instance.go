@@ -1400,13 +1400,6 @@ func (icr *APIInstanceCreateRequest) ValidateNVLinkInterfaces(itNvlCaps []cdbm.M
 	return ValidateNVLinkInterfaces(itNvlCaps, icr.NVLinkInterfaces)
 }
 
-const (
-	// InstanceRebootModeHard requests the existing forced host restart.
-	InstanceRebootModeHard = "Hard"
-	// InstanceRebootModeGraceful requests an OS-coordinated host restart.
-	InstanceRebootModeGraceful = "Graceful"
-)
-
 // APIInstanceUpdateRequest is the data structure to capture request to update an Instance
 type APIInstanceUpdateRequest struct {
 	// Name is the name of the Instance
@@ -1417,7 +1410,7 @@ type APIInstanceUpdateRequest struct {
 	Labels map[string]string `json:"labels"`
 	// TriggerReboot is the flag to trigger reboot
 	TriggerReboot *bool `json:"triggerReboot"`
-	// RebootMode selects Hard (the default) or Graceful when TriggerReboot is true.
+	// RebootMode is recognized only to reject PATCH reboot modes; graceful reboot requires its dedicated route.
 	RebootMode *string `json:"rebootMode"`
 	// RebootWithCustomIpxe is the flag to allow reboot with ipxe
 	RebootWithCustomIpxe *bool `json:"rebootWithCustomIpxe"`
@@ -1740,15 +1733,7 @@ func (iur *APIInstanceUpdateRequest) IsRebootRequest() bool {
 // Validate ensures the values passed in request are acceptable
 func (iur APIInstanceUpdateRequest) Validate() error {
 	if iur.RebootMode != nil {
-		if *iur.RebootMode != InstanceRebootModeHard && *iur.RebootMode != InstanceRebootModeGraceful {
-			return validation.Errors{"rebootMode": errors.New("`rebootMode` must be Hard or Graceful")}
-		}
-		if !iur.IsRebootRequest() {
-			return validation.Errors{"rebootMode": errors.New("`rebootMode` requires `triggerReboot: true`")}
-		}
-		if *iur.RebootMode == InstanceRebootModeGraceful && ((iur.RebootWithCustomIpxe != nil && *iur.RebootWithCustomIpxe) || (iur.ApplyUpdatesOnReboot != nil && *iur.ApplyUpdatesOnReboot)) {
-			return validation.Errors{"rebootMode": errors.New("graceful reboot cannot be combined with `rebootWithCustomIpxe: true` or `applyUpdatesOnReboot: true`")}
-		}
+		return validation.Errors{"rebootMode": errors.New("`rebootMode` is not supported for Instance updates; use the graceful-reboot endpoint")}
 	}
 
 	err := validation.ValidateStruct(&iur,
