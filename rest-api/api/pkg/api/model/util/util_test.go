@@ -110,6 +110,10 @@ autoinstall:
 			require.NotNil(t, targetPhoneHome)
 			assert.Equal(t, phoneHomeURL, mappingNodeValue(targetPhoneHome, SitePhoneHomeUrl).Value)
 			assert.Equal(t, SitePhoneHomePostAll, mappingNodeValue(targetPhoneHome, SitePhoneHomePost).Value)
+			tries := mappingNodeValue(targetPhoneHome, "tries")
+			require.NotNil(t, tries)
+			assert.Equal(t, "!!int", tries.Tag)
+			assert.Equal(t, "10", tries.Value)
 		})
 	}
 }

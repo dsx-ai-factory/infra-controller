@@ -822,10 +822,11 @@ network settings when the archive requires one of these unsupported features.
 # ... your first-boot setup (SSH keys, passwords, packages, ...) ...
 phone_home:
   post: all
+  tries: 10
   url: http://169.254.169.254/latest/meta-data/phone_home
 ```
 
-The injected `url` is the site-configured phone-home endpoint in `site.phoneHomeUrl`. The default is `http://169.254.169.254/latest/meta-data/phone_home`. The platform operator controls this site-wide value; it is not a per-instance transport selection. If you supply no `userData` when enabling phone-home, NICo generates a minimal `#cloud-config` that contains only the block above.
+The injected `url` is the site-configured phone-home endpoint in `site.phoneHomeUrl`. The default is `http://169.254.169.254/latest/meta-data/phone_home`. The platform operator controls this site-wide value; it is not a per-instance transport selection. NICo sets `tries` to the integer `10`, matching cloud-init's fallback without triggering its warning for an omitted retry count. If you supply no `userData` when enabling phone-home, NICo generates a minimal `#cloud-config` that contains only the block above.
 
 For direct access to the embedded agent's default listener, set the URL to `http://169.254.169.254:7777/latest/meta-data/phone_home`, or `http://[fd00:76b9::254]:7777/latest/meta-data/phone_home` when IPv6 metadata is enabled. Standalone FMDS defaults to port 80; both modes support listener overrides. A site mixing deployment modes must provide one URL reachable by all affected instances, accounting for any deployment-specific proxy or port forwarding. NICo does not choose the URL's address family or port separately for each DPU.
 
@@ -863,6 +864,7 @@ NICo leaves a part whose content is a `## template: jinja` document unchanged be
     #cloud-config
     phone_home:
       post: all
+      tries: 10
       url: http://169.254.169.254/latest/meta-data/phone_home
 ```
 
