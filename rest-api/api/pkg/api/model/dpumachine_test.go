@@ -106,7 +106,7 @@ func TestAPIDpuMachine_FromProto(t *testing.T) {
 					},
 				},
 			},
-			BmcInfo: &corev1.BmcInfo{
+			BmcInfo: &corev1.BmcInfo{ //nolint:staticcheck // Exercise the legacy BMC representation.
 				Ip: cutil.GetPtr("10.0.0.1"),
 			},
 			Inventory: &corev1.MachineComponentInventory{
