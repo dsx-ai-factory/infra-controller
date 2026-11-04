@@ -1158,7 +1158,7 @@ async fn blocked_snapshots_release_pool_capacity(pool: sqlx::PgPool) -> TestResu
             env.test_credential_manager.clone(),
         ));
 
-        // The setup case blocks inside `begin`, before it can install the
+        // The setup case blocks inside `begin_read_only_snapshot`, before it can install the
         // server cap. The other cases stop an inventory read after setup.
         let (lock_statement, query_fragment) = match cancellation {
             Cancellation::SetupCallerDrop => (
