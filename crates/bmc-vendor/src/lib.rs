@@ -35,6 +35,7 @@ use std::fmt;
 pub enum BMCVendor {
     Lenovo,
     LenovoAMI,
+    GigaComputing,
     Dell,
     Supermicro,
     Hpe,
@@ -58,6 +59,7 @@ impl From<&str> for BMCVendor {
         match s.to_lowercase().as_str() {
             "lenovo" => BMCVendor::Lenovo,
             "lenovoami" => BMCVendor::LenovoAMI,
+            "gigacomputing" => BMCVendor::GigaComputing,
             "dell" => BMCVendor::Dell,
             "supermicro" => BMCVendor::Supermicro,
             "hpe" => BMCVendor::Hpe,
@@ -164,6 +166,7 @@ impl BMCVendor {
             "https://www.mellanox.com" => BMCVendor::Nvidia,
             "NVIDIA" => BMCVendor::Nvidia,
             "Supermicro" => BMCVendor::Supermicro,
+            "Giga Computing" => BMCVendor::GigaComputing,
             "HPE" => BMCVendor::Hpe,
             _ => BMCVendor::Unknown,
         }
@@ -174,6 +177,7 @@ impl BMCVendor {
         match self {
             BMCVendor::Lenovo => "Lenovo",
             BMCVendor::LenovoAMI => "LenovoAMI",
+            BMCVendor::GigaComputing => "GigaComputing",
             BMCVendor::Dell => "Dell",
             BMCVendor::Supermicro => "Supermicro",
             BMCVendor::Hpe => "Hpe",
@@ -253,6 +257,12 @@ mod tests {
                     BMCVendor::LenovoAMI,
                     "lenovoami".to_string(),
                     "LenovoAMI".to_string(),
+                    VendorPredicates::default(),
+                ),
+                "GiGaCoMpUtInG" => (
+                    BMCVendor::GigaComputing,
+                    "gigacomputing".to_string(),
+                    "GigaComputing".to_string(),
                     VendorPredicates::default(),
                 ),
                 "DELL" => (
@@ -343,6 +353,7 @@ mod tests {
                 "https://www.mellanox.com" => BMCVendor::Nvidia,
                 "NVIDIA" => BMCVendor::Nvidia,
                 "Supermicro" => BMCVendor::Supermicro,
+                "Giga Computing" => BMCVendor::GigaComputing,
                 "HPE" => BMCVendor::Hpe,
             }
 
