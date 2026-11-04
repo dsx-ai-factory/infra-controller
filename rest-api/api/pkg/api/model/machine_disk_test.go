@@ -36,3 +36,15 @@ func TestNewAPIMachineDisks(t *testing.T) {
 	assert.Equal(t, "SATA1", disks[2].Serial)
 	assert.Empty(t, newAPIMachineDisks(nil))
 }
+
+func TestNewAPIMachineDisksEmptySerial(t *testing.T) {
+	info := &corev1.DiscoveryInfo{
+		NvmeDevices:  []*corev1.NvmeDevice{{Model: "NVME", Serial: ""}},
+		BlockDevices: []*corev1.BlockDevice{{Model: "SATA SSD", Serial: "", DeviceType: "disk"}},
+	}
+
+	disks := newAPIMachineDisks(info)
+
+	assert.Len(t, disks, 2, "an empty serial is not an identity, so the block disk is kept")
+	assert.Equal(t, "SATA SSD", disks[1].Model)
+}
