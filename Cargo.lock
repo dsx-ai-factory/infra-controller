@@ -1772,6 +1772,7 @@ dependencies = [
  "metrics-endpoint",
  "once_cell",
  "opentelemetry",
+ "pkg-config",
  "prometheus",
  "prost",
  "serde_json",
