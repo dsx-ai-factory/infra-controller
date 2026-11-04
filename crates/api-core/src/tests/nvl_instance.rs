@@ -20,7 +20,7 @@ use carbide_instrument::testing::MetricsCapture;
 use carbide_secrets::credentials::{
     BmcCredentialType, CredentialKey, CredentialWriter, Credentials,
 };
-use carbide_uuid::nvlink::NvLinkDomainId;
+use carbide_uuid::nvlink::{NvLinkDomainId, NvLinkPartitionId};
 use carbide_uuid::power_shelf::PowerShelfId;
 use carbide_uuid::rack::RackId;
 use carbide_uuid::switch::SwitchId;
@@ -1564,6 +1564,91 @@ async fn test_instance_delete_with_nvl_config(pool: sqlx::PgPool) {
         .map(|response| response.into_inner())
         .unwrap();
     assert_eq!(ids_all.partition_ids.len(), 0);
+}
+
+/// Every `nvlink_partitions` row, in no particular order.
+async fn nvl_physical_partition_rows(
+    pool: &sqlx::PgPool,
+) -> Vec<model::nvl_partition::NvlPartition> {
+    db::nvl_partition::find_by(pool, ObjectColumnFilter::<db::nvl_partition::IdColumn>::All)
+        .await
+        .expect("load nvlink_partitions")
+}
+
+/// Every `nvlink_logical_partitions` row, soft-deleted ones included.
+async fn nvl_logical_partition_rows(
+    pool: &sqlx::PgPool,
+) -> Vec<model::nvl_logical_partition::LogicalPartition> {
+    db::nvl_logical_partition::find_by(
+        pool,
+        ObjectColumnFilter::<db::nvl_logical_partition::IdColumn>::All,
+    )
+    .await
+    .expect("load nvlink_logical_partitions")
+}
+
+/// One purge transaction handles every logical partition marked as deleted:
+/// the one a physical `nvlink_partitions` row still references is kept, the
+/// unreferenced one is removed, and the pass still reconciles the host.
+#[crate::sqlx_test]
+async fn test_logical_partition_purge_skips_referenced_partition(pool: sqlx::PgPool) {
+    let env =
+        create_partition_monitor_test_env(pool.clone(), Some(std::time::Duration::ZERO)).await;
+    let mh = create_partitioned_host(&env).await;
+    let referenced_id = create_nvl_logical_partition(&env, "referenced".to_string())
+        .await
+        .id;
+    let unreferenced_id = create_nvl_logical_partition(&env, "unreferenced".to_string())
+        .await
+        .id;
+
+    // A physical row no NMX-C domain owns, like one left behind after NMX-C
+    // state loss. No group removes it, so it keeps referencing its logical
+    // partition.
+    let mut txn = pool.begin().await.unwrap();
+    let stale_row = db::nvl_partition::create(
+        &model::nvl_partition::NewNvlPartition {
+            id: NvLinkPartitionId::new(),
+            name: model::nvl_partition::NvlPartitionName::try_from("stale".to_string()).unwrap(),
+            logical_partition_id: referenced_id,
+            domain_uuid: NvLinkDomainId::new(),
+            nmx_c_partition_id: 1,
+        },
+        &mut txn,
+    )
+    .await
+    .unwrap();
+    txn.commit().await.unwrap();
+
+    // Deletion checks instances, not physical rows, so both are marked.
+    for id in [referenced_id, unreferenced_id] {
+        env.api
+            .delete_nv_link_logical_partition(tonic::Request::new(
+                rpc::forge::NvLinkLogicalPartitionDeletionRequest { id: Some(id) },
+            ))
+            .await
+            .unwrap();
+    }
+
+    let observed_at = nvlink_observed_at(&mh, &pool).await;
+    env.run_nvl_partition_monitor_iteration().await;
+
+    // The host's group was reconciled in the same pass.
+    assert!(nvlink_observed_at(&mh, &pool).await > observed_at);
+    let unreachable = env
+        .test_meter
+        .formatted_metrics("carbide_nvlink_partition_monitor_nmx_c_unreachable_chassis_count");
+    assert!(unreachable.is_empty(), "{unreachable:?}");
+
+    let marked_ids: Vec<_> = nvl_logical_partition_rows(&pool)
+        .await
+        .into_iter()
+        .filter(model::nvl_logical_partition::is_marked_as_deleted)
+        .map(|lp| lp.id)
+        .collect();
+    assert_eq!(marked_ids, vec![referenced_id]);
+    let rows = nvl_physical_partition_rows(&pool).await;
+    assert!(rows.iter().any(|row| row.id == stale_row.id), "{rows:?}");
 }
 
 #[crate::sqlx_test]
