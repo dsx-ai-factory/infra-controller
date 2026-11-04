@@ -113,6 +113,9 @@ func TestExpectedMachine_FromProto(t *testing.T) {
 				MachineID:                cutil.GetPtr("machine-1"),
 				FallbackDpuSerialNumbers: []string{"dpu-1", "dpu-2"},
 				Interfaces:               []ExpectedMachineInterface{{MacAddress: cutil.GetPtr("02:00:00:00:00:09"), PhysicalName: cutil.GetPtr("C1-1-L1"), LogicalName: cutil.GetPtr("rail0"), NicType: &nicType, FixedIP: &fixedIP}},
+				HostNics: ExpectedHostNics{
+					{MacAddress: "02:00:00:00:00:09", NicType: &nicType, FixedIP: &fixedIP},
+				},
 				IsDpfEnabled:             cutil.GetPtr(false),
 				HostLifecycleProfile:     HostLifecycleProfile{DisableLockdown: cutil.GetPtr(false)},
 			},
@@ -123,7 +126,7 @@ func TestExpectedMachine_FromProto(t *testing.T) {
 				Id:            &corev1.UUID{Value: "not-a-uuid"},
 				BmcMacAddress: "aa:bb",
 			},
-			want: ExpectedMachine{ID: id, SiteID: siteID, BmcMacAddress: "aa:bb", Interfaces: []ExpectedMachineInterface{}},
+			want: ExpectedMachine{ID: id, SiteID: siteID, BmcMacAddress: "aa:bb", Interfaces: []ExpectedMachineInterface{}, HostNics: ExpectedHostNics{}},
 		},
 		{
 			name: "empty metadata does not read obsolete names",
@@ -132,7 +135,7 @@ func TestExpectedMachine_FromProto(t *testing.T) {
 				Description: cutil.GetPtr("obsolete-description"),
 				Metadata:    &corev1.Metadata{},
 			},
-			want: ExpectedMachine{ID: id, SiteID: siteID, Interfaces: []ExpectedMachineInterface{}},
+			want: ExpectedMachine{ID: id, SiteID: siteID, Interfaces: []ExpectedMachineInterface{}, HostNics: ExpectedHostNics{}},
 		},
 	}
 	for _, tc := range tests {
