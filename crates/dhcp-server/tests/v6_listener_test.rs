@@ -432,6 +432,10 @@ async fn boot_options_follow_configuration_and_client_requests() {
                         prefix: Some("192.0.2.0/24".to_string()),
                         fqdn: "host.example.com".to_string(),
                         booturl: input.boot_url.map(str::to_owned),
+                        booturl_v4: None,
+                        booturl_v6: None,
+                        dns_servers_v4: vec![],
+                        dns_servers_v6: vec![],
                         mtu: Some(9000),
                         ipv6: Some(InterfaceInfoV6 {
                             address: (input.has_address
