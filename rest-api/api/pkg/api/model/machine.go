@@ -542,7 +542,7 @@ func newAPIMachineDisks(info *corev1.DiscoveryInfo) []APIMachineDisk {
 	}
 
 	for _, dev := range info.GetBlockDevices() {
-		if dev.DeviceType != "disk" || seen[dev.Serial] {
+		if dev.DeviceType != "disk" || (dev.Serial != "" && seen[dev.Serial]) {
 			continue
 		}
 		disks = append(disks, APIMachineDisk{Type: dev.DeviceType, Model: dev.Model, Serial: dev.Serial})
