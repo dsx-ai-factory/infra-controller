@@ -62,8 +62,6 @@ func TestNewAPIRoutes(t *testing.T) {
 		"expected-switch":           7,
 		"instance-type":             5,
 		"machine":                   23,
-		"switch":                    1,
-		"power-shelf":               1,
 		"allocation":                6,
 		"subnet":                    5,
 		"machine-instance-type":     3,
@@ -83,7 +81,7 @@ func TestNewAPIRoutes(t *testing.T) {
 		"run":                       8,
 		"domain":                    6,
 		"rack":                      16,
-		"tray":                      13,
+		"tray":                      14,
 		"stats":                     4,
 		"identity-config":           3,
 		"identity-token-delegation": 3,
@@ -116,8 +114,14 @@ func TestNewAPIRoutes(t *testing.T) {
 			got := NewAPIRoutes(tt.args.dbSession, tt.args.tc, tt.args.tnc, tt.args.scp, tt.args.cfg, nil)
 
 			assert.Equal(t, totalRouteCount, len(got))
-			for _, resource := range []string{"machine", "switch", "power-shelf"} {
+			for _, resource := range []string{"machine", "tray"} {
 				assertRouteExists(t, got, http.MethodPost, "/org/:orgName/"+cfg.GetAPIName()+"/"+resource+"/:id/decommission")
+			}
+
+			for _, resource := range []string{"switch", "power-shelf"} {
+				for _, route := range got {
+					assert.NotEqual(t, "/org/:orgName/"+cfg.GetAPIName()+"/"+resource+"/:id/decommission", route.Path)
+				}
 			}
 
 			for _, route := range got {

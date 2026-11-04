@@ -12589,167 +12589,6 @@ paths:
         Org must have an Infrastructure Provider entity and own the Site that
         the Machine belongs to. User must have authorization role with
         `PROVIDER_ADMIN` suffix.
-  '/v2/org/{org}/nico/switch/{id}/decommission':
-    parameters:
-      - name: org
-        in: path
-        required: true
-        description: Name of the Org
-        schema:
-          type: string
-      - name: id
-        in: path
-        required: true
-        description: Core inventory ID of the managed switch, not an expected-inventory or Flow component ID.
-        schema:
-          type: string
-    post:
-      summary: Decommission a Switch
-      operationId: decommission-switch
-      tags:
-        - Switch
-      description: |-
-        Start decommissioning a managed switch in the specified Site's Core
-        inventory. You must be a Provider Admin in the Org that owns the Site.
-        The Site must be Registered. Core requires the component to be `Ready` and
-        rejects the request if any managed host in its rack is assigned to an instance.
-        Core also requires the RMS component-manager backend.
-
-        Decommissioning factory-resets NVOS and the BMC and deletes the
-        switch's managed NVOS and BMC credentials.
-
-        A 202 response confirms acceptance, not completion. Inspect the component's
-        Core controller state for progress; the terminal success state is
-        `decommissioning` with substate `decommissioned`. REST does not expose
-        component progress here.
-        Requests are not retried automatically. After a timeout, the result is
-        unknown; Core can still be processing the request. Repeating the request
-        after Core leaves `Ready` returns 412.
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/SwitchDecommissionRequest'
-      responses:
-        '202':
-          description: Switch decommissioning request was accepted.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/MessageResponse'
-        '400':
-          $ref: '#/components/responses/ValidationError'
-        '403':
-          $ref: '#/components/responses/ForbiddenError'
-        '404':
-          $ref: '#/components/responses/NotFoundError'
-        '412':
-          description: Core rejected the component's state, rack assignments, or backend configuration.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/NICoAPIError'
-        '500':
-          $ref: '#/components/responses/GenericHttpError'
-        '501':
-          description: The Site's Core deployment does not implement this operation.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/NICoAPIError'
-        '503':
-          description: Core is unavailable.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/NICoAPIError'
-        '504':
-          description: The Core proxy request timed out; the operation may still be running.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/NICoAPIError'
-  '/v2/org/{org}/nico/power-shelf/{id}/decommission':
-    parameters:
-      - name: org
-        in: path
-        required: true
-        description: Name of the Org
-        schema:
-          type: string
-      - name: id
-        in: path
-        required: true
-        description: Core inventory ID of the managed power shelf, not an expected-inventory or Flow component ID.
-        schema:
-          type: string
-    post:
-      summary: Decommission a Power Shelf
-      operationId: decommission-power-shelf
-      tags:
-        - PowerShelf
-      description: |-
-        Start decommissioning a managed power shelf in the specified Site's Core
-        inventory. You must be a Provider Admin in the Org that owns the Site.
-        The Site must be Registered. Core requires the component to be `Ready` and
-        rejects the request if any managed host in its rack is assigned to an instance.
-
-        Decommissioning factory-resets the BMC and deletes the power shelf's
-        managed BMC credentials.
-
-        A 202 response confirms acceptance, not completion. Inspect the component's
-        Core controller state for progress; the terminal success state is
-        `decommissioning` with substate `decommissioned`. REST does not expose
-        component progress here.
-        Requests are not retried automatically. After a timeout, the result is
-        unknown; Core can still be processing the request. Repeating the request
-        after Core leaves `Ready` returns 412.
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/PowerShelfDecommissionRequest'
-      responses:
-        '202':
-          description: Power Shelf decommissioning request was accepted.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/MessageResponse'
-        '400':
-          $ref: '#/components/responses/ValidationError'
-        '403':
-          $ref: '#/components/responses/ForbiddenError'
-        '404':
-          $ref: '#/components/responses/NotFoundError'
-        '412':
-          description: Core rejected the component's state, rack assignments, or backend configuration.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/NICoAPIError'
-        '500':
-          $ref: '#/components/responses/GenericHttpError'
-        '501':
-          description: The Site's Core deployment does not implement this operation.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/NICoAPIError'
-        '503':
-          description: Core is unavailable.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/NICoAPIError'
-        '504':
-          description: The Core proxy request timed out; the operation may still be running.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/NICoAPIError'
   '/v2/org/{org}/nico/machine/{machineId}/validation/run':
     parameters:
       - schema:
@@ -16331,6 +16170,99 @@ paths:
           $ref: '#/components/responses/GatewayTimeoutError'
       tags:
         - Tray
+  '/v2/org/{org}/nico/tray/{id}/decommission':
+    parameters:
+      - name: org
+        in: path
+        required: true
+        description: Name of the Org
+        schema:
+          type: string
+      - name: id
+        in: path
+        required: true
+        description: Core inventory component ID of the Tray, not an expected-inventory or Flow component ID.
+        schema:
+          type: string
+    post:
+      summary: Decommission a Tray
+      operationId: decommission-tray
+      tags:
+        - Tray
+      description: |-
+        Start decommissioning a managed Tray in the specified Site's Core inventory.
+        `type` selects `Compute` (managed host), `NVSwitch`, or `PowerShelf`.
+        The ID must identify a component of that type. A recognized ID namespace
+        that conflicts with `type` returns 400; an absent component returns 404.
+
+        You must be a Provider Admin in the Org that owns the Site, and the Site
+        must be Registered. Core requires the component to be `Ready`.
+        For `Compute`, the host must be unassigned and every attached DPU must
+        support BFB installation through Redfish. For `NVSwitch` and `PowerShelf`,
+        no managed host in the component's rack may be assigned to an instance.
+        `NVSwitch` also requires Core's RMS component-manager backend.
+        Failed preconditions return 412.
+
+        Decommissioning a `Compute` Tray deconfigures the host and attached DPUs,
+        factory-resets their BMCs, and deletes managed credentials. For `NVSwitch`, it factory-resets NVOS and the BMC and deletes
+        the managed NVOS and BMC credentials. For `PowerShelf`, it factory-resets
+        the BMC and deletes its managed BMC credentials.
+
+        A 202 response confirms acceptance, not completion. For `Compute`, use
+        Machine status to observe workflow progress. For `NVSwitch` and
+        `PowerShelf`, inspect the Core controller state; the terminal success
+        state is `decommissioning` with substate `decommissioned`. This endpoint
+        returns no Flow Task or component progress.
+        Requests are not retried automatically. After a timeout, the result is
+        unknown; Core can still be processing the request. Repeating the request
+        after Core leaves `Ready` returns 412.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TrayDecommissionRequest'
+      responses:
+        '202':
+          description: Tray decommissioning request was accepted.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+              example:
+                message: Tray decommissioning request was accepted
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+        '412':
+          description: Core rejected the component's state, rack assignments, or backend configuration.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NICoAPIError'
+        '500':
+          $ref: '#/components/responses/GenericHttpError'
+        '501':
+          description: The Site's Core deployment does not implement this operation.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NICoAPIError'
+        '503':
+          description: Core is unavailable.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NICoAPIError'
+        '504':
+          description: The Core proxy request timed out; the operation may still be running.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NICoAPIError'
   '/v2/org/{org}/nico/tray/{id}/health-report':
     parameters:
       - schema:
@@ -18971,32 +18903,28 @@ paths:
           $ref: '#/components/responses/GenericHttpError'
 components:
   schemas:
-    SwitchDecommissionRequest:
-      title: SwitchDecommissionRequest
+    TrayDecommissionRequest:
+      title: TrayDecommissionRequest
       type: object
-      description: Site containing the managed switch in Core inventory.
+      description: Site and component type of the managed Tray to decommission in Core inventory.
       examples:
         - siteId: 11111111-1111-4111-8111-111111111111
+          type: NVSwitch
       required:
         - siteId
+        - type
       properties:
         siteId:
           type: string
           format: uuid
           description: ID of the Registered Site owned by the Org's Infrastructure Provider.
-    PowerShelfDecommissionRequest:
-      title: PowerShelfDecommissionRequest
-      type: object
-      description: Site containing the managed power shelf in Core inventory.
-      examples:
-        - siteId: 11111111-1111-4111-8111-111111111111
-      required:
-        - siteId
-      properties:
-        siteId:
+        type:
           type: string
-          format: uuid
-          description: ID of the Registered Site owned by the Org's Infrastructure Provider.
+          enum:
+            - Compute
+            - NVSwitch
+            - PowerShelf
+          description: Component type used to select the decommission operation for the Tray ID.
     PageNumber:
       title: PageNumber
       type: integer

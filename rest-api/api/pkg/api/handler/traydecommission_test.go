@@ -32,30 +32,12 @@ import (
 	authz "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
 	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/grpcproxy"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
-	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 	swe "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/error"
 )
 
-func TestDecommissionSwitchHandler_Handle(t *testing.T) {
-	testDecommissionComponentHandler(t, func(db *cdb.Session, pool *sc.ClientPool) echo.HandlerFunc {
-		return NewDecommissionSwitchHandler(db, pool).Handle
-	}, corev1.Forge_DecommissionSwitch_FullMethodName,
-		&corev1.DecommissionSwitchRequest{SwitchId: &corev1.SwitchId{Id: "component-id"}},
-		"Switch decommissioning request was accepted")
-}
-
-func TestDecommissionPowerShelfHandler_Handle(t *testing.T) {
-	testDecommissionComponentHandler(t, func(db *cdb.Session, pool *sc.ClientPool) echo.HandlerFunc {
-		return NewDecommissionPowerShelfHandler(db, pool).Handle
-	}, corev1.Forge_DecommissionPowerShelf_FullMethodName,
-		&corev1.DecommissionPowerShelfRequest{PowerShelfId: &corev1.PowerShelfId{Id: "component-id"}},
-		"Power Shelf decommissioning request was accepted")
-}
-
-func testDecommissionComponentHandler(t *testing.T, newHandler func(*cdb.Session, *sc.ClientPool) echo.HandlerFunc, method string, expected proto.Message, message string) {
-	t.Helper()
+func TestDecommissionTrayHandler_Handle(t *testing.T) {
 	db := common.TestInitDB(t)
 	t.Cleanup(db.Close)
 	common.TestSetupSchema(t, db)
@@ -70,7 +52,7 @@ func testDecommissionComponentHandler(t *testing.T, newHandler func(*cdb.Session
 	otherUser := common.TestBuildUser(t, db, uuid.NewString(), otherOrg, []string{authz.ProviderAdminRole})
 	otherProvider := common.TestBuildInfrastructureProvider(t, db, "Other Provider", otherOrg, otherUser)
 	otherSite := common.TestBuildSite(t, db, otherProvider, "Other Site", otherUser)
-	body := `{"siteId":"` + site.ID.String() + `"}`
+	body := `{"siteId":"` + site.ID.String() + `","type":"NVSwitch"}`
 	cases := []struct {
 		name        string
 		body        string
@@ -79,18 +61,27 @@ func testDecommissionComponentHandler(t *testing.T, newHandler func(*cdb.Session
 		resultError error
 		wantStatus  int
 		proxied     bool
+		method      string
+		expected    proto.Message
 	}{
-		{name: "accepted", wantStatus: http.StatusAccepted, proxied: true},
+		{name: "accepted switch", wantStatus: http.StatusAccepted, proxied: true},
+		{name: "accepted compute", body: `{"siteId":"` + site.ID.String() + `","type":"Compute"}`, wantStatus: http.StatusAccepted, proxied: true,
+			method: corev1.Forge_DecommissionManagedHost_FullMethodName, expected: &corev1.DecommissionManagedHostRequest{MachineId: &corev1.MachineId{Id: "component-id"}}},
+		{name: "accepted power shelf", body: `{"siteId":"` + site.ID.String() + `","type":"PowerShelf"}`, wantStatus: http.StatusAccepted, proxied: true,
+			method: corev1.Forge_DecommissionPowerShelf_FullMethodName, expected: &corev1.DecommissionPowerShelfRequest{PowerShelfId: &corev1.PowerShelfId{Id: "component-id"}}},
+		{name: "missing type", body: `{"siteId":"` + site.ID.String() + `"}`, wantStatus: http.StatusBadRequest},
+		{name: "unsupported type", body: `{"siteId":"` + site.ID.String() + `","type":"Switch"}`, wantStatus: http.StatusBadRequest},
+		{name: "mismatched namespace", id: "ps100-component", wantStatus: http.StatusBadRequest},
 		{name: "missing user", wantStatus: http.StatusInternalServerError},
 		{name: "provider viewer", user: &cdbm.User{OrgData: cdbm.OrgData{org: cdbm.Org{Name: org, Roles: []string{authz.ProviderViewerRole}}}}, wantStatus: http.StatusForbidden},
 		{name: "tenant admin", user: &cdbm.User{OrgData: cdbm.OrgData{org: cdbm.Org{Name: org, Roles: []string{authz.TenantAdminRole}}}}, wantStatus: http.StatusForbidden},
 		{name: "wrong org", user: otherUser, wantStatus: http.StatusForbidden},
 		{name: "malformed body", body: "{", wantStatus: http.StatusBadRequest},
 		{name: "missing site", body: "{}", wantStatus: http.StatusBadRequest},
-		{name: "invalid site", body: `{"siteId":"invalid"}`, wantStatus: http.StatusBadRequest},
-		{name: "unknown site", body: `{"siteId":"` + uuid.NewString() + `"}`, wantStatus: http.StatusBadRequest},
-		{name: "other provider site", body: `{"siteId":"` + otherSite.ID.String() + `"}`, wantStatus: http.StatusForbidden},
-		{name: "unregistered site", body: `{"siteId":"` + unregistered.ID.String() + `"}`, wantStatus: http.StatusBadRequest},
+		{name: "invalid site", body: `{"siteId":"invalid","type":"NVSwitch"}`, wantStatus: http.StatusBadRequest},
+		{name: "unknown site", body: `{"siteId":"` + uuid.NewString() + `","type":"NVSwitch"}`, wantStatus: http.StatusBadRequest},
+		{name: "other provider site", body: `{"siteId":"` + otherSite.ID.String() + `","type":"NVSwitch"}`, wantStatus: http.StatusForbidden},
+		{name: "unregistered site", body: `{"siteId":"` + unregistered.ID.String() + `","type":"NVSwitch"}`, wantStatus: http.StatusBadRequest},
 		{name: "missing component", id: "empty", wantStatus: http.StatusBadRequest},
 		{name: "Core rejects assigned rack or unsupported backend", resultError: swe.WrapErr(status.Error(codes.FailedPrecondition, "decommission precondition failed")), wantStatus: http.StatusPreconditionFailed, proxied: true},
 		{name: "Core component absent", resultError: swe.WrapErr(status.Error(codes.NotFound, "component not found")), wantStatus: http.StatusNotFound, proxied: true},
@@ -125,7 +116,10 @@ func testDecommissionComponentHandler(t *testing.T, newHandler func(*cdb.Session
 			recorder := httptest.NewRecorder()
 			c := echo.New().NewContext(request, recorder)
 			c.SetParamNames("orgName", "id")
-			id := "component-id"
+			id := tc.id
+			if id == "" {
+				id = "component-id"
+			}
 			if tc.id == "empty" {
 				id = ""
 			}
@@ -137,9 +131,17 @@ func testDecommissionComponentHandler(t *testing.T, newHandler func(*cdb.Session
 			if requestUser != nil {
 				c.Set("user", requestUser)
 			}
-			require.NoError(t, newHandler(db, pool)(c))
+			require.NoError(t, NewDecommissionTrayHandler(db, pool).Handle(c))
 			assert.Equal(t, tc.wantStatus, recorder.Code, recorder.Body.String())
 			if tc.proxied {
+				method := tc.method
+				if method == "" {
+					method = corev1.Forge_DecommissionSwitch_FullMethodName
+				}
+				expected := tc.expected
+				if expected == nil {
+					expected = &corev1.DecommissionSwitchRequest{SwitchId: &corev1.SwitchId{Id: id}}
+				}
 				assert.Equal(t, method, captured.FullMethod)
 				decoded := proto.Clone(expected)
 				proto.Reset(decoded)
@@ -157,7 +159,7 @@ func testDecommissionComponentHandler(t *testing.T, newHandler func(*cdb.Session
 			if tc.wantStatus == http.StatusAccepted {
 				var response model.APIMessageResponse
 				require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &response))
-				assert.Equal(t, message, response.Message)
+				assert.Equal(t, "Tray decommissioning request was accepted", response.Message)
 			} else {
 				var response cutil.APIError
 				require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &response))
