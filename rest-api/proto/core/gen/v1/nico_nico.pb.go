@@ -65038,10 +65038,12 @@ func (*ComponentResetRequest_PowerShelfPmcMacs) isComponentResetRequest_Target()
 type ComponentResetResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// One result per requested device, in request order. SUCCESS means the reset
-	// was accepted and its reference recorded. Backend submission failures use
-	// INTERNAL_ERROR; error text may describe rejection or an uncertain outcome.
-	// Do not automatically retry a failed submission: the reset may have started,
-	// and the previous recorded reference may remain in place.
+	// was accepted and its reference recorded. OUTCOME_UNKNOWN means the reset may
+	// have started, including when RMS accepted it but NICo could not record its
+	// reference; do not automatically resubmit. INVALID_ARGUMENT means the target
+	// could not be prepared or RMS rejected it before dispatch. NOT_FOUND means the
+	// target or its credentials could not be resolved. A non-SUCCESS result leaves
+	// the previous recorded reference in place.
 	Results       []*ComponentResult `protobuf:"bytes,1,rep,name=results,proto3" json:"results,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache

@@ -145,8 +145,11 @@ implemented. Targets can be switch IDs or BMC MACs, including expected inventory
 before ingestion. SDN reset disrupts fabric traffic and restores SDN defaults
 without reinstalling NVOS. Submission success means accepted and tracked; it does not mean
 the reset completed. Other valid targets can proceed when one target fails.
-Backend submission failures use `INTERNAL_ERROR`; the error text may describe
-rejection or an uncertain outcome. The status code does not distinguish them.
+`OUTCOME_UNKNOWN` means the reset may have started, including when RMS accepted
+it but NICo could not record its reference; do not automatically resubmit.
+`INVALID_ARGUMENT` means the target could not be prepared or RMS rejected it
+before dispatch. `NOT_FOUND` means the target or its credentials could not be
+resolved.
 
 NICo stores the most recently recorded accepted RMS job reference per device
 MAC and reset action. This follows firmware direct-dispatch tracking: references
