@@ -18,6 +18,7 @@
 //! DPF SDK - High-level interface for DPF operations.
 
 mod bmc_credentials;
+mod version;
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::net::{IpAddr, Ipv4Addr};
@@ -221,6 +222,7 @@ pub struct DpfSdk<R, L = NoLabels> {
     repo: Arc<R>,
     namespace: String,
     labeler: L,
+    operator_version: Option<semver::Version>,
     shared_bmc_password_ready: Arc<AtomicBool>,
     _bmc_refresh_guard: Option<tokio_util::sync::DropGuard>,
 }
@@ -290,7 +292,7 @@ impl<'a, R, P, L> DpfSdkBuilder<'a, R, P, L> {
 
 impl<R, P, L> DpfSdkBuilder<'_, R, P, L>
 where
-    R: K8sConfigRepository + 'static,
+    R: K8sConfigRepository + DpfOperatorConfigRepository + 'static,
     P: BmcPasswordProvider + 'static,
 {
     /// Fetch password, write the K8s BMC secret, spawn refresh task,
@@ -311,6 +313,9 @@ where
     /// DPUDevice while the replacement replica starts.
     /// Without a refresh interval nothing would ever retry, so there a failed
     /// read stays fatal.
+    ///
+    /// Reads the installed operator version once. An unavailable or invalid version
+    /// remains unknown for this SDK's lifetime, disabling version-gated capabilities.
     async fn init_secret_and_task(self) -> Result<DpfSdk<R, L>, DpfError> {
         let repo = Arc::new(self.repo);
         let namespace = self.namespace;
@@ -346,6 +351,8 @@ where
             Err(error) => return Err(error),
         };
 
+        let operator_version = version::read_operator_version(repo.as_ref(), &namespace).await;
+
         let guard = if let Some(interval) = self.bmc_password_refresh_interval {
             Some(spawn_bmc_refresh(
                 repo.clone(),
@@ -364,13 +371,14 @@ where
             repo,
             namespace,
             labeler: self.labeler,
+            operator_version,
             shared_bmc_password_ready,
             _bmc_refresh_guard: guard,
         })
     }
 
-    /// Consume the builder, create the K8s BMC secret and optionally
-    /// spawn a background refresh task. Does not create DPF CRDs.
+    /// Consume the builder, create the K8s BMC secret, cache the installed operator version,
+    /// and optionally spawn a background credential refresh task. Does not create DPF CRDs.
     pub async fn build_without_resources(self) -> Result<DpfSdk<R, L>, DpfError> {
         self.init_secret_and_task().await
     }

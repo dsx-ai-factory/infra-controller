@@ -1964,6 +1964,7 @@ dependencies = [
  "once_cell",
  "rand 0.10.1",
  "rustls",
+ "semver 1.0.28",
  "serde",
  "serde_json",
  "serde_yaml",

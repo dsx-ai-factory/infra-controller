@@ -26,6 +26,7 @@ use async_trait::async_trait;
 use futures::StreamExt;
 use k8s_openapi::api::core::v1::{ConfigMap, Secret};
 use kube::api::{DeleteParams, ListParams, Patch, PatchParams, PostParams, Preconditions};
+use kube::core::{ApiResource, DynamicObject};
 use kube::runtime::controller::Action;
 use kube::runtime::{Controller, watcher};
 use kube::{Api, Client, Resource};
@@ -921,6 +922,22 @@ impl BmcCredentialRepository for KubeRepository {
 
 #[async_trait]
 impl DpfOperatorConfigRepository for KubeRepository {
+    async fn get_version(&self, name: &str, namespace: &str) -> Result<Option<String>, DpfError> {
+        // Older operator specs lack fields required by the generated schema.
+        let api: Api<DynamicObject> = Api::namespaced_with(
+            self.client.clone(),
+            namespace,
+            &ApiResource::erase::<DPFOperatorConfig>(&()),
+        );
+        Ok(api.get_opt(name).await?.and_then(|config| {
+            config
+                .data
+                .pointer("/status/version")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        }))
+    }
+
     async fn get(
         &self,
         name: &str,

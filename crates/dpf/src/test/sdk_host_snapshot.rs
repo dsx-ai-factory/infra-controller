@@ -27,12 +27,14 @@ use async_trait::async_trait;
 use dashmap::DashMap;
 use kube::core::ObjectMeta;
 
+use crate::crds::dpfoperatorconfigs_generated::DPFOperatorConfig;
 use crate::crds::dpudevices_generated::DPUDevice;
 use crate::crds::dpunodes_generated::DPUNode;
 use crate::crds::dpus_generated::DPU;
 use crate::error::DpfError;
 use crate::repository::{
-    DpuDeviceRepository, DpuNodeRepository, DpuRepository, K8sConfigRepository,
+    DpfOperatorConfigRepository, DpuDeviceRepository, DpuNodeRepository, DpuRepository,
+    K8sConfigRepository,
 };
 use crate::sdk::DpfSdkBuilder;
 use crate::types::HostDpfSnapshot;
@@ -191,6 +193,17 @@ impl K8sConfigRepository for SnapshotMock {
         _: BTreeMap<String, Vec<u8>>,
     ) -> Result<(), DpfError> {
         Ok(())
+    }
+}
+
+#[async_trait]
+impl DpfOperatorConfigRepository for SnapshotMock {
+    async fn get(&self, _: &str, _: &str) -> Result<Option<DPFOperatorConfig>, DpfError> {
+        Ok(None)
+    }
+
+    async fn patch(&self, _: &str, _: &str, _: serde_json::Value) -> Result<(), DpfError> {
+        unreachable!("host snapshots do not patch the operator config")
     }
 }
 
