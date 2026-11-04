@@ -33,7 +33,7 @@ impl GenericAmi<'_> {
             vendor: redfish::oem::BmcVendor::Ami,
             product: Some("AMI Redfish Server"),
             redfish_version: "1.17.0",
-            exposes_computer_systems: true,
+            advertises_computer_systems: true,
         }
     }
 
@@ -42,7 +42,7 @@ impl GenericAmi<'_> {
             vendor: redfish::oem::BmcVendor::Supermicro,
             product: Some("Super Server"),
             redfish_version: "1.17.0",
-            exposes_computer_systems: true,
+            advertises_computer_systems: true,
         }
     }
 
@@ -105,7 +105,7 @@ impl GenericAmi<'_> {
             })
             .collect::<Vec<_>>();
         redfish::computer_system::Config {
-            systems: vec![redfish::computer_system::SingleSystemConfig {
+            systems: Some(vec![redfish::computer_system::SingleSystemConfig {
                 id: Cow::Borrowed(system_id),
                 manufacturer: None,
                 model: None,
@@ -133,7 +133,7 @@ impl GenericAmi<'_> {
                 ),
                 serial_console: None,
                 secure_boot_available: false,
-            }],
+            }]),
         }
     }
 

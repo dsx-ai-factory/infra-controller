@@ -44,7 +44,7 @@ impl NvidiaDgxH100<'_> {
             vendor: redfish::oem::BmcVendor::Ami,
             product: Some("AMI Redfish Server"),
             redfish_version: "1.11.0",
-            exposes_computer_systems: true,
+            advertises_computer_systems: true,
         }
     }
 
@@ -178,7 +178,7 @@ impl NvidiaDgxH100<'_> {
         .collect::<Vec<_>>();
 
         redfish::computer_system::Config {
-            systems: vec![
+            systems: Some(vec![
                 redfish::computer_system::SingleSystemConfig {
                     id: system_id.into(),
                     manufacturer: Some("NVIDIA".into()),
@@ -221,7 +221,7 @@ impl NvidiaDgxH100<'_> {
                     serial_console: None,
                     secure_boot_available: false,
                 },
-            ],
+            ]),
         }
     }
 

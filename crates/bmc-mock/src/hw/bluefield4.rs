@@ -45,7 +45,7 @@ impl Bluefield4<'_> {
             vendor: redfish::oem::BmcVendor::Nvidia(redfish::oem::NvidiaNamestyle::Capitalized),
             product: Some("BlueField-4"),
             redfish_version: "1.17.0",
-            exposes_computer_systems: true,
+            advertises_computer_systems: true,
         }
     }
 
@@ -376,7 +376,7 @@ impl Bluefield4<'_> {
         ))
         .collect();
         redfish::computer_system::Config {
-            systems: vec![redfish::computer_system::SingleSystemConfig {
+            systems: Some(vec![redfish::computer_system::SingleSystemConfig {
                 id: Cow::Borrowed(system_id),
                 manufacturer: Some("Nvidia".into()),
                 model: Some("BlueField-4".into()),
@@ -402,7 +402,7 @@ impl Bluefield4<'_> {
                 memory: None,
                 serial_console: Some(hw::openbmc::enabled_serial_console()),
                 secure_boot_available: true,
-            }],
+            }]),
         }
     }
 
