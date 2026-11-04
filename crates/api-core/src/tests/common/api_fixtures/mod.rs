@@ -2392,13 +2392,11 @@ pub(in crate::tests) async fn network_configured_with_lldp(
     let expected_fingerprint = (lldp.result == rpc::forge::LldpReportResult::Updated as i32)
         .then(|| ::rpc::lldp_snapshot::fingerprint(&lldp.interfaces));
 
-    // Send the snapshot through the fingerprint-aware status contract.
     try_network_configured_with_lldp(env, dpu_machine_id, lldp)
         .await
         .unwrap();
 
-    // A successful replacement is not complete until config confirms that
-    // exact snapshot; RPC success alone does not establish acceptance.
+    // RPC success is insufficient; config must confirm the exact fingerprint.
     if let Some(expected_fingerprint) = expected_fingerprint {
         let config = env
             .api
@@ -2417,8 +2415,6 @@ pub(in crate::tests) async fn network_configured_with_lldp(
     }
 }
 
-/// Sends attached LLDP as a fingerprint-aware agent using the existing status
-/// RPC.
 pub(in crate::tests) async fn try_network_configured_with_lldp(
     env: &TestEnv,
     dpu_machine_id: &DpuMachineId,
@@ -2435,8 +2431,6 @@ pub(in crate::tests) async fn try_network_configured_with_lldp(
     .await
 }
 
-/// Sends attached LLDP as a fingerprint-aware agent while overriding the
-/// identifier, allowing validation-failure tests to exercise a mismatch.
 pub(in crate::tests) async fn try_network_configured_with_lldp_fingerprint(
     env: &TestEnv,
     dpu_machine_id: &DpuMachineId,
@@ -2454,8 +2448,6 @@ pub(in crate::tests) async fn try_network_configured_with_lldp_fingerprint(
     .await
 }
 
-/// Sends attached LLDP through the original status method so tests can verify
-/// that older agents receive rejection as an RPC error after status commits.
 pub(in crate::tests) async fn try_legacy_network_configured_with_lldp(
     env: &TestEnv,
     dpu_machine_id: &DpuMachineId,
@@ -2472,18 +2464,13 @@ pub(in crate::tests) async fn try_legacy_network_configured_with_lldp(
     .await
 }
 
-/// Selects whether the network-status fixture behaves as a current or legacy
-/// agent.
 enum NetworkStatusClient {
     Legacy,
     FingerprintAware,
     FingerprintOverride(Vec<u8>),
 }
 
-/// Builds one representative status and sends it through the existing RPC so
-/// tests can compare legacy and fingerprint-aware semantics.
-///
-/// This fixture reports the compatibility fields populated for older agents.
+// This fixture reports the compatibility fields populated for older agents.
 #[allow(deprecated)]
 async fn report_network_status(
     env: &TestEnv,

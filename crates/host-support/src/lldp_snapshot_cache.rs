@@ -23,7 +23,7 @@ use ::rpc::forge::{InterfaceLldp, LldpReport, LldpReportResult};
 
 use crate::lldp_collector::{LldpCollectorResult, LldpNeighbor};
 
-/// A DPU status attachment paired with the identifier Core must accept.
+/// Classification result for DPU status reporting.
 #[derive(Clone, Debug, PartialEq)]
 pub struct FingerprintedLldpReport {
     pub report: LldpReport,
@@ -113,7 +113,6 @@ impl LldpSnapshotCache {
     }
 }
 
-/// Converts collector output to a deterministic wire snapshot.
 fn canonical_interfaces(neighbors: Vec<LldpNeighbor>) -> Vec<InterfaceLldp> {
     let mut interfaces = neighbors
         .into_iter()
@@ -189,62 +188,46 @@ mod tests {
         }
     }
 
-    /// One neighbor on one port, the simplest snapshot the collector can yield.
     fn one_neighbor() -> Vec<LldpNeighbor> {
         vec![neighbor("aa:bb:cc:dd:ee:ff", "p0", "p0")]
     }
 
-    /// Proves acceptance of snapshot A cannot suppress a newer snapshot B.
     #[test]
     fn accepted_fingerprint_only_suppresses_the_matching_snapshot() {
-        // Establish the identifier Core would return after accepting A.
         let snapshot_a = classify_against_accepted_snapshot(Ok(one_neighbor()), None);
         let accepted = snapshot_a.snapshot_fingerprint.unwrap();
         let snapshot_b = vec![neighbor("aa:bb:cc:dd:ee:ff", "p0", "p1")];
 
-        // Classify both the accepted snapshot and the changed topology.
         let repeated_a =
             classify_against_accepted_snapshot(Ok(one_neighbor()), Some(accepted.as_slice()));
         let changed_b =
             classify_against_accepted_snapshot(Ok(snapshot_b), Some(accepted.as_slice()));
 
-        // Only the exact accepted snapshot may be abbreviated.
         assert_eq!(result_of(&repeated_a.report), LldpReportResult::Unchanged);
         assert_eq!(result_of(&changed_b.report), LldpReportResult::Updated);
     }
 
-    /// Proves an older Core's absent acknowledgment keeps full snapshots pending.
     #[test]
     fn absent_accepted_fingerprint_never_suppresses_a_snapshot() {
-        // Classify the same successful collection twice without a Core identifier.
         let first = classify_against_accepted_snapshot(Ok(one_neighbor()), None);
         let retry = classify_against_accepted_snapshot(Ok(one_neighbor()), None);
 
-        // Both reports remain complete updates for safe legacy-Core operation.
         assert_eq!(result_of(&first.report), LldpReportResult::Updated);
         assert_eq!(result_of(&retry.report), LldpReportResult::Updated);
     }
 
-    /// Proves an accepted successful empty collection is distinguishable from
-    /// an absent acknowledgment.
     #[test]
     fn accepted_empty_snapshot_is_unchanged() {
-        // Derive the stable identifier for a successful empty collection.
         let initial = classify_against_accepted_snapshot(Ok(vec![]), None);
         let accepted = initial.snapshot_fingerprint.unwrap();
 
-        // Reclassify the empty collection using Core's accepted identifier.
         let repeated = classify_against_accepted_snapshot(Ok(vec![]), Some(accepted.as_slice()));
 
-        // The acknowledged empty topology may be abbreviated safely.
         assert_eq!(result_of(&repeated.report), LldpReportResult::Unchanged);
     }
 
-    /// Proves collection failure does not invalidate a still-current Core
-    /// acknowledgment after the collector recovers.
     #[test]
     fn collection_recovery_uses_the_persisted_core_fingerprint() {
-        // Establish an accepted topology, then observe a collection failure.
         let initial = classify_against_accepted_snapshot(Ok(one_neighbor()), None);
         let accepted = initial.snapshot_fingerprint.unwrap();
         let failed = classify_against_accepted_snapshot(
@@ -252,11 +235,9 @@ mod tests {
             Some(accepted.as_slice()),
         );
 
-        // Recover with the same topology Core retained.
         let recovered =
             classify_against_accepted_snapshot(Ok(one_neighbor()), Some(accepted.as_slice()));
 
-        // Failure has no snapshot identifier; exact recovery needs no rewrite.
         assert_eq!(
             result_of(&failed.report),
             LldpReportResult::CollectionFailed

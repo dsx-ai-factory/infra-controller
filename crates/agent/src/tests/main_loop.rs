@@ -212,8 +212,6 @@ fn fmds_reply_routes_preserve_ipv4_and_use_the_ipv6_metadata_source() {
     );
 }
 
-/// Builds one deterministic collection so compatibility tests can observe
-/// whether the same snapshot remains pending.
 fn one_lldp_neighbor() -> carbide_host_support::lldp_collector::LldpNeighbor {
     carbide_host_support::lldp_collector::LldpNeighbor {
         local_mac: "02:00:00:00:00:01".to_string(),
@@ -226,14 +224,11 @@ fn one_lldp_neighbor() -> carbide_host_support::lldp_collector::LldpNeighbor {
     }
 }
 
-/// Captures status payloads sent to an older Core implementation.
 #[derive(Default)]
 struct NetworkStatusRpcState {
     statuses: Vec<rpc::DpuNetworkStatus>,
 }
 
-/// Records the status payload and returns the empty response used by older
-/// Core versions.
 async fn handle_original_network_status(
     axum::extract::State(state): axum::extract::State<
         std::sync::Arc<tokio::sync::Mutex<NetworkStatusRpcState>>,
@@ -248,7 +243,6 @@ async fn handle_original_network_status(
     crate::tests::common::respond(()).into_response()
 }
 
-/// Routes the unchanged status method exposed by an older Core.
 fn network_status_mock(
     state: std::sync::Arc<tokio::sync::Mutex<NetworkStatusRpcState>>,
 ) -> axum::Router {
@@ -263,7 +257,6 @@ fn network_status_mock(
         .with_state(state)
 }
 
-/// Runs one status operation under a deadline so a broken mock fails deterministically.
 async fn record_network_status_before_deadline(
     address: std::net::SocketAddr,
     status: rpc::DpuNetworkStatus,
@@ -280,21 +273,16 @@ async fn record_network_status_before_deadline(
     .map_err(|_| eyre::eyre!("network status report exceeded its test deadline"))?
 }
 
-/// Proves success from an older Core does not confirm attached LLDP when its
-/// next configuration response cannot identify an accepted snapshot.
 #[tokio::test]
 async fn legacy_core_success_keeps_lldp_snapshot_pending() -> eyre::Result<()> {
     use carbide_host_support::lldp_snapshot_cache::result_of;
 
-    // An older Core exposes the original status method and no accepted
-    // fingerprint in its configuration response.
     let state = std::sync::Arc::new(tokio::sync::Mutex::new(NetworkStatusRpcState::default()));
     let (address, server) =
         crate::tests::common::run_grpc_server(network_status_mock(state.clone())).await?;
     let classified = classify_against_accepted_snapshot(Ok(vec![one_lldp_neighbor()]), None);
     let sent_report = classified.report.clone();
 
-    // Send the full snapshot with its identifier and receive legacy RPC success.
     record_network_status_before_deadline(
         address,
         rpc::DpuNetworkStatus {
@@ -306,7 +294,6 @@ async fn legacy_core_success_keeps_lldp_snapshot_pending() -> eyre::Result<()> {
     .await?;
     server.abort();
 
-    // The report reached Core, but absence in the next config keeps it pending.
     let state = state.lock().await;
     assert_eq!(state.statuses.len(), 1);
     assert_eq!(state.statuses[0].lldp.as_ref(), Some(&sent_report));
@@ -763,20 +750,15 @@ fn current_network_version_never_matches_before_first_update() {
     assert!(!CurrentNetworkVersion::default().matches_versions_from(&config, None));
 }
 
-/// Proves LLDP acceptance updates do not trigger unrelated HBN
-/// reconfiguration.
 #[test]
 fn accepted_lldp_fingerprint_is_not_a_rendered_network_input() {
     let mut config = comparison_network_config();
     let mut current = CurrentNetworkVersion::default();
 
-    // Record the applied network response before Core accepts an LLDP snapshot.
     current.update_from(&config, None);
 
-    // Change only the response metadata used to classify the next LLDP report.
     config.accepted_lldp_snapshot_fingerprint = Some(vec![1; 32]);
 
-    // HBN inputs and explicit versions are unchanged.
     assert!(current.matches_versions_from(&config, None));
 }
 

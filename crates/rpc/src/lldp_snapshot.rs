@@ -33,7 +33,6 @@ pub fn fingerprint(interfaces: &[InterfaceLldp]) -> Vec<u8> {
 mod tests {
     use super::*;
 
-    /// Proves collection ordering cannot change the identifier for one topology.
     #[test]
     fn fingerprint_ignores_interface_order() {
         let first = InterfaceLldp {
@@ -45,21 +44,16 @@ mod tests {
             ..Default::default()
         };
 
-        // Fingerprint the same two interfaces in both collection orders.
         let canonical = fingerprint(&[first.clone(), second.clone()]);
         let reversed = fingerprint(&[second, first]);
 
-        // Ordering alone must not produce a pending snapshot.
         assert_eq!(canonical, reversed);
     }
 
-    /// Proves an empty snapshot has a stable non-absent identifier.
     #[test]
     fn empty_snapshot_has_a_fingerprint() {
-        // Fingerprint the successful observation of no neighbors.
         let empty = fingerprint(&[]);
 
-        // SHA-256 always identifies the snapshot, including an empty one.
         assert_eq!(empty.len(), 32);
     }
 }

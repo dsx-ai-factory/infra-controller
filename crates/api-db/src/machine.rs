@@ -1309,8 +1309,8 @@ pub async fn update_network_status_observation(
     Ok(ConditionalWrite::NotApplied(MachineObservationNotCurrent))
 }
 
-/// Advances the LLDP fingerprint only after the matching replacement succeeds
-/// in the caller's transaction.
+/// Stores the accepted fingerprint. Call in the same transaction as the
+/// corresponding neighbor replacement.
 pub async fn update_accepted_lldp_snapshot_fingerprint(
     txn: &mut PgConnection,
     machine_id: &DpuMachineId,
@@ -1343,8 +1343,8 @@ pub async fn update_accepted_lldp_snapshot_fingerprint(
     Ok(())
 }
 
-/// Reads the accepted LLDP fingerprint while locking its machine row so a
-/// caller can validate snapshot identity against current serialized state.
+/// Returns the accepted fingerprint while locking the machine row for the
+/// caller's transaction.
 pub async fn lock_accepted_lldp_snapshot_fingerprint(
     txn: &mut PgConnection,
     machine_id: &DpuMachineId,
@@ -5532,8 +5532,6 @@ mod test {
         Ok(())
     }
 
-    /// Proves operational observation input cannot replace the server-owned
-    /// accepted LLDP fingerprint stored in the same JSON document.
     #[crate::sqlx_test]
     async fn network_observation_update_preserves_server_owned_lldp_fingerprint(
         pool: sqlx::PgPool,
@@ -5551,8 +5549,6 @@ mod test {
         let fingerprint_a = vec![0x0a; 32];
         let fingerprint_b = vec![0x0b; 32];
 
-        // Create the DPU and establish an ordinary observation before Core
-        // records accepted fingerprint A.
         let mut txn = pool.begin().await?;
         super::create(
             txn.as_mut(),
@@ -5582,8 +5578,6 @@ mod test {
             .await?;
         txn.commit().await?;
 
-        // Submit a newer operational observation whose model argument attempts
-        // to supply a different fingerprint.
         let newer = MachineNetworkStatusObservation {
             machine_id,
             agent_version: Some("newer-agent".to_string()),
@@ -5602,8 +5596,6 @@ mod test {
         );
         txn.commit().await?;
 
-        // Operational fields advance, but SQL restores fingerprint A from the
-        // row instead of trusting the model-owned value.
         let persisted: sqlx::types::Json<MachineNetworkStatusObservation> =
             sqlx::query_scalar("SELECT network_status_observation FROM machines WHERE id = $1")
                 .bind(machine_id)

@@ -1013,8 +1013,7 @@ pub(crate) async fn update_agent_reported_inventory(
     Ok(Response::new(()))
 }
 
-/// Records DPU status while preserving legacy LLDP error behavior for clients
-/// that do not send snapshot fingerprints.
+/// Records DPU network status and optional LLDP.
 pub(crate) async fn record_dpu_network_status(
     api: &Api,
     request: Request<rpc::DpuNetworkStatus>,
@@ -1031,8 +1030,7 @@ pub(crate) async fn record_dpu_network_status(
     Ok(Response::new(()))
 }
 
-/// Processes an attached DPU LLDP report and advances its accepted fingerprint
-/// in the same savepoint as the corresponding neighbor replacement.
+/// Validates and stores an attached LLDP report and its accepted fingerprint.
 async fn handle_dpu_lldp_report(
     txn: &mut sqlx::PgConnection,
     dpu_machine_id: &DpuMachineId,
@@ -1057,8 +1055,8 @@ async fn handle_dpu_lldp_report(
         }
         rpc::LldpReportResult::Unchanged => {
             if let Some(supplied) = supplied_fingerprint {
-                // The operational-status update already locked this row. Read
-                // its current value rather than the earlier unlocked snapshot.
+                // Read after the status update locked the row; the earlier DPU
+                // snapshot may be stale.
                 let accepted =
                     db::machine::lock_accepted_lldp_snapshot_fingerprint(txn, dpu_machine_id)
                         .await?;
@@ -1085,8 +1083,6 @@ async fn handle_dpu_lldp_report(
     Ok(())
 }
 
-/// Requires a fingerprint-aware UNCHANGED report to identify Core's exact
-/// accepted snapshot so stale agent state cannot confirm a different topology.
 fn validate_unchanged_lldp_fingerprint(
     supplied: &[u8],
     accepted: Option<&[u8]>,
@@ -1106,8 +1102,6 @@ mod lldp_fingerprint_validation_tests {
 
     use super::validate_unchanged_lldp_fingerprint;
 
-    /// Verifies fingerprint-bearing UNCHANGED reports identify exactly one
-    /// previously accepted snapshot rather than merely claiming no change.
     #[test]
     fn unchanged_fingerprint_requires_exact_stored_acceptance() {
         scenarios!(
@@ -1128,8 +1122,8 @@ mod lldp_fingerprint_validation_tests {
     }
 }
 
-/// Applies one DPU status report, retaining an LLDP rejection until operational
-/// status and existing post-commit follow-up work have completed.
+/// Applies a DPU status report, retaining LLDP rejection until post-commit
+/// follow-up completes.
 async fn process_dpu_network_status(
     api: &Api,
     mut request: rpc::DpuNetworkStatus,
@@ -1268,8 +1262,7 @@ async fn process_dpu_network_status(
         .await?;
     }
 
-    // Keep the machine-row ordering owned by this transaction while allowing a
-    // rejected LLDP report to roll back without discarding operational status.
+    // Isolate LLDP so rejection does not roll back operational status.
     let mut lldp_error = None;
     if let Some(lldp) = request.lldp.take() {
         let mut lldp_savepoint = db::Transaction::begin_inner(txn.as_pgconn()).await?;
@@ -1285,8 +1278,8 @@ async fn process_dpu_network_status(
                 lldp_savepoint.commit().await?;
             }
             Err(error) => {
-                // An explicit rollback restores the outer transaction after SQL
-                // errors leave the savepoint in an aborted state.
+                // SQL errors leave the savepoint aborted; roll it back before
+                // continuing.
                 lldp_savepoint.rollback().await?;
                 tracing::warn!(
                     %dpu_machine_id,

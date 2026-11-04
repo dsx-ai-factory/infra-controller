@@ -1940,7 +1940,7 @@ fn fmds_reply_routes(
     Ok(routes)
 }
 
-/// Pushes DPU network status through the existing Core RPC.
+/// Reports DPU network status to Core.
 async fn record_network_status(
     status: rpc::DpuNetworkStatus,
     forge_api: &str,

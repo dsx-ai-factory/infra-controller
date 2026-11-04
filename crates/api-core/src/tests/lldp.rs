@@ -325,7 +325,6 @@ async fn stored_links(
         .collect()
 }
 
-/// Returns the exact LLDP snapshot identifier exposed to the DPU agent.
 async fn accepted_lldp_fingerprint(
     env: &common::api_fixtures::TestEnv,
     dpu_machine_id: DpuMachineId,
@@ -485,15 +484,12 @@ async fn test_scout_lldp_report_reconciles_stored_neighbors(pool: sqlx::PgPool) 
     );
 }
 
-/// Proves rejected LLDP leaves Core's accepted snapshot unchanged while newer
-/// operational status commits.
 #[crate::sqlx_test]
 async fn test_dpu_lldp_rejection_commits_status_and_preserves_neighbors(pool: sqlx::PgPool) {
     let env = create_test_env(pool).await;
     let dpu_id = create_managed_host(&env).await.dpu().id;
     let prior_neighbor = neighbor("B0:00:00:00:00:01", "bb:bb:bb:bb:bb:bb", "swp9");
 
-    // Seed an accepted LLDP snapshot.
     network_configured_with_lldp(
         &env,
         &dpu_id,
@@ -521,7 +517,6 @@ async fn test_dpu_lldp_rejection_commits_status_and_preserves_neighbors(pool: sq
         ),
     ];
     for (name, report) in cases {
-        // Make each attempted status update independently observable.
         sqlx::query(
             "UPDATE machines
              SET network_status_observation =
@@ -542,8 +537,6 @@ async fn test_dpu_lldp_rejection_commits_status_and_preserves_neighbors(pool: sq
             .await
             .unwrap_or_else(|error| panic!("{name}: {error}"));
 
-        // The outer status committed, while savepoint rollback preserved both
-        // neighbors and the exact accepted-snapshot identifier.
         let agent_version: Option<String> = sqlx::query_scalar(
             "SELECT network_status_observation->>'agent_version' FROM machines WHERE id = $1",
         )
@@ -565,15 +558,12 @@ async fn test_dpu_lldp_rejection_commits_status_and_preserves_neighbors(pool: sq
     }
 }
 
-/// Proves an ordinary newer status report cannot clear accepted LLDP state
-/// when it carries no LLDP attachment.
 #[crate::sqlx_test]
 async fn test_dpu_status_without_lldp_preserves_accepted_snapshot(pool: sqlx::PgPool) {
     let env = create_test_env(pool).await;
     let dpu_id = create_managed_host(&env).await.dpu().id;
     let snapshot_a = neighbor("B0:00:00:00:00:01", "bb:bb:bb:bb:bb:bb", "swp9");
 
-    // Accept snapshot A and retain both forms of its persisted state.
     network_configured_with_lldp(
         &env,
         &dpu_id,
@@ -587,8 +577,6 @@ async fn test_dpu_status_without_lldp_preserves_accepted_snapshot(pool: sqlx::Pg
         Some(fingerprint_a.clone())
     );
 
-    // Make the next ordinary status update distinguishable, then submit it
-    // without an LLDP attachment.
     sqlx::query(
         "UPDATE machines
          SET network_status_observation =
@@ -605,7 +593,6 @@ async fn test_dpu_status_without_lldp_preserves_accepted_snapshot(pool: sqlx::Pg
     .unwrap();
     network_configured_with_health(&env, &dpu_id, None).await;
 
-    // Operational status advances while snapshot A remains accepted intact.
     let agent_version: Option<String> = sqlx::query_scalar(
         "SELECT network_status_observation->>'agent_version' FROM machines WHERE id = $1",
     )
@@ -624,8 +611,6 @@ async fn test_dpu_status_without_lldp_preserves_accepted_snapshot(pool: sqlx::Pg
     );
 }
 
-/// Proves a mismatched identifier rejects snapshot B without losing status or
-/// snapshot A, and that a correctly identified retry can subsequently commit B.
 #[crate::sqlx_test]
 async fn test_dpu_lldp_fingerprint_mismatch_preserves_a_until_b_retries(pool: sqlx::PgPool) {
     let env = create_test_env(pool).await;
@@ -633,7 +618,6 @@ async fn test_dpu_lldp_fingerprint_mismatch_preserves_a_until_b_retries(pool: sq
     let snapshot_a = neighbor("B0:00:00:00:00:01", "aa:aa:aa:aa:aa:aa", "swp1");
     let snapshot_b = neighbor("B0:00:00:00:00:02", "bb:bb:bb:bb:bb:bb", "swp2");
 
-    // Establish snapshot A as the accepted baseline.
     network_configured_with_lldp(
         &env,
         &dpu_id,
@@ -644,8 +628,6 @@ async fn test_dpu_lldp_fingerprint_mismatch_preserves_a_until_b_retries(pool: sq
     let fingerprint_b = ::rpc::lldp_snapshot::fingerprint(std::slice::from_ref(&snapshot_b));
     let links_a = stored_links(&env, &dpu_id).await;
 
-    // Make the operational write observable and send valid B under a different
-    // synthetic identifier.
     sqlx::query(
         "UPDATE machines
          SET network_status_observation =
@@ -671,8 +653,6 @@ async fn test_dpu_lldp_fingerprint_mismatch_preserves_a_until_b_retries(pool: sq
     .await
     .unwrap();
 
-    // The outer status commits, but rejected B cannot replace A or its
-    // accepted fingerprint.
     let agent_version: Option<String> = sqlx::query_scalar(
         "SELECT network_status_observation->>'agent_version' FROM machines WHERE id = $1",
     )
@@ -690,7 +670,6 @@ async fn test_dpu_lldp_fingerprint_mismatch_preserves_a_until_b_retries(pool: sq
         Some(fingerprint_a)
     );
 
-    // Retry B with the production-computed fingerprint.
     try_network_configured_with_lldp(
         &env,
         &dpu_id,
@@ -699,7 +678,6 @@ async fn test_dpu_lldp_fingerprint_mismatch_preserves_a_until_b_retries(pool: sq
     .await
     .unwrap();
 
-    // Correctly identified B now owns both neighbors and acceptance.
     assert_eq!(
         stored_links(&env, &dpu_id).await,
         vec![(
@@ -714,14 +692,11 @@ async fn test_dpu_lldp_fingerprint_mismatch_preserves_a_until_b_retries(pool: sq
     );
 }
 
-/// Proves a successful empty snapshot clears neighbors and is acknowledged
-/// with its own stable identifier.
 #[crate::sqlx_test]
 async fn test_dpu_empty_lldp_snapshot_is_acknowledged(pool: sqlx::PgPool) {
     let env = create_test_env(pool).await;
     let dpu_id = create_managed_host(&env).await.dpu().id;
 
-    // Seed one neighbor, then successfully replace it with an empty snapshot.
     network_configured_with_lldp(
         &env,
         &dpu_id,
@@ -733,7 +708,6 @@ async fn test_dpu_empty_lldp_snapshot_is_acknowledged(pool: sqlx::PgPool) {
     .await;
     network_configured_with_lldp(&env, &dpu_id, lldp_report(Updated, vec![])).await;
 
-    // Empty is accepted as a real topology, not confused with no report.
     assert!(stored_links(&env, &dpu_id).await.is_empty());
     assert_eq!(
         accepted_lldp_fingerprint(&env, dpu_id).await,
@@ -741,15 +715,12 @@ async fn test_dpu_empty_lldp_snapshot_is_acknowledged(pool: sqlx::PgPool) {
     );
 }
 
-/// Proves collection failure retains the accepted snapshot so recovery with
-/// the same topology remains safely unchanged.
 #[crate::sqlx_test]
 async fn test_dpu_lldp_collection_failure_and_recovery_preserve_acceptance(pool: sqlx::PgPool) {
     let env = create_test_env(pool).await;
     let dpu_id = create_managed_host(&env).await.dpu().id;
     let prior_neighbor = neighbor("B0:00:00:00:00:01", "bb:bb:bb:bb:bb:bb", "swp9");
 
-    // Commit one snapshot, then report that the next collection failed.
     network_configured_with_lldp(
         &env,
         &dpu_id,
@@ -763,13 +734,10 @@ async fn test_dpu_lldp_collection_failure_and_recovery_preserve_acceptance(pool:
     );
     network_configured_with_lldp(&env, &dpu_id, lldp_report(CollectionFailed, vec![])).await;
 
-    // Recover with a matching UNCHANGED fingerprint, as the agent does when
-    // Core's retained acceptance still identifies its current topology.
     try_network_configured_with_lldp(&env, &dpu_id, lldp_report(Unchanged, vec![]))
         .await
         .unwrap();
 
-    // Failure and recovery neither erase nor rewrite the retained topology.
     assert_eq!(
         accepted_lldp_fingerprint(&env, dpu_id).await,
         Some(accepted)
@@ -784,8 +752,6 @@ async fn test_dpu_lldp_collection_failure_and_recovery_preserve_acceptance(pool:
     );
 }
 
-/// Proves a mismatched UNCHANGED fingerprint rejects LLDP without rolling back
-/// newer operational status or disturbing Core's accepted snapshot.
 #[crate::sqlx_test]
 async fn test_dpu_mismatched_unchanged_fingerprint_preserves_status_and_acceptance(
     pool: sqlx::PgPool,
@@ -794,7 +760,6 @@ async fn test_dpu_mismatched_unchanged_fingerprint_preserves_status_and_acceptan
     let dpu_id = create_managed_host(&env).await.dpu().id;
     let prior_neighbor = neighbor("B0:00:00:00:00:01", "bb:bb:bb:bb:bb:bb", "swp9");
 
-    // Establish the accepted topology and make the next status write observable.
     network_configured_with_lldp(
         &env,
         &dpu_id,
@@ -818,8 +783,6 @@ async fn test_dpu_mismatched_unchanged_fingerprint_preserves_status_and_acceptan
     .await
     .unwrap();
 
-    // A fingerprint-aware caller receives RPC success even though the
-    // mismatched LLDP portion rolls back to its savepoint.
     let mut mismatched = accepted.clone();
     mismatched[0] ^= 0xff;
     try_network_configured_with_lldp_fingerprint(
@@ -831,8 +794,6 @@ async fn test_dpu_mismatched_unchanged_fingerprint_preserves_status_and_acceptan
     .await
     .unwrap();
 
-    // The outer status commits while topology and acceptance retain their
-    // previously committed values.
     let agent_version: Option<String> = sqlx::query_scalar(
         "SELECT network_status_observation->>'agent_version' FROM machines WHERE id = $1",
     )
@@ -851,14 +812,11 @@ async fn test_dpu_mismatched_unchanged_fingerprint_preserves_status_and_acceptan
     );
 }
 
-/// Proves a supplied UNCHANGED fingerprint cannot create acceptance when Core
-/// has never committed an LLDP snapshot for the DPU.
 #[crate::sqlx_test]
 async fn test_dpu_unchanged_fingerprint_without_prior_acceptance_is_rejected(pool: sqlx::PgPool) {
     let env = create_test_env(pool).await;
     let dpu_id = create_managed_host(&env).await.dpu().id;
 
-    // Submit a fingerprint-aware UNCHANGED claim before any snapshot exists.
     try_network_configured_with_lldp_fingerprint(
         &env,
         &dpu_id,
@@ -868,8 +826,6 @@ async fn test_dpu_unchanged_fingerprint_without_prior_acceptance_is_rejected(poo
     .await
     .unwrap();
 
-    // Rejection leaves LLDP state absent while the surrounding operational
-    // status still commits.
     let agent_version: Option<String> = sqlx::query_scalar(
         "SELECT network_status_observation->>'agent_version' FROM machines WHERE id = $1",
     )
@@ -885,15 +841,12 @@ async fn test_dpu_unchanged_fingerprint_without_prior_acceptance_is_rejected(poo
     assert_eq!(accepted_lldp_fingerprint(&env, dpu_id).await, None);
 }
 
-/// Proves legacy UNCHANGED remains compatible when the older agent omits the
-/// fingerprint that newer agents use for exact snapshot validation.
 #[crate::sqlx_test]
 async fn test_legacy_dpu_unchanged_without_fingerprint_remains_compatible(pool: sqlx::PgPool) {
     let env = create_test_env(pool).await;
     let dpu_id = create_managed_host(&env).await.dpu().id;
     let prior_neighbor = neighbor("B0:00:00:00:00:01", "bb:bb:bb:bb:bb:bb", "swp9");
 
-    // Establish one accepted snapshot before exercising the legacy omission.
     network_configured_with_lldp(
         &env,
         &dpu_id,
@@ -903,12 +856,10 @@ async fn test_legacy_dpu_unchanged_without_fingerprint_remains_compatible(pool: 
     let accepted = ::rpc::lldp_snapshot::fingerprint(std::slice::from_ref(&prior_neighbor));
     let links_before = stored_links(&env, &dpu_id).await;
 
-    // The original client shape sends UNCHANGED without a fingerprint.
     try_legacy_network_configured_with_lldp(&env, &dpu_id, lldp_report(Unchanged, vec![]))
         .await
         .unwrap();
 
-    // Legacy acceptance remains a no-op that preserves the committed snapshot.
     assert_eq!(stored_links(&env, &dpu_id).await, links_before);
     assert_eq!(
         accepted_lldp_fingerprint(&env, dpu_id).await,
@@ -916,15 +867,12 @@ async fn test_legacy_dpu_unchanged_without_fingerprint_remains_compatible(pool: 
     );
 }
 
-/// Proves a legacy agent still receives a non-OK result after operational
-/// status commits, preventing it from treating rejected LLDP as accepted.
 #[crate::sqlx_test]
 async fn test_legacy_dpu_lldp_rejection_returns_error_after_status_commit(pool: sqlx::PgPool) {
     let env = create_test_env(pool).await;
     let dpu_id = create_managed_host(&env).await.dpu().id;
     let prior_neighbor = neighbor("B0:00:00:00:00:01", "bb:bb:bb:bb:bb:bb", "swp9");
 
-    // Seed last-known-good neighbors and mark the stored status as older.
     network_configured_with_lldp(
         &env,
         &dpu_id,
@@ -947,7 +895,6 @@ async fn test_legacy_dpu_lldp_rejection_returns_error_after_status_commit(pool: 
     .unwrap();
     let links_before = stored_links(&env, &dpu_id).await;
 
-    // Use the original RPC and reject malformed LLDP.
     let status = try_legacy_network_configured_with_lldp(
         &env,
         &dpu_id,
@@ -956,7 +903,6 @@ async fn test_legacy_dpu_lldp_rejection_returns_error_after_status_commit(pool: 
     .await
     .expect_err("legacy client must receive LLDP rejection");
 
-    // The legacy error preserves cache safety without rolling back status.
     assert_eq!(status.code(), tonic::Code::InvalidArgument);
     let agent_version: Option<String> = sqlx::query_scalar(
         "SELECT network_status_observation->>'agent_version' FROM machines WHERE id = $1",

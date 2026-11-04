@@ -29145,9 +29145,8 @@ type ManagedHostNetworkConfigResponse struct {
 	// not supply an inventory; present and empty means the deployment has zero
 	// service slots.
 	ServiceVpcSlotInventory *ServiceVpcSlotInventory `protobuf:"bytes,122,opt,name=service_vpc_slot_inventory,json=serviceVpcSlotInventory,proto3,oneof" json:"service_vpc_slot_inventory,omitempty"`
-	// Identifies the last complete LLDP snapshot Core committed for this DPU.
-	// Absent means Core cannot confirm any snapshot. Agents may report UNCHANGED
-	// only when this value matches the fingerprint of their current snapshot.
+	// Fingerprint of the last LLDP snapshot committed by Core. Agents send
+	// UNCHANGED only when this matches their current snapshot.
 	AcceptedLldpSnapshotFingerprint []byte `protobuf:"bytes,123,opt,name=accepted_lldp_snapshot_fingerprint,json=acceptedLldpSnapshotFingerprint,proto3,oneof" json:"accepted_lldp_snapshot_fingerprint,omitempty"`
 	unknownFields                   protoimpl.UnknownFields
 	sizeCache                       protoimpl.SizeCache
@@ -34384,9 +34383,9 @@ type DpuNetworkStatus struct {
 	// LLDP neighbors this DPU sees, attached to the status push rather than sent
 	// on its own RPC. Absent when the agent did not attempt a collection.
 	Lldp *LldpReport `protobuf:"bytes,18,opt,name=lldp,proto3,oneof" json:"lldp,omitempty"`
-	// Stable fingerprint of the complete attached LLDP snapshot. New agents set
-	// this for UPDATED and UNCHANGED reports. Core recomputes it for UPDATED
-	// reports and advances its accepted fingerprint only with committed writes.
+	// Fingerprint of the current snapshot for UPDATED and UNCHANGED reports.
+	// Core validates it against the attached interfaces for UPDATED reports
+	// and against its accepted fingerprint for UNCHANGED reports.
 	LldpSnapshotFingerprint []byte `protobuf:"bytes,19,opt,name=lldp_snapshot_fingerprint,json=lldpSnapshotFingerprint,proto3,oneof" json:"lldp_snapshot_fingerprint,omitempty"`
 	unknownFields           protoimpl.UnknownFields
 	sizeCache               protoimpl.SizeCache

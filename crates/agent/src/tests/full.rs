@@ -1085,7 +1085,7 @@ fn mock_core(state: Arc<Mutex<State>>) -> Router {
             ::rpc::service_path!("FindInterfaces"),
             post(handle_find_interfaces),
         )
-        // Connection checks and status-method selection share the Version route.
+        // ForgeApiClient needs a working Version route for connection retrying
         .route(::rpc::service_path!("Version"), post(handle_version))
         .fallback(handler)
         .with_state(state)
@@ -1714,8 +1714,6 @@ async fn handle_netconf(AxumState(state): AxumState<Arc<Mutex<State>>>) -> impl 
     common::respond(netconf)
 }
 
-/// Serves the network-status RPC and exposes accepted LLDP fingerprints through
-/// subsequent configuration responses.
 async fn handle_record_netstat(
     AxumState(state): AxumState<Arc<Mutex<State>>>,
     body: Bytes,
@@ -1732,14 +1730,11 @@ async fn handle_record_netstat(
     Ok(common::respond(()).into_response())
 }
 
-/// Names the mock outcome fields used by the status handler.
 struct RecordedNetworkStatusRequest {
     rejected: bool,
     lldp_attached: bool,
 }
 
-/// Decodes and records one mock status request, advancing LLDP acceptance only
-/// for a successful matching snapshot.
 async fn record_network_status_request(
     state: &Arc<Mutex<State>>,
     body: Bytes,
@@ -1782,7 +1777,6 @@ async fn record_network_status_request(
     })
 }
 
-/// Builds the injected gRPC failure for a status request.
 fn rejected_network_status_response() -> axum::response::Response {
     (
         [
