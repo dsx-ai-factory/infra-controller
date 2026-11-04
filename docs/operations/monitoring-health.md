@@ -513,6 +513,8 @@ Resource-status records use `event.type = "redfish.resource_status"` and carry t
 | `redfish.status.conditions` | array of `kvlist` | Conditional | First 64 conditions. Each entry contains `message_id` and the optional `timestamp`, `severity`, and `condition_type`. |
 | `redfish.status.conditions.dropped` | integer | Conditional | Number of conditions omitted after the first 64. |
 
+The log body provides a compact human-readable summary, for example `firmware CPLDMB_0 status: state=Enabled, health=OK, health_rollup=OK, conditions=0`. A missing individual value is shown as `unknown`; if the resource omits the entire `Status` object, the body ends with `status: unavailable`. Use the structured attributes rather than parsing the body.
+
 The OTLP severity is `ERROR` when health, health rollup, or a condition is `Critical`; `WARN` when at least one is `Warning`; and `INFO` otherwise. Missing status remains missing rather than being reported as healthy. At most 64 conditions are included in one record.
 
 ## DPU Health Checks
