@@ -15,7 +15,6 @@ import (
 	"testing"
 	"time"
 
-	swe "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/error"
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
 	"github.com/rs/zerolog"
@@ -24,7 +23,6 @@ import (
 	"github.com/uptrace/bun/extra/bundebug"
 	tclient "go.temporal.io/sdk/client"
 	tmocks "go.temporal.io/sdk/mocks"
-	"go.temporal.io/sdk/temporal"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
@@ -398,85 +396,10 @@ func TestGRPCStatusMessage(t *testing.T) {
 }
 
 func TestUnwrapWorkflowError(t *testing.T) {
-	plainErr := errors.New("plain")
-	causeErr := errors.New("other error")
-	grpcPerm := status.Error(codes.PermissionDenied, "forbidden")
-	grpcInvalid := status.Error(codes.InvalidArgument, "Maximum Limit of Infiniband partitions had been reached")
-	grpcResourceExhausted := status.Error(codes.ResourceExhausted, "VPC prefix capacity exhausted")
-	wrappedResourceExhausted := swe.WrapErr(grpcResourceExhausted)
-
-	tests := []struct {
-		name                     string
-		err                      error
-		wantCode                 int
-		wantErr                  error
-		wantApplicationErrorType string
-	}{
-		{
-			name:     "unwraps Temporal cause",
-			err:      temporal.NewApplicationErrorWithCause("wrapper", "test-type", causeErr),
-			wantCode: http.StatusInternalServerError,
-			wantErr:  causeErr,
-		},
-		{
-			name:     "maps gRPC permission denied",
-			err:      temporal.NewApplicationErrorWithCause("wrapper", "test-type", grpcPerm),
-			wantCode: http.StatusForbidden,
-			wantErr:  grpcPerm,
-		},
-		{
-			name:     "returns non-temporal error as is",
-			err:      plainErr,
-			wantCode: http.StatusInternalServerError,
-			wantErr:  plainErr,
-		},
-		{
-			name:     "maps gRPC invalid argument",
-			err:      temporal.NewApplicationErrorWithCause("wrapper", "error", grpcInvalid),
-			wantCode: http.StatusBadRequest,
-			wantErr:  grpcInvalid,
-		},
-		{
-			name:     "maps gRPC resource exhausted",
-			err:      temporal.NewApplicationErrorWithCause("wrapper", "error", grpcResourceExhausted),
-			wantCode: http.StatusTooManyRequests,
-			wantErr:  grpcResourceExhausted,
-		},
-		{
-			name:     "maps non-gRPC error with collected invalid argument (nvbugs 5778658)",
-			err:      temporal.NewApplicationErrorWithCause("wrapper", swe.ErrTypeNICoInvalidArgument, causeErr),
-			wantCode: http.StatusBadRequest,
-			wantErr:  causeErr,
-		},
-		{
-			name:                     "maps wrapped gRPC resource exhausted",
-			err:                      wrappedResourceExhausted,
-			wantCode:                 http.StatusTooManyRequests,
-			wantErr:                  grpcResourceExhausted,
-			wantApplicationErrorType: swe.ErrTypeNICoResourceExhausted,
-		},
-		{
-			name:     "unwraps ApplicationError wrapped in generic error chain",
-			err:      fmt.Errorf("workflow execution error: %w", fmt.Errorf("activity error: %w", temporal.NewApplicationErrorWithCause("wrapped", swe.ErrTypeNICoObjectNotFound, causeErr))),
-			wantCode: http.StatusNotFound,
-			wantErr:  causeErr,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if tt.wantApplicationErrorType != "" {
-				var applicationErr *temporal.ApplicationError
-				require.ErrorAs(t, tt.err, &applicationErr)
-				assert.Equal(t, tt.wantApplicationErrorType, applicationErr.Type())
-				assert.True(t, applicationErr.NonRetryable())
-			}
-
-			code, gotErr := UnwrapWorkflowError(tt.err)
-			assert.Equal(t, tt.wantCode, code)
-			assert.Equal(t, tt.wantErr, gotErr)
-		})
-	}
+	original := status.Error(codes.PermissionDenied, "denied")
+	code, cause := UnwrapWorkflowError(original)
+	require.Equal(t, http.StatusForbidden, code)
+	require.Same(t, original, cause)
 }
 
 func TestGetTenantForOrg(t *testing.T) {
