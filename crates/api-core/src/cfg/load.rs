@@ -419,6 +419,11 @@ pub fn parse_carbide_config_with_deferred_diagnostics(
         .downloads
         .validate()
         .wrap_err("invalid firmware_global.downloads configuration")?;
+    carbide_firmware::FirmwareArtifactCache::validate_capacity(
+        config.firmware_global.nic_firmware_cache_capacity_bytes,
+        config.firmware_global.downloads.max_download_bytes,
+    )
+    .wrap_err("invalid firmware_global.nic_firmware_cache_capacity_bytes configuration")?;
 
     if let Some(config) = &config.dsx_exchange_event_bus {
         config.periodic_state_republish.validate()?;
@@ -748,6 +753,41 @@ request_timeout_seconds = 5"#
                         => FailsWith(
                             "invalid firmware_global.downloads configuration: max_concurrent_downloads must be between 1 and 16".to_string(),
                         ),
+                }
+            );
+            Ok(())
+        })
+    }
+
+    /// Validates the NIC cache budget through the production loader, including
+    /// existing configurations that omit the new setting.
+    #[test]
+    #[allow(clippy::result_large_err)]
+    fn nic_firmware_cache_capacity_is_loaded_and_validated() {
+        figment::Jail::expect_with(|jail| {
+            scenarios!(
+                run = |settings| {
+                    jail.create_file(
+                        "config.toml",
+                        &format!("{}\n{settings}\n", include_str!("test_data/min_config.toml")),
+                    ).unwrap();
+                    parse_carbide_config(Path::new("config.toml"), None)
+                        .map(|config| config.firmware_global.nic_firmware_cache_capacity_bytes)
+                        .map_err(|error| format!("{error:#}"))
+                };
+                "NIC cache startup budget" {
+                    // Omission supports even the largest previously valid download limit.
+                    "[firmware_global.downloads]\nmax_download_bytes = 17179869184"
+                        => Yields(17179869184_u64),
+                    // An explicit budget is preserved when it covers a maximum transfer.
+                    "[firmware_global]\nnic_firmware_cache_capacity_bytes = 8\n[firmware_global.downloads]\nmax_download_bytes = 8"
+                        => Yields(8_u64),
+                    // The loader enforces the relation before Core performs startup writes.
+                    "[firmware_global]\nnic_firmware_cache_capacity_bytes = 7\n[firmware_global.downloads]\nmax_download_bytes = 8"
+                        => FailsWith("invalid firmware_global.nic_firmware_cache_capacity_bytes configuration: firmware cache capacity must cover max_download_bytes and be at most 1 TiB".to_string()),
+                    // A budget above the supported storage bound is also rejected at loading.
+                    "[firmware_global]\nnic_firmware_cache_capacity_bytes = 1099511627777"
+                        => FailsWith("invalid firmware_global.nic_firmware_cache_capacity_bytes configuration: firmware cache capacity must cover max_download_bytes and be at most 1 TiB".to_string()),
                 }
             );
             Ok(())

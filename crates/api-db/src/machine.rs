@@ -51,7 +51,7 @@ use model::machine::network::{
     DpuFabricInterfaceStatusObservation, MachineNetworkStatusObservation, ManagedHostNetworkConfig,
     ManagedHostQuarantineState,
 };
-use model::machine::nic_firmware::NicFirmwarePurpose;
+use model::machine::nic_firmware::{NicFirmwareOperation, NicFirmwarePurpose};
 use model::machine::nvlink::MachineNvLinkStatusObservation;
 use model::machine::spx::MachineSpxStatusObservation;
 use model::machine::spx_multiplane::{MachineSpxMultiplane, MachineSpxMultiplaneStatus};
@@ -1173,6 +1173,32 @@ pub async fn lookup_managed_host_state(
     };
 
     Ok(Some(json.0))
+}
+
+/// `find_host_nic_firmware_operations` reads only frozen operations from current
+/// stable or predicted host controller states, paired with each owning host ID.
+/// DPU copies and historical states are excluded. Callers validate operations
+/// and decide which phases retain artifacts; a malformed matching operation
+/// fails the entire read without returning a partial retention set.
+pub async fn find_host_nic_firmware_operations(
+    conn: impl DbReader<'_>,
+) -> DatabaseResult<Vec<(HostMachineId, NicFirmwareOperation)>> {
+    let query = r#"
+        SELECT id, controller_state->'operation' FROM machines
+        WHERE (id LIKE $1 OR id LIKE $2)
+          AND controller_state->>'state' = 'nicfirmwareupdating'
+    "#;
+    let operations: Vec<(HostMachineId, sqlx::types::Json<NicFirmwareOperation>)> =
+        sqlx::query_as(query)
+            .bind(format!("{}%", MachineType::Host.id_prefix()))
+            .bind(format!("{}%", MachineType::PredictedHost.id_prefix()))
+            .fetch_all(conn)
+            .await
+            .map_err(|error| DatabaseError::query(query, error))?;
+    Ok(operations
+        .into_iter()
+        .map(|(host_machine_id, operation)| (host_machine_id, operation.0))
+        .collect())
 }
 
 /// Returns the `use_admin_network` flag from the host that owns the
