@@ -198,6 +198,10 @@ impl K8sConfigRepository for SnapshotMock {
 
 #[async_trait]
 impl DpfOperatorConfigRepository for SnapshotMock {
+    async fn get_version(&self, _: &str, _: &str) -> Result<String, DpfError> {
+        Ok(super::helpers::DPF_VERSION.to_string())
+    }
+
     async fn get(&self, _: &str, _: &str) -> Result<Option<DPFOperatorConfig>, DpfError> {
         Ok(None)
     }

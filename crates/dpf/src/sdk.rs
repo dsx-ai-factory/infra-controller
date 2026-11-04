@@ -222,7 +222,7 @@ pub struct DpfSdk<R, L = NoLabels> {
     repo: Arc<R>,
     namespace: String,
     labeler: L,
-    operator_version: Option<semver::Version>,
+    operator_version: semver::Version,
     shared_bmc_password_ready: Arc<AtomicBool>,
     _bmc_refresh_guard: Option<tokio_util::sync::DropGuard>,
 }
@@ -314,13 +314,14 @@ where
     /// Without a refresh interval nothing would ever retry, so there a failed
     /// read stays fatal.
     ///
-    /// Reads the installed operator version once. An unavailable or invalid version
-    /// remains unknown for this SDK's lifetime, disabling version-gated capabilities.
+    /// Reads the installed operator version once. A missing operator config or version,
+    /// invalid version, read failure, or expired read deadline fails SDK construction.
     async fn init_secret_and_task(self) -> Result<DpfSdk<R, L>, DpfError> {
         let repo = Arc::new(self.repo);
         let namespace = self.namespace;
         let provider = self.bmc_password_provider;
         let shared_bmc_password_ready = Arc::new(AtomicBool::new(false));
+        let operator_version = version::read_operator_version(repo.as_ref(), &namespace).await?;
 
         let password = match provider.get_bmc_password().await {
             Ok(password) => {
@@ -350,8 +351,6 @@ where
             }
             Err(error) => return Err(error),
         };
-
-        let operator_version = version::read_operator_version(repo.as_ref(), &namespace).await;
 
         let guard = if let Some(interval) = self.bmc_password_refresh_interval {
             Some(spawn_bmc_refresh(
@@ -7086,6 +7085,10 @@ mod tests {
 
     #[async_trait]
     impl crate::repository::DpfOperatorConfigRepository for SdkMock {
+        async fn get_version(&self, _: &str, _: &str) -> Result<String, DpfError> {
+            Ok("26.8.0".to_string())
+        }
+
         async fn get(
             &self,
             _name: &str,
@@ -8724,6 +8727,10 @@ mod tests {
 
     #[async_trait]
     impl crate::repository::DpfOperatorConfigRepository for SecretTrackingMock {
+        async fn get_version(&self, _: &str, _: &str) -> Result<String, DpfError> {
+            Ok("26.8.0".to_string())
+        }
+
         async fn get(
             &self,
             _name: &str,

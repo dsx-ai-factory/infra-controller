@@ -922,20 +922,22 @@ impl BmcCredentialRepository for KubeRepository {
 
 #[async_trait]
 impl DpfOperatorConfigRepository for KubeRepository {
-    async fn get_version(&self, name: &str, namespace: &str) -> Result<Option<String>, DpfError> {
+    async fn get_version(&self, name: &str, namespace: &str) -> Result<String, DpfError> {
         // Older operator specs lack fields required by the generated schema.
         let api: Api<DynamicObject> = Api::namespaced_with(
             self.client.clone(),
             namespace,
             &ApiResource::erase::<DPFOperatorConfig>(&()),
         );
-        Ok(api.get_opt(name).await?.and_then(|config| {
-            config
-                .data
-                .pointer("/status/version")
-                .and_then(serde_json::Value::as_str)
-                .map(str::to_string)
-        }))
+        api.get(name)
+            .await?
+            .data
+            .pointer("/status/version")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string)
+            .ok_or_else(|| {
+                DpfError::InvalidState(format!("DPFOperatorConfig {name} has no status.version"))
+            })
     }
 
     async fn get(

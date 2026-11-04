@@ -421,14 +421,8 @@ pub trait DpfOperatorConfigRepository: Send + Sync {
     async fn get(&self, name: &str, namespace: &str)
     -> Result<Option<DPFOperatorConfig>, DpfError>;
 
-    /// Read the installed `status.version`, returning `None` when the resource or version is absent.
-    async fn get_version(&self, name: &str, namespace: &str) -> Result<Option<String>, DpfError> {
-        Ok(self
-            .get(name, namespace)
-            .await?
-            .and_then(|config| config.status)
-            .and_then(|status| status.version))
-    }
+    /// Read the installed `status.version`. A missing resource or version is an error.
+    async fn get_version(&self, name: &str, namespace: &str) -> Result<String, DpfError>;
 
     async fn patch(
         &self,

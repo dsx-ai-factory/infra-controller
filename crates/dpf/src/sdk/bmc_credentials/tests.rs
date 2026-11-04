@@ -30,7 +30,7 @@ fn fixture() -> (DpfSdk<KubeRepository>, ApiHandle) {
         repo: Arc::new(KubeRepository::with_client(Client::new(service, "default"))),
         namespace: NS.to_string(),
         labeler: NoLabels,
-        operator_version: None,
+        operator_version: semver::Version::new(26, 8, 0),
         shared_bmc_password_ready: Arc::new(AtomicBool::new(false)),
         _bmc_refresh_guard: None,
     };
