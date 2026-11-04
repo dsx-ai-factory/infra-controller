@@ -9095,7 +9095,7 @@ paths:
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '409':
-          description: The request conflicts with an existing resource or operation, such as an already assigned machine or a power operation in progress for the VPC.
+          description: The request conflicts with an existing resource or operation, such as an already assigned machine, a power operation in progress for the VPC or an `externalValidationRequestId` reused with different inputs.
           content:
             application/json:
               schema:
@@ -9159,6 +9159,11 @@ paths:
         is absent or its outcome is unclear, ask the Site operator to verify the Core
         allocation and workflow before creating again. An empty REST result does not
         rule out a Site allocation. Follow the same checks after a lost HTTP response.
+
+        With `externalValidationRequestId`, retry an uncertain outcome or a lost HTTP
+        response as the identical request with the same ID instead. The retry returns
+        the original Instance once allocation finishes, while reusing the ID with
+        different inputs returns HTTP 409.
       requestBody:
         content:
           application/json:
@@ -12748,7 +12753,7 @@ paths:
       description: |-
         Start an external validation attempt for a Machine with an active external validation hold. Then create the validation Instance with [Create an Instance](#tag/Instance/operation/create-instance), passing the attempt `id` as `externalValidationRequestId`.
 
-        Persist `idempotencyKey` before calling. Replaying the same key returns the attempt it started, even after that attempt has finished. A new key is rejected with `409` while another attempt is open, and `data.id` in the error is the ID of the open attempt.
+        Persist `idempotencyKey` before calling. Replaying the same key returns the attempt it started, even after that attempt has finished. A new key is rejected with `409` while another attempt is open, with the ID of the open attempt in `data.id`. Reusing a key for a different Machine also returns `409`, with `data` set to `null`.
 
         A Site without external validation returns `501`.
 
@@ -12779,8 +12784,23 @@ paths:
         '404':
           $ref: '#/components/responses/NotFoundError'
         '409':
-          description: Another attempt is open for the Machine. `data.id` is the ID of the open attempt.
-          $ref: '#/components/responses/ConflictError'
+          description: Another attempt is open for the Machine, with its ID in `data.id`. Also returned with `data` set to `null` when `idempotencyKey` was used before for a different Machine.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NICoAPIError'
+              examples:
+                attempt-open:
+                  value:
+                    source: nico
+                    message: Another external validation attempt is open for the Machine
+                    data:
+                      id: b7e4c9a1-2f3d-4c8e-a6b5-1d9f0e7c3a24
+                idempotency-key-reused:
+                  value:
+                    source: nico
+                    message: idempotencyKey was already used to start an attempt on a different Machine
+                    data: null
         '412':
           description: No hold on the Machine can take a new attempt. The hold may be cleared, the Machine may not be `Ready` or may be assigned, a health alert such as `RequestRepair` may block allocation, or the previous attempt may still be awaiting cleanup or recovery.
           $ref: '#/components/responses/GenericHttpError'
@@ -12844,6 +12864,18 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/MachineExternalValidationAttempt'
+              examples:
+                passed:
+                  value:
+                    id: b7e4c9a1-2f3d-4c8e-a6b5-1d9f0e7c3a24
+                    holdId: 3c1f6a2e-8b4d-4e7a-9f15-6d2c8b0a4e93
+                    idempotencyKey: 0d5a8e3c-7b1f-4a92-8c6e-4f2b9d1a7e58
+                    status: Passed
+                    allocationStatus: Created
+                    instanceId: 497f6eca-6276-4993-bfeb-53cbbbba6f08
+                    details: 'Validation run 4821: all checks passed'
+                    created: '2026-10-20T18:05:00Z'
+                    closed: '2026-10-21T02:40:00Z'
         '400':
           $ref: '#/components/responses/ValidationError'
         '403':
@@ -12853,6 +12885,9 @@ paths:
         '409':
           description: The attempt is no longer current, a different result was already recorded, or `instanceId` is not the attempt's validation Instance.
           $ref: '#/components/responses/ConflictError'
+        '412':
+          description: The validation Instance for the attempt has not been created, so its `allocationStatus` is not `Created`.
+          $ref: '#/components/responses/GenericHttpError'
         '500':
           $ref: '#/components/responses/GenericHttpError'
         '501':
@@ -12911,6 +12946,18 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/MachineExternalValidationAttempt'
+              examples:
+                cancelled:
+                  value:
+                    id: b7e4c9a1-2f3d-4c8e-a6b5-1d9f0e7c3a24
+                    holdId: 3c1f6a2e-8b4d-4e7a-9f15-6d2c8b0a4e93
+                    idempotencyKey: 0d5a8e3c-7b1f-4a92-8c6e-4f2b9d1a7e58
+                    status: Cancelled
+                    allocationStatus: NotStarted
+                    instanceId: null
+                    details: Validation run 4821 was aborted before allocation
+                    created: '2026-10-20T18:05:00Z'
+                    closed: '2026-10-20T18:20:00Z'
         '400':
           $ref: '#/components/responses/ValidationError'
         '403':
@@ -21119,7 +21166,7 @@ components:
             - Passed
             - Failed
             - Cancelled
-          description: Result of the external validation. Only `Passed` lets NICo remove the hold.
+          description: Result of the external validation. Only `Passed` can make the hold `Satisfied`.
         instanceId:
           type: string
           format: uuid

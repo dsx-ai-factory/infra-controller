@@ -24,7 +24,7 @@ var _ MappedNullable = &MachineExternalValidationAttemptCompleteRequest{}
 
 // MachineExternalValidationAttemptCompleteRequest Request to record the result of an external validation attempt
 type MachineExternalValidationAttemptCompleteRequest struct {
-	// Result of the external validation. Only `Passed` lets NICo remove the hold.
+	// Result of the external validation. Only `Passed` can make the hold `Satisfied`.
 	Outcome string `json:"outcome"`
 	// ID of the validation Instance created for the attempt.
 	InstanceId string `json:"instanceId"`

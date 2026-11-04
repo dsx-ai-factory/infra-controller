@@ -408,6 +408,17 @@ func (a *MachineAPIService) CompleteMachineExternalValidationAttemptExecute(r Ap
 			newErr.model = v
 			return localVarReturnValue, localVarHTTPResponse, newErr
 		}
+		if localVarHTTPResponse.StatusCode == 412 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
 		if localVarHTTPResponse.StatusCode == 500 {
 			var v NICoAPIError
 			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
@@ -4680,7 +4691,7 @@ StartMachineExternalValidationAttempt Start a Machine external validation attemp
 
 Start an external validation attempt for a Machine with an active external validation hold. Then create the validation Instance with [Create an Instance](#tag/Instance/operation/create-instance), passing the attempt `id` as `externalValidationRequestId`.
 
-Persist `idempotencyKey` before calling. Replaying the same key returns the attempt it started, even after that attempt has finished. A new key is rejected with `409` while another attempt is open, and `data.id` in the error is the ID of the open attempt.
+Persist `idempotencyKey` before calling. Replaying the same key returns the attempt it started, even after that attempt has finished. A new key is rejected with `409` while another attempt is open, with the ID of the open attempt in `data.id`. Reusing a key for a different Machine also returns `409`, with `data` set to `null`.
 
 A Site without external validation returns `501`.
 

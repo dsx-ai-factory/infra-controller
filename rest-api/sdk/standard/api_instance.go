@@ -240,6 +240,11 @@ is absent or its outcome is unclear, ask the Site operator to verify the Core
 allocation and workflow before creating again. An empty REST result does not
 rule out a Site allocation. Follow the same checks after a lost HTTP response.
 
+With `externalValidationRequestId`, retry an uncertain outcome or a lost HTTP
+response as the identical request with the same ID instead. The retry returns
+the original Instance once allocation finishes, while reusing the ID with
+different inputs returns HTTP 409.
+
 	@param ctx context.Context - for authentication, logging, cancellation, deadlines, tracing, etc. Passed from http.Request or context.Background().
 	@param org Name of the Org
 	@return ApiCreateInstanceRequest
