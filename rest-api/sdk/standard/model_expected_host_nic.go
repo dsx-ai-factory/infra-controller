@@ -24,8 +24,8 @@ var _ MappedNullable = &ExpectedHostNic{}
 
 // ExpectedHostNic Declared host interface on an Expected Machine (legacy REST field; prefer interfaces).
 type ExpectedHostNic struct {
-	// MAC address of the host interface
-	MacAddress string `json:"macAddress" validate:"regexp=^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$"`
+	// MAC address of the host interface. May be empty for Astra hosts that identify interfaces by name elsewhere.
+	MacAddress string `json:"macAddress" validate:"regexp=^$|^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$"`
 	// When true, marks the host's primary (boot) interface. At most one entry may be true.
 	Primary NullableBool `json:"primary,omitempty"`
 	// Optional network segment type guard for DHCP and fixed-address allocation.

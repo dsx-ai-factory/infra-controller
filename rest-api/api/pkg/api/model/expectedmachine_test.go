@@ -348,6 +348,19 @@ func TestAPIExpectedMachineCreateRequest_Validate(t *testing.T) {
 			expectErr: false,
 		},
 		{
+			desc: "ok with empty hostNic macAddress for Astra legacy",
+			obj: APIExpectedMachineCreateRequest{
+				BmcMacAddress:       "00:11:22:33:44:55",
+				DefaultBmcUsername:  &validUsername,
+				DefaultBmcPassword:  &validPassword,
+				ChassisSerialNumber: validChassisSerial,
+				HostNics: []APIExpectedHostNic{
+					{MacAddress: "", Primary: cutil.GetPtr(true), NetworkSegmentType: cutil.GetPtr("hostInband")},
+				},
+			},
+			expectErr: false,
+		},
+		{
 			desc: "error when dpuPolicy is invalid",
 			obj: APIExpectedMachineCreateRequest{
 				BmcMacAddress:       "00:11:22:33:44:55",
@@ -793,6 +806,37 @@ func TestNewAPIExpectedMachine(t *testing.T) {
 			assert.Equal(t, "null", string(fields["bmcRetainCredentials"]))
 		})
 	}
+}
+
+func TestNewAPIExpectedMachine_ProjectsLegacyHostNics(t *testing.T) {
+	mac := "02:00:00:00:00:09"
+	dbEM := &cdbm.ExpectedMachine{
+		BmcMacAddress:       "00:11:22:33:44:55",
+		ChassisSerialNumber: "CHASSIS123",
+		HostNics: cdbm.ExpectedHostNics{
+			{
+				MacAddress:         mac,
+				Primary:            cutil.GetPtr(true),
+				NetworkSegmentType: cutil.GetPtr("hostInband"),
+				Role:               cutil.GetPtr("host"),
+				IPAllocation:       cutil.GetPtr("dynamic"),
+			},
+		},
+		Created: cdb.GetCurTime(),
+		Updated: cdb.GetCurTime(),
+	}
+
+	got := NewAPIExpectedMachine(dbEM)
+	require.Len(t, got.Interfaces, 1)
+	require.NotNil(t, got.Interfaces[0].Identifier)
+	require.NotNil(t, got.Interfaces[0].Identifier.MacAddress)
+	assert.Equal(t, mac, string(*got.Interfaces[0].Identifier.MacAddress))
+	assert.Equal(t, cutil.GetPtr(true), got.Interfaces[0].Primary)
+	if assert.NotNil(t, got.Interfaces[0].NetworkSegmentType) {
+		assert.Equal(t, cdbm.ExpectedInterfaceNetworkSegmentTypeHostInband, *got.Interfaces[0].NetworkSegmentType)
+	}
+	require.Len(t, got.HostNics, 1)
+	assert.Equal(t, mac, got.HostNics[0].MacAddress)
 }
 
 func TestAPIHostLifecycleProfile_Conversions(t *testing.T) {

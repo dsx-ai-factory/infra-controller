@@ -2196,6 +2196,80 @@ func TestExpectedMachineSQLDAO_UpdateMultiple_BmcIpAddress(t *testing.T) {
 	assert.Equal(t, &preservedIPName, stored.Name)
 }
 
+// TestExpectedMachineSQLDAO_UpdateMultiple_ZeroDpuRESTFields guards against zero-DPU
+// REST columns supplied for one row clearing values omitted by another row.
+func TestExpectedMachineSQLDAO_UpdateMultiple_ZeroDpuRESTFields(t *testing.T) {
+	ctx := context.Background()
+	dbSession := testInitDB(t)
+	defer dbSession.Close()
+	testExpectedMachineSetupSchema(t, dbSession)
+
+	user := TestBuildUser(t, dbSession, "test-user", "test-org", []string{"admin"})
+	ip := TestBuildInfrastructureProvider(t, dbSession, "test-provider", "test-org", user)
+	site := TestBuildSite(t, dbSession, ip, "test-site", user)
+	emsd := NewExpectedMachineDAO(dbSession)
+
+	originalPolicy := ExpectedMachineDpuPolicyManage
+	preservedPolicy := ExpectedMachineDpuPolicyNic
+	updatedPolicy := ExpectedMachineDpuPolicyIgnore
+	originalRetain := true
+	preservedRetain := false
+	updatedRetain := true
+	originalHostNics := ExpectedHostNics{{MacAddress: "aa:bb:cc:dd:ee:01"}}
+	preservedHostNics := ExpectedHostNics{{MacAddress: "aa:bb:cc:dd:ee:02"}}
+	updatedHostNics := ExpectedHostNics{{MacAddress: "aa:bb:cc:dd:ee:03"}}
+
+	emUpdated, err := emsd.Create(ctx, nil, ExpectedMachineCreateInput{
+		ExpectedMachineID:      uuid.New(),
+		SiteID:                 site.ID,
+		BmcMacAddress:          "00:1B:44:11:3A:F6",
+		ChassisSerialNumber:    "CHASSIS-ZERO-DPU-A",
+		DpuPolicy:              &originalPolicy,
+		BmcRetainCredentials:   &originalRetain,
+		HostNics:               originalHostNics,
+		CreatedBy:              user.ID,
+	})
+	require.NoError(t, err)
+	emPreserved, err := emsd.Create(ctx, nil, ExpectedMachineCreateInput{
+		ExpectedMachineID:      uuid.New(),
+		SiteID:                 site.ID,
+		BmcMacAddress:          "00:1B:44:11:3A:F7",
+		ChassisSerialNumber:    "CHASSIS-ZERO-DPU-B",
+		DpuPolicy:              &preservedPolicy,
+		BmcRetainCredentials:   &preservedRetain,
+		HostNics:               preservedHostNics,
+		CreatedBy:              user.ID,
+	})
+	require.NoError(t, err)
+
+	got, err := emsd.UpdateMultiple(ctx, nil, []ExpectedMachineUpdateInput{
+		{
+			ExpectedMachineID:      emUpdated.ID,
+			DpuPolicy:              &updatedPolicy,
+			BmcRetainCredentials:   &updatedRetain,
+			HostNics:               &updatedHostNics,
+		},
+		{
+			ExpectedMachineID: emPreserved.ID,
+		},
+	})
+	require.NoError(t, err)
+	if assert.Len(t, got, 2) {
+		assert.Equal(t, &updatedPolicy, got[0].DpuPolicy)
+		assert.Equal(t, &updatedRetain, got[0].BmcRetainCredentials)
+		assert.Equal(t, updatedHostNics, got[0].HostNics)
+		assert.Equal(t, &preservedPolicy, got[1].DpuPolicy)
+		assert.Equal(t, &preservedRetain, got[1].BmcRetainCredentials)
+		assert.Equal(t, preservedHostNics, got[1].HostNics)
+	}
+
+	stored, err := emsd.Get(ctx, nil, emPreserved.ID, nil, false)
+	require.NoError(t, err)
+	assert.Equal(t, &preservedPolicy, stored.DpuPolicy)
+	assert.Equal(t, &preservedRetain, stored.BmcRetainCredentials)
+	assert.Equal(t, preservedHostNics, stored.HostNics)
+}
+
 // TestExpectedMachineSQLDAO_UpdateMultiple_HostLifecycleProfile guards against a
 // mixed batch clearing host_lifecycle_profile on rows that did not set it.
 // Because the shared bulk UPDATE applies one column list to every row, the field

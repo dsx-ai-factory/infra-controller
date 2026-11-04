@@ -373,6 +373,83 @@ func newAPIExpectedHostNics(nics cdbm.ExpectedHostNics) []APIExpectedHostNic {
 	return out
 }
 
+func hostNicNetworkSegmentToInterface(segmentType string) *cdbm.ExpectedInterfaceNetworkSegmentType {
+	switch strings.ToLower(segmentType) {
+	case "tenant":
+		v := cdbm.ExpectedInterfaceNetworkSegmentTypeTenant
+		return &v
+	case "admin":
+		v := cdbm.ExpectedInterfaceNetworkSegmentTypeAdmin
+		return &v
+	case "underlay":
+		v := cdbm.ExpectedInterfaceNetworkSegmentTypeUnderlay
+		return &v
+	case "hostinband", "host_inband":
+		v := cdbm.ExpectedInterfaceNetworkSegmentTypeHostInband
+		return &v
+	default:
+		return nil
+	}
+}
+
+func hostNicRoleToInterface(role string) *cdbm.ExpectedInterfaceRole {
+	switch role {
+	case "host":
+		v := cdbm.ExpectedInterfaceRoleHost
+		return &v
+	case "dpuOs", "dpu_os":
+		v := cdbm.ExpectedInterfaceRoleDpuOs
+		return &v
+	case "dpuBmc", "dpu_bmc":
+		v := cdbm.ExpectedInterfaceRoleDpuBmc
+		return &v
+	case "hostBmc", "host_bmc":
+		v := cdbm.ExpectedInterfaceRoleHostBmc
+		return &v
+	default:
+		return nil
+	}
+}
+
+func hostNicIPAllocationToInterface(allocation string) *cdbm.ExpectedInterfaceIPAllocation {
+	switch allocation {
+	case "dynamic":
+		v := cdbm.ExpectedInterfaceIPAllocationDynamic
+		return &v
+	case "fixed":
+		v := cdbm.ExpectedInterfaceIPAllocationFixed
+		return &v
+	case "retained":
+		v := cdbm.ExpectedInterfaceIPAllocationRetained
+		return &v
+	default:
+		return nil
+	}
+}
+
+func expectedMachineInterfaceFromHostNic(nic cdbm.ExpectedHostNic) cdbm.ExpectedMachineInterface {
+	result := cdbm.ExpectedMachineInterface{
+		NicType:      nic.NicType,
+		FixedIP:      nic.FixedIP,
+		FixedMask:    nic.FixedMask,
+		FixedGateway: nic.FixedGateway,
+		Primary:      nic.Primary,
+	}
+	if nic.MacAddress != "" {
+		result.MacAddress = cutil.GetPtr(nic.MacAddress)
+	}
+	if nic.NetworkSegmentType != nil && *nic.NetworkSegmentType != "" {
+		result.NetworkSegmentType = hostNicNetworkSegmentToInterface(*nic.NetworkSegmentType)
+	}
+	if nic.Role != nil && *nic.Role != "" {
+		result.Role = hostNicRoleToInterface(*nic.Role)
+	}
+	if nic.IPAllocation != nil && *nic.IPAllocation != "" {
+		result.IPAllocation = hostNicIPAllocationToInterface(*nic.IPAllocation)
+	}
+	return result
+}
+
 // ExpectedHostNicsToDBPtr converts an optional API host NIC list for PATCH updates.
 func ExpectedHostNicsToDBPtr(nics *[]APIExpectedHostNic) *cdbm.ExpectedHostNics {
 	if nics == nil {
@@ -416,8 +493,7 @@ func validateExpectedHostNics(nics []APIExpectedHostNic) error {
 		segmentTypes := []any{"tenant", "admin", "underlay", "hostInband", "host_inband"}
 		err := validation.ValidateStruct(nic,
 			validation.Field(&nic.MacAddress,
-				validation.Required.Error(validationErrorValueRequired),
-				validationis.MAC),
+				validation.When(nic.MacAddress != "", validationis.MAC)),
 			validation.Field(&nic.NetworkSegmentType,
 				validation.NilOrNotEmpty.Error("networkSegmentType cannot be empty"),
 				validation.When(nic.NetworkSegmentType != nil && *nic.NetworkSegmentType != "",
@@ -845,9 +921,15 @@ func NewAPIExpectedMachine(dibp *cdbm.ExpectedMachine) *APIExpectedMachine {
 	fallbackDPUSerialNumbers := make([]string, len(dibp.FallbackDpuSerialNumbers))
 	copy(fallbackDPUSerialNumbers, dibp.FallbackDpuSerialNumbers)
 
-	interfaces := make([]APIExpectedMachineInterface, 0, len(dibp.Interfaces))
+	interfaces := make([]APIExpectedMachineInterface, 0, len(dibp.Interfaces)+len(dibp.HostNics))
 	for _, expectedInterface := range dibp.Interfaces {
 		interfaces = append(interfaces, NewAPIExpectedMachineInterface(expectedInterface))
+	}
+	if len(dibp.Interfaces) == 0 && len(dibp.HostNics) > 0 {
+		interfaces = interfaces[:0]
+		for _, hostNic := range dibp.HostNics {
+			interfaces = append(interfaces, NewAPIExpectedMachineInterface(expectedMachineInterfaceFromHostNic(hostNic)))
+		}
 	}
 	apiem := &APIExpectedMachine{
 		ID:                       dibp.ID,

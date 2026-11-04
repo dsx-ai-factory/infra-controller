@@ -894,6 +894,10 @@ func (emsd ExpectedMachineSQLDAO) UpdateMultiple(ctx context.Context, tx *db.Tx,
 	bmcIPUpdates := make([]*ExpectedMachine, 0, len(inputs))
 	// Server names have the same omission semantics: update only supplied rows.
 	serverNameUpdates := make([]*ExpectedMachine, 0, len(inputs))
+	// Zero-DPU REST fields use the same per-row omission semantics as BMC IP.
+	dpuPolicyUpdates := make([]*ExpectedMachine, 0, len(inputs))
+	bmcRetainCredentialsUpdates := make([]*ExpectedMachine, 0, len(inputs))
+	hostNicsUpdates := make([]*ExpectedMachine, 0, len(inputs))
 	// host_lifecycle_profile is applied in its own bulk update scoped to only the
 	// rows that set it (see below), so rows that omit it keep their existing value.
 	hlpUpdates := make([]*ExpectedMachine, 0, len(inputs))
@@ -980,16 +984,22 @@ func (emsd ExpectedMachineSQLDAO) UpdateMultiple(ctx context.Context, tx *db.Tx,
 			columnsSet["is_dpf_enabled"] = true
 		}
 		if input.DpuPolicy != nil {
-			em.DpuPolicy = input.DpuPolicy
-			columnsSet["dpu_policy"] = true
+			dpuPolicyUpdates = append(dpuPolicyUpdates, &ExpectedMachine{
+				ID:        input.ExpectedMachineID,
+				DpuPolicy: input.DpuPolicy,
+			})
 		}
 		if input.BmcRetainCredentials != nil {
-			em.BmcRetainCredentials = input.BmcRetainCredentials
-			columnsSet["bmc_retain_credentials"] = true
+			bmcRetainCredentialsUpdates = append(bmcRetainCredentialsUpdates, &ExpectedMachine{
+				ID:                   input.ExpectedMachineID,
+				BmcRetainCredentials: input.BmcRetainCredentials,
+			})
 		}
 		if input.HostNics != nil {
-			em.HostNics = *input.HostNics
-			columnsSet["host_nics"] = true
+			hostNicsUpdates = append(hostNicsUpdates, &ExpectedMachine{
+				ID:       input.ExpectedMachineID,
+				HostNics: *input.HostNics,
+			})
 		}
 
 		expectedMachines = append(expectedMachines, em)
@@ -1026,6 +1036,15 @@ func (emsd ExpectedMachineSQLDAO) UpdateMultiple(ctx context.Context, tx *db.Tx,
 		if len(serverNameUpdates) > 0 {
 			traceColumns = append(traceColumns, "server_name")
 		}
+		if len(dpuPolicyUpdates) > 0 {
+			traceColumns = append(traceColumns, "dpu_policy")
+		}
+		if len(bmcRetainCredentialsUpdates) > 0 {
+			traceColumns = append(traceColumns, "bmc_retain_credentials")
+		}
+		if len(hostNicsUpdates) > 0 {
+			traceColumns = append(traceColumns, "host_nics")
+		}
 		if len(hlpUpdates) > 0 {
 			traceColumns = append(traceColumns, "host_lifecycle_profile")
 		}
@@ -1061,6 +1080,39 @@ func (emsd ExpectedMachineSQLDAO) UpdateMultiple(ctx context.Context, tx *db.Tx,
 		_, err = db.GetIDB(tx, emsd.dbSession).NewUpdate().
 			Model(&serverNameUpdates).
 			Column("server_name").
+			Bulk().
+			Exec(ctx)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	if len(dpuPolicyUpdates) > 0 {
+		_, err = db.GetIDB(tx, emsd.dbSession).NewUpdate().
+			Model(&dpuPolicyUpdates).
+			Column("dpu_policy").
+			Bulk().
+			Exec(ctx)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	if len(bmcRetainCredentialsUpdates) > 0 {
+		_, err = db.GetIDB(tx, emsd.dbSession).NewUpdate().
+			Model(&bmcRetainCredentialsUpdates).
+			Column("bmc_retain_credentials").
+			Bulk().
+			Exec(ctx)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	if len(hostNicsUpdates) > 0 {
+		_, err = db.GetIDB(tx, emsd.dbSession).NewUpdate().
+			Model(&hostNicsUpdates).
+			Column("host_nics").
 			Bulk().
 			Exec(ctx)
 		if err != nil {
