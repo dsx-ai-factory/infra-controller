@@ -257,33 +257,14 @@ The route precedence is:
 For the packaged CX7 Scout route on DGX H100, refer to
 [ConnectX-7 firmware configuration](configuration.md#connectx-7-infiniband-firmware).
 
-Starting with NICo 2.5, every new Scout firmware task requires acknowledgement;
-no configuration setting is needed. The first upgrade from an older version
-requires a one-time API maintenance window with no old and new Core processes
-running together. Follow the
-[NICo 2.5 rollout procedure](../../manuals/upgrade.md#nico-25-scout-firmware-acknowledgement),
-including updating the Scouts that will receive firmware tasks.
+Scout tasks allow 30 minutes for delivery, inferred from Scout contact. The
+completion budget starts at inferred delivery and covers download and execution
+timeouts plus 30 minutes for reporting, capped at five hours. Later polls do not
+extend it. A missing completion report leaves the execution outcome unknown.
 
-New Scout tasks have a separate 30-minute delivery deadline. Scout
-must advertise
-`supports_firmware_upgrade_ack = true` and successfully acknowledge the task before
-downloading or running it. The completion budget starts at that first
-acknowledgement: script download time, the download timeout for each artifact,
-the script execution timeout, and 30 minutes of reporting slack, capped at five
-hours. Polling and repeated acknowledgements do not extend either deadline.
-Tasks persisted without acknowledgement metadata retain their original deadline
-and delivery behavior. Scouts without acknowledgement support cannot receive new tasks
-that require acknowledgement. Do not reintroduce an older Core process after
-this upgrade: it cannot preserve the new acknowledgement contract. NICo supports
-forward upgrades, not downgrades; see the
-[release policy](https://github.com/dsx-ai-factory/infra-controller/blob/main/RELEASE.md#upgrade-and-downgrade-support).
-
-An expired delivery deadline means Scout did not accept the task. After
-acceptance, a missing completion report means the execution outcome is unknown;
-it does not prove the script timed out. Scout reports an execution timeout when
-its script exceeds the configured limit. While the same Scout process remains
-running, redelivery of a completed task retries its report without running the
-script again. This completion record does not survive a Scout restart.
+Scout caches completed results until restart, so a repeated task retries the
+report without rerunning the script. Older Scouts may rerun tasks after a lost
+report.
 
 All successful routes eventually return to component selection. Scout and
 Redfish updates first pass through NICo's activation and inventory-verification
@@ -349,7 +330,7 @@ The principal host firmware substates are:
 |---|---|
 | `CheckingFirmwareV2`, `CheckingFirmwareRepeatV2` | Refresh inventory and select the next mismatched component. |
 | `WaitingForManualUpgrade` | Wait for completion of the approved platform procedure. |
-| `WaitingForScoutUpgrade` | Wait for Scout to execute the packaged task and report its result. New tasks first wait for acceptance, with separate delivery and completion deadlines; persisted legacy tasks keep their original deadline. |
+| `WaitingForScoutUpgrade` | Wait for Scout to execute the task and report its result. |
 | `WaitingForScript` | Wait for the legacy Core-local script. |
 | `WaitingForUpload` | A Redfish upload is running asynchronously. |
 | `WaitingForFirmwareUpgrade` | The upload completed and NICo is polling the Redfish task. |

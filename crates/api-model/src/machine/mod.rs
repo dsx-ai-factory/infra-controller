@@ -2249,12 +2249,11 @@ pub enum HostReprovisionState {
         #[serde(default)]
         power_drains_needed: Option<u32>,
         started_at: DateTime<Utc>,
-        /// Completion deadline. For acknowledged tasks this is shifted by the
-        /// delivery wait when Scout accepts; it is inactive before acceptance.
+        /// Completion deadline, shifted once by the delivery wait inferred from Scout contact.
         deadline: DateTime<Utc>,
-        /// Absent on tasks created before Scout acknowledgement was supported.
+        /// Scout contact used to infer delivery; absent until delivery is recorded.
         #[serde(default)]
-        delivery: Option<ScoutUpgradeDelivery>,
+        delivered_at: Option<DateTime<Utc>>,
         /// Serialized FirmwareUpgradeTask JSON for the scout
         task_json: String,
         #[serde(default)]
@@ -2269,15 +2268,6 @@ pub struct ScoutUpgradeResult {
     pub stdout: String,
     pub stderr: String,
     pub error: String,
-}
-
-/// Task-specific delivery tracking, independent of the execution budget.
-#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
-pub struct ScoutUpgradeDelivery {
-    /// Latest time at which Scout may first accept the task.
-    pub deadline: DateTime<Utc>,
-    /// First successful acknowledgement; retries preserve this timestamp.
-    pub accepted_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -4070,7 +4060,7 @@ mod tests {
     };
 
     #[test]
-    fn scout_upgrade_pre_acknowledgement_state_remains_readable() {
+    fn scout_upgrade_state_without_delivery_timestamp_remains_readable() {
         let fixture = r#"{"waitingforscoutupgrade":{
             "upgrade_task_id":"legacy-task","firmware_type":"bmc",
             "final_version":"1.2.3","started_at":"2026-10-28T12:00:00Z",
@@ -4078,12 +4068,14 @@ mod tests {
         }}"#;
         let state: HostReprovisionState = serde_json::from_str(fixture).unwrap();
         let HostReprovisionState::WaitingForScoutUpgrade {
-            delivery, deadline, ..
+            delivered_at,
+            deadline,
+            ..
         } = &state
         else {
             panic!("unexpected state")
         };
-        assert!(delivery.is_none());
+        assert!(delivered_at.is_none());
         assert_eq!(
             *deadline,
             "2026-10-28T13:00:00Z".parse::<DateTime<Utc>>().unwrap()

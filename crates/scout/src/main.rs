@@ -40,7 +40,10 @@ use rpc::protos::mlx_device::{
     LockStatus, MlxObservation, MlxObservationReport, PublishMlxObservationReportRequest,
     PublishMlxObservationReportResponse,
 };
-use rpc::{ForgeScoutErrorReport, forge as rpc_forge, forge_agent_control_response as fac};
+use rpc::{
+    ForgeScoutErrorReport, forge as rpc_forge, forge_agent_control_response as fac,
+    scout_firmware_upgrade as sfu,
+};
 use scout::{CarbideClientError, CarbideClientResult};
 use tokio::sync::RwLock;
 use tokio::task::JoinSet;
@@ -75,9 +78,6 @@ struct DevEnv {
 }
 static IN_QEMU_VM: Lazy<RwLock<DevEnv>> = Lazy::new(|| RwLock::new(DevEnv { in_qemu: false }));
 const POLL_INTERVAL: Duration = Duration::from_secs(60);
-// Bound client setup (including its Version probe) and acknowledgement together
-// to one polling interval, leaving retries within Core's 30-minute delivery window.
-const FIRMWARE_ACKNOWLEDGEMENT_TIMEOUT: Duration = POLL_INTERVAL;
 const LLDP_COLLECTION_INTERVAL: Duration = Duration::from_secs(60);
 const REBOOT_COMPLETED_PATH: &str = "/tmp/reboot_completed";
 const MAX_FIRMWARE_UPGRADE_STATUS_FIELD_SIZE: usize = 1500;
@@ -569,7 +569,7 @@ async fn handle_action(
             handle_firmware_upgrade_action(
                 config,
                 machine_id,
-                firmware_upgrade,
+                firmware_upgrade.task,
                 firmware_upgrade_state,
             )
             .await?;
@@ -581,10 +581,10 @@ async fn handle_action(
 async fn handle_firmware_upgrade_action(
     config: &Options,
     machine_id: &MachineId,
-    action: fac::FirmwareUpgrade,
+    task: Option<sfu::ScoutFirmwareUpgradeTask>,
     state: &mut firmware_upgrade::ScoutFirmwareUpgradeState,
 ) -> Result<(), CarbideClientError> {
-    let task = action.task.ok_or_else(|| {
+    let task = task.ok_or_else(|| {
         CarbideClientError::GenericError("firmware upgrade action missing task".to_string())
     })?;
 
@@ -598,33 +598,7 @@ async fn handle_firmware_upgrade_action(
         "[firmware_upgrade] received upgrade task",
     );
 
-    let result = state
-        .run(
-            &http_client,
-            &task,
-            action.requires_acknowledgement,
-            async {
-                tokio::time::timeout(FIRMWARE_ACKNOWLEDGEMENT_TIMEOUT, async {
-                    let mut client = client::create_forge_client(config).await?;
-                    client
-                        .acknowledge_scout_firmware_upgrade(
-                            rpc_forge::ScoutFirmwareUpgradeAcknowledgement {
-                                machine_id: Some(machine_id.try_into()?),
-                                upgrade_task_id: task.upgrade_task_id.clone(),
-                            },
-                        )
-                        .await?;
-                    Ok(())
-                })
-                .await
-                .map_err(|_| {
-                    CarbideClientError::TonicStatusError(tonic::Status::deadline_exceeded(
-                        "firmware task acknowledgement attempt timed out",
-                    ))
-                })?
-            },
-        )
-        .await?;
+    let result = state.run(&http_client, &task).await?;
 
     tracing::info!(
         success = result.success,
@@ -1232,14 +1206,6 @@ async fn report_scout_error(
     Ok(())
 }
 
-/// Advertise acknowledgement support with this Scout's machine identity.
-fn agent_control_request(machine_id: &MachineId) -> rpc_forge::ForgeAgentControlRequest {
-    rpc_forge::ForgeAgentControlRequest {
-        machine_id: Some(*machine_id),
-        supports_firmware_upgrade_ack: true,
-    }
-}
-
 /// Ask API if we need to do anything after discovery.
 async fn query_api(
     config: &Options,
@@ -1252,7 +1218,10 @@ async fn query_api(
         query_attempt,
         "Sending ForgeAgentControlRequest",
     );
-    let request = tonic::Request::new(agent_control_request(machine_id));
+    let query = rpc_forge::ForgeAgentControlRequest {
+        machine_id: Some(*machine_id),
+    };
+    let request = tonic::Request::new(query);
     let mut client = client::create_forge_client(config).await?;
     let response = client.forge_agent_control(request).await?.into_inner();
     let action_str = response
@@ -1423,23 +1392,6 @@ mod tests {
     use clap::Parser;
 
     use super::*;
-
-    /// Core must see acknowledgement support on this Scout's control request
-    /// before it can deliver host firmware tasks requiring acknowledgement.
-    #[test]
-    fn agent_control_request_advertises_firmware_acknowledgement_with_machine_identity() {
-        let machine_id = "fm100ht038bg3qsho433vkg684heguv282qaggmrsh2ugn1qk096n2c6hcg"
-            .parse()
-            .unwrap();
-
-        assert_eq!(
-            agent_control_request(&machine_id),
-            rpc_forge::ForgeAgentControlRequest {
-                machine_id: Some(machine_id),
-                supports_firmware_upgrade_ack: true,
-            }
-        );
-    }
 
     /// Invalid local configuration still produces a correlated error for every
     /// generic command. Legacy work defers without discovery, and neither

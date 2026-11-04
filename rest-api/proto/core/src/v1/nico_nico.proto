@@ -504,9 +504,6 @@ service Forge {
   rpc MarkManualFirmwareUpgradeComplete(common.MachineId) returns (google.protobuf.Empty);
   // Report the result of a scout-based firmware upgrade
   rpc ReportScoutFirmwareUpgradeStatus(ScoutFirmwareUpgradeStatusRequest) returns (google.protobuf.Empty);
-  // Persist task acceptance before Scout downloads or executes firmware work.
-  // Repeated acknowledgement of the current task does not extend its deadline.
-  rpc AcknowledgeScoutFirmwareUpgrade(ScoutFirmwareUpgradeAcknowledgement) returns (google.protobuf.Empty);
 
   rpc GetDpuInfoList(GetDpuInfoListRequest) returns (GetDpuInfoListResponse);
 
@@ -6204,9 +6201,6 @@ message ForgeAgentControlRequest {
   common.MachineId machine_id = 1;
   reserved 2;
   reserved "capabilities";
-  // True when Scout acknowledges host firmware tasks before execution and retries
-  // result delivery. Omitted/false prevents delivery of tasks requiring acknowledgement.
-  bool supports_firmware_upgrade_ack = 3;
 }
 
 message ForgeAgentControlResponse {
@@ -6417,9 +6411,6 @@ message ForgeAgentControlResponse {
 
   message FirmwareUpgrade {
     scout_firmware_upgrade.ScoutFirmwareUpgradeTask task = 1;
-    // Requires supports_firmware_upgrade_ack on the control request. Scout must
-    // receive a successful acknowledgement before starting. Omission preserves legacy tasks.
-    bool requires_acknowledgement = 2;
   }
 
 
@@ -7776,14 +7767,6 @@ message MachineRebootCompletedResponse {
 
 message MachineRebootCompletedRequest {
   common.MachineId machine_id = 1;
-}
-
-// Identifies the current host firmware task. A stale ID, expired deadline,
-// completed task, or wrong machine state returns FAILED_PRECONDITION without
-// changing state. A repeated acceptance preserves the original deadline.
-message ScoutFirmwareUpgradeAcknowledgement {
-  common.MachineId machine_id = 1;
-  string upgrade_task_id = 2;
 }
 
 message ScoutFirmwareUpgradeStatusRequest {
