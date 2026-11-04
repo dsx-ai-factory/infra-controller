@@ -10,9 +10,7 @@ component and action
 ## SYNOPSIS
 
 ```text
-nico-admin-cli component-manager get-reset-status <--action>
-[--extended] [--sort-by] [-h|--help]
-<subcommands>
+nico-admin-cli component-manager get-reset-status [OPTIONS] --action <ACTION> <COMMAND>
 ```
 
 ## DESCRIPTION

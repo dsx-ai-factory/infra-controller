@@ -10,9 +10,7 @@ reset status by ID or BMC MAC
 ## SYNOPSIS
 
 ```text
-nico-admin-cli component-manager get-reset-status switch
-[--switch-id] [--mac-address] [--extended]
-[--sort-by] [-h|--help]
+nico-admin-cli component-manager get-reset-status --action <ACTION> switch [OPTIONS] <--switch-id <SWITCH_IDS>...|--mac-address <MAC_ADDRESSES>...>
 ```
 
 ## DESCRIPTION

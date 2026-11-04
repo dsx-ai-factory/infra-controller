@@ -10,9 +10,7 @@ reset directly (SDN reset disrupts fabric traffic)
 ## SYNOPSIS
 
 ```text
-nico-admin-cli component-manager component-reset <--action>
-[--domain-name] [--extended] [--sort-by]
-[-h|--help] <subcommands>
+nico-admin-cli component-manager component-reset [OPTIONS] --action <ACTION> <COMMAND>
 ```
 
 ## DESCRIPTION

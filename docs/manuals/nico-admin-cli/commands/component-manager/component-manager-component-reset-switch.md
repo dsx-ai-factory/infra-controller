@@ -10,9 +10,7 @@ by ID or BMC MAC
 ## SYNOPSIS
 
 ```text
-nico-admin-cli component-manager component-reset switch
-[--switch-id] [--mac-address] [--extended]
-[--sort-by] [-h|--help]
+nico-admin-cli component-manager component-reset --action <ACTION> switch [OPTIONS] <--switch-id <SWITCH_IDS>...|--mac-address <MAC_ADDRESSES>...>
 ```
 
 ## DESCRIPTION
