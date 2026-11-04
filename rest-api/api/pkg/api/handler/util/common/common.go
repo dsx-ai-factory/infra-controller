@@ -748,13 +748,6 @@ func GetAllAllocationConstraintsForInstanceType(ctx context.Context, tx *cdb.Tx,
 	return acs, tot, nil
 }
 
-// RollbackTx delegates deferred cleanup to cdb.RollbackTx.
-// ctx must be the context passed to cdb.BeginTx; it controls cancellation
-// filtering and trace fields on rollback failure logs.
-func RollbackTx(ctx context.Context, tx *cdb.Tx, committed *bool) {
-	cdb.RollbackTx(ctx, tx, committed)
-}
-
 // HandleTxError translates an error returned by cdb.WithTx / cdb.WithTxResult
 // into an Echo API response. The lookups happen in this order:
 //  1. If the error wraps a *cutil.APIError (the closure chose its own
