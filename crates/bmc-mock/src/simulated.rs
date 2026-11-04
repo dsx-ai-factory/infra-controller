@@ -25,8 +25,8 @@ use tokio_util::sync::{CancellationToken, DropGuard};
 
 use crate::actor::{Actor, ActorCallbacks, ActorMailbox, ActorResult};
 use crate::{
-    ActionError, BmcEvent, BmcState, Callbacks, POWER_CYCLE_DELAY, ResourceResetType,
-    validate_power_reset,
+    ActionError, BmcEvent, BmcResetUpdate, BmcState, Callbacks, DeviceEffect, POWER_CYCLE_DELAY,
+    ResourceResetType, validate_power_reset,
 };
 
 /// Owns power transitions for a standalone generated BMC.
@@ -82,6 +82,10 @@ pub struct SimulatedCallbacks {
 enum Message {
     Reset {
         reset_type: ResourceResetType,
+        reply: oneshot::Sender<Result<(), ActionError>>,
+    },
+    ResetBmcToDefaults {
+        update: BmcResetUpdate,
         reply: oneshot::Sender<Result<(), ActionError>>,
     },
     CycleCompleted,
@@ -159,6 +163,11 @@ impl ActorCallbacks<Message> for Backend {
             Message::Reset { reset_type, reply } => {
                 reply.send(self.reset(mailbox, reset_type)).ok();
             }
+            Message::ResetBmcToDefaults { update, reply } => {
+                // Publication belongs to the actor even if the HTTP caller has gone away.
+                // A standalone BMC serves no DHCP, so there is no recovery to admit.
+                reply.send(update.commit().await.map(drop)).ok();
+            }
             Message::CycleCompleted => {
                 self.cycling = false;
                 self.publish(PowerState::On);
@@ -177,6 +186,22 @@ impl Callbacks for SimulatedCallbacks {
         let (reply, response) = oneshot::channel();
         self.mailbox
             .send(Message::Reset { reset_type, reply })
+            .map_err(|error| ActionError::Internal(error.into()))?;
+        response
+            .await
+            .map_err(|error| ActionError::Internal(error.into()))?
+    }
+
+    /// A factory reset changes only BMC state; other effects are not modeled.
+    async fn device_effect(&self, effect: DeviceEffect) -> Result<(), ActionError> {
+        let DeviceEffect::ResetBmcToDefaults(update) = effect else {
+            return Err(ActionError::BadRequest(eyre::eyre!(
+                "bmc-mock: backend does not support device effect {effect:?}"
+            )));
+        };
+        let (reply, response) = oneshot::channel();
+        self.mailbox
+            .send(Message::ResetBmcToDefaults { update, reply })
             .map_err(|error| ActionError::Internal(error.into()))?;
         response
             .await
@@ -294,6 +319,56 @@ mod tests {
             stop.cancel();
             tasks.join_next().await.unwrap().unwrap();
         }
+    }
+
+    #[tokio::test]
+    async fn standalone_manager_reset_to_defaults_restores_factory_accounts() {
+        let stop = CancellationToken::new();
+        let (actor, callbacks) = SimulatedActor::new(stop.clone().drop_guard());
+        let (router, state) = machine_router(
+            &host_info(HardwareType::DellPowerEdgeR750),
+            Arc::new(callbacks),
+            "standalone-reset-defaults".into(),
+            false,
+            MachineRouterOptions::default(),
+        );
+        let state = Arc::new(state);
+        let mut tasks = JoinSet::new();
+        actor.run(&state, &mut tasks, stop.clone());
+        let factory_accounts = state.account_service_state.accounts();
+        let account_id = serde_json::to_value(state.persisted()).unwrap()["accounts"][0]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert!(
+            state
+                .account_service_state
+                .update_password(&account_id, "rotated")
+                .await
+                .unwrap()
+        );
+        assert_ne!(state.account_service_state.accounts(), factory_accounts);
+
+        let target = format!(
+            "{}/Actions/Manager.ResetToDefaults",
+            state.manager.primary_odata_id().unwrap()
+        );
+        let response = router
+            .clone()
+            .oneshot(
+                Request::post(&target)
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"ResetType":"ResetAll"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(state.account_service_state.accounts(), factory_accounts);
+        assert_eq!(state.factory_reset_generation(), 1);
+
+        stop.cancel();
+        tasks.join_next().await.unwrap().unwrap();
     }
 
     #[tokio::test]
