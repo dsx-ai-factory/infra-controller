@@ -810,10 +810,11 @@ fn map_switch_maintenance_operation(action: PowerAction) -> SwitchMaintenanceOpe
 
 fn map_machine_maintenance_operation(action: PowerAction) -> MachineMaintenanceOperation {
     match action {
+        PowerAction::AcPowercycle => MachineMaintenanceOperation::AcPowercycle,
         PowerAction::On => MachineMaintenanceOperation::PowerOn,
         PowerAction::GracefulShutdown => MachineMaintenanceOperation::PowerOff { graceful: true },
         PowerAction::ForceOff => MachineMaintenanceOperation::PowerOff { graceful: false },
-        PowerAction::GracefulRestart | PowerAction::ForceRestart | PowerAction::AcPowercycle => {
+        PowerAction::GracefulRestart | PowerAction::ForceRestart => {
             MachineMaintenanceOperation::Reset
         }
     }
@@ -7535,25 +7536,17 @@ mod tests {
 
     #[test]
     fn map_machine_maintenance_operation_variants() {
-        use model::machine::MachineMaintenanceOperation;
-
-        use super::map_machine_maintenance_operation;
-
-        assert_eq!(
-            map_machine_maintenance_operation(PowerAction::On),
-            MachineMaintenanceOperation::PowerOn,
-        );
-        assert_eq!(
-            map_machine_maintenance_operation(PowerAction::ForceOff),
-            MachineMaintenanceOperation::PowerOff { graceful: false },
-        );
-        assert_eq!(
-            map_machine_maintenance_operation(PowerAction::GracefulShutdown),
-            MachineMaintenanceOperation::PowerOff { graceful: true },
-        );
-        assert_eq!(
-            map_machine_maintenance_operation(PowerAction::ForceRestart),
-            MachineMaintenanceOperation::Reset,
+        carbide_test_support::value_scenarios!(map_machine_maintenance_operation:
+            "power state" {
+                PowerAction::On => MachineMaintenanceOperation::PowerOn,
+                PowerAction::ForceOff => MachineMaintenanceOperation::PowerOff { graceful: false },
+                PowerAction::GracefulShutdown => MachineMaintenanceOperation::PowerOff { graceful: true },
+            }
+            "restart preserves AC cycle" {
+                PowerAction::ForceRestart => MachineMaintenanceOperation::Reset,
+                PowerAction::GracefulRestart => MachineMaintenanceOperation::Reset,
+                PowerAction::AcPowercycle => MachineMaintenanceOperation::AcPowercycle,
+            }
         );
     }
 

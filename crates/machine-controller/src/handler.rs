@@ -152,6 +152,7 @@ mod machine_validation;
 mod maintenance;
 mod nic_firmware;
 mod nic_lockdown_rotation;
+mod onboard_nics;
 mod power;
 mod reset;
 mod rotation;
@@ -8484,58 +8485,22 @@ impl StateHandler for HostMachineStateHandler {
                 MachineState::DisableOnboardNics {
                     disable_onboard_nics_state,
                 } => {
-                    let next_state = match disable_onboard_nics_state {
-                        DisableOnboardNicsState::ConfigureOnboardNics { enable } => {
-                            let redfish_client = ctx
-                                .services
-                                .create_redfish_client_from_machine(&mh_snapshot.host_snapshot)
-                                .await?;
-                            let (operation, target) = if *enable {
-                                ("enable_onboard_nics", libredfish::EnabledDisabled::Enabled)
-                            } else {
-                                (
-                                    "disable_onboard_nics",
-                                    libredfish::EnabledDisabled::Disabled,
-                                )
-                            };
-                            redfish_client
-                                .set_enable_onboard_nics(target)
-                                .await
-                                .map_err(|e| redfish_error(operation, e))?;
-                            MachineState::DisableOnboardNics {
-                                disable_onboard_nics_state:
-                                    DisableOnboardNicsState::WaitForConfigToBeApplied {
-                                        onboard_nics_disabled: !enable,
-                                    },
-                            }
-                        }
-                        DisableOnboardNicsState::WaitForConfigToBeApplied {
-                            onboard_nics_disabled,
-                        } => {
-                            if mh_snapshot.host_snapshot.state.version.since_state_change()
-                                < Duration::seconds(10)
-                            {
-                                return Ok(StateHandlerOutcome::wait(
-                                    "Waiting for onboard NIC configuration to be applied"
-                                        .to_string(),
-                                ));
-                            }
-                            if *onboard_nics_disabled {
-                                MachineState::WaitingForPlatformConfiguration { retry_count: 0 }
-                            } else {
+                    let machine_state =
+                        match onboard_nics::advance(disable_onboard_nics_state, mh_snapshot, ctx)
+                            .await?
+                        {
+                            onboard_nics::Progress::Wait => return Ok(onboard_nics::wait()),
+                            onboard_nics::Progress::Next(disable_onboard_nics_state) => {
                                 MachineState::DisableOnboardNics {
-                                    disable_onboard_nics_state:
-                                        DisableOnboardNicsState::ConfigureOnboardNics {
-                                            enable: false,
-                                        },
+                                    disable_onboard_nics_state,
                                 }
                             }
-                        }
-                    };
+                            onboard_nics::Progress::Complete => {
+                                MachineState::WaitingForPlatformConfiguration { retry_count: 0 }
+                            }
+                        };
                     Ok(StateHandlerOutcome::transition(
-                        ManagedHostState::HostInit {
-                            machine_state: next_state,
-                        },
+                        ManagedHostState::HostInit { machine_state },
                     ))
                 }
                 MachineState::WaitingForPlatformConfiguration { retry_count } => {

@@ -177,8 +177,10 @@ fn expected_action(operation: MachineMaintenanceOperation) -> PowerAction {
         MachineMaintenanceOperation::PowerOff { graceful: true } => PowerAction::GracefulShutdown,
         MachineMaintenanceOperation::PowerOff { graceful: false } => PowerAction::ForceOff,
         MachineMaintenanceOperation::Reset => PowerAction::ForceRestart,
-        MachineMaintenanceOperation::ChassisReset { .. } => {
-            unreachable!("chassis resets do not use the compute-tray backend")
+        MachineMaintenanceOperation::AcPowercycle => PowerAction::AcPowercycle,
+        MachineMaintenanceOperation::ChassisReset { .. }
+        | MachineMaintenanceOperation::DisableOnboardNics { .. } => {
+            unreachable!("Redfish maintenance does not use the compute-tray backend")
         }
     }
 }
@@ -886,6 +888,342 @@ async fn chassis_reset_preserves_replacement_including_legacy_state(pool: PgPool
                 .await
                 .machine_maintenance_requested
                 .is_none()
+        );
+    }
+}
+
+fn maintenance_recovery_state(
+    request: &model::machine::MachineMaintenanceRequest,
+    operation: MachineMaintenanceOperation,
+) -> ManagedHostState {
+    ManagedHostState::Maintenance {
+        operation,
+        request: Some(request.clone()),
+    }
+}
+
+#[sqlx_test]
+async fn ac_cycle_restores_onboard_nics_across_restart(pool: PgPool) {
+    use carbide_redfish::libredfish::test_support::RedfishSimAction;
+    use libredfish::EnabledDisabled;
+    use model::machine::DisableOnboardNicsState;
+
+    use super::onboard_nics::{expire_wait, setup_host};
+
+    let backend = Arc::new(ReconciliationComputeTrayManager::new());
+    let manager = component_manager(backend.clone());
+    // Keep the large fixture futures off the default test-thread stack.
+    let mut env = Box::pin(
+        Env::builder(pool.clone())
+            .with_component_manager(manager.clone())
+            .with_credential_manager(valid_credential_manager())
+            .build(),
+    )
+    .await;
+    let (host, bmc) = Box::pin(setup_host(&env, ManagedHostConfig::default())).await;
+    host.advance_to_converged_ready().await;
+    env.redfish_sim
+        .set_service_root_vendor(Some("NVIDIA".into()));
+    env.redfish_sim
+        .set_service_root_product(Some("VR NVL72".into()));
+    enter_requested_state(
+        &env,
+        &host,
+        MachineMaintenanceOperation::AcPowercycle,
+        EntryState::Ready,
+    )
+    .await;
+    env.run_single_iteration().await;
+    let entered = host.host.machine().await;
+    let request = entered.machine_maintenance_requested.clone().unwrap();
+
+    backend.set_outcome(BackendOutcome::NonSuccess);
+    env.run_single_iteration().await;
+    assert_retryable_failure(&entered, &host.host.machine().await);
+    assert_eq!(backend.take_actions(), vec![PowerAction::AcPowercycle]);
+
+    backend.set_outcome(BackendOutcome::Success);
+    env.run_single_iteration().await;
+    let recovering = host.host.machine().await;
+    assert_eq!(
+        recovering.state.value,
+        maintenance_recovery_state(
+            &request,
+            MachineMaintenanceOperation::DisableOnboardNics {
+                disable_onboard_nics_state: DisableOnboardNicsState::ConfigureOnboardNics {
+                    enable: true
+                },
+            },
+        )
+    );
+    assert_eq!(
+        recovering.machine_maintenance_requested,
+        Some(request.clone())
+    );
+    assert_eq!(backend.take_actions(), vec![PowerAction::AcPowercycle]);
+
+    // A new controller resumes NIC recovery immediately, without another power cycle.
+    env = Env::builder(pool.clone())
+        .with_component_manager(manager.clone())
+        .with_credential_manager(valid_credential_manager())
+        .build_with_harness(env.test_harness, env.redfish_sim);
+
+    for (enable, target) in [
+        (true, EnabledDisabled::Enabled),
+        (false, EnabledDisabled::Disabled),
+    ] {
+        let before = host.host.machine().await;
+        let actions = env.redfish_sim.timepoint();
+        env.redfish_sim
+            .fail_next_onboard_nics_write("temporary NIC write failure");
+        env.run_single_iteration().await;
+        assert_retryable_failure(&before, &host.host.machine().await);
+        env = Env::builder(pool.clone())
+            .with_component_manager(manager.clone())
+            .with_credential_manager(valid_credential_manager())
+            .build_with_harness(env.test_harness, env.redfish_sim);
+        env.run_single_iteration().await;
+        let waiting = host.host.machine().await;
+        assert_eq!(
+            waiting.state.value,
+            maintenance_recovery_state(
+                &request,
+                MachineMaintenanceOperation::DisableOnboardNics {
+                    disable_onboard_nics_state: DisableOnboardNicsState::WaitForConfigToBeApplied {
+                        onboard_nics_disabled: !enable
+                    },
+                }
+            )
+        );
+        assert_eq!(
+            env.redfish_sim.actions_since(&actions).for_host(&bmc),
+            vec![
+                RedfishSimAction::SetEnableOnboardNicsFailed(target),
+                RedfishSimAction::SetEnableOnboardNics(target),
+            ]
+        );
+        let actions = env.redfish_sim.timepoint();
+        env.run_single_iteration().await;
+        let still_waiting = host.host.machine().await;
+        assert_eq!(still_waiting.state.value, waiting.state.value);
+        assert_eq!(still_waiting.state.version, waiting.state.version);
+        assert_eq!(
+            still_waiting.machine_maintenance_requested,
+            Some(request.clone())
+        );
+        assert!(matches!(still_waiting.controller_state_outcome,
+            Some(PersistentStateHandlerOutcome::Wait { ref reason, .. })
+                if reason == "Waiting for onboard NIC configuration to be applied"));
+        expire_wait(&env, &host).await;
+        env.run_single_iteration().await;
+        let completed = host.host.machine().await;
+        if enable {
+            assert_eq!(
+                completed.state.value,
+                maintenance_recovery_state(
+                    &request,
+                    MachineMaintenanceOperation::DisableOnboardNics {
+                        disable_onboard_nics_state: DisableOnboardNicsState::ConfigureOnboardNics {
+                            enable: false
+                        },
+                    }
+                )
+            );
+        } else {
+            assert_eq!(completed.state.value, ManagedHostState::Ready);
+            assert!(completed.machine_maintenance_requested.is_none());
+        }
+        assert!(
+            env.redfish_sim
+                .actions_since(&actions)
+                .for_host(&bmc)
+                .is_empty()
+        );
+        assert!(
+            backend.take_actions().is_empty(),
+            "recovery must not repeat the AC cycle"
+        );
+    }
+}
+
+#[sqlx_test]
+async fn failed_nic_recovery_admits_replacement_request(pool: PgPool) {
+    use carbide_redfish::libredfish::test_support::RedfishSimAction;
+    use libredfish::EnabledDisabled;
+    use model::machine::DisableOnboardNicsState;
+
+    use super::onboard_nics::setup_host;
+
+    let mut env = Env::builder(pool).build().await;
+    let (host, bmc) = setup_host(&env, ManagedHostConfig::default()).await;
+    enter_requested_state(
+        &env,
+        &host,
+        MachineMaintenanceOperation::AcPowercycle,
+        EntryState::Ready,
+    )
+    .await;
+    env.run_single_iteration().await;
+    let request = host
+        .host
+        .machine()
+        .await
+        .machine_maintenance_requested
+        .unwrap();
+    host.advance_state(maintenance_recovery_state(
+        &request,
+        MachineMaintenanceOperation::DisableOnboardNics {
+            disable_onboard_nics_state: DisableOnboardNicsState::ConfigureOnboardNics {
+                enable: false,
+            },
+        },
+    ))
+    .await;
+    env.redfish_sim
+        .fail_next_onboard_nics_write("temporary NIC write failure");
+    let before = host.host.machine().await;
+    env.run_single_iteration().await;
+    assert_retryable_failure(&before, &host.host.machine().await);
+
+    let mut txn = env.test_harness.db_txn().await;
+    db::machine::set_machine_maintenance_requested(
+        &mut txn,
+        host.host.id,
+        "replacement",
+        MachineMaintenanceOperation::DisableOnboardNics {
+            disable_onboard_nics_state: DisableOnboardNicsState::ConfigureOnboardNics {
+                enable: true,
+            },
+        },
+    )
+    .await
+    .unwrap();
+    txn.commit().await.unwrap();
+    let replacement = host
+        .host
+        .machine()
+        .await
+        .machine_maintenance_requested
+        .unwrap();
+    let actions = env.redfish_sim.timepoint();
+    env.run_single_iteration().await;
+    let admitted = host.host.machine().await;
+    assert_eq!(
+        admitted.state.value,
+        ManagedHostState::maintenance_for_request(replacement.clone())
+    );
+    assert_eq!(
+        admitted.machine_maintenance_requested,
+        Some(replacement.clone())
+    );
+    assert!(
+        env.redfish_sim
+            .actions_since(&actions)
+            .for_host(&bmc)
+            .is_empty()
+    );
+
+    env.run_single_iteration().await;
+    assert_eq!(
+        host.host.machine().await.state.value,
+        maintenance_recovery_state(
+            &replacement,
+            MachineMaintenanceOperation::DisableOnboardNics {
+                disable_onboard_nics_state: DisableOnboardNicsState::WaitForConfigToBeApplied {
+                    onboard_nics_disabled: false,
+                },
+            },
+        ),
+    );
+    assert_eq!(
+        env.redfish_sim.actions_since(&actions).for_host(&bmc),
+        vec![RedfishSimAction::SetEnableOnboardNics(
+            EnabledDisabled::Enabled
+        ),]
+    );
+}
+
+#[sqlx_test]
+async fn ac_cycle_recovery_only_applies_to_vera_rubin_with_managed_dpus(pool: PgPool) {
+    use carbide_test_harness::test_support::fixture_config::ManagedHostConfigExt as _;
+
+    let backend = Arc::new(ReconciliationComputeTrayManager::new());
+    let mut env = Env::builder(pool)
+        .with_component_manager(component_manager(backend.clone()))
+        .with_credential_manager(valid_credential_manager())
+        .build()
+        .await;
+    let domain = env.test_harness.test_domain().await;
+    let network_controller = env.test_harness.network_controller();
+    let underlay = network_controller.create_underlay_segment(&domain).await;
+    network_controller.create_admin_segment(&domain).await;
+    let site_explorer = env.test_harness.default_test_site_explorer();
+    for (scenario, product, zero_dpu, operation, action) in [
+        (
+            "other SKU",
+            "GB200 NVL",
+            false,
+            MachineMaintenanceOperation::AcPowercycle,
+            PowerAction::AcPowercycle,
+        ),
+        (
+            "no managed DPUs",
+            "VR NVL72",
+            true,
+            MachineMaintenanceOperation::AcPowercycle,
+            PowerAction::AcPowercycle,
+        ),
+        (
+            "ordinary reset",
+            "VR NVL72",
+            false,
+            MachineMaintenanceOperation::Reset,
+            PowerAction::ForceRestart,
+        ),
+    ] {
+        let mut config = if zero_dpu {
+            ManagedHostConfig::zero_dpu()
+        } else {
+            ManagedHostConfig::default()
+        };
+        if zero_dpu {
+            config.expected_machine_data = Some(model::expected_machine::ExpectedMachineData {
+                serial_number: config.serial.clone(),
+                dpu_policy: model::expected_machine::HostDpuPolicy::Ignore,
+                ..Default::default()
+            });
+        }
+        // Build before setting Vera Rubin detection, so fixture ingestion does not wait.
+        env.redfish_sim.set_service_root_product(None);
+        let (host, data) = env
+            .test_harness
+            .managed_host_builder(&site_explorer, underlay)
+            .with_config(config)
+            .build()
+            .await;
+        let bmc = data.host_bmc_ip().to_string();
+        host.advance_to_converged_ready().await;
+        env.redfish_sim
+            .set_service_root_vendor(Some("NVIDIA".into()));
+        env.redfish_sim
+            .set_service_root_product(Some(product.into()));
+        enter_requested_state(&env, &host, operation, EntryState::Ready).await;
+        env.run_single_iteration().await;
+        let actions = env.redfish_sim.timepoint();
+        env.run_single_iteration().await;
+        let completed = host.host.machine().await;
+        assert_eq!(completed.state.value, ManagedHostState::Ready, "{scenario}");
+        assert!(
+            completed.machine_maintenance_requested.is_none(),
+            "{scenario}"
+        );
+        assert_eq!(backend.take_actions(), vec![action], "{scenario}");
+        assert!(
+            env.redfish_sim
+                .actions_since(&actions)
+                .for_host(&bmc)
+                .is_empty(),
+            "{scenario}"
         );
     }
 }

@@ -29,13 +29,15 @@ use mac_address::MacAddress;
 use model::component_manager::PowerAction;
 use model::controller_outcome::PersistentStateHandlerOutcome;
 use model::machine::{
-    FailureCause, FailureDetails, FailureSource, HostMachine, MachineMaintenanceOperation,
-    MachineMaintenanceRequest, ManagedHostState, ManagedHostStateSnapshot, StateMachineArea,
+    DisableOnboardNicsState, FailureCause, FailureDetails, FailureSource, HostMachine,
+    MachineMaintenanceOperation, MachineMaintenanceRequest, ManagedHostState,
+    ManagedHostStateSnapshot, StateMachineArea,
 };
 use state_controller::state_handler::{
     StateHandlerContext, StateHandlerError, StateHandlerOutcome,
 };
 
+use super::{is_vera_rubin_host, onboard_nics};
 use crate::context::MachineStateHandlerContextObjects;
 
 /// Handles the Maintenance state for a host, dispatching on the requested
@@ -79,9 +81,36 @@ pub(super) async fn handle_maintenance(
         MachineMaintenanceOperation::Reset => {
             handle_reset(host_machine_id, mh_snapshot, request, ctx).await
         }
+        MachineMaintenanceOperation::AcPowercycle => {
+            invoke_power_operation(
+                host_machine_id,
+                mh_snapshot,
+                request,
+                ctx,
+                PowerAction::AcPowercycle,
+                "AcPowercycle",
+            )
+            .await
+        }
         MachineMaintenanceOperation::ChassisReset { chassis_id } => {
             handle_chassis_reset(host_machine_id, mh_snapshot, request, ctx, chassis_id).await
         }
+        MachineMaintenanceOperation::DisableOnboardNics {
+            disable_onboard_nics_state,
+        } => match onboard_nics::advance(disable_onboard_nics_state, mh_snapshot, ctx).await? {
+            onboard_nics::Progress::Wait => Ok(onboard_nics::wait()),
+            onboard_nics::Progress::Next(disable_onboard_nics_state) => Ok(
+                StateHandlerOutcome::transition(ManagedHostState::Maintenance {
+                    operation: MachineMaintenanceOperation::DisableOnboardNics {
+                        disable_onboard_nics_state,
+                    },
+                    request: request.cloned(),
+                }),
+            ),
+            onboard_nics::Progress::Complete => {
+                finish_maintenance(host_machine_id, request, ctx, ManagedHostState::Ready).await
+            }
+        },
     }
 }
 
@@ -213,6 +242,18 @@ async fn invoke_power_operation(
 ) -> Result<StateHandlerOutcome<ManagedHostState>, StateHandlerError> {
     let machine = &mh_snapshot.host_snapshot;
 
+    // Identify the platform before the power cycle takes the BMC offline.
+    let restore_onboard_nics =
+        if action == PowerAction::AcPowercycle && mh_snapshot.has_managed_dpus() {
+            let client = ctx
+                .services
+                .create_redfish_client_from_machine(machine)
+                .await?;
+            is_vera_rubin_host(client.as_ref()).await?
+        } else {
+            false
+        };
+
     let component_manager = ctx.services.component_manager.as_ref().ok_or_else(|| {
         StateHandlerError::GenericError(eyre::eyre!(
             "machine {host_machine_id} maintenance ({operation_label}): component manager not configured"
@@ -250,8 +291,19 @@ async fn invoke_power_operation(
                     machine_id = %host_machine_id,
                     operation = operation_label,
                     backend = component_manager.compute_tray.name(),
-                    "Machine power control succeeded; returning host to Ready"
+                    "Machine power control succeeded"
                 );
+                if restore_onboard_nics {
+                    return Ok(StateHandlerOutcome::transition(
+                        ManagedHostState::Maintenance {
+                            operation: MachineMaintenanceOperation::DisableOnboardNics {
+                                disable_onboard_nics_state:
+                                    DisableOnboardNicsState::ConfigureOnboardNics { enable: true },
+                            },
+                            request: request.cloned(),
+                        },
+                    ));
+                }
                 return finish_maintenance(host_machine_id, request, ctx, ManagedHostState::Ready)
                     .await;
             }
