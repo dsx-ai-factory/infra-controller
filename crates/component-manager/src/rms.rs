@@ -35,6 +35,7 @@ use carbide_rack::rms_node_type::{
 use carbide_secrets::credentials::Credentials;
 use carbide_uuid::rack::{RackId, RackProfileId};
 use carbide_uuid::switch::SwitchId;
+use db::db_read::DbReader;
 use db::direct_dispatch_rms_job::RmsJobKind;
 use librms::protos::{rack_manager as rms, rack_manager_v2 as rms_v2};
 use librms::{RackManagerError, RmsApi};
@@ -82,6 +83,10 @@ use crate::types::FirmwareUpdateOptions;
 use crate::{
     NvosUpdateManager, NvosUpdateRequest, RackFirmwareUpdateManager, RackFirmwareUpdateRequest,
 };
+
+mod firmware_inventory;
+
+use crate::firmware_inventory::{ComponentFirmwareInventoryResult, FirmwareInventorySource};
 
 /// Common RMS identity needed to address a device in RMS.
 #[derive(Clone)]
@@ -251,6 +256,41 @@ fn rms_node_descriptor_config_error(
 }
 
 /// `RmsBackend` implements component operations through RMS.
+///
+/// # Firmware reads
+///
+/// Passive inventory reads accept at most 256 endpoints; larger input returns
+/// `InvalidArgument` before allocating endpoint vectors or performing I/O.
+/// Empty input performs no I/O.
+/// Reads do not register devices, submit updates, or change firmware tracking.
+/// Results retain caller order and repeated slots. Full preparation failure
+/// fails every slot; individual identity/profile failures remain per endpoint.
+/// Identical descriptors share a query; conflicting descriptors fail that node.
+///
+/// Compute and shelves use ingested identities, then expected inventory with a
+/// declared rack. Switches require an ingested switch and retain both supplied
+/// BMC and NVUE endpoints. Compute and shelves send BMC endpoints only. Compute
+/// checks known machine BMC-IP owners in the snapshot before fallback. It does
+/// not check other component types or prevent reassignment after the snapshot.
+///
+/// Sequential batches contain at most 64 nodes from one rack, sorted by rack
+/// and node ID. Preparation and all batches share 30 seconds, so a slow batch
+/// can leave later nodes unqueried. Preparation owns a read-only snapshot;
+/// acquisition and setup share the total budget, and a five-second statement cap
+/// applies after setup, preserving shorter server limits. The session ends
+/// before RMS. Cancellation drops local futures and releases local DB capacity;
+/// completed observations survive later failures and deadline expiry.
+///
+/// Each inventory retains at most 256 members in backend order with repeats.
+/// Names, versions and update targets each have a 1 KiB limit and share a 64 KiB
+/// retained metadata budget per node. Oversized members fail in place; excessive
+/// member counts fail the collection. These post-decoding bounds do not cap wire
+/// allocations. Missing inventory is unavailable; a present empty list succeeds.
+/// Only RMS name/version/target are retained, including empty scalar strings;
+/// no identifiers or resource URIs are invented. The established observation
+/// model has no `health`, `updateable` or `firmware_type` fields. Remote
+/// `Unimplemented` is nested `FirmwareReadError::Unsupported` after attempted
+/// I/O; whole-call capability rejection remains unsupported without I/O.
 ///
 /// # Power reads
 ///
@@ -1792,7 +1832,7 @@ impl RmsBackend {
 
 /// Resolve power shelf MAC addresses to RMS identities via the api-db layer.
 async fn resolve_power_shelf_identities(
-    db: &PgPool,
+    db: impl DbReader<'_>,
     macs: &[MacAddress],
 ) -> Result<HashMap<MacAddress, RmsIdentity>, ComponentManagerError> {
     let rows = db::power_shelf::find_rms_identities_by_macs(db, macs)
@@ -1832,7 +1872,7 @@ async fn resolve_power_shelf_identities(
 /// as an opaque string and the request also carries the full node descriptor and
 /// endpoints. Mirrors `resolve_pre_ingestion_switch_identities`.
 async fn resolve_pre_ingestion_power_shelf_identities(
-    db: &PgPool,
+    db: impl DbReader<'_>,
     macs: &[MacAddress],
 ) -> Result<HashMap<MacAddress, RmsIdentity>, ComponentManagerError> {
     if macs.is_empty() {
@@ -1908,7 +1948,7 @@ impl From<db::expected_machine::PreIngestionComputeRmsIdentity> for ComputeTrayR
 /// `resolve_compute_tray_identities` loads BMC IP owners and eligible RMS
 /// identities, retaining owners whose machine has no `rack_id`.
 async fn resolve_compute_tray_identities(
-    db: &PgPool,
+    db: impl DbReader<'_>,
     bmc_ips: &[IpAddr],
 ) -> Result<ComputeTrayIdentityLookup, ComponentManagerError> {
     let rows = db::machine::find_rms_identities_by_bmc_ips(db, bmc_ips)
@@ -1947,7 +1987,7 @@ async fn resolve_compute_tray_identities(
 
 /// Resolve switch MAC addresses to RMS identities via the api-db layer.
 async fn resolve_switch_identities(
-    db: &PgPool,
+    db: impl DbReader<'_>,
     macs: &[MacAddress],
 ) -> Result<HashMap<MacAddress, RmsIdentity>, ComponentManagerError> {
     let rows = db::switch::find_rms_identities_by_macs(db, macs)
@@ -2108,6 +2148,17 @@ fn build_power_shelf_node_info(
 
 #[async_trait::async_trait]
 impl PowerShelfManager for RmsBackend {
+    fn firmware_inventory_source(&self) -> Option<FirmwareInventorySource> {
+        Some(FirmwareInventorySource::Rms)
+    }
+
+    async fn get_firmware_inventory(
+        &self,
+        endpoints: &[PowerShelfEndpoint],
+    ) -> Result<Vec<ComponentFirmwareInventoryResult>, ComponentManagerError> {
+        self.read_power_shelf_firmware(endpoints).await
+    }
+
     fn power_state_source(&self) -> Option<crate::component_common::PowerStateSource> {
         Some(crate::component_common::PowerStateSource::Rms)
     }
@@ -3532,6 +3583,17 @@ pub fn scale_up_fabric_service_statuses_from_rms(
 
 #[async_trait::async_trait]
 impl NvSwitchManager for RmsBackend {
+    fn firmware_inventory_source(&self) -> Option<FirmwareInventorySource> {
+        Some(FirmwareInventorySource::Rms)
+    }
+
+    async fn get_firmware_inventory(
+        &self,
+        endpoints: &[SwitchEndpoint],
+    ) -> Result<Vec<ComponentFirmwareInventoryResult>, ComponentManagerError> {
+        self.read_switch_firmware(endpoints).await
+    }
+
     fn power_state_source(&self) -> Option<crate::component_common::PowerStateSource> {
         Some(crate::component_common::PowerStateSource::Rms)
     }
@@ -5583,14 +5645,14 @@ impl RmsBackend {
     /// resolve; the BMC MAC is used as the RMS node id because no machine id
     /// exists yet.
     async fn resolve_pre_ingestion_compute_identities(
-        &self,
+        db: impl DbReader<'_>,
         bmc_macs: &[MacAddress],
     ) -> Result<HashMap<MacAddress, ComputeTrayRmsIdentity>, ComponentManagerError> {
         if bmc_macs.is_empty() {
             return Ok(HashMap::new());
         }
 
-        let rows = db::expected_machine::find_rms_identities_by_bmc_macs(&self.db, bmc_macs)
+        let rows = db::expected_machine::find_rms_identities_by_bmc_macs(db, bmc_macs)
             .await
             .map_err(|e| {
                 ComponentManagerError::Internal(format!(
@@ -5725,6 +5787,17 @@ impl RmsBackend {
 
 #[async_trait::async_trait]
 impl ComputeTrayManager for RmsBackend {
+    fn firmware_inventory_source(&self) -> Option<FirmwareInventorySource> {
+        Some(FirmwareInventorySource::Rms)
+    }
+
+    async fn get_firmware_inventory(
+        &self,
+        endpoints: &[ComputeTrayEndpoint],
+    ) -> Result<Vec<ComponentFirmwareInventoryResult>, ComponentManagerError> {
+        self.read_compute_firmware(endpoints).await
+    }
+
     fn power_state_source(&self) -> Option<crate::component_common::PowerStateSource> {
         Some(crate::component_common::PowerStateSource::Rms)
     }
@@ -5752,9 +5825,9 @@ impl ComputeTrayManager for RmsBackend {
                 .filter(|ep| !ingested.rms_identities.contains_key(&ep.bmc_ip))
                 .map(|ep| ep.bmc_mac)
                 .collect();
-            let pre_ingestion = self
-                .resolve_pre_ingestion_compute_identities(&pre_ingestion_macs)
-                .await?;
+            let pre_ingestion =
+                Self::resolve_pre_ingestion_compute_identities(&self.db, &pre_ingestion_macs)
+                    .await?;
             Ok(endpoints
                 .iter()
                 .map(|ep| {
@@ -5793,9 +5866,8 @@ impl ComputeTrayManager for RmsBackend {
             .filter(|ep| !ingested.rms_identities.contains_key(&ep.bmc_ip))
             .map(|ep| ep.bmc_mac)
             .collect();
-        let pre_ingestion = self
-            .resolve_pre_ingestion_compute_identities(&pre_ingestion_macs)
-            .await?;
+        let pre_ingestion =
+            Self::resolve_pre_ingestion_compute_identities(&self.db, &pre_ingestion_macs).await?;
 
         // Preserve graceful compute reboots without changing switch, shelf, or
         // legacy force-restart/power-cycle mappings.
@@ -5920,9 +5992,8 @@ impl ComputeTrayManager for RmsBackend {
             .filter(|ep| !ingested.rms_identities.contains_key(&ep.bmc_ip))
             .map(|ep| ep.bmc_mac)
             .collect();
-        let pre_ingestion = self
-            .resolve_pre_ingestion_compute_identities(&pre_ingestion_macs)
-            .await?;
+        let pre_ingestion =
+            Self::resolve_pre_ingestion_compute_identities(&self.db, &pre_ingestion_macs).await?;
 
         let component_filters = compute_tray_firmware_object_component_filters(components);
         let mut results = Vec::with_capacity(endpoints.len());
@@ -7836,6 +7907,542 @@ mod tests {
                 })
                 .collect(),
         }
+    }
+
+    /// Exercises firmware wiring once for each role, including expected compute
+    /// inventory and an occupied IP that must never receive its credentials.
+    #[carbide_macros::sqlx_test]
+    async fn firmware_inventory_uses_passive_descriptor_routes(pool: sqlx::PgPool) {
+        use crate::firmware_inventory::{
+            FirmwareComponent, FirmwareInventoryEntry, FirmwareReadError,
+        };
+
+        let (mock, mut backend, rack_id, ps1, _, sw1, _) = make_backend(&pool).await;
+        // The expected rack sorts after the managed rack's UUID, fixing RPC order.
+        let expected_rack = RackId::new("zz-firmware-expected");
+        let capabilities = &mut Arc::make_mut(&mut backend.rack_profiles)
+            .rack_profiles
+            .get_mut(TEST_RACK_PROFILE_ID)
+            .unwrap()
+            .rack_capabilities;
+        capabilities.compute.count = 1;
+        capabilities.switch.count = 2;
+        capabilities.power_shelf.count = 2;
+        let mut txn = pool.begin().await.unwrap();
+        let ct1 = seed_machine(&mut txn, CT_MAC_1, CT_IP_1, "CT-001", &rack_id).await;
+        seed_pre_ingestion_compute_tray(&mut txn, CT_MAC_2, &expected_rack, false).await;
+        txn.commit().await.unwrap();
+        let switch_mac = SW_MAC_1.parse().unwrap();
+        let tracked = HashMap::from([(
+            switch_mac,
+            vec![RmsTrackedFirmwareJob::SwitchSystemImage(
+                "system-job".to_owned(),
+            )],
+        )]);
+        *backend.firmware_jobs.lock().unwrap() = tracked.clone();
+        backend.staged_firmware_objects.lock().unwrap().insert(
+            switch_mac,
+            StagedFirmwareObject::Staged {
+                system_image_job: "system-job".to_owned(),
+                config_json: "private manifest".to_owned(),
+                component_filters: vec!["bmc".to_owned()],
+                options: FirmwareUpdateOptions {
+                    access_token: Some("private access token".to_owned()),
+                    force_update: true,
+                },
+            },
+        );
+        db::direct_dispatch_rms_job::save(
+            &pool,
+            switch_mac,
+            RmsJobKind::SwitchSystemImage,
+            "system-job",
+        )
+        .await
+        .unwrap();
+        let saved = db::direct_dispatch_rms_job::get_firmware_jobs(&pool, switch_mac)
+            .await
+            .unwrap();
+        assert_eq!(
+            saved,
+            [(RmsJobKind::SwitchSystemImage, "system-job".to_owned())]
+        );
+        let mut switch = make_sw_endpoint(SW_MAC_1);
+        switch.nvos_host_name = Some("switch-host.example".to_owned());
+        for node_id in [
+            sw1.to_string(),
+            ps1.to_string(),
+            ct1.to_string(),
+            CT_MAC_2.parse::<MacAddress>().unwrap().to_string(),
+        ] {
+            mock.enqueue_batch_get_firmware_inventory(Ok(rms::BatchGetFirmwareInventoryResponse {
+                // Declare Success explicitly: proto default means Unspecified.
+                response: Some(rms::NodeBatchResponse {
+                    status: rms::ReturnCode::Success as i32,
+                    ..Default::default()
+                }),
+                nodes: vec![rms::NodeFirmwareInventory {
+                    firmware_list: if node_id == sw1.to_string() {
+                        vec![rms::FirmwareInventoryInfo {
+                            name: "switch-fw".to_owned(),
+                            version: "42".to_owned(),
+                            target: "/switch-fw".to_owned(),
+                            ..Default::default()
+                        }]
+                    } else {
+                        Vec::new()
+                    },
+                    node_id,
+                }],
+            }))
+            .await;
+        }
+        let compute = [
+            make_ct_endpoint(CT_IP_2, CT_MAC_2),
+            make_ct_endpoint(CT_IP_1, CT_MAC_1),
+            make_ct_endpoint(CT_IP_1, CT_MAC_1),
+            // Valid expected inventory cannot authorize the occupied BMC IP.
+            make_ct_endpoint(CT_IP_1, CT_MAC_2),
+        ];
+
+        let switch_results = NvSwitchManager::get_firmware_inventory(&backend, &[switch])
+            .await
+            .unwrap();
+        let shelf_results =
+            PowerShelfManager::get_firmware_inventory(&backend, &[make_ps_endpoint(PS_MAC_1)])
+                .await
+                .unwrap();
+        let compute_results = ComputeTrayManager::get_firmware_inventory(&backend, &compute)
+            .await
+            .unwrap();
+
+        for source in [
+            NvSwitchManager::firmware_inventory_source(&backend),
+            PowerShelfManager::firmware_inventory_source(&backend),
+            ComputeTrayManager::firmware_inventory_source(&backend),
+        ] {
+            assert_eq!(source, Some(FirmwareInventorySource::Rms));
+        }
+        for (results, macs) in [
+            (&switch_results, vec![SW_MAC_1]),
+            (&shelf_results, vec![PS_MAC_1]),
+            (
+                &compute_results,
+                vec![CT_MAC_2, CT_MAC_1, CT_MAC_1, CT_MAC_2],
+            ),
+        ] {
+            assert_eq!(results.len(), macs.len());
+            for (result, mac) in results.iter().zip(macs) {
+                assert_eq!(result.mac_address, mac.parse::<MacAddress>().unwrap());
+            }
+        }
+        assert_eq!(
+            switch_results[0].inventory,
+            Ok(vec![FirmwareInventoryEntry {
+                inventory_id: None,
+                firmware: Ok(FirmwareComponent {
+                    id: None,
+                    resource_uri: None,
+                    name: Some("switch-fw".to_owned()),
+                    version: Some("42".to_owned()),
+                    update_target: Some("/switch-fw".to_owned()),
+                    description: None,
+                    release_date: None,
+                }),
+            }])
+        );
+        assert_eq!(shelf_results[0].inventory, Ok(Vec::new()));
+        assert!(
+            compute_results[..3]
+                .iter()
+                .all(|result| result.inventory == Ok(Vec::new()))
+        );
+        assert_eq!(
+            compute_results[3].inventory,
+            Err(FirmwareReadError::ReadFailed)
+        );
+        let calls = mock.batch_get_firmware_inventory_calls().await;
+        assert_eq!(calls.len(), 4);
+        for (call, node_id, role, mac, ip, rack) in [
+            (
+                &calls[0],
+                sw1.to_string(),
+                ROLE_SWITCH,
+                SW_MAC_1,
+                "10.0.0.1",
+                &rack_id,
+            ),
+            (
+                &calls[1],
+                ps1.to_string(),
+                ROLE_POWER_SHELF,
+                PS_MAC_1,
+                "10.0.0.1",
+                &rack_id,
+            ),
+            (
+                &calls[2],
+                ct1.to_string(),
+                ROLE_COMPUTE,
+                CT_MAC_1,
+                CT_IP_1,
+                &rack_id,
+            ),
+            (
+                &calls[3],
+                CT_MAC_2.parse::<MacAddress>().unwrap().to_string(),
+                ROLE_COMPUTE,
+                CT_MAC_2,
+                CT_IP_2,
+                &expected_rack,
+            ),
+        ] {
+            let nodes = &call.nodes.as_ref().unwrap().nodes;
+            assert_eq!(nodes.len(), 1);
+            let node = &nodes[0];
+            assert_eq!(node.node_id, node_id);
+            assert_eq!(node.rack_id, rack.to_string());
+            assert_descriptor_node(node, role);
+            if role != ROLE_SWITCH {
+                assert!(node.host_endpoint.is_none());
+            }
+            let endpoint = node.bmc_endpoint.as_ref().unwrap();
+            assert_eq!(endpoint.interface.as_ref().unwrap().mac_address, mac);
+            assert_eq!(endpoint.interface.as_ref().unwrap().ip_address, ip);
+            assert_eq!(
+                endpoint.credentials,
+                Some(credentials_to_rms(&Credentials::UsernamePassword {
+                    username: "admin".to_owned(),
+                    password: "pass".to_owned(),
+                }))
+            );
+        }
+        let host = calls[0].nodes.as_ref().unwrap().nodes[0]
+            .host_endpoint
+            .as_ref()
+            .unwrap();
+        assert_eq!(host.interface.as_ref().unwrap().ip_address, "10.0.0.2");
+        assert_eq!(
+            host.interface.as_ref().unwrap().mac_address,
+            "11:22:33:44:55:66"
+        );
+        assert_eq!(
+            host.interface.as_ref().unwrap().host_name.as_deref(),
+            Some("switch-host.example")
+        );
+        assert_eq!(
+            host.credentials,
+            Some(credentials_to_rms(&Credentials::UsernamePassword {
+                username: "nvos-admin".to_owned(),
+                password: "nvos-pass".to_owned(),
+            }))
+        );
+        assert!(mock.list_node_inventory_calls().await.is_empty());
+        assert!(mock.create_nodes_calls().await.is_empty());
+        assert!(mock.update_node_calls().await.is_empty());
+        assert!(mock.delete_node_calls().await.is_empty());
+        assert!(mock.get_node_firmware_inventory_calls().await.is_empty());
+        assert!(mock.apply_firmware_object_calls().await.is_empty());
+        assert!(mock.apply_switch_system_image_calls().await.is_empty());
+        assert!(mock.batch_set_power_state_calls().await.is_empty());
+        assert!(mock.set_power_state_calls().await.is_empty());
+        assert_eq!(*backend.firmware_jobs.lock().unwrap(), tracked);
+        {
+            let staged = backend.staged_firmware_objects.lock().unwrap();
+            assert_eq!(staged.len(), 1);
+            let StagedFirmwareObject::Staged {
+                system_image_job,
+                config_json,
+                component_filters,
+                options,
+            } = staged.get(&switch_mac).unwrap()
+            else {
+                panic!("passive read changed the staged phase")
+            };
+            assert_eq!(
+                (
+                    system_image_job.as_str(),
+                    config_json.as_str(),
+                    component_filters.as_slice(),
+                    options.access_token.as_deref(),
+                    options.force_update
+                ),
+                (
+                    "system-job",
+                    "private manifest",
+                    &["bmc".to_owned()][..],
+                    Some("private access token"),
+                    true
+                )
+            );
+        }
+        assert_eq!(
+            db::direct_dispatch_rms_job::get_firmware_jobs(&pool, switch_mac)
+                .await
+                .unwrap(),
+            saved
+        );
+    }
+
+    /// Explicit names stay with their slots; missing names come only from DB,
+    /// even when another endpoint supplies a name for the same interface MAC.
+    #[carbide_macros::sqlx_test]
+    async fn firmware_switch_hostnames_preserve_slot_conflicts_and_db_fallback(pool: sqlx::PgPool) {
+        use crate::firmware_inventory::FirmwareReadError;
+        let (mock, mut backend, rack, _, _, sw1, sw2) = make_backend(&pool).await;
+        let capabilities = &mut Arc::make_mut(&mut backend.rack_profiles)
+            .rack_profiles
+            .get_mut(TEST_RACK_PROFILE_ID)
+            .unwrap()
+            .rack_capabilities;
+        capabilities.compute.count = 1;
+        capabilities.switch.count = 2;
+        capabilities.power_shelf.count = 2;
+        let mut txn = pool.begin().await.unwrap();
+        seed_machine(&mut txn, CT_MAC_1, CT_IP_1, "hostname-from-db", &rack).await;
+        txn.commit().await.unwrap();
+        let mut first = make_sw_endpoint(SW_MAC_1);
+        first.nvos_host_name = Some("caller-a".to_owned());
+        let mut second = first.clone();
+        second.nvos_host_name = Some("caller-b".to_owned());
+        let mut healthy = make_sw_endpoint(SW_MAC_2);
+        healthy.nvos_host_name = Some("healthy".to_owned());
+        mock.enqueue_batch_get_firmware_inventory(Ok(rms::BatchGetFirmwareInventoryResponse {
+            response: Some(rms::NodeBatchResponse {
+                status: rms::ReturnCode::Success as i32,
+                ..Default::default()
+            }),
+            nodes: vec![rms::NodeFirmwareInventory {
+                node_id: sw2.to_string(),
+                firmware_list: Vec::new(),
+            }],
+        }))
+        .await;
+
+        let results = NvSwitchManager::get_firmware_inventory(
+            &backend,
+            &[first.clone(), second, first, healthy.clone()],
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(results.len(), 4);
+        assert!(
+            results[..3]
+                .iter()
+                .all(|result| result.inventory == Err(FirmwareReadError::ReadFailed))
+        );
+        assert_eq!(results[3].inventory, Ok(Vec::new()));
+        let calls = mock.batch_get_firmware_inventory_calls().await;
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].nodes.as_ref().unwrap().nodes.len(), 1);
+        assert_eq!(
+            calls[0].nodes.as_ref().unwrap().nodes[0].node_id,
+            sw2.to_string()
+        );
+
+        // Reuse the seeded interface's hostname as the missing NVUE name. Both
+        // endpoints use its MAC, but the healthy slot's explicit name stays local.
+        let mut missing = make_sw_endpoint(SW_MAC_1);
+        missing.nvos_mac = CT_MAC_1.parse().unwrap();
+        healthy.nvos_mac = missing.nvos_mac;
+        mock.enqueue_batch_get_firmware_inventory(Ok(rms::BatchGetFirmwareInventoryResponse {
+            response: Some(rms::NodeBatchResponse {
+                status: rms::ReturnCode::Success as i32,
+                ..Default::default()
+            }),
+            nodes: [sw1.to_string(), sw2.to_string()]
+                .into_iter()
+                .map(|node_id| rms::NodeFirmwareInventory {
+                    node_id,
+                    firmware_list: Vec::new(),
+                })
+                .collect(),
+        }))
+        .await;
+
+        let results = NvSwitchManager::get_firmware_inventory(&backend, &[missing, healthy])
+            .await
+            .unwrap();
+
+        assert!(
+            results
+                .iter()
+                .all(|result| result.inventory == Ok(Vec::new()))
+        );
+        let calls = mock.batch_get_firmware_inventory_calls().await;
+        let nodes = &calls[1].nodes.as_ref().unwrap().nodes;
+        assert_eq!(nodes.len(), 2);
+        for (id, name) in [
+            (sw1.to_string(), "hostname-from-db"),
+            (sw2.to_string(), "healthy"),
+        ] {
+            let node = nodes.iter().find(|node| node.node_id == id).unwrap();
+            assert_eq!(
+                node.host_endpoint
+                    .as_ref()
+                    .unwrap()
+                    .interface
+                    .as_ref()
+                    .unwrap()
+                    .host_name
+                    .as_deref(),
+                Some(name)
+            );
+        }
+    }
+
+    /// Every role releases a healthy snapshot before RMS, drops a blocked
+    /// snapshot on caller cancellation, and includes pool waits in its budget.
+    #[carbide_macros::sqlx_test]
+    async fn firmware_preparation_cancellation_releases_database_capacity(pool: sqlx::PgPool) {
+        use crate::firmware_inventory::FirmwareReadError;
+        let (mock, mut backend, rack_id, ps1, _, sw1, _) = make_backend(&pool).await;
+        let capabilities = &mut Arc::make_mut(&mut backend.rack_profiles)
+            .rack_profiles
+            .get_mut(TEST_RACK_PROFILE_ID)
+            .unwrap()
+            .rack_capabilities;
+        capabilities.compute.count = 1;
+        capabilities.switch.count = 2;
+        capabilities.power_shelf.count = 2;
+        let mut txn = pool.begin().await.unwrap();
+        let ct1 = seed_machine(&mut txn, CT_MAC_1, CT_IP_1, "CT-001", &rack_id).await;
+        txn.commit().await.unwrap();
+        let compute = [make_ct_endpoint(CT_IP_1, CT_MAC_1)];
+        let switches = [make_sw_endpoint(SW_MAC_1)];
+        let shelves = [make_ps_endpoint(PS_MAC_1)];
+        for (role, table, node_id) in [
+            (ROLE_COMPUTE, "machines", ct1.to_string()),
+            (ROLE_SWITCH, "switches", sw1.to_string()),
+            (ROLE_POWER_SHELF, "power_shelves", ps1.to_string()),
+        ] {
+            let reader_pool = sqlx::postgres::PgPoolOptions::new()
+                .max_connections(1)
+                .acquire_timeout(Duration::from_secs(60))
+                .connect_with(pool.connect_options().as_ref().clone())
+                .await
+                .unwrap();
+            backend.db = reader_pool.clone();
+            // Disable an inherited timeout so it cannot rescue blocked cleanup.
+            let _: String =
+                sqlx::query_scalar("SELECT set_config('statement_timeout', '0', false)")
+                    .fetch_one(&reader_pool)
+                    .await
+                    .unwrap();
+            let reader_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+                .fetch_one(&reader_pool)
+                .await
+                .unwrap();
+            let request = || async {
+                match role {
+                    ROLE_COMPUTE => {
+                        ComputeTrayManager::get_firmware_inventory(&backend, &compute).await
+                    }
+                    ROLE_SWITCH => {
+                        NvSwitchManager::get_firmware_inventory(&backend, &switches).await
+                    }
+                    _ => PowerShelfManager::get_firmware_inventory(&backend, &shelves).await,
+                }
+            };
+            mock.enqueue_batch_get_firmware_inventory(Ok(rms::BatchGetFirmwareInventoryResponse {
+                response: Some(rms::NodeBatchResponse {
+                    status: rms::ReturnCode::Success as i32,
+                    ..Default::default()
+                }),
+                nodes: vec![rms::NodeFirmwareInventory {
+                    node_id,
+                    firmware_list: Vec::new(),
+                }],
+            }))
+            .await;
+            let (arrival, release) = mock.block_next_batch_get_firmware_inventory().await;
+            let mut read = Box::pin(request());
+            tokio::select! {
+                arrived = tokio::time::timeout(Duration::from_secs(10), arrival) => arrived.unwrap().unwrap(),
+                result = &mut read => panic!("{role} RPC finished before its gate: {result:?}"),
+            }
+
+            let reused: i32 = tokio::time::timeout(
+                Duration::from_secs(2),
+                sqlx::query_scalar("SELECT pg_backend_pid()").fetch_one(&reader_pool),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert_eq!(
+                reused, reader_pid,
+                "{role} snapshot must commit and return before RMS"
+            );
+            release.send(()).unwrap();
+            assert_eq!(
+                tokio::time::timeout(Duration::from_secs(10), read)
+                    .await
+                    .unwrap()
+                    .unwrap()[0]
+                    .inventory,
+                Ok(Vec::new())
+            );
+
+            let mut blocker = pool.begin().await.unwrap();
+            let lock_statement = match role {
+                ROLE_COMPUTE => "LOCK TABLE machines IN ACCESS EXCLUSIVE MODE",
+                ROLE_SWITCH => "LOCK TABLE switches IN ACCESS EXCLUSIVE MODE",
+                _ => "LOCK TABLE power_shelves IN ACCESS EXCLUSIVE MODE",
+            };
+            sqlx::query(lock_statement)
+                .execute(&mut *blocker)
+                .await
+                .unwrap();
+            let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+                .fetch_one(&mut *blocker)
+                .await
+                .unwrap();
+            let mut read = Box::pin(request());
+            let fragment = format!("FROM {table}");
+            let blocked_pid = tokio::select! {
+                observed = tokio::time::timeout(Duration::from_secs(2), db::test_support::postgres::wait_for_blocked_query(&pool, blocker_pid, &fragment)) => observed.unwrap(),
+                result = &mut read => panic!("{role} query did not block: {result:?}"),
+            };
+            assert_eq!(blocked_pid, reader_pid);
+
+            drop(read);
+
+            assert_eq!(
+                reader_pool.size(),
+                0,
+                "{role} caller drop must release capacity synchronously"
+            );
+            // Keep the lock until a replacement borrower completes, so normal
+            // SQLx cleanup cannot conceal a retained local pool slot.
+            let recovered = tokio::time::timeout(
+                Duration::from_secs(2),
+                sqlx::query_scalar::<_, i32>("SELECT 1").fetch_one(&reader_pool),
+            )
+            .await;
+            blocker.rollback().await.unwrap();
+            assert_eq!(recovered.unwrap().unwrap(), 1);
+
+            let held = reader_pool.acquire().await.unwrap();
+            tokio::time::pause();
+            let start = Instant::now();
+            let timed_out = tokio::time::timeout(Duration::from_secs(120), request()).await;
+            let finished = Instant::now();
+            tokio::time::resume();
+            drop(held);
+            let deadline = start + Duration::from_secs(30);
+            // A timer started after real SQL setup can round up by one tick.
+            assert!(
+                (deadline..=deadline + Duration::from_millis(1)).contains(&finished),
+                "{role}"
+            );
+            assert_eq!(
+                timed_out.unwrap().unwrap()[0].inventory,
+                Err(FirmwareReadError::DeadlineExceeded)
+            );
+            reader_pool.close().await;
+        }
+        assert_eq!(mock.batch_get_firmware_inventory_calls().await.len(), 3);
     }
 
     #[carbide_macros::sqlx_test]
