@@ -207,11 +207,13 @@ ip_allocation=dynamic|fixed|retained|unspecified.
 network_segment_type uses protobuf enum numbers: tenant=0, admin=1,
 underlay=2, host_inband=3. Replaces the full interface list for the
 machine. For a matching stored MAC, omitting role preserves the stored
-role; role=unspecified resets it to host. Omitting ip_allocation
-preserves the stored policy when the presence of fixed_ip is unchanged;
-ip_allocation=unspecified resets it to fixed_ip inference. Omitting any
-other optional interface field, including network_segment_type, clears
-its stored value.
+physical-interface role. An omitted dpu_loopback role is preserved only
+when both MAC and fixed_ip match the stored loopback; changing its
+address requires explicit role=dpu_loopback. role=unspecified resets it
+to host. Omitting ip_allocation preserves the stored policy when the
+presence of fixed_ip is unchanged; ip_allocation=unspecified resets it
+to fixed_ip inference. Omitting any other optional interface field,
+including network_segment_type, clears its stored value.
 
 `--disable-lockdown <DISABLE_LOCKDOWN>`
 

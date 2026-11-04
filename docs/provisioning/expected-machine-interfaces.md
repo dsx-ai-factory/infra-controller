@@ -348,7 +348,10 @@ or `null`, and clears it when `interfaces` is `[]`. `em replace-all` has no
 stored list to preserve, so omitted or `null` results in an empty list.
 
 Within a replacement list, omitting `role` for a matching stored MAC preserves
-its role. Set `role` to `unspecified` to reset it to `host`. Omitting
+its physical-interface role. Preserving an omitted `dpu_loopback` role requires
+both the MAC and `fixed_ip` to match the stored loopback. When changing a
+loopback address, explicitly set `role: "dpu_loopback"`. Set `role` to
+`unspecified` to reset it to `host`. Omitting
 `ip_allocation` preserves the stored policy when the presence of `fixed_ip`
 does not change. Set `ip_allocation` to `unspecified` to infer the policy
 again. Omitting `network_segment_type` clears the stored segment guard.
