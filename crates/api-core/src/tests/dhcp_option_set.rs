@@ -503,3 +503,91 @@ async fn test_attach_waits_for_concurrent_dhcp_option_set_delete(pool: sqlx::PgP
     assert_eq!(err.code(), Code::FailedPrecondition);
     assert_eq!(vpc_dhcp_option_set(&env, vpc_id).await, None);
 }
+
+/// The DPU's DHCP server gets tenant values only for a Ready instance whose OS
+/// boots via its option set; any other OS keeps NICo's values even with a set attached.
+#[crate::sqlx_test]
+async fn test_host_network_config_carries_tenant_dhcp_values_for_option_set_os(pool: sqlx::PgPool) {
+    let env = create_test_env(pool).await;
+    create_fixture_tenant(&env, TENANT).await.unwrap();
+    let set_id = env
+        .api
+        .create_dhcp_option_set(Request::new(rpc::forge::CreateDhcpOptionSetRequest {
+            id: None,
+            tenant_organization_id: TENANT.to_string(),
+            metadata: Some(rpc::forge::Metadata {
+                name: "tenant boot".to_string(),
+                ..Default::default()
+            }),
+            options: Some(rpc::forge::DhcpOptions {
+                v4: Some(rpc::forge::DhcpOptionsV4 {
+                    boot_url: Some("http://boot.example.com/x.efi".to_string()),
+                    dns_servers: vec!["10.0.0.53".to_string()],
+                }),
+                v6: Some(rpc::forge::DhcpOptionsV6 {
+                    boot_url: Some("http://[2001:db8::5]/x.efi".to_string()),
+                    dns_servers: vec![],
+                }),
+            }),
+        }))
+        .await
+        .unwrap()
+        .into_inner()
+        .dhcp_option_set
+        .and_then(|set| set.id)
+        .unwrap();
+    let segment_id = env.create_vpc_and_tenant_segment().await;
+    let option_set_os = rpc::forge::InstanceOperatingSystemConfig {
+        variant: Some(
+            rpc::forge::instance_operating_system_config::Variant::DhcpOptionSet(
+                rpc::forge::DhcpOptionSetBoot {},
+            ),
+        ),
+        ..default_os_config()
+    };
+
+    // Each row allocates a Ready instance with the set attached, then reads the DPU's config.
+    for (os, expected) in [
+        (
+            option_set_os,
+            (
+                Some("http://boot.example.com/x.efi".to_string()),
+                Some("http://[2001:db8::5]/x.efi".to_string()),
+                vec!["10.0.0.53".to_string()],
+            ),
+        ),
+        (default_os_config(), (None, None, vec![])),
+    ] {
+        let host = create_managed_host(&env).await;
+        host.instance_builer(&env)
+            .config(rpc::InstanceConfig {
+                tenant: Some(default_tenant_config()),
+                os: Some(os.clone()),
+                network: Some(single_interface_network_config(segment_id)),
+                dhcp_option_set_id: Some(set_id.to_string()),
+                ..Default::default()
+            })
+            .build()
+            .await;
+        let config = env
+            .api
+            .get_managed_host_network_config(Request::new(
+                rpc::forge::ManagedHostNetworkConfigRequest {
+                    dpu_machine_id: Some(host.dpu().id),
+                },
+            ))
+            .await
+            .unwrap()
+            .into_inner();
+        let interface = &config.tenant_interfaces[0];
+        assert_eq!(
+            (
+                interface.booturl_v4.clone(),
+                interface.booturl_v6.clone(),
+                interface.dns_servers_v4.clone(),
+            ),
+            expected,
+            "os = {os:?}"
+        );
+    }
+}

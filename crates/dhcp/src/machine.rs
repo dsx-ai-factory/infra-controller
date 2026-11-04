@@ -759,12 +759,12 @@ mod test {
     use carbide_dhcp_common::VendorClass;
     use rpc::forge as rpc;
 
-    use crate::carbide_set_config_ntp;
     use crate::discovery::Discovery;
     use crate::machine::{
         Machine, encode_domain_name, flatten_ipv6_addresses, machine_get_filename,
-        machine_get_ntpservers, ntp_server_option_payload, parent_domain,
+        machine_get_nameservers, machine_get_ntpservers, ntp_server_option_payload, parent_domain,
     };
+    use crate::{carbide_set_config_name_servers, carbide_set_config_ntp};
 
     #[test]
     fn test_use_booturl_internal() {
@@ -849,6 +849,7 @@ mod test {
         let mut machine = Box::new(Machine {
             inner: rpc::DhcpRecord {
                 ntp_servers: vec!["198.51.100.1".to_string(), "198.51.100.2".to_string()],
+                dns_servers: vec![],
                 ..Default::default()
             },
             discovery_info: Discovery {
@@ -881,6 +882,7 @@ mod test {
         let mut machine = Box::new(Machine {
             inner: rpc::DhcpRecord {
                 ntp_servers: vec![],
+                dns_servers: vec![],
                 ..Default::default()
             },
             discovery_info: Discovery {
@@ -901,6 +903,46 @@ mod test {
         // and is converted back into its CString exactly once.
         let cstr = unsafe { CString::from_raw(raw) };
         assert_eq!(cstr.to_str().unwrap(), "10.0.0.2,10.0.0.3");
+    }
+
+    /// Kea must send the record's tenant DNS servers, and Kea's configured ones when the record has none.
+    #[test]
+    fn test_machine_get_nameservers() {
+        // SAFETY: The local CString remains live and NUL-terminated for this
+        // synchronous configuration call.
+        unsafe {
+            let s = CString::new("10.0.0.1").unwrap();
+            carbide_set_config_name_servers(s.as_ptr());
+        }
+
+        for (dns_servers, expected) in [
+            (vec!["198.51.100.53".to_string()], "198.51.100.53"),
+            (vec![], "10.0.0.1"),
+        ] {
+            let mut machine = Box::new(Machine {
+                inner: rpc::DhcpRecord {
+                    dns_servers,
+                    ..Default::default()
+                },
+                discovery_info: Discovery {
+                    relay_address: "127.0.0.1".parse().unwrap(),
+                    mac_address: "00:00:00:00:00:03".parse().unwrap(),
+                    _client_system: None,
+                    vendor_class: None,
+                    link_select_address: None,
+                    circuit_id: None,
+                    remote_id: None,
+                    desired_address: None,
+                },
+                vendor_class: None,
+            });
+
+            let raw = machine_get_nameservers(&mut *machine);
+            // SAFETY: `raw` is the unreclaimed pointer returned by the getter above
+            // and is converted back into its CString exactly once.
+            let cstr = unsafe { CString::from_raw(raw) };
+            assert_eq!(cstr.to_str().unwrap(), expected);
+        }
     }
 
     #[test]

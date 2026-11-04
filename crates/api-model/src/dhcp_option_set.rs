@@ -158,3 +158,62 @@ fn validate_boot_url(boot_url: &Option<String>) -> Result<(), ConfigValidationEr
         ))),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use carbide_test_support::value_scenarios;
+
+    use super::*;
+
+    fn options(
+        boot_url_v4: Option<&str>,
+        dns_servers_v4: &[&str],
+        boot_url_v6: Option<&str>,
+    ) -> DhcpOptions {
+        DhcpOptions {
+            v4: Some(DhcpOptionsV4 {
+                boot_url: boot_url_v4.map(str::to_string),
+                dns_servers: dns_servers_v4.iter().map(|s| s.parse().unwrap()).collect(),
+            }),
+            v6: Some(DhcpOptionsV6 {
+                boot_url: boot_url_v6.map(str::to_string),
+                dns_servers: vec![],
+            }),
+        }
+    }
+
+    #[test]
+    fn resolve_prefers_instance_values_then_vpc_values() {
+        value_scenarios!(
+            run = |(instance, vpc): (Option<DhcpOptions>, Option<DhcpOptions>)| {
+                DhcpOverrides::resolve(instance.as_ref(), vpc.as_ref())
+            };
+            "instance values win over the VPC's" {
+                (
+                    Some(options(Some("http://instance/x.efi"), &["10.0.0.53"], None)),
+                    Some(options(Some("http://vpc/x.efi"), &["10.0.0.54"], None)),
+                ) => DhcpOverrides {
+                    boot_url_v4: Some("http://instance/x.efi".to_string()),
+                    dns_servers_v4: vec!["10.0.0.53".parse().unwrap()],
+                    ..Default::default()
+                },
+            }
+
+            "each unset instance value falls back to the VPC's" {
+                (
+                    Some(options(Some("http://instance/x.efi"), &[], None)),
+                    Some(options(None, &["10.0.0.54"], Some("http://vpc/x6.efi"))),
+                ) => DhcpOverrides {
+                    boot_url_v4: Some("http://instance/x.efi".to_string()),
+                    boot_url_v6: Some("http://vpc/x6.efi".to_string()),
+                    dns_servers_v4: vec!["10.0.0.54".parse().unwrap()],
+                    ..Default::default()
+                },
+            }
+
+            "no option sets keep NICo's values" {
+                (None, None) => DhcpOverrides::default(),
+            }
+        );
+    }
+}
