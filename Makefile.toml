@@ -422,7 +422,10 @@ workspace = false
 script = '''
 #!/usr/bin/env bash
 
-docker build --load ${REPO_ROOT}/dev/docker -f ${REPO_ROOT}/dev/docker/Dockerfile.build-artifacts-container-cross-aarch64 -t build-artifacts-container-cross-aarch64
+# The legacy builder (Docker without buildx) rejects --load.
+load=
+docker build --help 2>/dev/null | grep -q -- --load && load=--load
+docker build $load ${REPO_ROOT}/dev/docker -f ${REPO_ROOT}/dev/docker/Dockerfile.build-artifacts-container-cross-aarch64 -t build-artifacts-container-cross-aarch64
 '''
 
 [tasks.build-x86-build-container]
@@ -436,18 +439,14 @@ condition_script = '''
 category = "Kind"
 description = "Build the x86 build container"
 workspace = false
-command = "docker"
-args = [
-  "build",
-  "--load",
-  "--build-arg",
-  "KEA_VERSION=${KEA_VERSION}",
-  "-t",
-  "${BUILD_CONTAINER_X86_URL}",
-  "-f",
-  "${REPO_ROOT}/dev/docker/Dockerfile.build-container-x86_64",
-  ".",
-]
+script = '''
+#!/usr/bin/env bash
+
+# The legacy builder (Docker without buildx) rejects --load.
+load=
+docker build --help 2>/dev/null | grep -q -- --load && load=--load
+docker build $load --build-arg "KEA_VERSION=${KEA_VERSION}" -t "${BUILD_CONTAINER_X86_URL}" -f "${REPO_ROOT}/dev/docker/Dockerfile.build-container-x86_64" .
+'''
 cwd = "${REPO_ROOT}/dev/docker"
 
 [tasks.build-arm-build-container]
