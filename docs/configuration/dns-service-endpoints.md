@@ -12,8 +12,9 @@ record for the NTP hostname. A site-local recursive resolver (Unbound or
 equivalent) running on your site controller is the recommended approach.
 
 Stock DPU-agent images query `carbide-pxe.forge`, `carbide-ntp.forge`, and
-`socks.forge`. The rebranded `nico-pxe.nico`, `nico-ntp.nico`, and
-`socks.nico` names apply only to images built to use those names. These are
+`socks.forge`, and connect to the API at `carbide-api.forge` by default. The
+rebranded `nico-pxe.nico`, `nico-ntp.nico`, `socks.nico`, and `nico-api.nico`
+names apply only to images built to use those names. These are
 distinct hostnames, not suffix substitutions; configure the exact names queried
 by the deployed agent, or serve both aliases during a mixed-image transition.
 
@@ -257,7 +258,7 @@ What it resolves:
 
 | Query | How it's answered |
 |---|---|
-| `carbide-api.forge`, `nico-static-pxe.nico`, `otel-receiver.forge`, and the exact PXE, NTP, and SOCKS hostnames queried by the deployed agent | Served locally by Unbound from `local_data.conf` |
+| `nico-static-pxe.nico`, `otel-receiver.forge`, and the exact API, PXE, NTP, and SOCKS hostnames used by the deployed agent | Served locally by Unbound from `local_data.conf` |
 | Names in the site domain (e.g., a `<machine-id>` record under `initial_domain_name`) | Reaches `nico-dns` via upstream delegation of the site zone to the `nico-dns` VIPs, or via an explicit forward zone in Unbound |
 | External names (package mirrors, public NTP fallbacks, etc.) | Unbound forwards or recurses to the upstream resolver configured in `forwarders.conf` |
 
