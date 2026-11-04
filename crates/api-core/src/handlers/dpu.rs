@@ -1109,13 +1109,10 @@ mod lldp_fingerprint_validation_tests {
                 validate_unchanged_lldp_fingerprint(&supplied, accepted.as_deref()).map_err(drop)
             };
             "accepted snapshot" {
-                // An exact match is the only fingerprint-aware success path.
                 (vec![0x0a], Some(vec![0x0a])) => Yields(()),
             }
             "rejected snapshot" {
-                // A different accepted snapshot proves the agent claim is stale.
                 (vec![0x0b], Some(vec![0x0a])) => Fails,
-                // Absence cannot establish that Core accepted the supplied snapshot.
                 (vec![0x0a], None) => Fails,
             }
         );
