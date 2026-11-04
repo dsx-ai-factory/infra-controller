@@ -23,6 +23,7 @@ type Client interface {
 	Close() error
 	Version(ctx context.Context) (string, error)
 	GetMachines(ctx context.Context) ([]MachineDetail, error)
+	GetLeakingRackIds(ctx context.Context) ([]string, error)
 	GetLeakingMachineIds(ctx context.Context) ([]string, error)
 	GetLeakingSwitchIds(ctx context.Context) ([]string, error)
 	GetPowerStates(ctx context.Context, machineIds []string) (ret []MachinePowerState, err error)
@@ -276,6 +277,7 @@ type Client interface {
 	SetAdminPowerControlError(err error)
 	AddMachineInterface(iface MachineInterface)
 	AddExpectedSwitchInfo(info ExpectedSwitchInfo)
+	SetLeakingRackIds(ids []string)
 	SetLeakingMachineIds(ids []string)
 	SetLeakingSwitchIds([]string)
 	SetSwitchRackID(switchID, rackID string)

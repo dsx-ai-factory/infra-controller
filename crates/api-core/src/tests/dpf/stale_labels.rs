@@ -33,7 +33,7 @@ use carbide_uuid::machine::{DpuMachineId, HostMachineId};
 use model::machine::{DpfState, DpuInitState, FailureCause, FailureDetails, ManagedHostState};
 use tokio::time::timeout;
 
-use super::{dpf_config, expect_dpf_service_inventory, get_host_state};
+use super::{dpf_config, expect_dpf_service_inventory, get_host_state, phase_observation};
 use crate::tests::common::api_fixtures::{
     TestEnvOverrides, create_managed_host_with_dpf, create_test_env_with_overrides, get_config,
 };
@@ -47,8 +47,8 @@ fn provisioning_mock_with_labels_valid(labels_valid: Arc<AtomicBool>) -> MockDpf
     mock.expect_register_dpu_node().returning(|_| Ok(()));
     mock.expect_release_maintenance_hold().returning(|_| Ok(()));
     mock.expect_is_reboot_required().returning(|_| Ok(false));
-    mock.expect_get_dpu_phase()
-        .returning(|_, _| Ok(DpuPhase::Ready));
+    mock.expect_get_dpu_phase_observation()
+        .returning(|_, _| Ok(phase_observation(DpuPhase::Ready)));
     mock.expect_deployment_type_for_dpu()
         .returning(|_, _| Ok(DpuDeploymentType::Bf3));
     mock.expect_verify_node_labels()

@@ -449,6 +449,7 @@ fn register_queue_depth_metric(sinks: &[OtlpSink]) {
 mod tests {
     use std::borrow::Cow;
     use std::str::FromStr;
+    use std::time::{Duration, SystemTime};
 
     use carbide_instrument::testing::MetricsCapture;
     use mac_address::MacAddress;
@@ -468,6 +469,7 @@ mod tests {
     use crate::sink::event_mapper::OpenBmcEventMapper;
     use crate::sink::{
         CompositeDataSink, DiagnosticLogRecord, LogRecord, LogSeverity, MetricSample,
+        MetricSemantics,
     };
 
     fn test_context() -> EventContext {
@@ -562,6 +564,7 @@ mod tests {
         unit: &str,
     ) -> CollectorEvent {
         CollectorEvent::Metric(Box::new(MetricSample {
+            semantics: crate::sink::MetricSemantics::Gauge,
             key: key.to_string(),
             name: name.to_string(),
             metric_type: metric_type.to_string(),
@@ -624,17 +627,40 @@ mod tests {
     }
 
     #[test]
-    fn metric_events_dedup_by_sample_key() {
+    fn counter_replacement_keeps_the_latest_value_and_epoch() {
         let sink = test_sink();
         let ctx = test_context();
-        sink.handle_event(&ctx, &metric_event());
-        sink.handle_event(&ctx, &metric_event());
-        let mut count = 0;
-        while sink.metrics_queue.pop().is_some() {
-            count += 1;
+        for (value, start_nanos) in [(42.0, 1), (3.0, 2)] {
+            let CollectorEvent::Metric(mut sample) = metric_event_with_name(
+                "hw_metric",
+                "memory1/errors",
+                "lifetime_correctable_ecc_errors",
+                "count",
+            ) else {
+                panic!("fixture must contain a metric");
+            };
+            sample.value = value;
+            sample.semantics = MetricSemantics::CumulativeCounter {
+                description: "Number of correctable ECC errors over the memory lifetime",
+                start_time: Some(SystemTime::UNIX_EPOCH + Duration::from_nanos(start_nanos)),
+            };
+            sink.handle_event(&ctx, &CollectorEvent::Metric(sample));
         }
-        assert_eq!(count, 1, "same key should dedup to one entry");
+
+        let (_, latest) = sink
+            .metrics_queue
+            .pop()
+            .expect("latest counter observation");
+        assert!(sink.metrics_queue.pop().is_none(), "one entry per key");
         assert_eq!(sink.metrics_replaced_total.get() as u64, 1);
+        assert_eq!(latest.pair().1.value, 3.0);
+        assert_eq!(
+            latest.pair().1.semantics,
+            MetricSemantics::CumulativeCounter {
+                description: "Number of correctable ECC errors over the memory lifetime",
+                start_time: Some(SystemTime::UNIX_EPOCH + Duration::from_nanos(2)),
+            },
+        );
     }
 
     #[test]
@@ -940,6 +966,7 @@ mod tests {
             ),
         ] {
             let sample = MetricSample {
+                semantics: crate::sink::MetricSemantics::Gauge,
                 key: format!("nvue_gnmi_events:{id}"),
                 name: name.into(),
                 metric_type: metric_type.into(),
@@ -1645,38 +1672,220 @@ mod tests {
 
             let context = test_context();
 
-            let expected = if partial_rejections.is_some() {
-                1.0
-            } else {
-                2.0
-            };
+            let rejected = partial_rejections.unwrap_or_default() as f64;
+            let counter = CollectorEvent::Metric(Box::new(MetricSample {
+                key: "first".to_string(),
+                name: "hw_metric".to_string(),
+                metric_type: "lifetime_correctable_ecc_errors".to_string(),
+                unit: "count".to_string(),
+                value: 42.0,
+                semantics: MetricSemantics::CumulativeCounter {
+                    description: "Number of correctable ECC errors over the memory lifetime",
+                    start_time: Some(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1)),
+                },
+                labels: vec![],
+                context: None,
+            }));
 
-            for key in ["first", "second"] {
+            for (key, event) in [
+                ("first", counter),
+                ("second", metric_event_with("second", "gauge", "celsius")),
+            ] {
                 sink.handle_event(&context, &log_event(key, "[]"));
-                sink.handle_event(&context, &metric_event_with(key, "gauge", "celsius"));
+                sink.handle_event(&context, &event);
             }
 
             wait_until(
                 || {
-                    ["logs", "metrics"].into_iter().all(|signal| {
-                        capture.counter_delta(
-                            "carbide_health_otlp_egress_records_total",
-                            &[("target", &endpoint), ("signal", signal)],
-                        ) == expected
-                    })
+                    [("logs", 2.0), ("metrics", 3.0)]
+                        .into_iter()
+                        .all(|(signal, points)| {
+                            capture.counter_delta(
+                                "carbide_health_otlp_egress_records_total",
+                                &[("target", &endpoint), ("signal", signal)],
+                            ) == points - rejected
+                        })
                 },
                 "both signals count only acknowledged records",
             )
             .await;
 
-            let logs = collector.logs.lock().unwrap();
-            assert_eq!(logs.len(), 2);
-            assert_eq!(logs[1], logs[0], "retried logs export");
+            {
+                let logs = collector.logs.lock().unwrap();
+                assert_eq!(logs.len(), 2);
+                assert_eq!(logs[1], logs[0], "retried logs export");
 
-            let metrics = collector.metrics.lock().unwrap();
-            assert_eq!(metrics.len(), 2);
-            assert_eq!(metrics[1], metrics[0], "retried metrics export");
+                let metrics = collector.metrics.lock().unwrap();
+                assert_eq!(metrics.len(), 2);
+                assert_eq!(metrics[1], metrics[0], "retried metrics export");
+
+                let counter = metrics[0]
+                    .resource_metrics
+                    .iter()
+                    .flat_map(|resource| &resource.scope_metrics)
+                    .flat_map(|scope| &scope.metrics)
+                    .find(|metric| metric.name.ends_with("_total"))
+                    .expect("counter alias in the retried request");
+                let Some(crate::otlp::metrics::metric::Data::Sum(sum)) = &counter.data else {
+                    panic!("counter alias must be a Sum");
+                };
+
+                assert_eq!(sum.data_points[0].start_time_unix_nano, 1_000_000_000);
+                assert_eq!(
+                    sum.data_points[0].value,
+                    Some(crate::otlp::metrics::number_data_point::Value::AsDouble(
+                        42.0
+                    )),
+                );
+            }
+
+            for signal in ["logs", "metrics"] {
+                assert_eq!(
+                    capture.counter_delta(
+                        "carbide_health_otlp_ingress_records_total",
+                        &[("target", &endpoint), ("signal", signal)],
+                    ),
+                    2.0,
+                    "{signal} ingress counts observations before compatibility aliases",
+                );
+            }
+
+            if partial_rejections.is_none() {
+                use crate::otlp::common::any_value::Value::StringValue;
+
+                let CollectorEvent::Log(mut record) = log_event("OpenBMC.0.1.Repeated", "[]")
+                else {
+                    unreachable!("log_event always returns a log event");
+                };
+                // The full batch above reset the flush interval. Let each log
+                // leave the queue so both reach staging separately with the same key.
+                for body in ["first occurrence", "second occurrence"] {
+                    record.body = body.to_string();
+                    sink.handle_event(&context, &CollectorEvent::Log(record.clone()));
+                    wait_until(|| sink.queue.len() == 0, "log reaches staging").await;
+                }
+                wait_until(
+                    || {
+                        capture.counter_delta(
+                            "carbide_health_otlp_egress_records_total",
+                            &[("target", &endpoint), ("signal", "logs")],
+                        ) == 4.0
+                    },
+                    "both log records are exported",
+                )
+                .await;
+
+                let logs = collector.logs.lock().unwrap();
+                assert_eq!(logs.len(), 3);
+                let bodies = logs[2]
+                    .resource_logs
+                    .iter()
+                    .flat_map(|resource| &resource.scope_logs)
+                    .flat_map(|scope| &scope.log_records)
+                    .map(
+                        |record| match record.body.as_ref().and_then(|body| body.value.as_ref()) {
+                            Some(StringValue(body)) => body.as_str(),
+                            _ => panic!("test expects string log bodies"),
+                        },
+                    )
+                    .collect::<Vec<_>>();
+                assert_eq!(bodies, ["first occurrence", "second occurrence"]);
+            }
         }
+    }
+
+    #[tokio::test]
+    async fn metrics_drain_replaces_staged_readings_after_an_export() {
+        use crate::otlp::metrics::metric;
+        use crate::otlp::metrics::number_data_point::Value::AsDouble;
+
+        let capture = MetricsCapture::start();
+        let collector = Arc::new(FlakyCollector::default());
+        let endpoint = serve_collector(
+            tonic::transport::Server::builder()
+                .add_service(MetricsServiceServer::from_arc(collector.clone())),
+        )
+        .await;
+        let mut sink = bounded_test_sink(3);
+        sink.target = ConfiguredOtlpTarget(endpoint.clone());
+        let drain = OtlpMetricsDrainTask::new(
+            sink.metrics_queue.clone(),
+            OtlpTargetConfig {
+                endpoint: endpoint.clone(),
+                batch_size: 2,
+                queue_capacity: 3,
+                max_request_bytes: OtlpTargetConfig::DEFAULT_MAX_REQUEST_BYTES,
+                max_concurrent_exports: 1,
+                flush_interval: Duration::from_secs(3600),
+                include_diagnostics: false,
+                include_alert_details: false,
+                tls: None,
+            },
+            "staging".to_string(),
+        )
+        .run();
+        tokio::pin!(drain);
+
+        let context = test_context();
+        let first = metric_event();
+        let other = metric_event_with_name("fan", "other", "gauge", "rpm");
+        let mut replacement = first.clone();
+        let CollectorEvent::Metric(sample) = &mut replacement else {
+            panic!("metric fixture must contain a metric");
+        };
+        sample.value = 7.0;
+
+        // The full priming export resets the interval. Its first attempt returns
+        // `UNAVAILABLE`, so wait for the retry before reusing a key in a partial
+        // batch. The replacement and unrelated series then fill that batch.
+        for (phase, events, exported) in [
+            ("priming export", vec![first.clone(), other.clone()], 2.0),
+            ("partial staging", vec![first], 2.0),
+            ("replacement export", vec![replacement, other], 4.0),
+        ] {
+            for event in events {
+                sink.handle_event(&context, &event);
+            }
+            tokio::select! {
+                () = &mut drain => panic!("drain must keep running"),
+                () = wait_until(
+                    || sink.metrics_queue.len() == 0 && capture.counter_delta(
+                        "carbide_health_otlp_egress_records_total",
+                        &[("target", &endpoint), ("signal", "metrics")],
+                    ) == exported,
+                    phase,
+                ) => {}
+            }
+        }
+
+        let requests = collector.metrics.lock().unwrap();
+        assert_eq!(requests.len(), 3, "priming attempt, retry, and next batch");
+        let points = requests[2]
+            .resource_metrics
+            .iter()
+            .flat_map(|resource| &resource.scope_metrics)
+            .flat_map(|scope| &scope.metrics)
+            .map(|metric| {
+                let Some(metric::Data::Gauge(gauge)) = &metric.data else {
+                    panic!("test expects gauge points");
+                };
+                (
+                    metric.name.as_str(),
+                    gauge
+                        .data_points
+                        .iter()
+                        .map(|point| point.value)
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            points,
+            vec![
+                ("staging_temp_gauge_celsius", vec![Some(AsDouble(7.0))]),
+                ("staging_fan_gauge_rpm", vec![Some(AsDouble(42.0))]),
+            ]
+        );
     }
 
     /// Holds each metrics export until the gate hands out a permit, and
@@ -1773,31 +1982,56 @@ mod tests {
         use std::sync::atomic::Ordering::SeqCst;
 
         let collector = Arc::new(GatedCollector::new(0));
-        let sink = sink_exporting_to(
-            serve_gated_collector(&collector).await,
-            1,
-            2,
-            std::time::Duration::from_secs(3600),
-            "otlp_concurrency_test",
-        );
+        let endpoint = serve_gated_collector(&collector).await;
+        let mut sink = bounded_test_sink(3);
+        sink.target = ConfiguredOtlpTarget(endpoint.clone());
+        let drain = OtlpMetricsDrainTask::new(
+            sink.metrics_queue.clone(),
+            OtlpTargetConfig {
+                endpoint,
+                batch_size: 1,
+                queue_capacity: 3,
+                max_request_bytes: OtlpTargetConfig::DEFAULT_MAX_REQUEST_BYTES,
+                max_concurrent_exports: 2,
+                flush_interval: Duration::from_secs(3600),
+                include_diagnostics: false,
+                include_alert_details: false,
+                tls: None,
+            },
+            "otlp_concurrency_test".to_string(),
+        )
+        .run();
+        tokio::pin!(drain);
 
         push_metrics(&sink, 3);
 
-        wait_until(
-            || collector.in_flight.load(SeqCst) >= 2,
-            "two exports are in flight",
-        )
-        .await;
-        // Give a third export time to arrive if the drain did not wait for a slot.
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        tokio::select! {
+            () = &mut drain => panic!("drain must keep running"),
+            () = wait_until(
+                || collector.in_flight.load(SeqCst) >= 2,
+                "two exports are in flight",
+            ) => {}
+        }
+
+        // Both responses remain blocked while the drain is polled again. The
+        // third full batch must remain queued until an export completes.
+        let drain_poll =
+            std::future::poll_fn(|cx| std::task::Poll::Ready(drain.as_mut().poll(cx))).await;
+        assert!(drain_poll.is_pending());
+        assert_eq!(sink.metrics_queue.len(), 1);
+        assert_eq!(collector.in_flight.load(SeqCst), 2);
         assert_eq!(collector.max_in_flight.load(SeqCst), 2);
 
         collector.gate.add_permits(3);
-        wait_until(
-            || collector.exported_points.lock().unwrap().len() == 3,
-            "all three batches are exported",
-        )
-        .await;
+        tokio::select! {
+            () = &mut drain => panic!("drain must keep running"),
+            () = wait_until(
+                || collector.exported_points.lock().unwrap().len() == 3,
+                "all three batches are exported",
+            ) => {}
+        }
+        assert_eq!(sink.metrics_queue.len(), 0);
+        assert_eq!(*collector.exported_points.lock().unwrap(), vec![1, 1, 1]);
         assert_eq!(collector.max_in_flight.load(SeqCst), 2);
     }
 }

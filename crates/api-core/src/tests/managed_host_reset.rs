@@ -45,6 +45,7 @@ use crate::tests::common::api_fixtures::{
     create_managed_host_with_dpf_multi, create_test_env, create_test_env_with_overrides,
     get_config, network_configured_with_health,
 };
+use crate::tests::dpf::phase_observation;
 
 const TEST_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -56,8 +57,8 @@ fn provisioning_mock() -> MockDpfOperations {
     mock.expect_register_dpu_node().returning(|_| Ok(()));
     mock.expect_release_maintenance_hold().returning(|_| Ok(()));
     mock.expect_is_reboot_required().returning(|_| Ok(false));
-    mock.expect_get_dpu_phase()
-        .returning(|_, _| Ok(DpuPhase::Ready));
+    mock.expect_get_dpu_phase_observation()
+        .returning(|_, _| Ok(phase_observation(DpuPhase::Ready)));
     mock.expect_deployment_type_for_dpu()
         .returning(|_, _| Ok(DpuDeploymentType::Bf3));
     mock.expect_verify_node_labels().returning(|_, _| Ok(true));
@@ -258,6 +259,200 @@ async fn reset_without_instance_records_request_and_skips_network_wait(pool: sql
             .reset_requested
             .as_ref()
             .unwrap()
+            .started_at
+            .is_some()
+    );
+}
+
+/// A preparation failure is safe to recover, but reset must still wait for
+/// independent lockdown readback and the controller's persisted Failed phase.
+#[crate::sqlx_test]
+async fn reset_waits_for_nic_firmware_lockdown_restoration(pool: sqlx::PgPool) {
+    use carbide_libmlx_model::firmware::operation::{
+        FirmwareOperation, FirmwareOperationPhase, FirmwareOperationState,
+    };
+    use carbide_libmlx_model::firmware::result::FirmwareFlashReport;
+    use model::machine::nic_firmware::NicFirmwarePhase;
+    use model::test_support::nic_firmware as fixtures;
+    use rpc::protos::mlx_device as pb;
+    use rpc::protos::mlx_device::mlx_device_lockdown_result::Result as LockdownResult;
+
+    use crate::auth::AuthContext;
+
+    let env = dpf_test_env(pool).await;
+    let managed_host = dpf_ingested_host(&env).await;
+    managed_host.mark_machine_for_updates().await;
+    let host_id: MachineId = managed_host.id.into();
+
+    // A reset queued before firmware recovery resumed remains withdrawable.
+    env.api
+        .trigger_managed_host_reset(reset_request(host_id, Mode::Set))
+        .await
+        .unwrap();
+    let mut admitted = fixtures::operation();
+    admitted.phase = NicFirmwarePhase::UpdatingFirmware { target_index: 0 };
+    let target = &mut admitted.targets[0];
+    target.supervisor_instance_id = Some("reset-test-helper".into());
+    target.receipt = Some(FirmwareOperation {
+        operation_id: admitted.operation_id.clone(),
+        state: FirmwareOperationState::Failed,
+        phase: Some(FirmwareOperationPhase::Prepare),
+        report: FirmwareFlashReport {
+            expected_version: Some(target.resolution.entry.firmware.version.clone()),
+            ..Default::default()
+        },
+        diagnostic: Some("image preparation failed before mutation".into()),
+    });
+    admitted.validate().expect("valid admitted operation");
+    let mut txn = env.db_txn().await;
+    db::machine::update_state(
+        &mut txn,
+        managed_host.id.as_host_machine_id(),
+        &ManagedHostState::NicFirmwareUpdating {
+            operation: admitted,
+        },
+    )
+    .await
+    .unwrap();
+    txn.commit().await.unwrap();
+
+    env.api
+        .trigger_managed_host_reset(reset_request(host_id, Mode::Clear))
+        .await
+        .unwrap();
+    let error = env
+        .api
+        .trigger_managed_host_reset(reset_request(host_id, Mode::Set))
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), Code::FailedPrecondition);
+    assert!(error.message().contains("NIC firmware recovery"));
+    let active = db::machine::find_one(&env.pool, &managed_host.id, Default::default())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(active.reset_requested.is_none());
+    assert!(matches!(
+        active.state.value,
+        ManagedHostState::NicFirmwareUpdating {
+            operation: model::machine::nic_firmware::NicFirmwareOperation {
+                phase: NicFirmwarePhase::UpdatingFirmware { .. },
+                ..
+            }
+        }
+    ));
+
+    env.run_machine_state_controller_iteration_without_requeue()
+        .await;
+    let restoring = db::machine::find_one(&env.pool, &managed_host.id, Default::default())
+        .await
+        .unwrap()
+        .unwrap();
+    let ManagedHostState::NicFirmwareUpdating { operation } = &restoring.state.value else {
+        panic!("preparation failure must restore lockdown before allowing reset");
+    };
+    assert!(matches!(
+        operation.phase,
+        NicFirmwarePhase::RestoringLockdown {
+            failure: Some(_),
+            ..
+        }
+    ));
+    assert!(operation.lockdown.result.is_none());
+
+    // The reset API must preserve restoration ownership until its independent
+    // status read has committed, even though preparation already failed safely.
+    let error = env
+        .api
+        .trigger_managed_host_reset(reset_request(host_id, Mode::Set))
+        .await
+        .expect_err("reset must wait for lockdown restoration");
+    assert_eq!(error.code(), Code::FailedPrecondition);
+    let retained = db::machine::find_one(&env.pool, &managed_host.id, Default::default())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(retained.reset_requested.is_none());
+    assert_eq!(retained.state.value, restoring.state.value);
+    assert_eq!(retained.state.version, restoring.state.version);
+
+    // Report a separate status read for the restoration revision before the
+    // controller can persist Failed and release the reset guard.
+    let target = &operation.targets[0];
+    let model::nic_firmware::NicFirmwareCardSelector::Mac(mac) = target.selector else {
+        panic!("fixture selects its card by MAC")
+    };
+    let observed_device = pb::MlxDeviceInfo {
+        pci_name: target.pci_name.clone(),
+        base_mac: mac.to_string(),
+        ..Default::default()
+    };
+    let mut request = Request::new(pb::PublishMlxObservationReportRequest {
+        report: Some(pb::MlxObservationReport {
+            machine_id: Some(host_id),
+            observations: vec![pb::MlxObservation {
+                device_info: Some(observed_device),
+                lockdown_result: Some(pb::MlxDeviceLockdownResult {
+                    controller_state_version: restoring.state.version.to_string(),
+                    pci_name: target.pci_name.clone(),
+                    expected_device: Some(target.selector.clone().into()),
+                    result: Some(LockdownResult::StatusReport(pb::StatusReport {
+                        device_id: target.pci_name.clone(),
+                        status: pb::LockStatus::Unlocked.into(),
+                        timestamp: chrono::Utc::now().to_rfc3339(),
+                    })),
+                }),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }),
+    });
+    let mut auth = AuthContext::default();
+    auth.principals
+        .push(carbide_authn::middleware::Principal::SpiffeMachineIdentifier(host_id.to_string()));
+    request.extensions_mut().insert(auth);
+    env.api
+        .publish_mlx_observation_report(request)
+        .await
+        .unwrap();
+    env.run_machine_state_controller_iteration_without_requeue()
+        .await;
+
+    let failed = db::machine::find_one(&env.pool, &managed_host.id, Default::default())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        failed.state.value,
+        ManagedHostState::NicFirmwareUpdating {
+            operation: model::machine::nic_firmware::NicFirmwareOperation {
+                phase: NicFirmwarePhase::Failed { .. },
+                ..
+            }
+        }
+    ));
+    assert!(failed.reset_requested.is_none());
+    env.api
+        .trigger_managed_host_reset(reset_request(host_id, Mode::Set))
+        .await
+        .unwrap();
+    env.run_machine_state_controller_iteration_without_requeue()
+        .await;
+
+    let resetting = db::machine::find_one(&env.pool, &managed_host.id, Default::default())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        resetting.state.value,
+        ManagedHostState::Reset {
+            reset_state: ResetState::DeletingInstance,
+        }
+    );
+    assert!(
+        resetting
+            .reset_requested
+            .expect("accepted reset")
             .started_at
             .is_some()
     );

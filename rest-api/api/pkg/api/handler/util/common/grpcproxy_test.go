@@ -17,15 +17,21 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
+	temporalCommon "go.temporal.io/api/common/v1"
 	temporalEnums "go.temporal.io/api/enums/v1"
+	temporalFailure "go.temporal.io/api/failure/v1"
 	"go.temporal.io/api/serviceerror"
 	tclient "go.temporal.io/sdk/client"
 	tmocks "go.temporal.io/sdk/mocks"
 	tp "go.temporal.io/sdk/temporal"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/emptypb"
 
 	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/grpcproxy"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
+	swe "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/error"
 )
 
 // newProxyEchoContext returns a context and recorder for helpers whose HTTP
@@ -186,8 +192,6 @@ func TestProxyFlowGRPCReturnsAPIError(t *testing.T) {
 			name: "flow succeeds",
 		},
 		{
-			// Flow's own rejection arrives with no separate cause, so the
-			// message is the only diagnosis there is.
 			name:         "flow rejects the request",
 			getErr:       errors.New("rack not found"),
 			expectedCode: http.StatusInternalServerError,
@@ -228,36 +232,269 @@ func TestProxyFlowGRPCReturnsAPIError(t *testing.T) {
 }
 
 func TestExecuteCoreGRPC(t *testing.T) {
-	temporalClient, started := newTimingOutProxyClient()
-
-	err := ExecuteCoreGRPC(
-		context.Background(),
-		temporalClient,
-		"/forge.Forge/Test",
-		&emptypb.Empty{},
-		nil,
-		"",
-	)
-
-	t.Run("starts the Core proxy workflow", func(t *testing.T) {
-		assert.Equal(t, grpcproxy.Core.WorkflowName, started.workflowName)
+	cause := tp.NewApplicationError("method unavailable", "methodError")
+	applicationErr := tp.NewNonRetryableApplicationError("Core rejected the method", swe.ErrTypeNICoUnimplemented, cause)
+	converter := tp.GetDefaultFailureConverter()
+	activityErr := converter.FailureToError(&temporalFailure.Failure{
+		Message: "activity failed",
+		Cause:   converter.ErrorToFailure(applicationErr),
+		FailureInfo: &temporalFailure.Failure_ActivityFailureInfo{
+			ActivityFailureInfo: &temporalFailure.ActivityFailureInfo{
+				ActivityType: &temporalCommon.ActivityType{Name: "InvokeCoreGRPCOnSite"},
+			},
+		},
 	})
 
-	t.Run("generates a fresh workflow ID so identical calls never coalesce", func(t *testing.T) {
-		assert.True(t, strings.HasPrefix(started.options.ID, "core-grpc-Test-"), "got %q", started.options.ID)
-		assert.Equal(t, temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_UNSPECIFIED, started.options.WorkflowIDConflictPolicy)
-	})
+	cases := []struct {
+		name            string
+		getErr          error
+		expectedCode    int
+		expectedMessage string
+		checkCause      bool
+	}{
+		{
+			name:            "execution timeout",
+			getErr:          tp.NewTimeoutError(temporalEnums.TIMEOUT_TYPE_START_TO_CLOSE, nil),
+			expectedCode:    http.StatusGatewayTimeout,
+			expectedMessage: "Core proxy request timed out",
+		},
+		{
+			name:            "retains Temporal errors without exporting response data",
+			getErr:          activityErr,
+			expectedCode:    http.StatusNotImplemented,
+			expectedMessage: cause.Error(),
+			checkCause:      true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			temporalClient, started := newProxyClient(tc.getErr, nil)
+			apiErr := ExecuteCoreGRPC(context.Background(), temporalClient, "/forge.Forge/Test", &emptypb.Empty{}, nil, "")
 
-	t.Run("expires before the caller gives up", func(t *testing.T) {
-		assert.Equal(t, grpcproxy.WorkflowExecutionTimeout, started.options.WorkflowExecutionTimeout)
-		assert.Less(t, started.options.WorkflowExecutionTimeout, cutil.WorkflowContextTimeout)
-	})
+			assert.Equal(t, grpcproxy.Core.WorkflowName, started.workflowName)
+			assert.True(t, strings.HasPrefix(started.options.ID, "core-grpc-Test-"), "got %q", started.options.ID)
+			assert.Equal(t, temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_UNSPECIFIED, started.options.WorkflowIDConflictPolicy)
+			assert.Equal(t, grpcproxy.WorkflowExecutionTimeout, started.options.WorkflowExecutionTimeout)
+			assert.Less(t, started.options.WorkflowExecutionTimeout, cutil.WorkflowContextTimeout)
+			require.NotNil(t, apiErr)
+			assert.Equal(t, tc.expectedCode, apiErr.Code)
+			assert.Equal(t, tc.expectedMessage, apiErr.Message)
+			if !tc.checkCause {
+				return
+			}
 
-	t.Run("reports a timeout as 504", func(t *testing.T) {
-		require.NotNil(t, err)
-		assert.Equal(t, http.StatusGatewayTimeout, err.Code)
-		assert.Equal(t, "Core proxy request timed out", err.Message)
-	})
+			assert.Same(t, tc.getErr, apiErr.Unwrap())
+			var originalActivity *tp.ActivityError
+			require.ErrorAs(t, apiErr, &originalActivity)
+			assert.Equal(t, "InvokeCoreGRPCOnSite", originalActivity.ActivityType().Name)
+			var originalApplication *tp.ApplicationError
+			require.ErrorAs(t, apiErr, &originalApplication)
+			assert.Equal(t, swe.ErrTypeNICoUnimplemented, originalApplication.Type())
+			assert.EqualError(t, originalApplication.Unwrap(), cause.Error())
+			assert.Nil(t, apiErr.Data)
+
+			ctx, recorder := newProxyEchoContext()
+			require.NoError(t, apiErr.Send(ctx))
+			assert.Equal(t, tc.expectedCode, recorder.Code)
+			assert.JSONEq(t, `{"source":"","message":"method unavailable (type: methodError, retryable: true)","data":null}`, recorder.Body.String())
+		})
+	}
+}
+
+func TestExecuteCoreGRPCWithWorkflowID(t *testing.T) {
+	activityFailure := func(activityName string, cause error) error {
+		converter := tp.GetDefaultFailureConverter()
+		return converter.FailureToError(&temporalFailure.Failure{
+			Message: "activity failed",
+			Cause:   converter.ErrorToFailure(cause),
+			FailureInfo: &temporalFailure.Failure_ActivityFailureInfo{
+				ActivityFailureInfo: &temporalFailure.ActivityFailureInfo{
+					ActivityType: &temporalCommon.ActivityType{Name: activityName},
+				},
+			},
+		})
+	}
+	coreFailure := func(code codes.Code) error {
+		return activityFailure("InvokeCoreGRPCOnSite", swe.WrapErr(status.Error(code, "Core reply")))
+	}
+	cases := []struct {
+		name             string
+		startNewAttempt  bool
+		startErr         error
+		lookupRunID      *string
+		getErr           error
+		responseJSON     string
+		cancelCaller     bool
+		emptyWorkflowID  bool
+		expectedCode     int
+		expectedObserved bool
+		expectedAllDone  bool
+	}{
+		{
+			name: "new attempt returns completed cleanup", startNewAttempt: true,
+			responseJSON: `{"allDone":true}`, expectedObserved: true, expectedAllDone: true,
+		},
+		{
+			name: "new attempt returns incomplete cleanup", startNewAttempt: true,
+			responseJSON: `{}`, expectedObserved: true,
+		},
+		{
+			name: "duplicate running attempt joins its execution", startNewAttempt: true,
+			startErr:    serviceerror.NewWorkflowExecutionAlreadyStarted("running", "request-1", "running-run"),
+			lookupRunID: cutil.GetPtr("running-run"), responseJSON: `{}`, expectedObserved: true,
+		},
+		{
+			name: "duplicate completed attempt reads its result", startNewAttempt: true,
+			startErr:    serviceerror.NewWorkflowExecutionAlreadyStarted("completed", "request-1", "completed-run"),
+			lookupRunID: cutil.GetPtr("completed-run"), responseJSON: `{"allDone":true}`,
+			expectedObserved: true, expectedAllDone: true,
+		},
+		{
+			name:        "persisted attempt retrieves completed result without starting",
+			lookupRunID: cutil.GetPtr(""), responseJSON: `{"allDone":true}`,
+			expectedObserved: true, expectedAllDone: true,
+		},
+		{
+			name:        "expired workflow history never restarts a persisted attempt",
+			lookupRunID: cutil.GetPtr(""), getErr: serviceerror.NewNotFound("workflow history expired"),
+			expectedCode: http.StatusServiceUnavailable,
+		},
+		{
+			name: "missing namespace while starting is not Core NotFound", startNewAttempt: true,
+			startErr: serviceerror.NewNamespaceNotFound("missing-site"), expectedCode: http.StatusInternalServerError,
+		},
+		{
+			name: "start deadline preserves unknown execution", startNewAttempt: true,
+			startErr: serviceerror.NewDeadlineExceeded("start acknowledgement lost"), expectedCode: http.StatusGatewayTimeout,
+		},
+		{
+			name:        "caller timeout while recovering leaves execution alone",
+			lookupRunID: cutil.GetPtr(""), getErr: context.Canceled, cancelCaller: true,
+			expectedCode: http.StatusGatewayTimeout,
+		},
+		{
+			name:        "activity timeout is not a Core completion result",
+			lookupRunID: cutil.GetPtr(""), getErr: tp.NewTimeoutError(temporalEnums.TIMEOUT_TYPE_START_TO_CLOSE, nil),
+			expectedCode: http.StatusGatewayTimeout,
+		},
+		{
+			name:        "Core NotFound is a definitive reply",
+			lookupRunID: cutil.GetPtr(""), getErr: coreFailure(codes.NotFound),
+			expectedCode: http.StatusNotFound, expectedObserved: true,
+		},
+		{
+			name:         "legacy Core NotFound is a definitive reply",
+			lookupRunID:  cutil.GetPtr(""),
+			getErr:       activityFailure("InvokeCoreGRPCOnSite", tp.NewNonRetryableApplicationError("absent", swe.ErrTypeCarbideObjectNotFound, nil)),
+			expectedCode: http.StatusNotFound, expectedObserved: true,
+		},
+		{
+			name:        "Core precondition rejection is observed but not success",
+			lookupRunID: cutil.GetPtr(""), getErr: coreFailure(codes.FailedPrecondition),
+			expectedCode: http.StatusPreconditionFailed, expectedObserved: true,
+		},
+		{
+			name:        "Core transport unavailability remains ambiguous",
+			lookupRunID: cutil.GetPtr(""), getErr: coreFailure(codes.Unavailable),
+			expectedCode: http.StatusServiceUnavailable,
+		},
+		{
+			name:        "client response size exhaustion remains ambiguous",
+			lookupRunID: cutil.GetPtr(""), getErr: coreFailure(codes.ResourceExhausted),
+			expectedCode: http.StatusTooManyRequests,
+		},
+		{
+			name:         "unrecognized activity failure is not a definitive Core reply",
+			lookupRunID:  cutil.GetPtr(""),
+			getErr:       activityFailure("InvokeCoreGRPCOnSite", tp.NewApplicationError("connection failed", "unknown")),
+			expectedCode: http.StatusInternalServerError,
+		},
+		{
+			name:         "NotFound from another activity is not Core completion",
+			lookupRunID:  cutil.GetPtr(""),
+			getErr:       activityFailure("OtherActivity", swe.WrapErr(status.Error(codes.NotFound, "absent"))),
+			expectedCode: http.StatusServiceUnavailable,
+		},
+		{
+			name:        "unattributed gRPC NotFound is not Core completion",
+			lookupRunID: cutil.GetPtr(""), getErr: status.Error(codes.NotFound, "workflow lookup failed"),
+			expectedCode: http.StatusServiceUnavailable,
+		},
+		{
+			name: "absent result payload remains unknown", lookupRunID: cutil.GetPtr(""),
+			expectedCode: http.StatusInternalServerError,
+		},
+		{
+			name: "malformed JSON result remains unknown", lookupRunID: cutil.GetPtr(""), responseJSON: `{`,
+			expectedCode: http.StatusInternalServerError,
+		},
+		{
+			name: "malformed typed result remains unknown", lookupRunID: cutil.GetPtr(""), responseJSON: `{"allDone":"yes"}`,
+			expectedCode: http.StatusInternalServerError,
+		},
+		{
+			name: "missing attempt ID never dispatches", emptyWorkflowID: true, startNewAttempt: true,
+			expectedCode: http.StatusInternalServerError,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			temporalClient := &tmocks.Client{}
+			workflowRun := &tmocks.WorkflowRun{}
+			workflowID := "force-delete-attempt-1"
+			if tc.emptyWorkflowID {
+				workflowID = ""
+			} else {
+				if tc.startNewAttempt {
+					temporalClient.On("ExecuteWorkflow", mock.Anything, mock.MatchedBy(func(options tclient.StartWorkflowOptions) bool {
+						assert.Equal(t, workflowID, options.ID)
+						assert.Equal(t, temporalEnums.WORKFLOW_ID_REUSE_POLICY_REJECT_DUPLICATE, options.WorkflowIDReusePolicy)
+						assert.Equal(t, temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_FAIL, options.WorkflowIDConflictPolicy)
+						assert.True(t, options.WorkflowExecutionErrorWhenAlreadyStarted)
+						assert.Equal(t, grpcproxy.WorkflowExecutionTimeout, options.WorkflowExecutionTimeout)
+						return true
+					}), grpcproxy.Core.WorkflowName, mock.MatchedBy(func(req grpcproxy.Request) bool {
+						assert.Equal(t, corev1.Forge_AdminForceDeleteMachine_FullMethodName, req.FullMethod)
+						assert.JSONEq(t, `{"hostQuery":"machine-1"}`, string(req.RequestJSON))
+						return true
+					})).Return(workflowRun, tc.startErr).Once()
+				}
+				if tc.lookupRunID != nil {
+					temporalClient.On("GetWorkflow", mock.Anything, workflowID, *tc.lookupRunID).Return(workflowRun).Once()
+				}
+				if tc.startErr == nil || tc.lookupRunID != nil {
+					workflowRun.On("Get", mock.Anything, mock.Anything).Run(func(args mock.Arguments) {
+						args.Get(1).(*grpcproxy.Response).ResponseJSON = []byte(tc.responseJSON)
+					}).Return(tc.getErr).Once()
+				}
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			if tc.cancelCaller {
+				cancel()
+			}
+			response := &corev1.AdminForceDeleteMachineResponse{}
+			apiErr, observed := ExecuteCoreGRPCWithWorkflowID(ctx, temporalClient,
+				corev1.Forge_AdminForceDeleteMachine_FullMethodName,
+				&corev1.AdminForceDeleteMachineRequest{HostQuery: "machine-1"}, response,
+				workflowID, tc.startNewAttempt, "")
+
+			if tc.expectedCode == 0 {
+				require.Nil(t, apiErr)
+			} else {
+				require.NotNil(t, apiErr)
+				assert.Equal(t, tc.expectedCode, apiErr.Code)
+			}
+			assert.Equal(t, tc.expectedObserved, observed)
+			assert.Equal(t, tc.expectedAllDone, response.AllDone)
+			assertNoTermination(t, temporalClient)
+			if !tc.startNewAttempt || tc.emptyWorkflowID {
+				temporalClient.AssertNumberOfCalls(t, "ExecuteWorkflow", 0)
+			}
+			temporalClient.AssertExpectations(t)
+			workflowRun.AssertExpectations(t)
+		})
+	}
 }
 
 // TestExecuteGRPCProxyRejectsSecretFieldsWithoutKey covers the combination that

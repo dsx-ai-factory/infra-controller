@@ -591,6 +591,11 @@ pub(crate) async fn admin_network(
                 let vpc = vpcs.remove(0);
                 match vpc.status.vni {
                     Some(vpc_vni) => {
+                        let vpc_vni = u32::try_from(vpc_vni).map_err(|_| {
+                            CarbideError::internal(format!(
+                                "admin VPC {vpc_id} has a negative allocated VNI"
+                            ))
+                        })?;
                         let tenant_loopback_ip = if use_vpc_vrf_loopback {
                             Some(
                                 db::vpc_dpu_loopback::get_or_allocate_loopback_ip_for_vpc(
@@ -605,7 +610,7 @@ pub(crate) async fn admin_network(
                             None
                         };
 
-                        (vpc_vni as u32, tenant_loopback_ip)
+                        (vpc_vni, tenant_loopback_ip)
                     }
                     None => {
                         // if FNN is enabled, VPC must be created and updated in admin_segment.
@@ -656,7 +661,13 @@ pub(crate) async fn admin_network(
         internal_uuid: None,
         mtu: u32::try_from(admin_segment.config.mtu).ok(),
         ipv6_interface_config,
-        vpc_routing_profile: admin_vpc_routing_profile.map(rpc::RoutingProfile::from),
+        vpc_routing_profile: admin_vpc_routing_profile
+            .map(|profile| {
+                profile
+                    .to_rpc(Some(vpc_vni))
+                    .map_err(|error| CarbideError::FailedPrecondition(error.to_string()))
+            })
+            .transpose()?,
         interface_routing_profile: None,
         addresses: vec![],
     };
@@ -808,7 +819,14 @@ pub(crate) async fn tenant_network(
         None => None,
     };
 
-    let vpc_vni = vpc.as_ref().and_then(|v| v.status.vni).unwrap_or_default() as u32;
+    let vpc_vni = vpc
+        .as_ref()
+        .and_then(|vpc| vpc.status.vni)
+        .map(u32::try_from)
+        .transpose()
+        .map_err(|_| CarbideError::Internal {
+            message: format!("VPC attached to segment {} has a negative VNI", segment.id),
+        })?;
     let slaac_enabled = vpc.as_ref().is_some_and(|vpc| vpc.config.slaac_enabled);
 
     // Resolve the routing profile from the VPC attached to this interface.
@@ -819,7 +837,11 @@ pub(crate) async fn tenant_network(
             let profile = fnn.resolve_vpc_routing_profile(&vpc.config)?;
 
             (
-                Some(rpc::RoutingProfile::from(profile.as_ref())),
+                Some(
+                    profile
+                        .to_rpc(vpc_vni)
+                        .map_err(|error| CarbideError::FailedPrecondition(error.to_string()))?,
+                ),
                 iface
                     .routing_profile
                     .as_ref()
@@ -902,7 +924,7 @@ pub(crate) async fn tenant_network(
         },
         vlan_id: segment.status.vlan_id.unwrap_or_default() as u32,
         vni: segment.status.vni.unwrap_or_default() as u32,
-        vpc_vni,
+        vpc_vni: vpc_vni.unwrap_or_default(),
         gateway: ds.v4().and_then(NetworkPrefix::gateway_cidr),
         ip: address.map(|address| address.to_string()),
         interface_prefix: interface_prefix.map(|prefix| prefix.to_string()),
@@ -1286,7 +1308,7 @@ mod test {
         let interface_profile = interface_routing_profile(&["192.0.2.64/26", "2001:db8:1::/64"]);
 
         validate_interface_routing_profile(&vpc_profile, &interface_profile).unwrap();
-        let vpc_routing_profile = rpc::RoutingProfile::from(&vpc_profile);
+        let vpc_routing_profile = vpc_profile.to_rpc(None).unwrap();
         let interface_routing_profile = rpc::FlatInterfaceRoutingProfile::from(&interface_profile);
 
         assert!(vpc_routing_profile.leak_default_route_from_underlay);

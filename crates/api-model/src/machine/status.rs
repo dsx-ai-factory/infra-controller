@@ -28,6 +28,7 @@ use crate::instance::status::extension_service::InstanceExtensionServiceStatusOb
 use crate::machine::infiniband::MachineInfinibandStatusObservation;
 use crate::machine::nvlink::MachineNvLinkStatusObservation;
 use crate::machine::spx::MachineSpxStatusObservation;
+use crate::machine::spx_multiplane::MachineSpxMultiplaneStatus;
 use crate::machine::{FailureDetails, MachineInterfaceSnapshot, MachineLastRebootRequested};
 use crate::machine_boot_interface::BootInterfaceStatusObservation;
 use crate::power_manager::PowerOptions;
@@ -58,6 +59,8 @@ pub struct MachineStatus {
     pub infiniband_status_observation: Option<MachineInfinibandStatusObservation>,
     pub nvlink_status_observation: Option<MachineNvLinkStatusObservation>,
     pub spx_status_observation: Option<MachineSpxStatusObservation>,
+    /// Latest per-interface maintenance readback for each DPU machine.
+    pub spx_multiplane_status: Option<MachineSpxMultiplaneStatus>,
     /// Latest successful unfiltered Scout MLX report, or `None` before one is stored.
     pub mlx_device_observation: Option<MlxDeviceObservation>,
     pub extension_service_status_observations: InstanceExtensionServiceStatusObservationByType,
@@ -74,6 +77,13 @@ pub struct MachineStatus {
 pub struct MlxDeviceObservation {
     /// Time Scout generated the report, not the time Core received it.
     pub observed_at: DateTime<Utc>,
+    /// Database time taken while the write that accepted this report ran,
+    /// somewhere between that write's start and its commit. Writers leave it
+    /// `None`; `update_mlx_device_observation` sets it, including when Scout
+    /// re-sends a report with the same `observed_at`. Older stored reports omit
+    /// it. Reception after an action does not prove collection after it.
+    #[serde(default)]
+    pub received_at: Option<DateTime<Utc>>,
     /// All reported devices, including entries with unavailable optional facts.
     pub devices: Vec<MlxDeviceInfo>,
 }

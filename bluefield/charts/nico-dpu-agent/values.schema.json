@@ -5,6 +5,18 @@
   "type": "object",
   "required": ["serviceDaemonSet", "lldpSidecar"],
   "properties": {
+    "xplaneMaintenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled"],
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "Internal mount access for Xplane sockets and the provisioned netdev mapping, derived from [ewethers_config] partial-multiplane in the NICo site config."
+        }
+      }
+    },
     "serviceDaemonSet": {
       "type": "object",
       "description": "Configuration for the service DaemonSet",

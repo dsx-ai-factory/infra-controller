@@ -146,6 +146,7 @@ pub fn fully_populated() -> CarbideConfig {
             fmds_use_node_tokens: Some(false),
             ..Default::default()
         },
+        admin_lock_admission_permits: Some(16),
         ..get()
     }
 }
@@ -175,6 +176,7 @@ pub fn get() -> CarbideConfig {
         database_pool_idle_timeout: default_database_pool_idle_timeout(),
         database_pool_max_lifetime: default_database_pool_max_lifetime(),
         database_startup_retry_timeout: default_database_startup_retry_timeout(),
+        admin_lock_admission_permits: None,
         api_admission_control: Default::default(),
         compute_allocation_enforcement: Default::default(),
         asn: 0,
@@ -293,6 +295,7 @@ pub fn get() -> CarbideConfig {
             num_of_vfs: crate::cfg::file::DEFAULT_DPU_NUM_OF_VFS,
             service_vpc_slot_count: 0,
             max_active_service_vpc_interfaces_per_dpu: 0,
+            allow_service_vpc_tenant_overlap: false,
             additional_managed_sf: 0,
             restart_ovs_on_use_admin_network_change: false,
         },
@@ -330,6 +333,7 @@ pub fn get() -> CarbideConfig {
             enabled: true,
             svpc_enabled: true,
             astra_enabled: false,
+            partial_multiplane: Default::default(),
             subnet_ip: Ipv4Addr::UNSPECIFIED,
             subnet_mask: EwEthersConfig::default_subnet_mask(),
             astra: Default::default(),

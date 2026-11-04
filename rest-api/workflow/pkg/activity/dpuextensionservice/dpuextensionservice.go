@@ -51,7 +51,7 @@ func (mde ManageDpuExtensionService) UpdateDpuExtensionServicesInDB(ctx context.
 	stDAO := cdbm.NewSiteDAO(mde.dbSession)
 	sdDAO := cdbm.NewStatusDetailDAO(mde.dbSession)
 
-	site, err := stDAO.GetByID(ctx, nil, siteID, nil, false)
+	site, err := stDAO.GetByID(ctx, nil, siteID, nil, false, false)
 	if err != nil {
 		if err == cdb.ErrDoesNotExist {
 			logger.Warn().Err(err).Msg("received DPU Extension Service inventory for unknown or deleted Site")
@@ -411,17 +411,6 @@ func (mde ManageDpuExtensionService) createOrUpdateDpuExtensionServiceFromSite(
 			return nil, nil
 		}
 		tenant := &tenants[0]
-
-		hasSiteAccess, accessErr := cdbm.TenantHasSiteAccess(ctx, transaction, mde.dbSession, tenant, site.ID)
-		if accessErr != nil {
-			return nil, fmt.Errorf("unable to create DPU Extension Service found on Site: failed to validate Tenant access to Site, DB error: %w", accessErr)
-		}
-
-		if !hasSiteAccess {
-			logger.Warn().Msgf("unable to create DPU Extension Service found on Site: Tenant for org %s does not have access to Site", org)
-
-			return nil, nil
-		}
 
 		// Serialize recovery names per Tenant so concurrent inventory pages cannot choose
 		// the same fallback name.

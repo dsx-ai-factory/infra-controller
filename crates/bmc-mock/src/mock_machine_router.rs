@@ -165,6 +165,7 @@ fn machine_router_inner<C: Callbacks>(
             router.add_routes(crate::redfish::oem::nvidia::bluefield::add_routes)
         }
         MachineInfo::Host(_) => router
+            .add_routes(crate::redfish::oem::nvidia::chassis::add_routes)
             .add_routes(crate::redfish::oem::dell::idrac::add_routes)
             .add_routes(crate::redfish::oem::supermicro::manager::add_routes),
     };

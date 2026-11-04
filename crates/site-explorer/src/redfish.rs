@@ -299,6 +299,23 @@ impl RedfishClient {
             .map_err(map_redfish_client_creation_error)
     }
 
+    pub(super) async fn restore_bmc_root_ipmi_access(
+        &self,
+        bmc_ip_address: SocketAddr,
+        vendor: RedfishVendor,
+        credentials: Credentials,
+    ) -> Result<(), EndpointExplorationError> {
+        self.redfish_client_pool
+            .restore_bmc_root_ipmi_access(
+                &bmc_ip_address.ip().to_string(),
+                Some(bmc_ip_address.port()),
+                vendor,
+                credentials,
+            )
+            .await
+            .map_err(map_redfish_client_creation_error)
+    }
+
     pub(super) async fn set_bmc_root_password(
         &self,
         bmc_ip_address: SocketAddr,
@@ -525,6 +542,7 @@ impl RedfishClient {
         bmc_ip_address: SocketAddr,
         access: BmcAccess,
         boot_interface: Option<&BootInterfaceTarget>,
+        explore_drive_firmware: bool,
     ) -> Result<EndpointExplorationReport, EndpointExplorationError> {
         let (nv_pool, credentials) = self.nv_pool_and_credentials(access);
         let service_root = nv_pool
@@ -547,7 +565,7 @@ impl RedfishClient {
 
         let mut report = bmc_explorer::nv_generate_exploration_report(
             service_root,
-            &nv_bmc_explore_config(boot_interface),
+            &nv_bmc_explore_config(boot_interface, explore_drive_firmware),
         )
         .await
         .map_err(map_nv_redfish_explore_error)?;
@@ -1721,6 +1739,7 @@ async fn fetch_service(client: &dyn Redfish) -> Result<Vec<Service>, RedfishErro
             description: value.description,
             version: value.version,
             release_date: value.release_date,
+            drive: None,
         };
 
         inventories.push(inventory);
@@ -1911,7 +1930,10 @@ pub(crate) fn map_redfish_error(error: RedfishError) -> EndpointExplorationError
             if source.is_connect() {
                 EndpointExplorationError::ConnectionRefused { details }
             } else if source.is_timeout() {
-                EndpointExplorationError::ConnectionTimeout { details }
+                EndpointExplorationError::ConnectionTimeout {
+                    details,
+                    consecutive_count: 1,
+                }
             } else {
                 EndpointExplorationError::Unreachable {
                     details: Some(details),
@@ -1987,6 +2009,7 @@ fn nv_error_classifier(
 
 fn nv_bmc_explore_config(
     boot_interface: Option<&BootInterfaceTarget>,
+    explore_drive_firmware: bool,
 ) -> bmc_explorer::Config<'static, carbide_redfish::nv_redfish::RedfishBmc> {
     bmc_explorer::Config {
         boot_interface_mac: boot_interface.map(BootInterfaceTarget::mac_address),
@@ -1995,6 +2018,7 @@ fn nv_bmc_explore_config(
         // but not for too long relative to the total exploration
         // time.
         retry_timeout: Duration::from_millis(1000),
+        explore_drive_firmware,
     }
 }
 
@@ -2025,7 +2049,10 @@ fn map_nv_redfish_explore_error(
                     if err.is_connect() {
                         EndpointExplorationError::ConnectionRefused { details }
                     } else if err.is_timeout() {
-                        EndpointExplorationError::ConnectionTimeout { details }
+                        EndpointExplorationError::ConnectionTimeout {
+                            details,
+                            consecutive_count: 1,
+                        }
                     } else {
                         EndpointExplorationError::Unreachable {
                             details: Some(details),
@@ -2439,6 +2466,7 @@ mod tests {
                 boot_interface_mac: None,
                 error_classifier: &|_| None,
                 retry_timeout: std::time::Duration::ZERO,
+                explore_drive_firmware: false,
             },
         )
         .await
@@ -2715,7 +2743,7 @@ mod tests {
         };
 
         value_scenarios!(run = |target: Option<BootInterfaceTarget>| {
-            let config = nv_bmc_explore_config(target.as_ref());
+            let config = nv_bmc_explore_config(target.as_ref(), false);
             let mut status = MachineSetupStatus::default();
             record_evaluated_boot_interface(Some(&mut status), target.as_ref());
             (

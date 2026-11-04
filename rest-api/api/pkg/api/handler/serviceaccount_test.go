@@ -56,7 +56,10 @@ func TestServiceAccountHandler_GetCurrent(t *testing.T) {
 	user4 := common.TestBuildUser(t, dbSession, uuid.NewString(), org4, []string{authz.ProviderAdminRole, authz.TenantAdminRole})
 	ip4 := common.TestBuildInfrastructureProvider(t, dbSession, "test-provider-4", org4, user4)
 	tn4 := common.TestBuildTenant(t, dbSession, "test-tenant-4", org4, user4)
-	ta4 := common.TestBuildTenantAccountWithTargetedInstanceCreation(t, dbSession, ip4, &tn4.ID, org4, cdbm.TenantAccountStatusPending, user4)
+	ta4 := common.TestBuildTenantAccountWithCapabilities(t, dbSession, ip4, &tn4.ID, org4, cdbm.TenantAccountStatusPending, user4, cdbm.TenantAccountConfig{
+		TargetedInstanceCreation:     true,
+		CrossTenantInterfaceCreation: true,
+	})
 	sites := map[string]*cdbm.Site{
 		org2: testIPBlockBuildSite(t, dbSession, ip2, "existing-account-site", cdbm.SiteStatusRegistered, false, user2),
 		org4: testIPBlockBuildSite(t, dbSession, ip4, "promoted-account-site", cdbm.SiteStatusRegistered, false, user4),
@@ -202,6 +205,7 @@ func TestServiceAccountHandler_GetCurrent(t *testing.T) {
 				require.NoError(t, taErr)
 				assert.Equal(t, cdbm.TenantAccountStatusReady, updatedTA.Status)
 				assert.True(t, updatedTA.Config.TargetedInstanceCreation)
+				assert.True(t, updatedTA.Config.CrossTenantInterfaceCreation)
 
 				sds, sdErr := sdDAO.GetRecentByEntityIDs(ctx, nil, []string{ta4.ID.String()}, common.RECENT_STATUS_DETAIL_COUNT)
 				require.NoError(t, sdErr)

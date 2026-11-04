@@ -352,6 +352,7 @@ fn metric_sample(
     labels: Vec<MetricLabel>,
 ) -> MetricSample {
     MetricSample {
+        semantics: crate::sink::MetricSemantics::Gauge,
         key,
         name: EXTENDED_GNMI_STREAM_ID.to_string(),
         metric_type: metric_type.to_string(),
@@ -724,6 +725,10 @@ mod tests {
         assert_eq!(captured_metrics(&sink).len(), emitted);
 
         let mut unrelated = update.clone();
+        unrelated.update[0].path.as_mut().unwrap().elem[0]
+            .key
+            .insert("name".into(), String::new());
+
         unrelated.update[0]
             .path
             .as_mut()

@@ -138,15 +138,10 @@ func workflowOrchestrator() (*workflowtypes.WorkerStatus, error) {
 		}
 
 		// Each pod loads its own certificate on startup and reload.
-		leaf := clientcert.Leaf
-		if leaf == nil {
-			// GODEBUG=x509keypairleaf=0 leaves Leaf unset after a successful load.
-			leaf, err = x509.ParseCertificate(clientcert.Certificate[0])
-		}
-		if err == nil && leaf != nil && CertExpirationMetric != nil {
-			CertExpirationMetric.Set(float64(leaf.NotAfter.Unix()))
+		if CertExpirationMetric != nil {
+			CertExpirationMetric.Set(float64(clientcert.Leaf.NotAfter.Unix()))
 		} else {
-			log.Warn().Err(err).Msg("Workflow: Unable to update Temporal certificate expiration metric")
+			log.Warn().Msg("Workflow: Unable to update Temporal certificate expiration metric")
 		}
 
 		// Load server cert

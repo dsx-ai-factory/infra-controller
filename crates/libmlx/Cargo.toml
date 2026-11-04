@@ -110,6 +110,7 @@ carbide-libmlx-model = { path = "../libmlx-model", features = ["test-support"] }
 carbide-ssh = { path = "../ssh", features = ["test_support"] }
 carbide-test-support = { path = "../test-support" }
 russh = { workspace = true }
+tokio = { features = ["test-util"], workspace = true }
 
 [features]
 #default = ["mockdpa"]

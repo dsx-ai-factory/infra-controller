@@ -460,12 +460,21 @@ impl Defaults {
     }
 }
 
+/// `[tls]`. Unknown keys are rejected, so a misspelled `[tls.switch]` stops
+/// the proxy rather than leave switches reached without it.
 #[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct TlsConfig {
     pub(crate) identity_pemfile_path: String,
     pub(crate) identity_keyfile_path: String,
     pub(crate) root_cafile_path: String,
     pub(crate) admin_root_cafile_path: String,
+    /// The client certificate the proxy presents to switches' NVOS
+    /// interfaces, and the CA their certificates must chain to. Absent, the
+    /// proxy reaches a switch as it reaches a BMC: presenting no client
+    /// certificate and accepting any server certificate.
+    #[serde(default)]
+    pub(crate) switch: Option<SwitchTlsConfig>,
 }
 
 impl Default for TlsConfig {
@@ -476,8 +485,48 @@ impl Default for TlsConfig {
             root_cafile_path: "/var/run/secrets/spiffe.io/ca.crt".to_string(),
             admin_root_cafile_path: "/etc/forge/carbide-bmc-proxy/site/admin_root_cert_pem"
                 .to_string(),
+            switch: None,
         }
     }
+}
+
+/// `[tls.switch]`: the mTLS profile for the connections the proxy makes to
+/// switches' NVOS interfaces, whose NVUE REST API may require a client
+/// certificate. The files must load at startup, or the proxy does not start.
+/// As switches are reached, they are checked again every five minutes, and
+/// reloaded when they changed.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct SwitchTlsConfig {
+    /// PEM bundle of the CAs a switch's certificate must chain to.
+    pub(crate) ca_cert_path: String,
+    /// PEM certificate chain the proxy presents to switches.
+    pub(crate) client_cert_path: String,
+    /// PEM private key of `client_cert_path`.
+    pub(crate) client_key_path: String,
+    /// The DNS name every switch's certificate is checked against when they
+    /// share one, instead of the IP the proxy connects to. Only verification
+    /// uses it: the request still goes to the switch's IP, names that IP in
+    /// `Host`, and sends no SNI. Empty is the same as absent, which is how an
+    /// environment variable unsets a name the file gives.
+    #[serde(default, deserialize_with = "switch_server_name")]
+    pub(crate) tls_server_name: Option<String>,
+}
+
+/// `tls.switch.tls_server_name`: none when absent or empty, and otherwise a
+/// DNS name. An IP address is refused, since every switch would be checked
+/// against that one address.
+fn switch_server_name<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let Some(name) = Option::<String>::deserialize(deserializer)?.filter(|name| !name.is_empty())
+    else {
+        return Ok(None);
+    };
+    rustls_pki_types::DnsName::try_from(name.as_str())
+        .map_err(|_| D::Error::custom(format!("{name:?} is not a DNS name")))?;
+    Ok(Some(name))
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -494,7 +543,7 @@ impl Default for CarbideApiConfig {
             root_ca: "/var/run/secrets/spiffe.io/ca.crt".to_string(),
             client_cert: "/var/run/secrets/spiffe.io/tls.crt".to_string(),
             client_key: "/var/run/secrets/spiffe.io/tls.key".to_string(),
-            api_url: Url::parse("https://carbide-api.forge-system.svc.cluster.local:1079").unwrap(),
+            api_url: Url::parse("https://nico-api.nico-system.svc.cluster.local:1079").unwrap(),
         }
     }
 }
@@ -682,7 +731,7 @@ mod tests {
                         "/forge-system/sa/".to_string(),
                         "/default/sa/".to_string(),
                     ],
-                    carbide_api_url: "https://carbide-api.forge-system.svc.cluster.local:1079/"
+                    carbide_api_url: "https://nico-api.nico-system.svc.cluster.local:1079/"
                         .to_string(),
                     bmc_proxy: None,
                     redirect_mode: RedirectMode::FollowSameOrigin,
@@ -703,7 +752,7 @@ mod tests {
                         "/forge-system/sa/".to_string(),
                         "/default/sa/".to_string(),
                     ],
-                    carbide_api_url: "https://carbide-api.forge-system.svc.cluster.local:1079/"
+                    carbide_api_url: "https://nico-api.nico-system.svc.cluster.local:1079/"
                         .to_string(),
                     bmc_proxy: None,
                     redirect_mode: RedirectMode::FollowSameOrigin,
@@ -727,7 +776,7 @@ mod tests {
                         "/forge-system/sa/".to_string(),
                         "/default/sa/".to_string(),
                     ],
-                    carbide_api_url: "https://carbide-api.forge-system.svc.cluster.local:1079/"
+                    carbide_api_url: "https://nico-api.nico-system.svc.cluster.local:1079/"
                         .to_string(),
                     bmc_proxy: None,
                     redirect_mode: RedirectMode::FollowSameOrigin,
@@ -748,7 +797,7 @@ mod tests {
                         "/forge-system/sa/".to_string(),
                         "/default/sa/".to_string(),
                     ],
-                    carbide_api_url: "https://carbide-api.forge-system.svc.cluster.local:1079/"
+                    carbide_api_url: "https://nico-api.nico-system.svc.cluster.local:1079/"
                         .to_string(),
                     bmc_proxy: Some("proxy.local".to_string()),
                     redirect_mode: RedirectMode::FollowSameOrigin,
@@ -769,7 +818,7 @@ mod tests {
                         "/forge-system/sa/".to_string(),
                         "/default/sa/".to_string(),
                     ],
-                    carbide_api_url: "https://carbide-api.forge-system.svc.cluster.local:1079/"
+                    carbide_api_url: "https://nico-api.nico-system.svc.cluster.local:1079/"
                         .to_string(),
                     bmc_proxy: Some("8443".to_string()),
                     redirect_mode: RedirectMode::FollowSameOrigin,
@@ -790,7 +839,7 @@ mod tests {
                         "/forge-system/sa/".to_string(),
                         "/default/sa/".to_string(),
                     ],
-                    carbide_api_url: "https://carbide-api.forge-system.svc.cluster.local:1079/"
+                    carbide_api_url: "https://nico-api.nico-system.svc.cluster.local:1079/"
                         .to_string(),
                     bmc_proxy: Some("proxy.local:8443".to_string()),
                     redirect_mode: RedirectMode::FollowSameOrigin,
@@ -831,7 +880,7 @@ mod tests {
                         "/forge-system/sa/".to_string(),
                         "/default/sa/".to_string(),
                     ],
-                    carbide_api_url: "https://carbide-api.forge-system.svc.cluster.local:1079/"
+                    carbide_api_url: "https://nico-api.nico-system.svc.cluster.local:1079/"
                         .to_string(),
                     bmc_proxy: None,
                     redirect_mode: RedirectMode::ReturnToClient,
@@ -852,13 +901,65 @@ mod tests {
                         "/forge-system/sa/".to_string(),
                         "/default/sa/".to_string(),
                     ],
-                    carbide_api_url: "https://carbide-api.forge-system.svc.cluster.local:1079/"
+                    carbide_api_url: "https://nico-api.nico-system.svc.cluster.local:1079/"
                         .to_string(),
                     bmc_proxy: None,
                     redirect_mode: RedirectMode::FollowSameOrigin,
                     tracing_enabled: true,
                     tracing_otlp_endpoint: Some("http://collector.example.com:4317".to_string()),
                 },
+            }
+        );
+    }
+
+    /// A `[tls.switch]` table with every file, and a `tls_server_name`, if
+    /// any, of `name`.
+    fn switch_tls_with(name: Option<&str>) -> String {
+        let name = name
+            .map(|name| format!("tls_server_name = '{name}'"))
+            .unwrap_or_default();
+        format!(
+            "[tls.switch]\nca_cert_path = 'ca.crt'\nclient_cert_path = 'tls.crt'\nclient_key_path = 'tls.key'\n{name}"
+        )
+    }
+
+    /// `[tls.switch]` loads with its DNS name, an empty one unsetting it as an
+    /// absent one does. An IP address or other non-DNS name, an unknown key,
+    /// or a misspelled table under `[tls]` stops the proxy instead of
+    /// leaving switches reached without the profile.
+    #[test]
+    fn switch_tls_parses() {
+        scenarios!(
+            run = |tables: String| {
+                Config::parse(&format!(
+                    r#"
+                    [tls]
+                    identity_pemfile_path = "/tls/cert.pem"
+                    identity_keyfile_path = "/tls/key.pem"
+                    root_cafile_path = "/tls/ca.pem"
+                    admin_root_cafile_path = "/tls/admin-ca.pem"
+
+                    {tables}
+
+                    [auth]
+                    "#
+                ))
+                .map(|config| config.tls.switch.map(|switch| switch.tls_server_name))
+                .map_err(drop)
+            };
+            "loaded" {
+                String::new() => Yields(None),
+                switch_tls_with(None) => Yields(Some(None)),
+                switch_tls_with(Some("")) => Yields(Some(None)),
+                switch_tls_with(Some("switches.example")) => Yields(Some(Some("switches.example".to_string()))),
+            }
+
+            "rejected" {
+                switch_tls_with(Some("10.0.0.5")) => Fails,
+                switch_tls_with(Some("2001:db8::5")) => Fails,
+                switch_tls_with(Some("switches example")) => Fails,
+                format!("{}\nsni = 'switches.example'", switch_tls_with(None)) => Fails,
+                switch_tls_with(None).replace("[tls.switch]", "[tls.switches]") => Fails,
             }
         );
     }

@@ -4,6 +4,10 @@
 package workflow
 
 import (
+	"errors"
+	"os"
+	"path/filepath"
+
 	computils "github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/components/utils"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
@@ -55,25 +59,31 @@ func (wflow *API) Init() {
 	)
 	ManagerAccess.Data.EB.Managers.Workflow.State.HealthStatus.Store(uint64(computils.CompUnhealthy))
 
-	prometheus.MustRegister(
-		prometheus.NewCounterFunc(prometheus.CounterOpts{
-			Namespace: ManagerAccess.Conf.EB.MetricsNamespace,
-			Name:      MetricTemporalConnAttempted,
-			Help:      "Temporal connections attempted by the Site Agent",
-		},
-			func() float64 {
-				return float64(ManagerAccess.Data.EB.Managers.Workflow.State.ConnectionAttempted.Load())
-			}))
+	// The `_total` names identify cumulative counters. Retain the legacy
+	// names for existing dashboards and alerts.
+	for _, name := range []string{MetricTemporalConnAttempted, "temporal_connection_attempted_total"} {
+		prometheus.MustRegister(
+			prometheus.NewCounterFunc(prometheus.CounterOpts{
+				Namespace: ManagerAccess.Conf.EB.MetricsNamespace,
+				Name:      name,
+				Help:      "Temporal connections attempted by the Site Agent",
+			},
+				func() float64 {
+					return float64(ManagerAccess.Data.EB.Managers.Workflow.State.ConnectionAttempted.Load())
+				}))
+	}
 
-	prometheus.MustRegister(
-		prometheus.NewCounterFunc(prometheus.CounterOpts{
-			Namespace: ManagerAccess.Conf.EB.MetricsNamespace,
-			Name:      MetricTemporalConnSucc,
-			Help:      "Temporal connections succeeded by the Site Agent",
-		},
-			func() float64 {
-				return float64(ManagerAccess.Data.EB.Managers.Workflow.State.ConnectionSucc.Load())
-			}))
+	for _, name := range []string{MetricTemporalConnSucc, "temporal_connection_succeeded_total"} {
+		prometheus.MustRegister(
+			prometheus.NewCounterFunc(prometheus.CounterOpts{
+				Namespace: ManagerAccess.Conf.EB.MetricsNamespace,
+				Name:      name,
+				Help:      "Temporal connections succeeded by the Site Agent",
+			},
+				func() float64 {
+					return float64(ManagerAccess.Data.EB.Managers.Workflow.State.ConnectionSucc.Load())
+				}))
+	}
 }
 
 // Start the workflow orchestrator
@@ -87,33 +97,49 @@ func (wflow *API) Start() {
 func (wflow *API) WatchCertFile() {
 	fileName, caCertPath := ManagerAccess.Conf.EB.Temporal.GetTemporalCACertFilePath()
 	kpFileName, clientCertPath := ManagerAccess.Conf.EB.Temporal.GetTemporalClientCertFilePath()
-	path := []string{caCertPath, clientCertPath}
+	root := ManagerAccess.Conf.EB.Temporal.TemporalCertPath
 	file := make(map[string]bool)
-	file[caCertPath+fileName] = true
+	file[filepath.Clean(caCertPath+fileName)] = true
 	for _, v := range kpFileName {
-		file[clientCertPath+v] = true
+		file[filepath.Clean(clientCertPath+v)] = true
 	}
-	go wflow.watchFiles(path, file)
+
+	w, err := newCertWatcher(root, []string{caCertPath, clientCertPath})
+	if err != nil {
+		log.Panic().Msgf("Workflow: Failed to watch Temporal cert files: %v", err)
+	}
+	go watchCertFiles(w, root, file, Orchestrator)
 }
 
-// watchFiles watch on the secret files
-func (wflow *API) watchFiles(path []string, file map[string]bool) {
-	log.Info().Msgf("Workflow: Watching Temporal cert files %v", path)
+// newCertWatcher watches the cert mount root and each cert directory.
+//
+// Kubelet mounts the Secret items as `ca` and `client` symlinks through `..data`,
+// so a watch on either directory follows the symlink into the versioned data
+// directory. Kubelet deletes that directory after each update, which drops the
+// watch. The root watch survives every update and reports the `..data` swap.
+// The directory watches still cover mounts that write the files in place.
+func newCertWatcher(root string, dirs []string) (*fsnotify.Watcher, error) {
+	log.Info().Msgf("Workflow: Watching Temporal cert files under %v", root)
 
-	// Create a new watcher.
 	w, err := fsnotify.NewWatcher()
 	if err != nil {
-		log.Panic().Msgf("Workflow: Failed to create Temporal cert files watcher: %v", err)
+		return nil, err
 	}
-	defer w.Close()
 
-	// Watch the directory, not the file itself.
-	for _, v := range path {
-		err = w.Add(v)
+	for _, dir := range append([]string{root}, dirs...) {
+		err = w.Add(dir)
 		if err != nil {
-			log.Panic().Msgf("Workflow: Failed to add Temporal cert files to watcher: %v", err)
+			w.Close()
+			return nil, err
 		}
 	}
+
+	return w, nil
+}
+
+// watchCertFiles calls reload for every cert update until w is closed.
+func watchCertFiles(w *fsnotify.Watcher, root string, files map[string]bool, reload func()) {
+	defer w.Close()
 
 	for {
 		select {
@@ -122,6 +148,13 @@ func (wflow *API) watchFiles(path []string, file map[string]bool) {
 			if !ok { // Channel was closed (i.e. Watcher.Close() was called).
 				return
 			}
+			// The kqueue backend opens every entry of a watched directory, so it
+			// reports the versioned directory kubelet just deleted. The root
+			// watch still sees the `..data` swap, so no update is lost.
+			if errors.Is(err, os.ErrNotExist) {
+				log.Warn().Err(err).Msg("Workflow: Temporal cert files watcher lost a deleted entry")
+				continue
+			}
 			log.Panic().Msgf("Workflow: Temporal cert files watcher closed: %v", err.Error())
 		// Read from Events.
 		case e, ok := <-w.Events:
@@ -129,12 +162,10 @@ func (wflow *API) watchFiles(path []string, file map[string]bool) {
 				return
 			}
 
-			// log.Info().Msgf("Got event %v ", e.String())
-			_, ok = file[e.Name]
-			if !ok {
+			if !computils.IsProjectedSecretUpdate(e, files, root) {
 				continue
 			}
-			Orchestrator()
+			reload()
 			log.Info().Msgf("Workflow: Resuming Temporal cert files watcher for: %v ", e.String())
 		}
 	}

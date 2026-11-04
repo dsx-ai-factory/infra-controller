@@ -36,6 +36,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
+	"github.com/uptrace/bun"
 	"github.com/uptrace/bun/extra/bundebug"
 	tmocks "go.temporal.io/sdk/mocks"
 	"google.golang.org/protobuf/encoding/protojson"
@@ -128,10 +129,48 @@ func testExpectedMachineSetupTestData(t *testing.T, dbSession *cdb.Session, org 
 	return ip, site
 }
 
+// Bun hooks cannot return errors, so fail the SKU attachment lookup with a
+// canceled child of the query context.
+type testExpectedMachineSKULookupFailureHook struct {
+	armed   bool
+	fired   bool
+	selects int
+}
+
+func (h *testExpectedMachineSKULookupFailureHook) BeforeQuery(ctx context.Context, event *bun.QueryEvent) context.Context {
+	if !strings.HasPrefix(event.Query, "SELECT ") || !strings.Contains(event.Query, `FROM "sku"`) {
+		return ctx
+	}
+	h.selects++
+	if !h.armed || !strings.Contains(event.Query, "FOR KEY SHARE") {
+		return ctx
+	}
+	h.armed = false
+	h.fired = true
+	canceled, cancel := context.WithCancel(ctx)
+	cancel()
+	return canceled
+}
+
+func (h *testExpectedMachineSKULookupFailureHook) AfterQuery(context.Context, *bun.QueryEvent) {}
+
 func TestCreateExpectedMachineHandler_Handle(t *testing.T) {
-	t.Run("complete mutation conflict", func(t *testing.T) {
-		testExpectedMachineMutationRejectsCompleteMutationLock(t, "single create")
-	})
+	scenarios := []struct {
+		name string
+		run  func(*testing.T)
+	}{
+		{name: "complete mutation conflict", run: func(t *testing.T) {
+			testExpectedMachineMutationRejectsCompleteMutationLock(t, "single create")
+		}},
+		{name: "SKU recreated on another Site before attachment", run: func(t *testing.T) {
+			testExpectedMachineRejectsRecreatedSKU(t, "single create")
+		}},
+		{name: "BMC credentials forwarded to workflow", run: testCreateExpectedMachineBmcCredentialsForwardedToWorkflow},
+		{name: "DPF setting forwarded to workflow", run: testCreateExpectedMachineDpfEnabledForwardedToWorkflow},
+	}
+	for _, scenario := range scenarios {
+		t.Run(scenario.name, scenario.run)
+	}
 
 	// Setup
 	e := echo.New()
@@ -175,7 +214,7 @@ func TestCreateExpectedMachineHandler_Handle(t *testing.T) {
 		Name:                     "other-managed-site",
 		Org:                      org,
 		InfrastructureProviderID: infraProv.ID,
-		Status:                   cdbm.SiteStatusRegistered,
+		Status:                   cdbm.SiteStatusPending,
 	}
 	_, err = dbSession.DB.NewInsert().Model(otherSite).Exec(ctx)
 	require.NoError(t, err)
@@ -207,6 +246,8 @@ func TestCreateExpectedMachineHandler_Handle(t *testing.T) {
 	scp.IDClientMap[site.ID.String()] = mockTemporalClient
 
 	handler := NewCreateExpectedMachineHandler(dbSession, scp, cfg)
+	skuLookupFailure := &testExpectedMachineSKULookupFailureHook{}
+	dbSession.DB.AddQueryHook(skuLookupFailure)
 
 	// Helper function to create mock user
 	createMockUser := func(org string) *cdbm.User {
@@ -233,6 +274,7 @@ func TestCreateExpectedMachineHandler_Handle(t *testing.T) {
 		expectedStatus   int
 		expectedErrorMsg *string
 		rejectsMutation  bool
+		failSKULookup    bool
 	}{
 		{
 			name: "successful creation",
@@ -364,6 +406,23 @@ func TestCreateExpectedMachineHandler_Handle(t *testing.T) {
 			expectedStatus: http.StatusForbidden,
 		},
 		{
+			name: "SKU lookup failure returns 500 without mutation or dispatch",
+			requestBody: model.APIExpectedMachineCreateRequest{
+				SiteID:              site.ID.String(),
+				BmcMacAddress:       "00:11:22:33:44:A4",
+				ChassisSerialNumber: "SKU-LOOKUP-FAILURE",
+				SkuID:               cutil.GetPtr("test-sku-uuid-2"),
+			},
+			setupContext: func(c echo.Context) {
+				c.Set("user", createMockUser(org))
+				c.SetParamNames("orgName")
+				c.SetParamValues(org)
+			},
+			expectedStatus:  http.StatusInternalServerError,
+			rejectsMutation: true,
+			failSKULookup:   true,
+		},
+		{
 			name: "foreign Site SKU returns 422",
 			requestBody: model.APIExpectedMachineCreateRequest{
 				SiteID:              site.ID.String(),
@@ -396,6 +455,7 @@ func TestCreateExpectedMachineHandler_Handle(t *testing.T) {
 			expectedStatus:   http.StatusForbidden,
 			expectedErrorMsg: cutil.GetPtr("User does not have access to Site"),
 			rejectsMutation:  true,
+			failSKULookup:    true,
 		},
 		{
 			name: "Site access precedes existing SKU lookup",
@@ -415,15 +475,32 @@ func TestCreateExpectedMachineHandler_Handle(t *testing.T) {
 			rejectsMutation:  true,
 		},
 		{
-			name: "invalid SKU ID returns 422",
+			name: "invalid SKU takes precedence over duplicate MAC",
 			requestBody: model.APIExpectedMachineCreateRequest{
 				SiteID:              site.ID.String(),
-				BmcMacAddress:       "00:11:22:33:44:AA",
+				BmcMacAddress:       existingMAC,
 				DefaultBmcUsername:  cutil.GetPtr("admin"),
 				DefaultBmcPassword:  cutil.GetPtr("password"),
 				ChassisSerialNumber: "CHASSIS129",
 				SkuID:               cutil.GetPtr("invalid-sku-id-that-does-not-exist"),
 				Labels:              map[string]string{"env": "test"},
+			},
+			setupContext: func(c echo.Context) {
+				c.Set("user", createMockUser(org))
+				c.SetParamNames("orgName")
+				c.SetParamValues(org)
+			},
+			expectedStatus:   http.StatusUnprocessableEntity,
+			expectedErrorMsg: cutil.GetPtr("SKU ID specified in request does not exist"),
+			rejectsMutation:  true,
+		},
+		{
+			name: "invalid SKU takes precedence over pending Site",
+			requestBody: model.APIExpectedMachineCreateRequest{
+				SiteID:              otherSite.ID.String(),
+				BmcMacAddress:       "00:11:22:33:44:AA",
+				ChassisSerialNumber: "CHASSIS-PENDING-SITE",
+				SkuID:               cutil.GetPtr("missing-sku"),
 			},
 			setupContext: func(c echo.Context) {
 				c.Set("user", createMockUser(org))
@@ -477,7 +554,17 @@ func TestCreateExpectedMachineHandler_Handle(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			skuLookupFailure.armed = tt.failSKULookup
+			skuLookupFailure.fired = false
+			skuLookupFailure.selects = 0
+			wantSKUFailure := tt.failSKULookup && tt.expectedStatus == http.StatusInternalServerError
 			workflowCallsBefore := len(mockTemporalClient.Calls)
+			var logs bytes.Buffer
+			if wantSKUFailure {
+				previousLogger := log.Logger
+				log.Logger = zerolog.New(zerolog.SyncWriter(&logs))
+				t.Cleanup(func() { log.Logger = previousLogger })
+			}
 			var countBefore int
 			if tt.rejectsMutation {
 				countBefore, err = dbSession.DB.NewSelect().Model((*cdbm.ExpectedMachine)(nil)).Count(ctx)
@@ -509,12 +596,32 @@ func TestCreateExpectedMachineHandler_Handle(t *testing.T) {
 			if tt.expectedStatus != rec.Code {
 				t.Errorf("Response: %v", rec.Body.String())
 			}
+			if tt.failSKULookup {
+				assert.Equal(t, wantSKUFailure, skuLookupFailure.fired, "Site authorization must precede the SKU attachment lookup")
+			}
+			if tt.expectedStatus == http.StatusForbidden {
+				assert.Zero(t, skuLookupFailure.selects, "denied requests must not perform any SKU lookup")
+			}
+			if wantSKUFailure {
+				assert.JSONEq(t, `{"source":"","message":"Failed to validate SKU ID in request data due to DB error","data":null}`, rec.Body.String())
+				var lookupErrorLog map[string]any
+				for _, line := range strings.Split(strings.TrimSpace(logs.String()), "\n") {
+					var entry map[string]any
+					require.NoError(t, json.Unmarshal([]byte(line), &entry))
+					if entry["message"] == "error validating SKU ID in request data" {
+						lookupErrorLog = entry
+					}
+				}
+				require.NotNil(t, lookupErrorLog, "SKU lookup failure must be logged")
+				assert.Equal(t, "error", lookupErrorLog["level"])
+				assert.Equal(t, context.Canceled.Error(), lookupErrorLog["error"])
+			}
 
 			if tt.rejectsMutation {
 				assert.Len(t, mockTemporalClient.Calls, workflowCallsBefore)
 				countAfter, readErr := dbSession.DB.NewSelect().Model((*cdbm.ExpectedMachine)(nil)).Count(ctx)
 				require.NoError(t, readErr)
-				assert.Equal(t, countBefore, countAfter, "rejected SKU must not create an Expected Machine")
+				assert.Equal(t, countBefore, countAfter, "rejected request must not create an Expected Machine")
 			}
 
 			// For successful creations, verify labels and rackId are returned in response
@@ -1511,6 +1618,9 @@ func TestUpdateExpectedMachineHandler_Handle(t *testing.T) {
 	t.Run("complete mutation conflict", func(t *testing.T) {
 		testExpectedMachineMutationRejectsCompleteMutationLock(t, "single update")
 	})
+	t.Run("SKU recreated on another Site before attachment", func(t *testing.T) {
+		testExpectedMachineRejectsRecreatedSKU(t, "single update")
+	})
 
 	tests := []struct {
 		name string
@@ -1619,6 +1729,8 @@ func testUpdateExpectedMachineRequest(t *testing.T) {
 	scp.IDClientMap[site.ID.String()] = mockTemporalClient
 
 	handler := NewUpdateExpectedMachineHandler(dbSession, scp, cfg)
+	skuLookupFailure := &testExpectedMachineSKULookupFailureHook{}
+	dbSession.DB.AddQueryHook(skuLookupFailure)
 
 	// Helper function to create mock user
 	createMockUser := func(org string) *cdbm.User {
@@ -1645,6 +1757,7 @@ func testUpdateExpectedMachineRequest(t *testing.T) {
 		scheduleErr          error
 		expectedPaths        []string
 		rejectsMutation      bool
+		failSKULookup        bool
 		checkResponseContent func(t *testing.T, body []byte)
 	}{
 		{
@@ -1775,6 +1888,22 @@ func testUpdateExpectedMachineRequest(t *testing.T) {
 			},
 		},
 		{
+			name: "SKU lookup failure returns 500 without mutation or dispatch",
+			id:   testEM.ID.String(),
+			requestBody: model.APIExpectedMachineUpdateRequest{
+				SkuID:  cutil.GetPtr("test-sku-uuid-1"),
+				Labels: map[string]string{"env": "must-not-change"},
+			},
+			setupContext: func(c echo.Context) {
+				c.Set("user", createMockUser(org))
+				c.SetParamNames("orgName", "id")
+				c.SetParamValues(org, testEM.ID.String())
+			},
+			expectedStatus:  http.StatusInternalServerError,
+			rejectsMutation: true,
+			failSKULookup:   true,
+		},
+		{
 			name: "foreign Site SKU returns 422",
 			id:   testEM.ID.String(),
 			requestBody: model.APIExpectedMachineUpdateRequest{
@@ -1808,6 +1937,7 @@ func testUpdateExpectedMachineRequest(t *testing.T) {
 			},
 			expectedStatus:  http.StatusForbidden,
 			rejectsMutation: true,
+			failSKULookup:   true,
 			checkResponseContent: func(t *testing.T, body []byte) {
 				var response cutil.APIError
 				require.NoError(t, json.Unmarshal(body, &response))
@@ -1835,10 +1965,11 @@ func testUpdateExpectedMachineRequest(t *testing.T) {
 			},
 		},
 		{
-			name: "invalid SKU ID returns 422",
+			name: "invalid SKU takes precedence over changed MAC",
 			id:   testEM.ID.String(),
 			requestBody: model.APIExpectedMachineUpdateRequest{
-				SkuID: cutil.GetPtr("invalid-sku-id-for-update"),
+				SkuID:         cutil.GetPtr("invalid-sku-id-for-update"),
+				BmcMacAddress: cutil.GetPtr("AA:BB:CC:DD:EE:FF"),
 			},
 			setupContext: func(c echo.Context) {
 				c.Set("user", createMockUser(org))
@@ -1872,12 +2003,19 @@ func testUpdateExpectedMachineRequest(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			skuLookupFailure.armed = tt.failSKULookup
+			skuLookupFailure.fired = false
+			skuLookupFailure.selects = 0
+			wantSKUFailure := tt.failSKULookup && tt.expectedStatus == http.StatusInternalServerError
 			scheduleCall.Return(mockWorkflowRun, tt.scheduleErr)
 			workflowCallsBefore := len(mockTemporalClient.Calls)
 			var logs bytes.Buffer
 			before, err := emDAO.Get(ctx, nil, uuid.MustParse(tt.id), nil, false)
 			require.NoError(t, err)
-			if tt.scheduleErr != nil {
+			if wantSKUFailure {
+				require.NotEqual(t, before.Labels["env"], tt.requestBody.Labels["env"], "failure case must request a label change")
+			}
+			if tt.scheduleErr != nil || wantSKUFailure {
 				previousLogger := log.Logger
 				log.Logger = zerolog.New(zerolog.SyncWriter(&logs))
 				t.Cleanup(func() { log.Logger = previousLogger })
@@ -1902,6 +2040,26 @@ func testUpdateExpectedMachineRequest(t *testing.T) {
 			assert.Equal(t, tt.expectedStatus, rec.Code)
 			if tt.expectedStatus != rec.Code {
 				t.Errorf("Response: %v", rec.Body.String())
+			}
+			if tt.failSKULookup {
+				assert.Equal(t, wantSKUFailure, skuLookupFailure.fired, "Site authorization must precede the SKU attachment lookup")
+			}
+			if tt.expectedStatus == http.StatusForbidden {
+				assert.Zero(t, skuLookupFailure.selects, "denied requests must not perform any SKU lookup")
+			}
+			if wantSKUFailure {
+				assert.JSONEq(t, `{"source":"","message":"Failed to validate SKU ID in request data due to DB error","data":null}`, rec.Body.String())
+				var lookupErrorLog map[string]any
+				for _, line := range strings.Split(strings.TrimSpace(logs.String()), "\n") {
+					var entry map[string]any
+					require.NoError(t, json.Unmarshal([]byte(line), &entry))
+					if entry["message"] == "error validating SKU ID in request data" {
+						lookupErrorLog = entry
+					}
+				}
+				require.NotNil(t, lookupErrorLog, "SKU lookup failure must be logged")
+				assert.Equal(t, "error", lookupErrorLog["level"])
+				assert.Equal(t, context.Canceled.Error(), lookupErrorLog["error"])
 			}
 			if tt.scheduleErr != nil {
 				assert.Contains(t, logs.String(), tt.scheduleErr.Error())
@@ -2697,6 +2855,9 @@ func TestCreateExpectedMachinesHandler_Handle(t *testing.T) {
 	t.Run("complete mutation conflict", func(t *testing.T) {
 		testExpectedMachineMutationRejectsCompleteMutationLock(t, "batch create")
 	})
+	t.Run("SKU recreated on another Site before attachment", func(t *testing.T) {
+		testExpectedMachineRejectsRecreatedSKU(t, "batch create")
+	})
 
 	// Setup
 	e := echo.New()
@@ -3116,14 +3277,14 @@ func TestCreateExpectedMachinesHandler_Handle(t *testing.T) {
 	}
 }
 
-// TestCreateExpectedMachineHandler_BmcCredentialsForwardedToWorkflow is a regression test for a
+// testCreateExpectedMachineBmcCredentialsForwardedToWorkflow is a regression test for a
 // bug where the OpenAPI spec documented "bmcUsername" / "bmcPassword" as the request field names
 // while the Go struct (APIExpectedMachineCreateRequest) used JSON tags "defaultBmcUsername" /
 // "defaultBmcPassword". Clients following the spec sent keys that the JSON decoder could not bind,
 // leaving DefaultBmcUsername / DefaultBmcPassword nil and silently dropping credentials before
 // they reached the workflow. The spec has been corrected to use "defaultBmcUsername" /
 // "defaultBmcPassword" to match the Go struct tags.
-func TestCreateExpectedMachineHandler_BmcCredentialsForwardedToWorkflow(t *testing.T) {
+func testCreateExpectedMachineBmcCredentialsForwardedToWorkflow(t *testing.T) {
 	e := echo.New()
 	dbSession := testExpectedMachineInitDB(t)
 	defer dbSession.Close()
@@ -3203,7 +3364,7 @@ func TestCreateExpectedMachineHandler_BmcCredentialsForwardedToWorkflow(t *testi
 	}
 }
 
-func TestCreateExpectedMachineHandler_DpfEnabledForwardedToWorkflow(t *testing.T) {
+func testCreateExpectedMachineDpfEnabledForwardedToWorkflow(t *testing.T) {
 	e := echo.New()
 	dbSession := testExpectedMachineInitDB(t)
 	defer dbSession.Close()
@@ -3558,6 +3719,9 @@ func TestExpectedMachineUpdateFields(t *testing.T) {
 func TestUpdateExpectedMachinesHandler_Handle(t *testing.T) {
 	t.Run("complete mutation conflict", func(t *testing.T) {
 		testExpectedMachineMutationRejectsCompleteMutationLock(t, "batch update")
+	})
+	t.Run("SKU recreated on another Site before attachment", func(t *testing.T) {
+		testExpectedMachineRejectsRecreatedSKU(t, "batch update")
 	})
 
 	tests := []struct {

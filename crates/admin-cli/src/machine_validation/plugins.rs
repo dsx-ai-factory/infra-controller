@@ -8,6 +8,7 @@ use ::rpc::forge::{
     MachineValidationTestFullHostApprovalRequest, MachineValidationTestVerfiedRequest,
 };
 use clap::{Parser, ValueEnum};
+use eyre::WrapErr as _;
 
 use crate::cfg::run::Run;
 use crate::cfg::runtime::RuntimeContext;
@@ -114,10 +115,18 @@ impl Run for Args {
                         }),
                     })
                     .await?;
-                println!(
+                crate::async_writeln!(
+                    ctx.output_file,
                     "Created plugin revision: {} {}",
-                    response.test_id, response.version
-                );
+                    response.test_id,
+                    response.version
+                )
+                .wrap_err_with(|| {
+                    format!(
+                        "plugin creation succeeded for {} {} but its confirmation could not be written",
+                        response.test_id, response.version
+                    )
+                })?;
             }
             Self::Verify(args) => {
                 let response = ctx
@@ -128,7 +137,8 @@ impl Run for Args {
                         version: args.version,
                     })
                     .await?;
-                println!("{}", response.message);
+                crate::async_writeln!(ctx.output_file, "{}", response.message)
+                    .wrap_err("plugin verification request succeeded but its confirmation could not be written")?;
             }
             Self::ApproveFullHost(args) => {
                 let response = ctx
@@ -141,7 +151,8 @@ impl Run for Args {
                         },
                     )
                     .await?;
-                println!("{}", response.message);
+                crate::async_writeln!(ctx.output_file, "{}", response.message)
+                    .wrap_err("full host approval request succeeded but its confirmation could not be written")?;
             }
             Self::Enable(args) => {
                 let response = ctx
@@ -155,7 +166,9 @@ impl Run for Args {
                         },
                     )
                     .await?;
-                println!("{}", response.message);
+                crate::async_writeln!(ctx.output_file, "{}", response.message).wrap_err(
+                    "plugin enable request succeeded but its confirmation could not be written",
+                )?;
             }
             Self::Disable(args) => {
                 let response = ctx
@@ -169,7 +182,9 @@ impl Run for Args {
                         },
                     )
                     .await?;
-                println!("{}", response.message);
+                crate::async_writeln!(ctx.output_file, "{}", response.message).wrap_err(
+                    "plugin disable request succeeded but its confirmation could not be written",
+                )?;
             }
         }
         Ok(())

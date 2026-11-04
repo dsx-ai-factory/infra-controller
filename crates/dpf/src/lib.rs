@@ -75,11 +75,13 @@ pub use error::DpfError;
 pub use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
 pub use repository::{DpfRepository, KubeRepository};
 pub use sdk::{
-    DpfSdk, DpfSdkBuilder, DpuProvisioningSource, NoLabels, ResourceLabeler, build_deployment,
-    build_deployment_dpu_interfaces, build_effective_dpu_interfaces, build_service_configuration,
-    build_service_interface, build_service_nad, build_service_template, calculate_pf_total_sf,
-    detached_dpu_service_chain_spec, detached_dpu_service_interface_spec, dpu_cr_name,
-    dpu_device_cr_name, dpu_node_cr_name, node_id_from_dpu_node_cr_name,
+    BmcCredentialFailureReason, BmcCredentialHealth, BmcCredentialObservation, DpfSdk,
+    DpfSdkBuilder, DpuProvisioningSource, NoLabels, ResourceLabeler, bmc_credential_secret_name,
+    build_deployment, build_deployment_dpu_interfaces, build_effective_dpu_interfaces,
+    build_service_configuration, build_service_interface, build_service_nad,
+    build_service_template, calculate_pf_total_sf, detached_dpu_service_chain_spec,
+    detached_dpu_service_interface_spec, dpu_cr_name, dpu_device_cr_name, dpu_node_cr_name,
+    node_id_from_dpu_node_cr_name,
 };
 pub use service_vpc_slot::{SERVICE_VPC_MTU, ServiceVpcSlots};
 pub use services::{DEFAULT_DOCA_HELM_REGISTRY, ServiceRegistryConfig};
@@ -92,9 +94,10 @@ pub use types::{
     DetachedServiceDaemonSet, DetachedServiceDaemonSetRollingUpdate,
     DetachedServiceDaemonSetUpdateStrategy, DpfDeletePreconditions, DpfInterceptBridge,
     DpfInterceptBridging, DpfInterfaceIdentity, DpuDeploymentType, DpuDeviceInfo, DpuErrorEvent,
-    DpuEvent, DpuMismatch, DpuNodeInfo, DpuPhase, DpuReadyEvent, DpuServiceDaemonSetObservation,
-    DpuServiceHelmChartObservation, DpuServiceObservation, DpuServiceSecurityObservation,
-    DpuServiceVersion, InitDpfResourcesConfig, InitDpfResourcesConfigBuilder, MaintenanceEvent,
+    DpuEvent, DpuFailureObservation, DpuMismatch, DpuNodeInfo, DpuPhase, DpuPhaseObservation,
+    DpuReadyEvent, DpuServiceDaemonSetObservation, DpuServiceHelmChartObservation,
+    DpuServiceObservation, DpuServiceSecurityObservation, DpuServiceVersion,
+    InitDpfResourcesConfig, InitDpfResourcesConfigBuilder, MaintenanceEvent,
     PF_TOTAL_SF_BF4_ASTRA_FUDGE, RebootRequiredEvent, ServiceChainSwitch, ServiceConfigPort,
     ServiceConfigPortProtocol, ServiceDefinition, ServiceInterface, ServiceNAD,
     ServiceNADResourceType,

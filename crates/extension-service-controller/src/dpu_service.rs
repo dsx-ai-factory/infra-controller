@@ -327,7 +327,7 @@ pub fn dpu_service_mutable_patch(
 
 /// Reports whether every NICo-owned mutable DPUService field matches the desired definition,
 /// excluding immutable attachment fields checked separately.
-pub(crate) fn dpu_service_mutable_fields_match(
+pub fn dpu_service_mutable_fields_match(
     projected: &DetachedDpuServiceDefinition,
     existing: &DpuServiceObservation,
 ) -> bool {
@@ -1495,10 +1495,13 @@ mod tests {
         );
     }
 
-    /// Verifies RFC 6902 replacement preserves literal nulls in tenant Helm values.
-    /// A merge patch would delete these keys and cause every later Ready scan to detect drift.
+    /// Verifies RFC 6902 replacement preserves literal nulls and unrelated fields when
+    /// `/spec/serviceDaemonSet` is absent. A merge patch would delete the null-valued keys and
+    /// cause every later Ready scan to detect drift, while nested DaemonSet operations would reject
+    /// platform services that omit `/spec/serviceDaemonSet`.
     #[test]
     fn mutable_patch_preserves_literal_nulls_and_unowned_fields() {
+        // Define stale live values to exercise replacement of both scalar and nested Helm data.
         let existing_values = BTreeMap::from_iter([
             ("replicas".to_owned(), json!(2)),
             ("debug".to_owned(), json!(true)),
@@ -1507,7 +1510,8 @@ mod tests {
                 json!({"tag": "1.0.0", "repository": "registry.example.com/old"}),
             ),
         ]);
-        let projected = project_dpu_service(
+        // Build desired Helm values with literal nulls to exercise their distinction from removal.
+        let mut projected = project_dpu_service(
             service_id(),
             NAMESPACE,
             &data(Some(Map::from_iter([
@@ -1521,11 +1525,15 @@ mod tests {
             ExtensionServiceDeploymentType::DemandDriven,
         );
 
+        // Match the platform release by omitting workload settings from desired and observed state.
+        projected.service_daemon_set = None;
         let mut existing = observation(&projected);
         // Replace the projected values with stale live data so the patch must preserve nested
         // nulls.
         existing.helm_chart.values = Some(existing_values);
         let patch = dpu_service_mutable_patch(&projected, &existing, "17");
+        // Model a raw Kubernetes document with unrelated fields and no `/spec/serviceDaemonSet`
+        // object.
         let mut document = json!({
             "metadata": {
                 "resourceVersion": "17",
@@ -1546,7 +1554,6 @@ mod tests {
                     "privileged": false,
                     "externalPolicy": {"mode": "enforced"},
                 },
-                "serviceDaemonSet": {"nodeSelector": {}},
             },
         });
 
@@ -1578,6 +1585,7 @@ mod tests {
             document["spec"]["security"]["externalPolicy"],
             json!({"mode": "enforced"})
         );
+        assert!(document.pointer("/spec/serviceDaemonSet").is_none());
 
         // Model the next Kubernetes observation from the applied values; Ready must now stay quiet.
         existing.helm_chart.values =

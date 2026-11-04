@@ -112,6 +112,8 @@ async fn test_lldp_topology_force_delete(
                 allow_delete_with_orphaned_dpf_crds: false,
                 delete_bmc_suppressions: false,
                 delete_retained_boot_interfaces: false,
+                allow_delete_with_instance_type: false,
+                allow_delete_with_instance: false,
                 release_preserved_addresses: false,
                 wait_for_instance_dpu: false,
             },
@@ -624,6 +626,8 @@ async fn test_lldp_neighbors_force_delete(pool: sqlx::PgPool) {
     env.api
         .admin_force_delete_machine(tonic::Request::new(
             rpc::forge::AdminForceDeleteMachineRequest {
+                allow_delete_with_instance_type: false,
+                allow_delete_with_instance: false,
                 host_query: host_id.to_string(),
                 delete_interfaces: true,
                 delete_bmc_interfaces: true,

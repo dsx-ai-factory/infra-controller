@@ -17,6 +17,7 @@
 use std::net::SocketAddrV4;
 use std::sync::Arc;
 
+use carbide_rpc_utils::dhcp::ServiceReservation;
 use lru::LruCache;
 use rpc::forge::{DhcpDiscovery, DhcpRecord, MessageKind};
 use tokio::sync::Mutex;
@@ -43,6 +44,17 @@ pub enum V6Outcome {
 
 #[async_trait]
 pub trait DhcpMode: Send + Sync + std::fmt::Debug {
+    /// Resolves an exact service reservation before host discovery so service slots cannot fall
+    /// through to tenant host DHCP.
+    fn service_reservation<'a>(
+        &self,
+        _config: &'a Config,
+        _receiving_interface: &str,
+        _client_mac: &str,
+    ) -> Result<Option<&'a ServiceReservation>, DhcpError> {
+        Ok(None)
+    }
+
     /// Method to determine IP address to be returned to client.
     async fn discover_dhcp(
         &self,

@@ -34,14 +34,7 @@ pub fn start_cleanup_metrics(
     cancel: CancellationToken,
 ) -> std::io::Result<()> {
     let metrics = SharedMetricsHolder::with_fresh_period(FRESH_PERIOD);
-    let observed = metrics.clone();
-    meter
-        .i64_observable_gauge(METRIC_NAME)
-        .with_description("Number of remote allocations awaiting confirmed cancellation or release")
-        .with_callback(move |observer| {
-            observed.if_available(|count, attrs| observer.observe(*count, attrs));
-        })
-        .build();
+    register_metrics(meter, &metrics);
 
     tasks
         .build_task()
@@ -50,35 +43,53 @@ pub fn start_cleanup_metrics(
             let mut interval = tokio::time::interval(SAMPLE_INTERVAL);
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             while cancel.run_until_cancelled(interval.tick()).await.is_some() {
-                let Some(sample) = cancel
-                    .run_until_cancelled(tokio::time::timeout(DATABASE_WAIT_TIMEOUT, async {
-                        let mut txn = database_transaction(&pool).await?;
-                        let count = cleanup_backlog(&mut txn).await?;
-                        txn.commit().await?;
-                        Ok::<_, db::DatabaseError>(count)
-                    }))
+                if cancel
+                    .run_until_cancelled(sample(&pool, &metrics))
                     .await
-                else {
+                    .is_none()
+                {
                     return;
-                };
-                match sample {
-                    Ok(Ok(count)) => metrics.update(count),
-                    Ok(Err(error)) => {
-                        tracing::warn!(error = %error, "Could not read remote cleanup backlog");
-                    }
-                    Err(_) => {
-                        tracing::warn!("Timed out reading remote cleanup backlog");
-                    }
                 }
             }
         })?;
     Ok(())
 }
 
+fn register_metrics(meter: Meter, metrics: &SharedMetricsHolder<i64>) {
+    let observed = metrics.clone();
+    meter
+        .i64_observable_gauge(METRIC_NAME)
+        .with_description("Number of remote allocations awaiting confirmed cancellation or release")
+        .with_callback(move |observer| {
+            observed.if_available(|count, attrs| observer.observe(*count, attrs));
+        })
+        .build();
+}
+
+// Publish only complete samples, retaining the last count when a query fails
+// or exceeds its deadline. Scheduling and shutdown belong to the caller.
+async fn sample(pool: &PgPool, metrics: &SharedMetricsHolder<i64>) {
+    let result = tokio::time::timeout(DATABASE_WAIT_TIMEOUT, async {
+        let mut txn = database_transaction(pool).await?;
+        let count = cleanup_backlog(&mut txn).await?;
+        txn.commit().await?;
+        Ok::<_, db::DatabaseError>(count)
+    })
+    .await;
+    match result {
+        Ok(Ok(count)) => metrics.update(count),
+        Ok(Err(error)) => {
+            tracing::warn!(error = %error, "Could not read remote cleanup backlog");
+        }
+        Err(_) => {
+            tracing::warn!("Timed out reading remote cleanup backlog");
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use carbide_utils::test_support::test_meter::TestMeter;
-    use chrono::{DateTime, Utc};
     use db::ConditionalWrite;
     use db::resource_pool::{binding, remote};
     use db::test_support::postgres::wait_for_blocked_query;
@@ -94,6 +105,27 @@ mod tests {
     use uuid::Uuid;
 
     use super::*;
+
+    #[test]
+    fn cleanup_gauge_preserves_the_count_when_its_sample_is_stale() {
+        // `SharedMetricsHolder` uses `std::time::Instant`. These periods force
+        // fresh and stale observations without waiting or advancing Tokio time.
+        for (fresh_period, expected) in [
+            (Duration::MAX, "{fresh=\"true\"} 2"),
+            (Duration::ZERO, "{fresh=\"false\"} 2"),
+        ] {
+            let meter = TestMeter::default();
+            let metrics = SharedMetricsHolder::with_fresh_period(fresh_period);
+            register_metrics(meter.meter(), &metrics);
+            assert_eq!(meter.formatted_metric(METRIC_NAME), None);
+
+            metrics.update(2);
+            assert_eq!(
+                meter.formatted_metric(METRIC_NAME).as_deref(),
+                Some(expected)
+            );
+        }
+    }
 
     async fn wait_for_count(meter: &TestMeter, count: i64) {
         let expected = format!("{{fresh=\"true\"}} {count}");
@@ -186,34 +218,32 @@ mod tests {
             txn.commit().await?;
         }
 
-        // Block the first sample so an invented initial zero cannot pass unnoticed.
-        let mut blocker = pool.begin().await?;
-        sqlx::query("LOCK TABLE resource_pool_allocations IN ACCESS EXCLUSIVE MODE")
-            .execute(&mut *blocker)
-            .await?;
-        let blocker_pid = sqlx::query_scalar("SELECT pg_backend_pid()")
-            .fetch_one(&mut *blocker)
-            .await?;
         let meter = TestMeter::default();
-        let mut tasks = JoinSet::new();
-        let cancel = CancellationToken::new();
-        start_cleanup_metrics(pool.clone(), meter.meter(), &mut tasks, cancel.clone())?;
-        wait_for_blocked_query(
-            &pool,
-            blocker_pid,
-            "SELECT count(*) FROM resource_pool_allocations",
-        )
-        .await;
-        assert_eq!(meter.formatted_metric(METRIC_NAME), None);
-        blocker.commit().await?;
+        let fresh_period = Duration::from_secs(1);
+        let metrics = SharedMetricsHolder::with_fresh_period(fresh_period);
+        register_metrics(meter.meter(), &metrics);
 
-        wait_for_count(&meter, 2).await;
+        // Drive complete samples directly; the spawned task's scheduling and
+        // cancellation are exercised below against the same database.
+        sample(&pool, &metrics).await;
+        assert_eq!(
+            meter.formatted_metric(METRIC_NAME).as_deref(),
+            Some("{fresh=\"true\"} 2")
+        );
         assert!(
             meter
                 .export_metrics()
                 .contains(&format!("# TYPE {METRIC_NAME} gauge"))
         );
 
+        // Let the sample age on `SharedMetricsHolder`'s real clock. A failed
+        // read must not refresh the last successful sample.
+        tokio::time::sleep(fresh_period).await;
+        assert_eq!(
+            meter.formatted_metric(METRIC_NAME).as_deref(),
+            Some("{fresh=\"false\"} 2")
+        );
+
         let mut blocker = pool.begin().await?;
         sqlx::query("LOCK TABLE resource_pool_allocations IN ACCESS EXCLUSIVE MODE")
             .execute(&mut *blocker)
@@ -221,60 +251,22 @@ mod tests {
         let blocker_pid = sqlx::query_scalar("SELECT pg_backend_pid()")
             .fetch_one(&mut *blocker)
             .await?;
-        let blocked_pid = tokio::time::timeout(
-            Duration::from_secs(12),
-            wait_for_blocked_query(
-                &pool,
-                blocker_pid,
-                "SELECT count(*) FROM resource_pool_allocations",
-            ),
-        )
-        .await?;
-        let query_started: DateTime<Utc> =
-            sqlx::query_scalar("SELECT query_start FROM pg_stat_activity WHERE pid = $1")
-                .bind(blocked_pid)
-                .fetch_one(&pool)
-                .await?;
-        // Keep the lock until the timed-out statement has stopped and the
-        // sampler has processed its failure by starting another attempt.
-        tokio::time::timeout(Duration::from_secs(12), async {
-            loop {
-                let still_running: bool = sqlx::query_scalar(
-                    "SELECT EXISTS (SELECT 1 FROM pg_stat_activity
-                        WHERE pid = $1 AND query_start = $2 AND state = 'active')",
-                )
-                .bind(blocked_pid)
-                .bind(query_started)
-                .fetch_one(&pool)
-                .await?;
-                if !still_running {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(25)).await;
-            }
-            wait_for_blocked_query(
-                &pool,
-                blocker_pid,
-                "SELECT count(*) FROM resource_pool_allocations",
-            )
-            .await;
-            Ok::<_, sqlx::Error>(())
-        })
-        .await??;
-        assert_eq!(
-            meter.formatted_metric(METRIC_NAME).as_deref(),
-            Some("{fresh=\"true\"} 2"),
-            "a failed sample must preserve the last successful count"
-        );
-
-        // `SharedMetricsHolder` uses `std::time::Instant`, so advancing Tokio's
-        // clock cannot age the sample. Keep the queries failing for another
-        // freshness period before checking the retained count.
-        tokio::time::sleep(FRESH_PERIOD).await;
+        let mut pending = Box::pin(sample(&pool, &metrics));
+        tokio::select! {
+            () = &mut pending => panic!("the sample did not wait for the table lock"),
+            _ = wait_for_blocked_query(&pool, blocker_pid, "SELECT count(*) FROM resource_pool_allocations") => {}
+        }
+        // The query is blocked. Expire the sampler's Tokio deadline without
+        // advancing PostgreSQL's clock. SQLx queues rollback behind the blocked
+        // query, so release the blocker after checking the retained sample.
+        tokio::time::pause();
+        tokio::time::advance(DATABASE_WAIT_TIMEOUT + Duration::from_millis(1)).await;
+        tokio::time::resume();
+        tokio::time::timeout(Duration::from_secs(1), pending).await?;
         assert_eq!(
             meter.formatted_metric(METRIC_NAME).as_deref(),
             Some("{fresh=\"false\"} 2"),
-            "failed samples must preserve the count after it becomes stale"
+            "a failed sample must preserve the last successful count and its age"
         );
         blocker.rollback().await?;
 
@@ -286,7 +278,34 @@ mod tests {
             );
         }
         txn.commit().await?;
-        // Recovery must replace the stale series with one fresh count.
+        sample(&pool, &metrics).await;
+        assert_eq!(
+            meter.formatted_metric(METRIC_NAME).as_deref(),
+            Some("{fresh=\"true\"} 0"),
+            "recovery must publish the new persisted count"
+        );
+
+        // Keep the spawned task's initial sample, interval, and cancellation
+        // covered against the real database as well as the directly driven reads.
+        let meter = TestMeter::default();
+        let mut tasks = JoinSet::new();
+        let cancel = CancellationToken::new();
+        let mut blocker = pool.begin().await?;
+        sqlx::query("LOCK TABLE resource_pool_allocations IN ACCESS EXCLUSIVE MODE")
+            .execute(&mut *blocker)
+            .await?;
+        let blocker_pid = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *blocker)
+            .await?;
+        start_cleanup_metrics(pool.clone(), meter.meter(), &mut tasks, cancel.clone())?;
+        wait_for_blocked_query(
+            &pool,
+            blocker_pid,
+            "SELECT count(*) FROM resource_pool_allocations",
+        )
+        .await;
+        assert_eq!(meter.formatted_metric(METRIC_NAME), None);
+        blocker.rollback().await?;
         wait_for_count(&meter, 0).await;
 
         let mut blocker = pool.begin().await?;
@@ -296,6 +315,9 @@ mod tests {
         let blocker_pid = sqlx::query_scalar("SELECT pg_backend_pid()")
             .fetch_one(&mut *blocker)
             .await?;
+        tokio::time::pause();
+        tokio::time::advance(SAMPLE_INTERVAL + Duration::from_millis(1)).await;
+        tokio::time::resume();
         tokio::time::timeout(
             Duration::from_secs(12),
             wait_for_blocked_query(

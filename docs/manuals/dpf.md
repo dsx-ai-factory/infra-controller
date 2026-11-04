@@ -1355,10 +1355,7 @@ defaults, and fails each iteration with `MissingCredentials` until all three are
 present.
 
 <Note>
-This is a site secret that must survive at all costs — it is also the input to
-SuperNIC lockdown key derivation. Refer to
-[SuperNIC Lockdown Key Management](../architecture/supernic_lockdown_key_management.md)
-for the backup and recovery requirements.
+The BMC site-wide root seeds SuperNIC lockdown IKM version 0 only when that lockdown credential is absent. Lockdown IKM and BMC credentials then remain independent. Before locking a card, follow the [IKM security requirements](../architecture/supernic_lockdown_key_management.md#key-derivation-function-kdf). Preserve the [credential and Core database backups required for recovery](../architecture/supernic_lockdown_key_management.md#backup-and-recovery).
 </Note>
 
 ### 3.7. Mark hosts as DPF-managed in expected machines
@@ -1482,6 +1479,30 @@ After changing the DPF status for a host in this way, you should trigger a repro
 **Note:** The `nico-admin-cli dpf enable` command updates the DPF flag only for the currently ingested machine. If you later force-delete the host, this change is lost—on rediscovery, the DPF setting will revert to whatever is present in your `expected_machines` database.
 
 ---
+
+### Site-wide partial-multiplane maintenance
+
+In `carbide.toml`, `partial-multiplane` controls whether Astra provisioning
+initializes all planes in maintenance mode. It defaults to `enabled`. To skip
+initialization of planes in maintenance mode during provisioning, set:
+
+```toml
+[ewethers_config]
+partial-multiplane = "disabled"
+```
+
+Core reads this setting at startup. Setting `enabled`
+initializes all planes in maintenance mode once per provisioning. `disabled` skips
+that step, leaving newly provisioned planes in their default enabled state.
+Legacy MAC/IP inventory skips maintenance initialization for either value.
+
+This setting does not restrict CLI or REST maintenance requests, configuration
+delivery, or DPU observations. Operators can request maintenance changes after
+provisioning with either value. Saved requests remain in effect.
+
+Changing the setting does not change existing plane states. It affects the
+initialization script in newly provisioned Astra flavors, including after
+reingestion or reprovisioning.
 
 ## 4. Start carbide-api to create the DPF initialization objects
 

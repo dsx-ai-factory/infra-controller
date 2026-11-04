@@ -31,6 +31,7 @@ use crate::api::{Api, log_request_data};
 fn advertised_build_capabilities() -> Vec<i32> {
     vec![
         rpc::BuildCapability::VpcSlaac as i32,
+        rpc::BuildCapability::ReplaceSkuComponents as i32,
         rpc::BuildCapability::InstanceGracefulRestart as i32,
     ]
 }
@@ -226,12 +227,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn advertised_build_capabilities_include_supported_operations() {
+    fn advertised_build_capabilities_include_supported_features() {
+        let capabilities = advertised_build_capabilities();
         for capability in [
             rpc::BuildCapability::VpcSlaac,
+            rpc::BuildCapability::ReplaceSkuComponents,
             rpc::BuildCapability::InstanceGracefulRestart,
         ] {
-            assert!(advertised_build_capabilities().contains(&(capability as i32)));
+            assert!(capabilities.contains(&(capability as i32)));
         }
     }
 }

@@ -79,6 +79,14 @@ pub enum DpfError {
 }
 
 impl DpfError {
+    /// Recognizes create and conditional-write races so callers can reread before retrying safely.
+    pub fn is_already_exists_or_conflict(&self) -> bool {
+        matches!(
+            self,
+            Self::AlreadyExists { .. } | Self::PatchConflict { .. }
+        ) || matches!(self, Self::KubeError(kube::Error::Api(status)) if status.is_already_exists() || status.is_conflict())
+    }
+
     /// Returns whether this error represents a missing DPF resource.
     pub fn is_not_found(&self) -> bool {
         matches!(self, Self::NotFound { .. })
@@ -123,5 +131,52 @@ impl DpfError {
 impl From<kube::runtime::watcher::Error> for DpfError {
     fn from(e: kube::runtime::watcher::Error) -> Self {
         Self::WatcherError(e.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use carbide_test_support::value_scenarios;
+
+    use super::*;
+
+    /// Verifies repository and Kubernetes write races request an immediate reread while unrelated
+    /// failures do not, preventing permanent API errors from entering conflict handling.
+    #[test]
+    fn already_exists_or_conflict_classifies_retryable_write_races() {
+        value_scenarios!(
+            run = |error: DpfError| error.is_already_exists_or_conflict();
+            "repository races require a reread" {
+                // Repository create collisions require callers to validate the object returned by
+                // the reread.
+                DpfError::already_exists("DPUService", "shared") => true,
+                // Repository patch conflicts require a fresh resourceVersion before another write.
+                DpfError::PatchConflict {
+                    kind: "DPUService",
+                    name: "shared".to_string(),
+                } => true,
+            }
+
+            "Kubernetes races require a reread" {
+                // Raw Kubernetes create collisions carry the same reread requirement.
+                DpfError::KubeError(kube::Error::Api(Box::new(
+                    kube::core::Status::failure("already exists", "AlreadyExists").with_code(409),
+                ))) => true,
+                // Raw Kubernetes conditional-write conflicts also require a fresh observation.
+                DpfError::KubeError(kube::Error::Api(Box::new(
+                    kube::core::Status::failure("conflict", "Conflict").with_code(409),
+                ))) => true,
+            }
+
+            "non-race failures bypass conflict handling" {
+                // Raw Kubernetes validation failures must not enter create-or-patch conflict
+                // handling.
+                DpfError::KubeError(kube::Error::Api(Box::new(
+                    kube::core::Status::failure("invalid resource", "BadRequest").with_code(400),
+                ))) => false,
+                // Missing resources follow separate reconciliation behavior and must not enter this path.
+                DpfError::not_found("DPUService", "shared") => false,
+            }
+        );
     }
 }

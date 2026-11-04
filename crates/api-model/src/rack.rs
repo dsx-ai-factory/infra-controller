@@ -494,6 +494,11 @@ pub enum RackState {
         /// Description of the failure that moved the rack to Error.
         cause: String,
 
+        /// Certificate diagnostics, absent for older rows and unrelated errors.
+        /// Exposed in lifecycle state and state history without a separate job API.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        certificate_failure: Option<crate::component_manager::SwitchCertificateFailure>,
+
         /// Policy controlling when the rack may leave Error.
         #[serde(default)]
         recovery_policy: RackErrorRecoveryPolicy,
@@ -1080,6 +1085,7 @@ mod tests {
 
             "legacy error retains automatic component recovery" {
                 r#"{"state":"error","cause":"switch failed"}"# => Yields(RackState::Error {
+                    certificate_failure: None,
                     cause: "switch failed".to_string(),
                     recovery_policy: RackErrorRecoveryPolicy::ComponentsReady,
                 }),
@@ -1087,6 +1093,7 @@ mod tests {
 
             "maintenance error requires a new request" {
                 r#"{"state":"error","cause":"maintenance failed","recovery_policy":"maintenance_request_required"}"# => Yields(RackState::Error {
+                    certificate_failure: None,
                     cause: "maintenance failed".to_string(),
                     recovery_policy: RackErrorRecoveryPolicy::MaintenanceRequestRequired,
                 }),
@@ -1341,6 +1348,7 @@ mod tests {
             "accepts in error state" {
                 (
                     RackState::Error {
+                        certificate_failure: None,
                         cause: "something broke".into(),
                         recovery_policy: RackErrorRecoveryPolicy::ComponentsReady,
                     },

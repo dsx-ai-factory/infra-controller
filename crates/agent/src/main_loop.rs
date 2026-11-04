@@ -805,7 +805,9 @@ impl CurrentNetworkVersion {
         config.anycast_site_prefixes.sort_unstable();
         config
             .additional_route_target_imports
-            .sort_by_key(|route_target| (route_target.asn, route_target.vni));
+            .sort_by_key(|route_target| {
+                (route_target.asn, route_target.vni, route_target.vni_self)
+            });
 
         if let Some(admin_interface) = &mut config.admin_interface {
             Self::normalize_interface(admin_interface);
@@ -855,10 +857,14 @@ impl CurrentNetworkVersion {
     fn normalize_routing_profile(routing_profile: &mut rpc::RoutingProfile) {
         routing_profile
             .route_target_imports
-            .sort_by_key(|route_target| (route_target.asn, route_target.vni));
+            .sort_by_key(|route_target| {
+                (route_target.asn, route_target.vni, route_target.vni_self)
+            });
         routing_profile
             .route_targets_on_exports
-            .sort_by_key(|route_target| (route_target.asn, route_target.vni));
+            .sort_by_key(|route_target| {
+                (route_target.asn, route_target.vni, route_target.vni_self)
+            });
         Self::sort_prefix_entries(&mut routing_profile.accepted_leaks_from_underlay);
         Self::sort_prefix_entries(&mut routing_profile.allowed_anycast_prefixes);
     }
@@ -1102,7 +1108,8 @@ impl MainLoop {
         // `read` does not block
         match self.periodic_config_reader.net_conf_read() {
             Some(conf) => {
-                // DHCP server only runs on the primary dpu or when using the tenant network
+                // Secondary-admin service reservations do not produce host-interface timestamps, so
+                // report request history only for primary DPUs or DPUs using the tenant network.
                 if !conf.use_admin_network || conf.is_primary_dpu {
                     status_out.last_dhcp_requests =
                         fetch_last_dhcp_requests(self.options.dhcp_grpc_server.as_deref()).await;
@@ -1296,13 +1303,16 @@ impl MainLoop {
                         .await
                     };
 
-                    // Astra (Weave EW VPC) reconciliation is independent of HBN/DHCP: it is
-                    // reported on network status below, but a failure here must not block
-                    // the HBN/DHCP bookkeeping (or the readiness gate) that follows.
-                    let astra_config_status = astra_weave::build_notify_weave_ew_vpc_astra_config(
-                        conf.astra_config.as_ref(),
-                    )
-                    .await;
+                    // Maintenance-only delivery must not reconcile Weave attachments.
+                    let mut astra_config_status = None;
+                    if let Some(astra_config) = conf.astra_config.as_ref()
+                        && astra_config.is_attachment_config_present.unwrap_or(true)
+                    {
+                        astra_config_status = Some(
+                            astra_weave::build_notify_weave_ew_vpc_astra_config(Some(astra_config))
+                                .await,
+                        );
+                    }
 
                     match (update_result, dhcp_result) {
                         (Ok(hbn_changed), Ok(dhcp_changed)) => {
@@ -1375,22 +1385,12 @@ impl MainLoop {
                         }
                     }
 
-                    match astra_config_status {
-                        Ok(status) => {
-                            if conf.astra_config.is_some() {
-                                status_out.astra_config_status = Some(status);
-                            }
-                        }
-                        Err(err) => {
-                            tracing::error!(
-                                error = format!("{err:#}"),
-                                "Notifying Weave EW VPC Astra config"
-                            );
-                            // Don't clobber a real HBN/DHCP failure already reported above.
-                            if status_out.network_config_error.is_none() {
-                                status_out.network_config_error = Some(err.to_string());
-                            }
-                        }
+                    if let Some(result) = astra_config_status {
+                        set_astra_config_status(
+                            conf.astra_config.as_ref(),
+                            result,
+                            &mut status_out,
+                        );
                     }
 
                     // In case of secondary DPU, the interface must be disabled if on admin network, else enabled.
@@ -1401,6 +1401,20 @@ impl MainLoop {
                     {
                         tracing::error!(error = format!("{err:#}"), "Updating interface state.");
                     }
+                }
+
+                // Xplane maintenance has no dependency on HBN being up. Its
+                // per-port failures are reported without changing HBN/DHCP
+                // acknowledgments or the readiness gate.
+                if let Some(astra_config) = conf.astra_config.as_ref()
+                    && astra_config.is_maintenance_config_present.unwrap_or(true)
+                {
+                    status_out.astra_config_status =
+                        crate::astra_xplane::build_notify_xplane_maintenance_config(
+                            astra_config,
+                            status_out.astra_config_status.take(),
+                        )
+                        .await;
                 }
 
                 // Feed the latest instance metadata to FMDS and acknowledge it
@@ -1741,6 +1755,40 @@ fn effective_virtualization_type(
         });
 
     Ok(virtualization_type)
+}
+
+/// `set_astra_config_status` reports attempted Astra reconciliation independently
+/// of HBN/DHCP acknowledgements. Absent configuration leaves the report unchanged.
+/// Failure records an error unless the caller has already recorded one.
+fn set_astra_config_status(
+    config: Option<&rpc::AstraConfig>,
+    result: eyre::Result<rpc::AstraConfigStatus>,
+    status_out: &mut rpc::DpuNetworkStatus,
+) {
+    if config.is_none() {
+        return;
+    }
+
+    status_out.astra_config_status = Some(match result {
+        Ok(status) => status,
+        Err(err) => {
+            tracing::error!(
+                error = format!("{err:#}"),
+                "Notifying Weave EW VPC Astra config"
+            );
+            // Keep an HBN/DHCP error the caller already recorded.
+            if status_out.network_config_error.is_none() {
+                status_out.network_config_error = Some(format!("{err:#}"));
+            }
+            // An empty report retracts Core's previous Astra readiness. Omitting
+            // the report would leave that observation unchanged after failure.
+            rpc::AstraConfigStatus {
+                is_attachment_status_present: Some(true),
+                is_maintenance_status_present: Some(false),
+                ..Default::default()
+            }
+        }
+    });
 }
 
 fn ack_network_config_update(
@@ -2109,10 +2157,10 @@ ATF: v2.2(release):4.9.3-")
     Ok(())
 }
 
-/// Require confirmed DHCP acceptance before IPv6-primary NVUE and FMDS updates,
-/// including later network-policy changes that configure DHCP. Secondary admin
-/// DPUs only stop DHCP, so a failed stop must not delay their NVUE isolation.
-/// Any DHCP error still leaves the network version pending for the next retry.
+/// Require confirmed DHCP acceptance before IPv6-primary NVUE and FMDS updates, including later
+/// network-policy changes that configure DHCP. Secondary admin DPUs without service listeners only
+/// stop DHCP, so a failed stop must not delay their NVUE isolation. Callers must leave the network
+/// version pending after any DHCP error so the next iteration retries.
 fn require_dhcp_before_ipv6_only_network_update(
     config: &rpc::ManagedHostNetworkConfigResponse,
     dhcp_result: &eyre::Result<bool>,
@@ -2120,7 +2168,12 @@ fn require_dhcp_before_ipv6_only_network_update(
     let Some(host) = &config.managed_host_config else {
         return Ok(());
     };
-    let stops_dhcp = config.use_admin_network && !config.is_primary_dpu;
+    let stops_dhcp = config.use_admin_network
+        && !config.is_primary_dpu
+        && config
+            .service_vpc_slot_inventory
+            .as_ref()
+            .is_none_or(|inventory| inventory.slots.is_empty());
     if !stops_dhcp && managed_host_ipv4_loopback(host)?.is_none() && dhcp_result.is_err() {
         // The caller reports the original DHCP error alongside this gate error.
         eyre::bail!("IPv6-only network update is waiting for DHCP");

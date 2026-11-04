@@ -196,13 +196,19 @@ struct SpanData {
 
 /// A `tracing` layer that forwards events and span-completion
 /// summaries to a [`LogStream`].
+/// Includes `trace_id` in the structured fields when an OpenTelemetry context
+/// exists. Install before the OpenTelemetry layer to preserve close-time context.
 pub struct LogStreamLayer {
     stream: LogStream,
+    trace_context: trace_propagation::LogTraceContext,
 }
 
 impl LogStreamLayer {
     pub fn new(stream: LogStream) -> Self {
-        Self { stream }
+        Self {
+            stream,
+            trace_context: trace_propagation::LogTraceContext::default(),
+        }
     }
 }
 
@@ -210,6 +216,10 @@ impl<S> Layer<S> for LogStreamLayer
 where
     S: Subscriber + for<'a> LookupSpan<'a>,
 {
+    fn on_register_dispatch(&self, dispatch: &tracing::Dispatch) {
+        self.trace_context.register_dispatch(dispatch);
+    }
+
     fn on_new_span(&self, attrs: &Attributes<'_>, id: &Id, ctx: Context<'_, S>) {
         let Some(span) = ctx.span(id) else { return };
         let mut visitor = LogLineVisitor::default();
@@ -235,6 +245,14 @@ where
 
         let mut visitor = LogLineVisitor::default();
         event.record(&mut visitor);
+        if let Some(trace_id) = ctx.event_span(event).and_then(|span| {
+            span.scope()
+                .find_map(|span| self.trace_context.trace_id(&span.id()))
+        }) {
+            visitor
+                .fields
+                .insert("trace_id".to_string(), trace_id.to_string());
+        }
 
         self.stream.publish(LogLine {
             seq: 0, // real value assigned in publish()
@@ -250,6 +268,9 @@ where
 
     fn on_close(&self, id: Id, ctx: Context<'_, S>) {
         let Some(span) = ctx.span(&id) else { return };
+        let trace_id = span
+            .scope()
+            .find_map(|span| self.trace_context.trace_id(&span.id()));
 
         // The span is closing and this layer is the only reader of its
         // `SpanData`, so take the data out of the extensions rather than
@@ -262,6 +283,9 @@ where
             opened_at,
         } = data;
         let elapsed_ms = opened_at.elapsed().as_millis();
+        if let Some(trace_id) = trace_id {
+            fields.insert("trace_id".to_string(), trace_id.to_string());
+        }
 
         // Put `span_id` to its own slot (for span click-to-filter)
         // and record how long the span was open.
@@ -379,9 +403,56 @@ impl Visit for LogLineVisitor {
 
 #[cfg(test)]
 mod tests {
+    use opentelemetry::trace::{
+        SpanContext, SpanId, TraceContextExt, TraceFlags, TraceId, TraceState, TracerProvider,
+    };
+    use opentelemetry_sdk::trace::{Sampler, SdkTracerProvider};
+    use tracing_opentelemetry::OpenTelemetrySpanExt;
     use tracing_subscriber::prelude::*;
 
     use super::*;
+
+    #[test]
+    fn trace_id_is_preserved_in_live_and_retained_logs() {
+        let provider = SdkTracerProvider::builder()
+            .with_sampler(Sampler::AlwaysOff)
+            .build();
+        let stream = LogStream::new(16, 64 * 1024);
+        let mut rx = stream.subscribe();
+        let subscriber = tracing_subscriber::registry()
+            .with(LogStreamLayer::new(stream.clone()))
+            .with(tracing_opentelemetry::layer().with_tracer(provider.tracer("test")));
+        tracing::subscriber::with_default(subscriber, || {
+            let request = tracing::info_span!("request", span_id = "local");
+            let parent = SpanContext::new(
+                TraceId::from(42),
+                SpanId::from(7),
+                TraceFlags::default(),
+                true,
+                TraceState::default(),
+            );
+            request
+                .set_parent(opentelemetry::Context::new().with_remote_span_context(parent))
+                .unwrap();
+            tracing::info!(parent: &request, trace_id = "incorrect", "explicit parent");
+            request.in_scope(|| {
+                let child = tracing::info_span!("child");
+                child.in_scope(|| tracing::info!("nested event"));
+            });
+        });
+        let lines = stream.latest(16);
+        assert_eq!(lines.len(), 4);
+        for line in &lines {
+            assert_eq!(
+                line.fields.get("trace_id"),
+                Some(&TraceId::from(42).to_string())
+            );
+            let live = rx.try_recv().unwrap();
+            assert!(Arc::ptr_eq(line, &live));
+        }
+        assert_eq!(lines[0].span_id.as_deref(), Some("local"));
+        assert_eq!(lines.last().unwrap().span_id.as_deref(), Some("local"));
+    }
 
     #[test]
     fn captures_event_level_target_message_and_fields() {
@@ -399,6 +470,7 @@ mod tests {
         assert_eq!(line.message, "hello world");
         assert_eq!(line.fields.get("answer").map(String::as_str), Some("42"));
         assert_eq!(line.span_id, None);
+        assert!(!line.fields.contains_key("trace_id"));
         assert_eq!(line.seq, 0);
 
         // The same line is retained for replay-on-connect.

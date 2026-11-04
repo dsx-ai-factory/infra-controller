@@ -78,6 +78,7 @@ async fn request_switch_maintenance_via_cm(
             })),
             action: cm_power_action(operation) as i32,
             bypass_state_controller: false,
+            credential_overrides: None,
         }))
         .await
         .expect("component_power_control should succeed")
@@ -386,6 +387,7 @@ async fn certificate_completion_preserves_replacement_after_controller_reload(po
         services.component_manager = Some(mock_component_manager(std::sync::Arc::new(
             MockNvSwitchManager::default().with_certificate_job_status(
                 ConfigureSwitchCertificateJobStatus {
+                    failure: None,
                     state: job_state,
                     error: Some("injected certificate failure".into()),
                 },

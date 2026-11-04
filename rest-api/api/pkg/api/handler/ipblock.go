@@ -376,7 +376,7 @@ func (gaipbh GetAllIPBlockHandler) Handle(c echo.Context) error {
 			return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Invalid Site ID in query", nil)
 		}
 
-		_, serr = stDAO.GetByID(ctx, nil, siteID, nil, false)
+		_, serr = stDAO.GetByID(ctx, nil, siteID, nil, false, false)
 		if serr != nil {
 			if serr == cdb.ErrDoesNotExist {
 				return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Site specified in query param does not exist", nil)

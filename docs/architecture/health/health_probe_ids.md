@@ -111,7 +111,7 @@ unavailable, missing, or unrecognized sensor state uses `SensorFailure`.
 The DSX Exchange consumer maps Building Management System (BMS) leak events to
 rack health reports. The target is the rack ID. Active events prevent
 allocations and use the `SensorCritical` and `Hardware` classifications. The
-two leak-detection probes also use `RackLeak`; the sensor-fault probe does not,
+leak-detection probe also uses `RackLeak`; the sensor-fault probe does not,
 because it does not establish that a leak is active.
 
 ### `BmsLeakDetectRack`
@@ -121,10 +121,6 @@ Indicates that BMS reported a rack-level leak.
 ### `BmsLeakSensorFaultRack`
 
 Indicates that BMS reported a rack-level leak sensor fault.
-
-### `BmsLeakDetectRackTray`
-
-Indicates that BMS reported a rack-tray leak.
 
 ## NVLink domain health probe identifiers
 
@@ -197,8 +193,10 @@ This removes the whole report for that source, including all affected GPU
 alerts. If both `Replace` and `Merge` reports use this source name, the command
 removes the replace report first; run it again to remove the merge report.
 
-The monitor re-evaluates on each successful GPU-health query
-(`nvlink_config.monitor_run_interval`, default `60s`). If NMX-C still reports an
+The monitor re-evaluates on each successful GPU-health query, which runs when
+a machine group is checked: every pass (`nvlink_config.monitor_run_interval`,
+default `60s`) for a group whose inputs changed, and otherwise at its full check
+(`nvlink_config.partition_monitor_full_check_interval`, default `10m`). If NMX-C still reports an
 unhealthy GPU matching the host's inventory, the monitor re-asserts the alert
 with a new `in_alert_since` after manual removal. Use removal for resolved
 faults whose alerts the monitor can no longer clear, such as a replaced GPU or

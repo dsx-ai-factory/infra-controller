@@ -174,7 +174,7 @@ async fn test_admin_bmc_reset(db_pool: sqlx::PgPool) -> Result<(), eyre::Report>
     let (host_machine_id, _dpu_machine_id) = create_managed_host(&env).await.into();
     let host_machine = env.find_machine(&host_machine_id).await.remove(0);
 
-    let bmc_ip = host_machine.bmc_info.as_ref().unwrap().ip();
+    let bmc_ip = host_machine.bmc.as_ref().unwrap().ip();
 
     // Check that we find full BMC details based only on BMC IP
     let req = tonic::Request::new(rpc::AdminBmcResetRequest {
