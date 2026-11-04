@@ -532,6 +532,14 @@ pub struct InterfaceInfo {
     pub prefix: Option<String>,
     pub fqdn: String,
     pub booturl: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub booturl_v4: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub booturl_v6: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dns_servers_v4: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dns_servers_v6: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mtu: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -646,6 +654,10 @@ impl TryFrom<::rpc::forge::FlatInterfaceConfig> for InterfaceInfo {
             prefix,
             fqdn: value.fqdn,
             booturl: value.booturl,
+            booturl_v4: value.booturl_v4,
+            booturl_v6: value.booturl_v6,
+            dns_servers_v4: value.dns_servers_v4,
+            dns_servers_v6: value.dns_servers_v6,
             mtu: value.mtu,
             ipv6,
         })
@@ -1660,6 +1672,10 @@ mod tests {
             prefix: Some("192.0.2.0/24".to_string()),
             fqdn: "host.example.com".to_string(),
             booturl: None,
+            booturl_v4: None,
+            booturl_v6: None,
+            dns_servers_v4: vec![],
+            dns_servers_v6: vec![],
             mtu: Some(9000),
             ipv6: Some(InterfaceInfoV6 {
                 address: Some("2001:db8::10".parse().unwrap()),

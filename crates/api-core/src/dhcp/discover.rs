@@ -18,12 +18,14 @@ use std::net::{IpAddr, Ipv4Addr};
 
 use ::rpc::forge as rpc;
 use carbide_network::ip::{IdentifyAddressFamily, IpAddressFamily};
-use carbide_uuid::machine::HostMachineId;
+use carbide_uuid::dhcp_option_set::DhcpOptionSetId;
+use carbide_uuid::machine::{HostMachineId, MachineId};
 use carbide_uuid::network::NetworkSegmentId;
 use db::dhcp_entry::DhcpEntry;
-use db::{self, expected_machine, machine_interface};
+use db::{self, ObjectColumnFilter, expected_machine, machine_interface, vpc};
 use mac_address::MacAddress;
 use model::allocation_type::AllocationType;
+use model::dhcp_option_set::DhcpOverrides;
 use model::dpa_interface::DpaInterface;
 use model::expected_machine::{
     ExpectedInterface, ExpectedInterfaceIpAllocation, ExpectedMachine, ExpectedMachineRequest,
@@ -205,6 +207,7 @@ async fn options_only_dhcpv6_record_from_segment(
         booturl: None,
         last_invalidation_time: Some(last_invalidation_time.into()),
         ntp_servers: ntp_servers.iter().map(ToString::to_string).collect(),
+        dns_servers: vec![],
     })
 }
 
@@ -246,6 +249,7 @@ async fn options_only_dhcpv6_record_from_interface(
         booturl: None,
         last_invalidation_time: Some(last_invalidation_time.into()),
         ntp_servers: ntp_servers.iter().map(ToString::to_string).collect(),
+        dns_servers: vec![],
     })
 }
 
@@ -438,6 +442,7 @@ async fn handle_overlay_from_dpa(
         fqdn: String::new(),
         prefix,
         ntp_servers: ntp_servers.iter().map(ToString::to_string).collect(),
+        dns_servers: vec![],
     })))
 }
 
@@ -479,6 +484,7 @@ async fn handle_underlay_from_dpa(
         fqdn: String::new(),
         prefix,
         ntp_servers: ntp_servers.iter().map(ToString::to_string).collect(),
+        dns_servers: vec![],
     })))
 }
 
@@ -534,6 +540,72 @@ async fn handle_dhcp_from_dpa(
         &api.runtime_config.ntp_servers,
     )
     .await
+}
+
+/// Tenant DHCP values for a zero-DPU host's instance; empty unless they apply.
+async fn zero_dpu_dhcp_overrides(
+    txn: &mut PgConnection,
+    machine_id: &MachineId,
+) -> Result<DhcpOverrides, CarbideError> {
+    let snapshot =
+        db::managed_host::load_snapshot(&mut *txn, machine_id, Default::default()).await?;
+    let Some(instance) = snapshot
+        .as_ref()
+        .filter(|snapshot| snapshot.use_tenant_dhcp_options())
+        .and_then(|snapshot| snapshot.instance.as_ref())
+    else {
+        return Ok(DhcpOverrides::default());
+    };
+    // Zero-DPU segments can be shared by VPCs, so the VPC comes from the instance.
+    let vpc_option_set_id = match &instance.config.network.auto_config {
+        Some(auto) => db::vpc::find_by(
+            &mut *txn,
+            ObjectColumnFilter::One(vpc::IdColumn, &auto.vpc_id),
+        )
+        .await?
+        .pop()
+        .and_then(|vpc| vpc.config.dhcp_option_set_id),
+        None => None,
+    };
+    let ids: Vec<_> = [instance.config.dhcp_option_set_id, vpc_option_set_id]
+        .into_iter()
+        .flatten()
+        .collect();
+    let sets = db::dhcp_option_set::find_by_ids(&mut *txn, &ids, None, false).await?;
+    let options = |id: Option<DhcpOptionSetId>| {
+        id.and_then(|id| sets.iter().find(|set| set.id == id))
+            .map(|set| &set.options)
+    };
+    Ok(DhcpOverrides::resolve(
+        options(instance.config.dhcp_option_set_id),
+        options(vpc_option_set_id),
+    ))
+}
+
+/// Copies the requested family's tenant DHCP values into the Kea record.
+fn apply_dhcp_overrides(
+    record: &mut rpc::DhcpRecord,
+    overrides: &DhcpOverrides,
+    family: IpAddressFamily,
+) {
+    match family {
+        IpAddressFamily::Ipv4 => {
+            record.booturl = overrides.boot_url_v4.clone();
+            record.dns_servers = overrides
+                .dns_servers_v4
+                .iter()
+                .map(ToString::to_string)
+                .collect();
+        }
+        IpAddressFamily::Ipv6 => {
+            record.booturl = overrides.boot_url_v6.clone();
+            record.dns_servers = overrides
+                .dns_servers_v6
+                .iter()
+                .map(ToString::to_string)
+                .collect();
+        }
+    }
 }
 
 pub(crate) async fn discover_dhcp(
@@ -967,6 +1039,7 @@ pub(crate) async fn discover_dhcp(
         .await?;
     }
 
+    let mut dhcp_overrides = DhcpOverrides::default();
     if machine_interface.interface_type != InterfaceType::Bmc
         && let Some(machine_id) = machine_interface.machine_id
         && machine_id.machine_type().is_host()
@@ -984,6 +1057,7 @@ pub(crate) async fn discover_dhcp(
                 "DHCP request received for instance: {instance_id}. ignoring"
             )));
         }
+        dhcp_overrides = zero_dpu_dhcp_overrides(&mut txn, &machine_id).await?;
     }
 
     // Lock the parent before inserting vendor rows. Otherwise a request that
@@ -1026,7 +1100,8 @@ pub(crate) async fn discover_dhcp(
 
     txn.commit().await?;
 
-    if let Some(record) = options_only_record {
+    if let Some(mut record) = options_only_record {
+        apply_dhcp_overrides(&mut record, &dhcp_overrides, address_family);
         return Ok(Response::new(record));
     }
 
@@ -1059,6 +1134,7 @@ pub(crate) async fn discover_dhcp(
         .iter()
         .map(ToString::to_string)
         .collect();
+    apply_dhcp_overrides(&mut record, &dhcp_overrides, address_family);
 
     Ok(Response::new(record))
 }
