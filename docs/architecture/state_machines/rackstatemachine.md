@@ -71,8 +71,8 @@ stateDiagram-v2
 
     state "Rack (collection of machines, switches, power shelves)" as Rack {
         [*] --> R_Created
-        R_Created --> R_Discovering : expected devices discovered
-        R_Discovering --> R_Maintenance : all machines, switches, and power shelves ready
+        R_Created --> R_Discovering : profile switch count discovered
+        R_Discovering --> R_Maintenance : profile switch count ready
         state R_Maintenance {
             [*] --> R_Maintenance_FirmwareUpgrade
             R_Maintenance_FirmwareUpgrade --> R_Maintenance_NVOSUpdate
@@ -111,9 +111,7 @@ stateDiagram-v2
 
     R_Created --> M_Created : check for newly-created machines
     R_Created --> S_Created : check for newly-created switches
-    R_Discovering --> M_Ready : wait for all machines ready
-    R_Discovering --> S_Ready : wait for all switches ready
-    R_Discovering --> PS_Ready : wait for all power shelves ready
+    R_Discovering --> S_Ready : wait for profile switch count ready
     R_Maintenance --> S_ReProvisioning : request switch reprovision
     R_Maintenance --> M_HostReprovision : request compute reprovision
     R_Ready --> M_Created : tray replaced (topology change)
@@ -139,8 +137,8 @@ stateDiagram-v2
 
     [*] --> Created : rack created when first child references rack_id
 
-    Created --> Discovering : expected devices present and discovery started
-    Discovering --> Maintenance : all machines, switches, and power shelves ready
+    Created --> Discovering : profile switch count discovered
+    Discovering --> Maintenance : profile switch count ready
 
     Maintenance --> Validating : maintenance complete
     Maintenance --> Error : timeout or failure
@@ -164,18 +162,18 @@ stateDiagram-v2
 #### Created (R_Created)
 
 - **Entry:** Site operator enters the expected rack; Site Explorer creates the rack entity when a machine, switch, or power shelf with the same `rack_id` is discovered.
-- **Exit:** When expected devices are present and discovery can proceed, the rack moves to **Discovering**.
+- **Exit:** When the number of discovered switches reaches the rack profile switch count, the rack moves to **Discovering**. A missing or unknown rack profile keeps the rack in `Created`.
 
 #### Discovering (R_Discovering)
 
 - **Entry:** From `Created` when discovery starts. Also re-entered from `Ready` when `topology_changed` is set (tray replacement).
-- **Exit:** When every machine in the rack is `ManagedHostState::Ready` or `Assigned`, every switch is `SwitchControllerState::Ready`, and every power shelf is `Ready` per the rack profile capability counts, the rack transitions to **Maintenance** at `FirmwareUpgrade(Start)`.
+- **Exit:** When the number of switches in `SwitchControllerState::Ready` reaches the rack profile switch count, the rack atomically sets `ingestion_in_progress` and transitions to **Maintenance** at `FirmwareUpgrade(Start)`. A missing or unknown rack profile keeps the rack in `Discovering`.
 
-The rack waits until all child devices reach ready before starting the first maintenance cycle.
+Compute and power shelf counts and readiness do not gate either ingestion transition. Their profile counts describe expected inventory for `MissingRackComponent` health alerts. Helm defaults are 16 compute trays, 9 switches, and 8 power shelves for GB200, 6 for GB300, or 4 for VR; `_NO_POWERSHELF` profiles expect zero power shelves. Site configuration can override these defaults. The switch count is a minimum threshold: zero allows progression without switches, and extra switches do not prevent either transition.
 
 #### Maintenance (R_Maintenance)
 
-- **Entry:** From `Discovering` after all children are ready, from `Ready` when `reprovision_requested` or `maintenance_requested` is set, or from `Error` when on-demand maintenance is requested.
+- **Entry:** From `Discovering` after the profile switch readiness threshold is met, from `Ready` when `reprovision_requested` or `maintenance_requested` is set, or from `Error` when on-demand maintenance is requested.
 - **Exit:**
   - To **Validating** (`Pending`) when maintenance reaches `Completed`.
   - To **Error** on timeout or unrecoverable failure.
@@ -348,7 +346,7 @@ The Rack state machine drives or observes the Switch state machine as follows:
 
 | Rack state | Effect on Switch |
 |------------|------------------|
-| R_Discovering | Rack waits until all switches are `Ready` before moving to `Maintenance`. |
+| R_Discovering | Rack waits until the ready switch count reaches the profile minimum before moving to `Maintenance`. |
 | R_Maintenance (`FirmwareUpgrade`) | Rack sets `switch_reprovisioning_requested` and `firmware_upgrade_status`; switches enter `ReProvisioning::WaitingForRackFirmwareUpgrade`. |
 | R_Maintenance (`NVOSUpdate`) | Rack sets `nvos_update_status`; switches advance to `ReProvisioning::WaitingForNVOSUpgrade`. |
 | R_Maintenance (`ConfigureNmxCluster`) | Rack rotates every switch's NVUE certificate, submits the RMS ScaleUpFabricManager job, and persists the RMS-selected primary and `fabric_manager_status`; switches advance to `ReProvisioning::WaitingForNMXCConfigure`. |
@@ -386,7 +384,7 @@ The Rack state machine drives or observes the Machine (compute) state machine as
 | Rack state | Effect on Machine |
 |------------|-------------------|
 | R_Created | Rack checks for newly-created compute machines (`ManagedHostState` ingestion states) that belong to this rack. |
-| R_Discovering | Rack checks that all compute machines are `Ready` or `Assigned` before moving to `Maintenance`. |
+| R_Discovering | Compute count and readiness do not gate ingestion; missing compute trays remain visible in rack health. |
 | R_Maintenance | Rack requests compute machine reprovision (`HostReprovision`); tracks when machines return to `Ready`. If a machine is stuck in `HostReprovision::FailedFirmwareUpgrade`, the Rack (or operator) may issue a fresh Host Reprovision request to restart the firmware upgrade flow without waiting for the auto-retry interval. |
 | R_Ready | If a tray is replaced, a new machine is created and the rack re-enters `Discovering`. |
 
@@ -398,7 +396,7 @@ These cross-state dependencies are shown in the [Combined State Diagram](#combin
 
 | Rack state | Effect on Power Shelf |
 |------------|-----------------------|
-| R_Discovering | Rack waits until all power shelves in the rack profile are `Ready` before moving to `Maintenance`. |
+| R_Discovering | Power shelf count and readiness do not gate ingestion; missing power shelves remain visible in rack health. |
 | R_Maintenance | Scoped power shelves participate in firmware upgrade, and the rack waits for their firmware outcome. Power shelves do not participate in the compute-host reboot batch. |
 | R_Ready | Rack monitors for power shelves in `Error`; any failed shelf can move the rack to `Error`. |
 
@@ -436,9 +434,9 @@ When a tray (compute machine) in a rack is physically replaced, the rack topolog
 
 1. **Old machine:** The replaced machine is removed from the rack. Its Machine state machine terminates (deletion path).
 2. **New machine:** Site Explorer detects the new tray and creates a new machine entity in **M_Created**. The new machine progresses through its ingestion states toward **M_Ready**.
-3. **Rack:** The rack detects the topology change (`topology_changed`) and transitions from **R_Ready** → **R_Discovering**. In R_Discovering the rack waits until the new machine reaches **M_Ready** (and all other machines, switches, and power shelves remain ready), then proceeds through **R_Maintenance** → **R_Validation** → **R_Ready** as in the normal flow.
+3. **Rack:** The rack detects the topology change (`topology_changed`) and transitions from **R_Ready** → **R_Discovering**. In R_Discovering the rack waits until the ready switch count reaches the profile minimum, then proceeds through **R_Maintenance** → **R_Validation** → **R_Ready** as in the normal flow.
 
-This ensures that any replaced hardware is fully discovered, provisioned, and validated before the rack returns to an operational ready state.
+Compute discovery proceeds independently of the switch threshold; the rack follows its normal maintenance and validation flow.
 
 ### How the data is organized
 

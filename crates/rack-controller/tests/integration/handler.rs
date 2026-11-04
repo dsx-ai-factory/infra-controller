@@ -549,10 +549,9 @@ async fn test_expected_no_definition_stays_parked(
     Ok(())
 }
 
-/// test_expected_incomplete_device_counts_stays verifies that a rack with a
-/// topology expecting more devices than currently exist stays in Created.
+/// A rack without its expected switches stays in Created.
 #[sqlx_test]
-async fn test_expected_incomplete_device_counts_stays(
+async fn test_created_waits_for_missing_switches(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let config = config_with_rack_profiles();
@@ -568,8 +567,7 @@ async fn test_expected_incomplete_device_counts_stays(
     let rack_id = new_rack_id();
     let mut txn = pool.acquire().await?;
 
-    // Create a rack with a definition expecting 2 compute, 1 switch, 1 PS,
-    // but only register 1 compute tray.
+    // No switches have been discovered for this rack.
     let mut rack = db_rack::create(
         &mut txn,
         &rack_id,
@@ -594,8 +592,12 @@ async fn test_expected_incomplete_device_counts_stays(
         .await?;
 
     assert!(
-        matches!(outcome, StateHandlerOutcome::Wait { .. }),
-        "Rack with incomplete device counts should wait in Created"
+        matches!(
+            outcome,
+            StateHandlerOutcome::Wait { ref reason, .. }
+                if reason == "waiting for switches: switch=0/1"
+        ),
+        "Rack without its expected switches should wait in Created"
     );
 
     Ok(())
@@ -657,7 +659,10 @@ async fn test_missing_compute_component_health_tracks_host_inventory(
                 alert.message,
                 "Rack component count is below the rack profile: expected 2, found 1, missing 1"
             );
-            assert!(matches!(rack.controller_state.value, RackState::Created));
+            assert!(matches!(
+                rack.controller_state.value,
+                RackState::Discovering
+            ));
         } else {
             assert!(
                 !rack
@@ -667,8 +672,9 @@ async fn test_missing_compute_component_health_tracks_host_inventory(
             );
             assert!(matches!(
                 rack.controller_state.value,
-                RackState::Discovering
+                RackState::Maintenance { .. }
             ));
+            assert!(rack.config.ingestion_in_progress);
         }
         let host = db::managed_host::load_snapshot(
             &mut env.db_reader(),
@@ -1134,95 +1140,60 @@ async fn test_expected_zero_topology_transitions_to_discovering(
     Ok(())
 }
 
-/// test_expected_more_discovered_than_expected_transitions verifies that a
-/// rack with more compute hosts present than the profile expects still
-/// transitions out of Created: the Created handler only waits while counts
-/// are below the expected minimum, so an over-count satisfies the threshold
-/// and advances to Discovering.
+/// Extra switches satisfy both discovery thresholds rather than requiring an
+/// exact count match.
 #[sqlx_test]
 async fn test_expected_more_discovered_than_expected_transitions(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let config = config_with_rack_profiles();
-    let env = create_test_env_with_overrides(
-        pool.clone(),
-        TestEnvOverrides {
-            config: Some(config),
-            ..Default::default()
-        },
-    )
-    .await;
-
-    // Rack profile "Single" expects 1 compute, 0 switches, 0 PS. Seed two
-    // host machines tied to the rack so the actual compute count (2) exceeds
-    // the expected count (1), exercising the over-discovery path.
+    let mut config = config_with_rack_profiles();
+    config
+        .rack_profiles
+        .rack_profiles
+        .get_mut("Single")
+        .unwrap()
+        .rack_capabilities
+        .switch
+        .count = 1;
+    let env =
+        create_test_env_with_overrides(pool.clone(), TestEnvOverrides::with_config(config)).await;
     let rack_id = new_rack_id();
-    let mut txn = pool.acquire().await?;
     db_rack::create(
-        &mut txn,
+        pool.acquire().await?.as_mut(),
         &rack_id,
         Some(&RackProfileId::new("Single")),
         &RackConfig::default(),
         None,
     )
     .await?;
-    drop(txn);
+    let switch_ids = attach_switches_with_nvos_credentials(&env, &rack_id, 2).await?;
 
-    new_host(
-        &env,
-        ManagedHostConfig::default().with_expected_machine_data(ExpectedMachineData {
-            rack_id: Some(rack_id.clone()),
-            ..Default::default()
-        }),
-    )
-    .await?;
-    new_host(
-        &env,
-        ManagedHostConfig::default().with_expected_machine_data(ExpectedMachineData {
-            rack_id: Some(rack_id.clone()),
-            ..Default::default()
-        }),
-    )
-    .await?;
+    env.run_rack_controller_iteration().await;
+    let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    assert_eq!(rack.controller_state.value, RackState::Discovering);
 
-    let mut rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
-
-    let handler = RackStateHandler::default();
-    let mut services = env.rack_state_handler_services();
-    let mut metrics = RackMetrics::default();
-    let mut db_writes = DbWriteBatch::default();
-    let mut ctx = StateHandlerContext::<RackStateHandlerContextObjects> {
-        services: &mut services,
-        metrics: &mut metrics,
-        pending_db_writes: &mut db_writes,
-    };
-
-    let outcome = handler
-        .handle_object_state(&rack_id, &mut rack, &RackState::Created, &mut ctx)
-        .await?;
-
-    match outcome {
-        StateHandlerOutcome::Transition { next_state, .. } => {
-            assert!(
-                matches!(next_state, RackState::Discovering),
-                "Should transition to Discovering, got {:?}",
-                next_state
-            );
-        }
-        other => panic!(
-            "Expected Transition to Discovering, got {:?}",
-            std::mem::discriminant(&other)
-        ),
+    for switch_id in switch_ids {
+        set_switch_state(
+            pool.acquire().await?.as_mut(),
+            &switch_id,
+            model::switch::SwitchControllerState::Ready,
+        )
+        .await;
     }
-
+    env.run_rack_controller_iteration().await;
+    let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    assert!(matches!(
+        rack.controller_state.value,
+        RackState::Maintenance { .. }
+    ));
+    assert!(rack.config.ingestion_in_progress);
     Ok(())
 }
 
-/// test_discovering_waits_when_compute_not_ready verifies that the Discovering
-/// handler waits (rather than erroring) when the rack does not yet have enough
-/// Ready/Assigned compute hosts to satisfy the expected count.
+/// Discovering waits for ready switches even when compute and power shelves
+/// are not used as ingestion gates.
 #[sqlx_test]
-async fn test_discovering_waits_when_compute_not_ready(
+async fn test_discovering_waits_for_missing_switches(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let config = config_with_rack_profiles();
@@ -1238,8 +1209,7 @@ async fn test_discovering_waits_when_compute_not_ready(
     let rack_id = new_rack_id();
     let mut txn = pool.acquire().await?;
 
-    // Create a rack whose profile expects compute hosts but register none of
-    // them, so no host has reached a Ready/Assigned state.
+    // No ready switches are registered.
     let mut rack = db_rack::create(
         &mut txn,
         &rack_id,
@@ -1259,17 +1229,87 @@ async fn test_discovering_waits_when_compute_not_ready(
         pending_db_writes: &mut db_writes,
     };
 
-    // The Discovering handler waits (does not fault) while not enough compute
-    // hosts are Ready/Assigned.
+    // The ready switch count still gates ingestion.
     let outcome = handler
         .handle_object_state(&rack_id, &mut rack, &RackState::Discovering, &mut ctx)
         .await?;
     assert!(
-        matches!(outcome, StateHandlerOutcome::Wait { .. }),
-        "Discovering should wait when compute hosts are not yet ready, got {:?}",
+        matches!(
+            outcome,
+            StateHandlerOutcome::Wait { ref reason, .. }
+                if reason == "waiting for switches ready: switch=0/1"
+        ),
+        "Discovering should wait when switches are missing, got {:?}",
         std::mem::discriminant(&outcome)
     );
 
+    Ok(())
+}
+
+/// Missing compute and power shelves remain visible in health while switches
+/// alone control the persisted ingestion transitions.
+#[sqlx_test]
+async fn test_ingestion_ignores_compute_and_power_shelf_counts(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = create_test_env_with_overrides(
+        pool.clone(),
+        TestEnvOverrides::with_config(config_with_rack_profiles()),
+    )
+    .await;
+    let rack_id = new_rack_id();
+    db_rack::create(
+        pool.acquire().await?.as_mut(),
+        &rack_id,
+        Some(&RackProfileId::new("NVL72")),
+        &RackConfig::default(),
+        None,
+    )
+    .await?;
+    let switch_id = attach_switch_with_nvos_credentials(&env, &rack_id).await?;
+
+    env.run_rack_controller_iteration().await;
+    let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    assert_eq!(rack.controller_state.value, RackState::Discovering);
+    assert!(!rack.config.ingestion_in_progress);
+
+    // The switch is present but still in its initial state.
+    env.run_rack_controller_iteration().await;
+    let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    assert_eq!(rack.controller_state.value, RackState::Discovering);
+    assert!(!rack.config.ingestion_in_progress);
+    assert!(matches!(
+        rack.controller_state_outcome,
+        Some(model::controller_outcome::PersistentStateHandlerOutcome::Wait { ref reason, .. })
+            if reason == "waiting for switches ready: switch=0/1"
+    ));
+
+    set_switch_state(
+        pool.acquire().await?.as_mut(),
+        &switch_id,
+        model::switch::SwitchControllerState::Ready,
+    )
+    .await;
+    env.run_rack_controller_iteration().await;
+    let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    assert_eq!(
+        rack.controller_state.value,
+        RackState::Maintenance {
+            maintenance_state: RackMaintenanceState::FirmwareUpgrade {
+                rack_firmware_upgrade: FirmwareUpgradeState::Start,
+            },
+        }
+    );
+    assert!(rack.config.ingestion_in_progress);
+    let report = &rack.health_reports.merges["rack-component-inventory"];
+    assert_eq!(
+        report
+            .alerts
+            .iter()
+            .map(|alert| alert.target.as_deref())
+            .collect::<Vec<_>>(),
+        vec![Some("compute"), Some("power_shelf")]
+    );
     Ok(())
 }
 

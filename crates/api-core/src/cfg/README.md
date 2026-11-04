@@ -206,15 +206,13 @@ For product families other than `gb200` and `gb300`, the `GetRackProfile`
 `product_family` enum is `UNSPECIFIED`. The configured string remains available
 to descriptor-based RMS operations.
 
-Each `rack_capabilities.<role>` section also requires a `count` field. This
-field is independent of RMS: it tells the rack state machine how many devices
-with that role the rack must have before it can progress. A rack stays in
-`Created` until all three roles have at least `count` devices registered; it
-stays in `Discovering` until all three roles have at least `count` devices in
-`Ready` state. All three roles — `compute`, `switch`, and `power_shelf` —
-require a `count` regardless of which backends are set to `rms`. The third
-example below shows `count` on `compute` and `switch` even though those roles
-use non-RMS backends.
+Each `rack_capabilities.<role>` section requires a `count` field regardless
+of which backends are set to `rms`. Counts describe expected inventory for
+missing-component health alerts. Only the switch count gates ingestion:
+`Created` waits for that many registered switches and `Discovering` waits for
+that many ready switches. Compute and power shelf counts and readiness do not
+gate these transitions. See the [rack state machine](../../../../docs/architecture/state_machines/rackstatemachine.md#discovering-r_discovering)
+for shipped defaults and transition details.
 
 The examples below only show the component-manager and rack-profile fields.
 Configure `[rms]` separately when NICo needs to call RMS.
