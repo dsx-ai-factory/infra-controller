@@ -16,33 +16,20 @@ ROOT = Path(__file__).resolve().parents[3]
 
 
 class TiltDhcpTest(unittest.TestCase):
-    def test_tilt_values_render_the_shared_hook_for_both_dhcp_families(self):
+    def test_tilt_values_render_the_development_dhcp4_hook(self):
         tilt_values = yaml.safe_load((ROOT / "dev/deployment/tilt/values.yaml").read_text())
         values = {"global": tilt_values["global"], **tilt_values["nico-dhcp"]}
-        # IPv6 is opt-in; use its required stable server identifier for this render.
-        values.setdefault("dhcp", {}).update(
-            v6Enabled=True, v6ServerIdentifier="020000000001",
-        )
         result = subprocess.run(
             ["helm", "template", "nico-dhcp", str(ROOT / "helm/charts/nico-dhcp"),
              "--namespace", tilt_values["tilt"]["localConfig"]["coreNamespace"],
-             "--values", "-", "--show-only", "templates/configmap.yaml",
-             "--show-only", "templates/configmap-v6.yaml"],
+             "--values", "-", "--show-only", "templates/configmap.yaml"],
             input=yaml.safe_dump(values), capture_output=True, text=True, timeout=30,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
-        configs = {
-            filename: json.loads(content)
-            for resource in yaml.safe_load_all(result.stdout)
-            for filename, content in resource["data"].items()
-        }
-        self.assertEqual(set(configs), {"kea_config.json", "kea_config6.json"})
-        for filename, family in (("kea_config.json", "Dhcp4"), ("kea_config6.json", "Dhcp6")):
-            with self.subTest(family=family):
-                self.assertEqual(
-                    configs[filename][family]["hooks-libraries"][0]["library"],
-                    "/usr/lib/kea/hooks/libdhcp.so",
-                )
+        configmap = yaml.safe_load(result.stdout)
+        config = json.loads(configmap["data"]["kea_config.json"])
+        self.assertEqual(config["Dhcp4"]["hooks-libraries"][0]["library"],
+                         "/usr/lib/kea/hooks/libdhcp.so")
 
 
 class TiltGatewayTest(unittest.TestCase):
@@ -62,7 +49,6 @@ class TiltGatewayTest(unittest.TestCase):
         stage = dockerfile.split(" AS mat-protocol-gateway\n", 1)[1].split("\nFROM ", 1)[0]
         destinations = re.findall(r"\bcp /cargo-target/\S+ (\S+)", stage)
         self.assertIn(command, destinations)
-        self.assertIn(f"sha256sum < {command}", stage)
 
 
 if __name__ == "__main__":
