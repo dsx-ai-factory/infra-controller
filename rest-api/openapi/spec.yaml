@@ -31230,6 +31230,7 @@ components:
             - underlay
             - hostInband
             - host_inband
+            - null
           description: Optional network segment type guard for DHCP and fixed-address allocation.
         nicType:
           type:
@@ -31260,6 +31261,10 @@ components:
             - dpuOs
             - dpuBmc
             - hostBmc
+            - dpu_os
+            - dpu_bmc
+            - host_bmc
+            - null
           description: Interface role. Defaults to host when omitted on create.
         ipAllocation:
           type:
@@ -31269,7 +31274,14 @@ components:
             - dynamic
             - fixed
             - retained
+            - null
           description: Address allocation policy for this interface.
+      example:
+        macAddress: 'de:ad:be:ef:00:02'
+        primary: true
+        networkSegmentType: hostInband
+        role: host
+        ipAllocation: dynamic
       required:
         - macAddress
     ExpectedMachine:
@@ -31426,6 +31438,7 @@ components:
             - manage
             - nic
             - ignore
+            - null
           description: Per-host DPU policy. Distinct from isDpfEnabled, which controls DPF provisioning eligibility.
         hostNics:
           type: array
@@ -31603,6 +31616,7 @@ components:
             - manage
             - nic
             - ignore
+            - null
           description: Per-host DPU policy. Distinct from isDpfEnabled.
         hostNics:
           type:
@@ -31734,7 +31748,7 @@ components:
           type:
             - array
             - 'null'
-          description: Complete expected host NIC list. Omission or null preserves the current list; an explicit empty list clears it.
+          description: Complete expected host NIC list. Omission or null preserves the current list; an explicit empty list clears it. Cannot be combined with `hostNics` in the same request, including when both are empty arrays.
           items:
             $ref: '#/components/schemas/ExpectedMachineInterface'
         skuId:
@@ -31812,12 +31826,13 @@ components:
             - manage
             - nic
             - ignore
+            - null
           description: Per-host DPU policy. Distinct from isDpfEnabled.
         hostNics:
           type:
             - array
             - 'null'
-          description: Replaces the full declared host interface list when provided in a PATCH request (legacy REST field; prefer interfaces).
+          description: Replaces the full declared host interface list when provided in a PATCH request (legacy REST field; prefer interfaces). Cannot be combined with `interfaces` in the same request, including when both are empty arrays.
           items:
             $ref: '#/components/schemas/ExpectedHostNic'
         replaceHostNics:

@@ -1806,6 +1806,8 @@ func (h ReplaceAllExpectedMachinesHandler) Handle(c echo.Context) error {
 			RackID:     machine.RackID, Name: machine.Name, Manufacturer: machine.Manufacturer,
 			Model: machine.Model, Description: machine.Description, ServerName: machine.ServerName, SlotID: machine.SlotID,
 			TrayIdx: machine.TrayIdx, HostID: machine.HostID, IsDpfEnabled: machine.IsDpfEnabled,
+			DpuPolicy: machine.DpuPolicy, BmcRetainCredentials: machine.BmcRetainCredentials,
+			HostNics: model.ExpectedHostNicsToDB(machine.HostNics),
 			Labels: machine.Labels, HostLifecycleProfile: machine.HostLifecycleProfile.ToDBModel(), CreatedBy: dbUser.ID,
 		})
 	}
