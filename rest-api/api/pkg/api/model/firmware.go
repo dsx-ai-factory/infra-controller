@@ -54,7 +54,7 @@ type APIUpdateFirmwareRequest struct {
 	// status. Intended for operator-supervised maintenance.
 	OverrideReadinessCheck bool `json:"overrideReadinessCheck,omitempty"`
 	// TargetResolutionMode defaults to Strict; BestEffort records unaddressable targets as skipped.
-	TargetResolutionMode TargetResolutionMode `json:"targetResolutionMode,omitempty"`
+	TargetResolutionMode *TargetResolutionMode `json:"targetResolutionMode,omitempty"`
 	// OverrideVersionCheck requests that the component backend apply firmware
 	// without enforcing version-based skip or downgrade decisions.
 	OverrideVersionCheck bool `json:"overrideVersionCheck"`
@@ -242,7 +242,7 @@ type APIBatchRackFirmwareUpdateRequest struct {
 	// spawned by this batch. See APIUpdateFirmwareRequest for semantics.
 	OverrideReadinessCheck bool `json:"overrideReadinessCheck,omitempty"`
 	// TargetResolutionMode defaults to Strict; BestEffort records unaddressable targets as skipped.
-	TargetResolutionMode TargetResolutionMode `json:"targetResolutionMode,omitempty"`
+	TargetResolutionMode *TargetResolutionMode `json:"targetResolutionMode,omitempty"`
 	// OverrideVersionCheck applies the firmware version-check override to every
 	// task spawned by this batch. See APIUpdateFirmwareRequest for semantics.
 	OverrideVersionCheck bool `json:"overrideVersionCheck"`
@@ -277,7 +277,7 @@ type APIBatchTrayFirmwareUpdateRequest struct {
 	// spawned by this batch. See APIUpdateFirmwareRequest for semantics.
 	OverrideReadinessCheck bool `json:"overrideReadinessCheck,omitempty"`
 	// TargetResolutionMode defaults to Strict; BestEffort records unaddressable targets as skipped.
-	TargetResolutionMode TargetResolutionMode `json:"targetResolutionMode,omitempty"`
+	TargetResolutionMode *TargetResolutionMode `json:"targetResolutionMode,omitempty"`
 	// OverrideVersionCheck applies the firmware version-check override to every
 	// task spawned by this batch. See APIUpdateFirmwareRequest for semantics.
 	OverrideVersionCheck bool `json:"overrideVersionCheck"`

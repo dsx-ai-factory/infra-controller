@@ -2087,14 +2087,14 @@ func ExecutePowerControlWorkflow(
 	overrideReadinessCheck bool,
 	workflowID string,
 	entityName string,
-	modes ...cam.TargetResolutionMode,
+	modes ...*cam.TargetResolutionMode,
 ) (*flowv1.SubmitTaskResponse, *cutil.APIError) {
 	var mode cam.TargetResolutionMode
-	if len(modes) > 0 {
-		mode = modes[0]
-	}
-	if err := mode.Validate(); err != nil {
-		return nil, cutil.NewAPIError(http.StatusBadRequest, err.Error(), nil)
+	if len(modes) > 0 && modes[0] != nil {
+		mode = *modes[0]
+		if err := mode.Validate(); err != nil {
+			return nil, cutil.NewAPIError(http.StatusBadRequest, err.Error(), nil)
+		}
 	}
 	if mode == cam.TargetResolutionBestEffort {
 		workflowID += "-best-effort"
@@ -2194,14 +2194,14 @@ func ExecuteBringUpRackWorkflow(
 	overrideReadinessCheck bool,
 	workflowID string,
 	entityName string,
-	modes ...cam.TargetResolutionMode,
+	modes ...*cam.TargetResolutionMode,
 ) (*flowv1.SubmitTaskResponse, *cutil.APIError) {
 	var mode cam.TargetResolutionMode
-	if len(modes) > 0 {
-		mode = modes[0]
-	}
-	if err := mode.Validate(); err != nil {
-		return nil, cutil.NewAPIError(http.StatusBadRequest, err.Error(), nil)
+	if len(modes) > 0 && modes[0] != nil {
+		mode = *modes[0]
+		if err := mode.Validate(); err != nil {
+			return nil, cutil.NewAPIError(http.StatusBadRequest, err.Error(), nil)
+		}
 	}
 	if mode == cam.TargetResolutionBestEffort {
 		workflowID += "-best-effort"
@@ -2255,14 +2255,14 @@ func ExecuteFirmwareUpdateWorkflow(
 	overrideVersionCheck bool,
 	workflowID string,
 	entityName string,
-	modes ...cam.TargetResolutionMode,
+	modes ...*cam.TargetResolutionMode,
 ) (*flowv1.SubmitTaskResponse, *cutil.APIError) {
 	var mode cam.TargetResolutionMode
-	if len(modes) > 0 {
-		mode = modes[0]
-	}
-	if err := mode.Validate(); err != nil {
-		return nil, cutil.NewAPIError(http.StatusBadRequest, err.Error(), nil)
+	if len(modes) > 0 && modes[0] != nil {
+		mode = *modes[0]
+		if err := mode.Validate(); err != nil {
+			return nil, cutil.NewAPIError(http.StatusBadRequest, err.Error(), nil)
+		}
 	}
 	if mode == cam.TargetResolutionBestEffort {
 		workflowID += "-best-effort"

@@ -19,10 +19,10 @@ const (
 	TargetResolutionBestEffort TargetResolutionMode = "BestEffort"
 )
 
-// Validate accepts omission as Strict and rejects unsupported modes.
+// Validate rejects unsupported explicit modes. A nil request field defaults to Strict.
 func (m TargetResolutionMode) Validate() error {
 	switch m {
-	case "", TargetResolutionStrict, TargetResolutionBestEffort:
+	case TargetResolutionStrict, TargetResolutionBestEffort:
 		return nil
 	default:
 		return fmt.Errorf("must be Strict or BestEffort")

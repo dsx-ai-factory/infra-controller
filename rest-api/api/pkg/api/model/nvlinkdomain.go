@@ -27,7 +27,7 @@ type APIBatchUpdateNVLinkDomainPowerStateRequest struct {
 	// See APIUpdatePowerStateRequest for semantics.
 	OverrideReadinessCheck bool `json:"overrideReadinessCheck"`
 	// TargetResolutionMode defaults to Strict; BestEffort records unaddressable targets as skipped.
-	TargetResolutionMode TargetResolutionMode `json:"targetResolutionMode,omitempty"`
+	TargetResolutionMode *TargetResolutionMode `json:"targetResolutionMode,omitempty"`
 }
 
 // Validate checks the NVLink Domain IDs and power-control fields.
@@ -63,7 +63,7 @@ type APINVLinkDomainFirmwareUpdateRequest struct {
 	// See APIUpdateFirmwareRequest for semantics.
 	OverrideReadinessCheck bool `json:"overrideReadinessCheck"`
 	// TargetResolutionMode defaults to Strict; BestEffort records unaddressable targets as skipped.
-	TargetResolutionMode TargetResolutionMode `json:"targetResolutionMode,omitempty"`
+	TargetResolutionMode *TargetResolutionMode `json:"targetResolutionMode,omitempty"`
 	// OverrideVersionCheck overrides firmware version-based checks for the
 	// operation. See APIUpdateFirmwareRequest for semantics.
 	OverrideVersionCheck bool `json:"overrideVersionCheck"`
@@ -95,7 +95,7 @@ type APIBatchNVLinkDomainFirmwareUpdateRequest struct {
 	// See APIUpdateFirmwareRequest for semantics.
 	OverrideReadinessCheck bool `json:"overrideReadinessCheck"`
 	// TargetResolutionMode defaults to Strict; BestEffort records unaddressable targets as skipped.
-	TargetResolutionMode TargetResolutionMode `json:"targetResolutionMode,omitempty"`
+	TargetResolutionMode *TargetResolutionMode `json:"targetResolutionMode,omitempty"`
 	// OverrideVersionCheck applies the firmware version-check override to every
 	// spawned task. See APIUpdateFirmwareRequest for semantics.
 	OverrideVersionCheck bool `json:"overrideVersionCheck"`

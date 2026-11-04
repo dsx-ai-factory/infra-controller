@@ -19,7 +19,7 @@ func TestTargetResolutionMode_Validate(t *testing.T) {
 		want    flowv1.TargetResolutionMode
 		invalid bool
 	}{
-		{"omitted", "", 0, false}, {"strict", TargetResolutionStrict, 1, false}, {"best effort", TargetResolutionBestEffort, 2, false}, {"unknown", "AllowPartial", 0, true},
+		{"empty explicit value", "", 0, true}, {"strict", TargetResolutionStrict, 1, false}, {"best effort", TargetResolutionBestEffort, 2, false}, {"unknown", "AllowPartial", 0, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			err := tc.mode.Validate()
@@ -52,4 +52,28 @@ func TestAPITaskReportV1_TargetResolution(t *testing.T) {
 	raw, err = json.Marshal(rep)
 	require.NoError(t, err)
 	require.Contains(t, string(raw), `"targetResolution":null`)
+}
+
+func TestAPIUpdatePowerStateRequest_TargetResolutionMode(t *testing.T) {
+	for _, tc := range []struct {
+		name, body string
+		invalid    bool
+	}{
+		{"omitted", `{"siteId":"site","state":"On"}`, false},
+		{"strict", `{"siteId":"site","state":"On","targetResolutionMode":"Strict"}`, false},
+		{"best effort", `{"siteId":"site","state":"On","targetResolutionMode":"BestEffort"}`, false},
+		{"empty", `{"siteId":"site","state":"On","targetResolutionMode":""}`, true},
+		{"unknown", `{"siteId":"site","state":"On","targetResolutionMode":"AllowPartial"}`, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var req APIUpdatePowerStateRequest
+			require.NoError(t, json.Unmarshal([]byte(tc.body), &req))
+			err := req.Validate()
+			if tc.invalid {
+				require.ErrorContains(t, err, "targetResolutionMode")
+				return
+			}
+			require.NoError(t, err)
+		})
+	}
 }

@@ -234,6 +234,17 @@ func (m *ManagerImpl) SubmitTask(
 			existing.Status == taskcommon.TaskStatusWaiting) {
 			return []uuid.UUID{existing.ID}, nil
 		}
+		if existing != nil && existing.Attributes.TargetResolution != nil {
+			targetRack, err := m.loadRackForTask(ctx, existing)
+			if err != nil {
+				return nil, err
+			}
+			id, err := m.createAndExecuteIdempotentTask(ctx, req, targetRack, existing.Attributes.TargetResolution)
+			if err != nil {
+				return nil, err
+			}
+			return []uuid.UUID{id}, nil
+		}
 	}
 
 	rackMap, resolutions, err := m.validateTask(ctx, req)
@@ -682,6 +693,15 @@ func (m *ManagerImpl) createAndExecuteIdempotentTask(
 					Str("rack_id", targetRack.Info.ID.String()).
 					Msg("task queued: waiting for rack to become available")
 				return nil
+			}
+
+			// An unscheduled task may be recovered after a process restart.
+			// Use its persisted membership even if the retry resolves more devices.
+			if task.Attributes.TargetResolution != nil {
+				targetRack, err = m.loadRackForTask(txCtx, &task)
+				if err != nil {
+					return err
+				}
 			}
 
 			// Keep the idempotency lock until the execution ID or deferred

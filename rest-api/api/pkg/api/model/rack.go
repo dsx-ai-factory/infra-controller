@@ -551,7 +551,7 @@ type APIBringUpRackRequest struct {
 	// maintenance.
 	OverrideReadinessCheck bool `json:"overrideReadinessCheck,omitempty"`
 	// TargetResolutionMode defaults to Strict; BestEffort records unaddressable targets as skipped.
-	TargetResolutionMode TargetResolutionMode `json:"targetResolutionMode,omitempty"`
+	TargetResolutionMode *TargetResolutionMode `json:"targetResolutionMode,omitempty"`
 }
 
 // Validate validates the bring up request
@@ -603,7 +603,7 @@ type APIBatchBringUpRackRequest struct {
 	// spawned by this batch. See APIBringUpRackRequest for semantics.
 	OverrideReadinessCheck bool `json:"overrideReadinessCheck,omitempty"`
 	// TargetResolutionMode defaults to Strict; BestEffort records unaddressable targets as skipped.
-	TargetResolutionMode TargetResolutionMode `json:"targetResolutionMode,omitempty"`
+	TargetResolutionMode *TargetResolutionMode `json:"targetResolutionMode,omitempty"`
 }
 
 // Validate checks required fields.

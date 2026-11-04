@@ -113,6 +113,18 @@ func TestManagerImpl_BestEffortQueuedSnapshot(t *testing.T) {
 	require.Len(t, exec.lastRequest.Info.Components, 1)
 	require.Equal(t, "compute-1", exec.lastRequest.Info.Components[0].ComponentID)
 	require.Equal(t, attrs.TargetResolution, exec.lastRequest.Info.TargetResolution)
+	// Recover an admitted but unscheduled task using the same idempotency key.
+	// Newly linked/skipped inventory must not be re-planned on that retry.
+	original.ExecutionID = ""
+	original.IdempotencyKey = "pending-recovery"
+	store.taskByIdempotencyKey = map[string]*taskdef.Task{original.IdempotencyKey: original}
+	req.IdempotencyKey = original.IdempotencyKey
+	req.RequiredRackID = rackID
+	recovered, err := m.SubmitTask(t.Context(), req)
+	require.NoError(t, err)
+	require.Equal(t, []uuid.UUID{original.ID}, recovered)
+	require.Len(t, exec.lastRequest.Info.Components, 1)
+	require.Equal(t, attrs.TargetResolution, exec.lastRequest.Info.TargetResolution)
 	// A component disappearing cannot silently shrink the accepted set.
 	selected.Components = selected.Components[1:]
 	err = m.promoteTask(t.Context(), original.ID)

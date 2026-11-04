@@ -89,7 +89,7 @@ type APIUpdatePowerStateRequest struct {
 	// status. Intended for operator-supervised maintenance.
 	OverrideReadinessCheck bool `json:"overrideReadinessCheck,omitempty"`
 	// TargetResolutionMode defaults to Strict; BestEffort records unaddressable targets as skipped.
-	TargetResolutionMode TargetResolutionMode `json:"targetResolutionMode,omitempty"`
+	TargetResolutionMode *TargetResolutionMode `json:"targetResolutionMode,omitempty"`
 }
 
 // Validate validates the power control request
@@ -146,7 +146,7 @@ type APIBatchUpdateRackPowerStateRequest struct {
 	// spawned by this batch. See APIUpdatePowerStateRequest for semantics.
 	OverrideReadinessCheck bool `json:"overrideReadinessCheck,omitempty"`
 	// TargetResolutionMode defaults to Strict; BestEffort records unaddressable targets as skipped.
-	TargetResolutionMode TargetResolutionMode `json:"targetResolutionMode,omitempty"`
+	TargetResolutionMode *TargetResolutionMode `json:"targetResolutionMode,omitempty"`
 }
 
 // Validate checks required fields and power state validity.
@@ -179,7 +179,7 @@ type APIBatchUpdateTrayPowerStateRequest struct {
 	// spawned by this batch. See APIUpdatePowerStateRequest for semantics.
 	OverrideReadinessCheck bool `json:"overrideReadinessCheck,omitempty"`
 	// TargetResolutionMode defaults to Strict; BestEffort records unaddressable targets as skipped.
-	TargetResolutionMode TargetResolutionMode `json:"targetResolutionMode,omitempty"`
+	TargetResolutionMode *TargetResolutionMode `json:"targetResolutionMode,omitempty"`
 }
 
 // Validate checks required fields, power state validity, and filter constraints.

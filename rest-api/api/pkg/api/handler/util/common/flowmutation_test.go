@@ -95,7 +95,7 @@ func TestFlowMutationHelpersProxyRequests(t *testing.T) {
 		{
 			name: "power on",
 			execute: func(ctx context.Context, stc tclient.Client) (*flowv1.SubmitTaskResponse, *cutil.APIError) {
-				return ExecutePowerControlWorkflow(ctx, zerolog.Nop(), stc, mutationTargetSpec(rackID), cam.PowerControlStateOn, &ruleIDArg, false, workflowID, entityName, cam.TargetResolutionBestEffort)
+				return ExecutePowerControlWorkflow(ctx, zerolog.Nop(), stc, mutationTargetSpec(rackID), cam.PowerControlStateOn, &ruleIDArg, false, workflowID, entityName, cutil.GetPtr(cam.TargetResolutionBestEffort))
 			},
 			wantWorkflowID: workflowID + "-best-effort",
 			wantFullMethod: flowv1.Flow_PowerOnRack_FullMethodName,
@@ -170,7 +170,7 @@ func TestFlowMutationHelpersProxyRequests(t *testing.T) {
 		{
 			name: "bring up",
 			execute: func(ctx context.Context, stc tclient.Client) (*flowv1.SubmitTaskResponse, *cutil.APIError) {
-				return ExecuteBringUpRackWorkflow(ctx, zerolog.Nop(), stc, mutationTargetSpec(rackID), "API bring up rack r1", &ruleIDArg, true, workflowID, entityName, cam.TargetResolutionBestEffort)
+				return ExecuteBringUpRackWorkflow(ctx, zerolog.Nop(), stc, mutationTargetSpec(rackID), "API bring up rack r1", &ruleIDArg, true, workflowID, entityName, cutil.GetPtr(cam.TargetResolutionBestEffort))
 			},
 			wantWorkflowID: workflowID + "-best-effort",
 			wantFullMethod: flowv1.Flow_BringUpRack_FullMethodName,
@@ -185,7 +185,7 @@ func TestFlowMutationHelpersProxyRequests(t *testing.T) {
 		{
 			name: "firmware update",
 			execute: func(ctx context.Context, stc tclient.Client) (*flowv1.SubmitTaskResponse, *cutil.APIError) {
-				return ExecuteFirmwareUpdateWorkflow(ctx, zerolog.Nop(), stc, mutationTargetSpec(rackID), &version, []string{"bmc", "nvos"}, nil, siteID, nil, false, true, workflowID, entityName, cam.TargetResolutionBestEffort)
+				return ExecuteFirmwareUpdateWorkflow(ctx, zerolog.Nop(), stc, mutationTargetSpec(rackID), &version, []string{"bmc", "nvos"}, nil, siteID, nil, false, true, workflowID, entityName, cutil.GetPtr(cam.TargetResolutionBestEffort))
 			},
 			wantFullMethod: flowv1.Flow_UpgradeFirmware_FullMethodName,
 			wantWorkflowID: workflowID + "-best-effort-override-version-check",
