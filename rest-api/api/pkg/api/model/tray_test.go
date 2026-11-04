@@ -5,7 +5,6 @@ package model
 
 import (
 	"encoding/json"
-	"google.golang.org/protobuf/encoding/protojson"
 	"os"
 	"testing"
 
@@ -14,6 +13,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/protobuf/encoding/protojson"
 )
 
 func TestAPITrayJSONContract(t *testing.T) {

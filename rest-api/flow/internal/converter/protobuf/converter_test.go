@@ -5,7 +5,6 @@ package protobuf
 
 import (
 	"encoding/json"
-	"google.golang.org/protobuf/encoding/protojson"
 	"net"
 	"os"
 	"testing"
@@ -14,6 +13,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	dbquery "github.com/NVIDIA/infra-controller/rest-api/flow/internal/db/query"
