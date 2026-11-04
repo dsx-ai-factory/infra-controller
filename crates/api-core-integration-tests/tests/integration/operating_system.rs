@@ -15,6 +15,7 @@
  * limitations under the License.
  */
 
+use std::error::Error;
 use std::time::Duration;
 
 use carbide_test_harness::prelude::{PgPool, TestHarness, sqlx_test};
@@ -236,6 +237,49 @@ async fn test_get_operating_system_not_found(pool: PgPool) {
 
     assert!(resp.is_err());
     assert_eq!(resp.unwrap_err().code(), Code::NotFound);
+}
+
+// Renaming the table makes `get_operating_system` fail with PostgreSQL `42P01`.
+// The shared status conversion must hide SQL diagnostics from clients while
+// retaining the original `DatabaseError` behind its redacted source wrapper.
+#[sqlx_test]
+async fn test_get_operating_system_database_failure_hides_diagnostics_and_retains_source(
+    pool: PgPool,
+) {
+    let env = TestHarness::builder(pool.clone()).build().await;
+
+    sqlx::query("ALTER TABLE operating_systems RENAME TO unavailable_operating_systems")
+        .execute(&pool)
+        .await
+        .expect("OS table should be unavailable for the handler query");
+
+    let id: OperatingSystemId = uuid::Uuid::nil().into();
+    let error = env
+        .api()
+        .get_operating_system(tonic::Request::new(id))
+        .await
+        .expect_err("the OS query must fail when its table is unavailable");
+
+    assert_eq!(error.code(), Code::Internal);
+    assert_eq!(error.message(), "internal database error");
+
+    let source = error
+        .source()
+        .expect("database status source should be retained")
+        .source()
+        .expect("original database error should be retained")
+        .downcast_ref::<db::DatabaseError>()
+        .expect("status should retain the typed database error");
+    let db::DatabaseError::Sqlx(annotated) = source else {
+        panic!("expected the original SQLx error: {source:?}");
+    };
+    let driver_error = annotated
+        .source
+        .as_database_error()
+        .expect("PostgreSQL error should be retained");
+    assert_eq!(driver_error.code().as_deref(), Some("42P01"));
+    let diagnostic = source.to_string();
+    assert!(diagnostic.contains("FROM operating_systems"));
 }
 
 #[sqlx_test]
