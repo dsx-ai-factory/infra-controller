@@ -1471,13 +1471,14 @@ func TestTargetSpecTo(t *testing.T) {
 	}
 }
 
-func TestTargetSpecFromNVLDomains(t *testing.T) {
+func TestTargetSpecFrom(t *testing.T) {
 	domainID := uuid.New()
-	testCases := map[string]struct {
+	type targetSpecCase struct {
 		input   *pb.OperationTargetSpec
 		want    operation.TargetSpec
 		wantErr string
-	}{
+	}
+	testCases := map[string]targetSpecCase{
 		"empty targets": {
 			input: &pb.OperationTargetSpec{
 				Targets: &pb.OperationTargetSpec_NvlDomains{
@@ -1512,6 +1513,26 @@ func TestTargetSpecFromNVLDomains(t *testing.T) {
 		},
 	}
 
+	// REST verifies its serialized output against the same fixture. Keeping the
+	// two generated descriptor packages in separate processes avoids collisions.
+	data, err := os.ReadFile("../../../../proto/flow/testdata/tray_batch_targets.json")
+	require.NoError(t, err)
+	var fixtures map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(data, &fixtures))
+	for name, wire := range fixtures {
+		var target pb.OperationTargetSpec
+		require.NoError(t, protojson.Unmarshal(wire, &target))
+		var components []operation.ComponentTarget
+		for _, component := range target.GetComponents().GetTargets() {
+			id, err := uuid.Parse(component.GetId().GetId())
+			require.NoError(t, err)
+			components = append(components, operation.ComponentTarget{UUID: id})
+		}
+		testCases["REST tray batch "+name] = targetSpecCase{
+			input: &target, want: operation.TargetSpec{Components: components},
+		}
+	}
+
 	for name, testCase := range testCases {
 		t.Run(name, func(t *testing.T) {
 			got, err := TargetSpecFrom(testCase.input)
@@ -1519,7 +1540,8 @@ func TestTargetSpecFromNVLDomains(t *testing.T) {
 				assert.ErrorContains(t, err, testCase.wantErr)
 				return
 			}
-			assert.NoError(t, err)
+			require.NoError(t, err)
+			require.NoError(t, got.Validate())
 			assert.Equal(t, testCase.want, got)
 		})
 	}
@@ -1794,29 +1816,6 @@ func TestTaskKindTo(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(string(tc.kind), func(t *testing.T) {
 			require.Equal(t, tc.want, TaskKindTo(tc.kind))
-		})
-	}
-}
-
-// The REST model test compares its serialized output to this shared fixture.
-// Separate tests avoid registering two generated copies of Flow's descriptors
-// in one process while checking both sides of the actual wire contract.
-func TestTargetSpecFrom_TrayBatchTargets(t *testing.T) {
-	data, err := os.ReadFile("../../../../proto/flow/testdata/tray_batch_targets.json")
-	require.NoError(t, err)
-	var fixtures map[string]json.RawMessage
-	require.NoError(t, json.Unmarshal(data, &fixtures))
-	for name, wire := range fixtures {
-		t.Run(name, func(t *testing.T) {
-			var target pb.OperationTargetSpec
-			require.NoError(t, protojson.Unmarshal(wire, &target))
-			got, err := TargetSpecFrom(&target)
-			require.NoError(t, err)
-			require.NoError(t, got.Validate())
-			require.Len(t, got.Components, len(target.GetComponents().GetTargets()))
-			for i, component := range got.Components {
-				assert.Equal(t, target.GetComponents().GetTargets()[i].GetId().GetId(), component.UUID.String())
-			}
 		})
 	}
 }
