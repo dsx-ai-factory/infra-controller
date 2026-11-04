@@ -71,6 +71,13 @@ pub struct FirmwareGlobal {
     /// [`FirmwareDownloadConfig`] defaults; changes require a Core restart.
     #[serde(default)]
     pub downloads: FirmwareDownloadConfig,
+    /// Maximum payload bytes in `firmware_download_cache_directory/digest-v1`, including partial
+    /// files and active reservations. Defaults to 16 GiB; accepts 1 through
+    /// 1 TiB and must be at least `downloads.max_download_bytes`. Active
+    /// operations and readers prevent eviction. Legacy URL-cache entries are
+    /// outside this limit. Changes require a Core restart.
+    #[serde(default = "FirmwareGlobal::nic_firmware_cache_capacity_bytes_default")]
+    pub nic_firmware_cache_capacity_bytes: u64,
     /// Delay before retrying a failed host firmware
     /// upgrade.
     /// Default is 60 minutes.
@@ -118,6 +125,8 @@ impl FirmwareGlobal {
             firmware_directory: PathBuf::default(),
             firmware_download_cache_directory: PathBuf::default(),
             downloads: FirmwareDownloadConfig::default(),
+            nic_firmware_cache_capacity_bytes:
+                FirmwareGlobal::nic_firmware_cache_capacity_bytes_default(),
             host_firmware_upgrade_retry_interval: Self::get_retry_interval(),
             instance_updates_manual_tagging: false,
             no_reset_retries: false,
@@ -134,6 +143,10 @@ impl FirmwareGlobal {
 }
 
 impl FirmwareGlobal {
+    fn nic_firmware_cache_capacity_bytes_default() -> u64 {
+        16 * 1024 * 1024 * 1024
+    }
+
     pub fn instance_updates_manual_tagging_default() -> bool {
         true
     }
@@ -182,6 +195,8 @@ impl Default for FirmwareGlobal {
             firmware_download_cache_directory:
                 FirmwareGlobal::firmware_download_cache_directory_default(),
             downloads: FirmwareDownloadConfig::default(),
+            nic_firmware_cache_capacity_bytes:
+                FirmwareGlobal::nic_firmware_cache_capacity_bytes_default(),
             host_firmware_upgrade_retry_interval:
                 FirmwareGlobal::host_firmware_upgrade_retry_interval_default(),
             instance_updates_manual_tagging: false,
