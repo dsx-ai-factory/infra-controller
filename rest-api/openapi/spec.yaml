@@ -11948,6 +11948,32 @@ paths:
         - Machine
       summary: Delete a Machine from a Site
       operationId: delete-machine
+      parameters:
+        - schema:
+            type: boolean
+            default: false
+          in: query
+          name: force
+          description: Request forced deletion on the Site, including host, DPU, and BMC interfaces. Starting a new attempt requires a Registered Site; a confirmed-complete retained request is replayed locally. Machines marked missing on Site can be force deleted without waiting 24 hours, including when their missing-status history is unavailable. This alone does not override attached Instances, assigned Instance Types, or Allocation Constraints. BMC credentials, discovery suppressions, and retained boot-interface pairs are preserved; orphaned DPF resources are not overridden.
+        - schema:
+            type: boolean
+            default: false
+          in: query
+          name: allowDeleteWithInstanceType
+          description: Requires force=true when enabled. Authorize removing an assigned Instance Type on the Site. This does not authorize deletion of an attached Instance or violating Allocation Constraints.
+        - schema:
+            type: boolean
+            default: false
+          in: query
+          name: allowDeleteWithInstance
+          description: Requires force=true when enabled. Authorize deletion of the attached Instance control-plane record on the Site without first requesting a graceful workload shutdown; cleanup may forcibly restart the host. Also authorizes removal of its Instance Type, even if allowDeleteWithInstanceType=false. REST Machine, Instance, interfaces, capabilities, and Instance Type associations are retained for deliberate cleanup by their owners. Allocation Constraints require a separate acknowledgment.
+        - schema:
+            type: boolean
+            default: false
+          in: query
+          name: allowDeleteWithAllocation
+          description: Requires force=true when enabled. Acknowledge that removing this Machine may leave fewer Machines than existing Instance Type Allocation Constraints require. Without this acknowledgment, such a request is rejected before Site deletion. When capacity would be insufficient, the Site deletion proceeds while REST Machine records and Instance Type associations are retained and Allocation Constraints remain unchanged. Machines with a recorded force-deletion attempt do not count toward capacity in later Allocation or deletion checks, even before inventory marks them missing. Does not imply either Instance or Instance Type deletion permission.
+
       responses:
         '202':
           description: Deletion request was accepted
@@ -11956,7 +11982,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/MessageResponse'
               examples:
-                example-1:
+                normal-deletion:
                   value:
                     message: Deletion request was accepted
         '400':
@@ -11966,13 +11992,84 @@ paths:
         '404':
           description: Describes an error response for 404 Not Found
           $ref: '#/components/responses/GenericHttpError'
+        '409':
+          description: Site cleanup is incomplete, an attempt changed concurrently, or ordinary REST-only cleanup lacks confirmed completion. A Retry-After header of 5 indicates a confirmed incomplete Core result; wait at least 5 seconds and repeat the forced DELETE with the same options. A pending attempt is recovered by its recorded workflow ID. No automatic continuation is scheduled, and the Machine remains unavailable for placement.
+          headers:
+            Retry-After:
+              description: Minimum delay in seconds before repeating a forced deletion after a confirmed incomplete Core result. Other conflicts may omit this header.
+              schema:
+                type: integer
+                example: 5
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NICoAPIError'
+        '412':
+          description: The Machine deletion preconditions were not met.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NICoAPIError'
+        '429':
+          $ref: '#/components/responses/ResourceExhaustedError'
         '422':
           description: Describes an error response for 422 Unprocessable Content
           $ref: '#/components/responses/GenericHttpError'
         '500':
           description: Describes an error response for 500 Internal Server Error
           $ref: '#/components/responses/GenericHttpError'
-      description: Org must have an Infrastructure Provider entity. Machine must belong to the Provider. User must have authorization role with `PROVIDER_ADMIN` suffix. Machine must meet certain criteria to be eligible for deletion.
+        '503':
+          description: A dependency required to delete the Machine is temporarily unavailable.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NICoAPIError'
+        '504':
+          description: The Machine deletion request timed out.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NICoAPIError'
+      description: >-
+        Requires Provider Admin access to the Machine's Infrastructure Provider.
+        Regular deletion requires the Machine to be missing on Site for at least 24 hours,
+        with no attached Instance or assigned Instance Type. The confirmed-complete
+        retained-deletion recovery exception is described below.
+
+        Starting forced deletion requires a Registered Site and the applicable overrides.
+        Authoritative Core Instance-consent enforcement and the Instance Type override
+        require Core builds containing https://github.com/dsx-ai-factory/infra-controller/pull/5394.
+        Older Core ignores the new protobuf fields; REST-side checks against REST records
+        do not establish Core's current ownership state or replace server-side enforcement.
+        It also supports missing Machines without waiting 24 hours. Before contacting Core,
+        REST records an attempt ID and makes the Machine unavailable for every Instance
+        placement path and for new Allocation capacity. A timeout, transport failure, or
+        unavailable workflow history keeps that attempt and quarantine. Retrying retrieves
+        the exact recorded execution instead of issuing another Core deletion. If no result
+        is available, including after a crash before dispatch, provide the attempt ID from
+        the error to the Site operator; ordinary deletion remains blocked.
+
+        A definitive Core precondition or validation rejection allows a corrected forced
+        request to start a new attempt. A confirmed incomplete result returns HTTP 409 with
+        `Retry-After: 5`; repeat the same forced DELETE after at least 5 seconds. No automatic
+        continuation is scheduled. Only a confirmed complete result or an actual Core
+        NotFound response records completion. Missing Temporal history is not completion.
+
+        Forced deletion returns HTTP 202 only after confirmed Site completion. REST records
+        are removed only when no Instance deletion was requested, no Instance remains
+        attached, and remaining Allocation capacity is sufficient. Otherwise, owner records
+        remain. Allocation Constraints are never deleted by this operation. Present inventory
+        cannot clear the retained marker, and completed forced requests replay locally
+        without deleting a newly rediscovered Core Machine. A later REST cleanup failure
+        preserves completion proof for local replay without workflow history.
+
+        After confirmed completion, owners may remove the retained Instance and all Machine
+        Instance Type associations; existing quota guards may require them to reduce or
+        rebalance Allocation Constraints before unlinking. Ordinary DELETE, with force omitted or false and no
+        overrides, then removes only REST Machine records even if Core reports the Machine
+        present and no missing inventory was observed. The Machine must be unassigned and
+        have neither an Instance Type ID nor association rows. This cleanup never calls Core
+        and returns HTTP 202; a later fresh inventory may restore the rediscovered Machine.
   '/v2/org/{org}/nico/machine/{machineId}/bmc/reset':
     parameters:
       - schema:
@@ -32422,7 +32519,7 @@ components:
           type:
             - string
             - 'null'
-          description: Rack fabric protocol. Null only for declarations created before protocol became required.
+          description: Rack fabric protocol, or null when unspecified.
         racks:
           type: array
           description: Ordered racks and their devices. Arrays are always present, including empty lists. Rack IDs and device identity tuples are unique across the group, with case-sensitive comparison.
@@ -32497,10 +32594,10 @@ components:
           maxLength: 128
           description: External group-level NVLink topology identifier, non-blank and at most 128 characters.
         protocol:
-          type: string
+          type: [string, 'null']
           minLength: 1
           maxLength: 128
-          description: Rack fabric protocol, non-blank and at most 128 characters. `NVLINK_V6` enables GB-to-VR profile topology normalization.
+          description: Optional rack fabric protocol, non-blank and at most 128 characters when supplied. Omission or null leaves it unspecified and disables protocol-specific topology normalization. `NVLINK_V6` enables GB-to-VR profile topology normalization.
         racks:
           type:
             - array
@@ -32531,7 +32628,6 @@ components:
         - siteId
         - rackGroupId
         - topology
-        - protocol
     ExpectedRackGroupList:
       title: ExpectedRackGroupList
       type: object
@@ -32651,7 +32747,7 @@ components:
             - 'null'
           minLength: 1
           maxLength: 128
-          description: Optional replacement rack fabric protocol, non-blank and at most 128 characters. `NVLINK_V6` enables GB-to-VR profile topology normalization.
+          description: Optional replacement rack fabric protocol, non-blank and at most 128 characters. Omission or null preserves the stored protocol, including an unspecified value. `NVLINK_V6` enables GB-to-VR profile topology normalization.
         racks:
           type:
             - array

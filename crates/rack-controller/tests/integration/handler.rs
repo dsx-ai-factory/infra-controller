@@ -26,6 +26,12 @@ use carbide_rack_controller::metrics::RackMetrics;
 use carbide_secrets::credentials::{
     BmcCredentialType, CredentialKey, CredentialReader, CredentialWriter, Credentials,
 };
+use carbide_test_harness::prelude::{sqlx_test, sqlx_testing};
+use carbide_test_harness::test_support::fixture_config::{
+    FixtureDefault as _, ManagedHostConfigExt as _,
+};
+use carbide_test_harness::test_support::mac_address_pool::EXPECTED_SWITCH_NVOS_MAC_ADDRESS_POOL;
+use carbide_test_harness::test_support::switch::attach_switches_with_nvos_credentials as attach_switches;
 use carbide_uuid::machine::{HostMachineId, MachineId, MachineIdSource, MachineType};
 use carbide_uuid::rack::{RackId, RackProfileId};
 use carbide_uuid::switch::SwitchId;
@@ -55,22 +61,15 @@ use model::rack_type::{
     RackFirmwareObjectConfig, RackHardwareClass, RackHardwareTopology, RackHardwareType,
     RackProductFamily, RackProfile, RackProfileConfig,
 };
-use model::switch::{
-    CONTROL_PLANE_STATE_CONFIGURED, FabricManagerState, FabricManagerStatus, NewSwitch,
-    SwitchConfig,
-};
+use model::switch::{CONTROL_PLANE_STATE_CONFIGURED, FabricManagerState, FabricManagerStatus};
 use model::test_support::ManagedHostConfig;
 use rpc::forge::forge_server::Forge;
 use state_controller::db_write_batch::DbWriteBatch;
 use state_controller::state_handler::{StateHandler, StateHandlerContext, StateHandlerOutcome};
 use tonic::Request;
 
-use crate::test_support::fixture_config::{FixtureDefault as _, ManagedHostConfigExt as _};
-use crate::test_support::mac_address_pool::EXPECTED_SWITCH_NVOS_MAC_ADDRESS_POOL;
-use crate::tests::common::api_fixtures::site_explorer::{create_expected_switches, new_host};
-use crate::tests::common::api_fixtures::{
-    TestEnv, TestEnvOverrides, create_test_env_with_overrides, get_config,
-};
+use crate::env::{TestEnv, TestEnvOverrides, create_test_env_with_overrides, get_config, new_host};
+use crate::fixtures::switch::expected_switch_configs;
 
 #[derive(Debug)]
 struct StaticFirmwareObjectFetcher {
@@ -166,7 +165,7 @@ fn single_capabilities() -> RackCapabilitiesSet {
     }
 }
 
-pub(crate) fn config_with_rack_profiles() -> crate::cfg::file::CarbideConfig {
+pub(crate) fn config_with_rack_profiles() -> carbide_test_harness::CarbideConfig {
     let mut config = get_config();
     config.rack_profiles = RackProfileConfig {
         rack_profiles: [
@@ -211,7 +210,7 @@ pub(crate) fn config_with_rack_profiles() -> crate::cfg::file::CarbideConfig {
     config
 }
 
-fn config_with_switch_profile() -> crate::cfg::file::CarbideConfig {
+fn config_with_switch_profile() -> carbide_test_harness::CarbideConfig {
     let mut config = config_with_rack_profiles();
     config.rack_profiles.rack_profiles.insert(
         "SwitchOnly".to_string(),
@@ -238,7 +237,7 @@ fn config_with_switch_profile() -> crate::cfg::file::CarbideConfig {
     config
 }
 
-fn config_with_nmx_cluster_profile() -> crate::cfg::file::CarbideConfig {
+fn config_with_nmx_cluster_profile() -> carbide_test_harness::CarbideConfig {
     let mut config = config_with_rack_profiles();
     config.rack_profiles.rack_profiles.insert(
         "NmxCluster".to_string(),
@@ -398,76 +397,14 @@ async fn attach_switches_with_nvos_credentials(
     rack_id: &RackId,
     count: usize,
 ) -> Result<Vec<SwitchId>, Box<dyn std::error::Error>> {
-    let mut txn = env.pool.begin().await?;
-    let expected_switches = create_expected_switches(txn.as_mut()).await;
-    let selected_switches = expected_switches
-        .into_iter()
-        .take(count)
-        .collect::<Vec<_>>();
-    if selected_switches.len() != count {
-        return Err(eyre::eyre!("expected at least {} switch fixtures", count).into());
+    let configs = expected_switch_configs();
+    let mut expected_switches = Vec::with_capacity(configs.len());
+    for config in configs {
+        let expected_switch = env.test_harness.create_expected_switch(config.into()).await;
+        let mut conn = env.pool.acquire().await?;
+        expected_switches.push(expected_switch.db_record(conn.as_mut()).await);
     }
-
-    let mut switch_ids = Vec::with_capacity(selected_switches.len());
-    for (index, expected_switch) in selected_switches.iter().enumerate() {
-        let switch_id = model::switch::switch_id::from_hardware_info(
-            &expected_switch.serial_number,
-            "NVIDIA",
-            "Switch",
-            carbide_uuid::switch::SwitchIdSource::ProductBoardChassisSerial,
-            carbide_uuid::switch::SwitchType::NvLink,
-        )?;
-
-        let new_switch = NewSwitch {
-            id: switch_id,
-            config: SwitchConfig {
-                name: expected_switch.metadata.name.clone(),
-                enable_nmxc: false,
-                fabric_manager_config: None,
-            },
-            bmc_mac_address: Some(expected_switch.bmc_mac_address),
-            metadata: None,
-            rack_id: Some(rack_id.clone()),
-            slot_number: Some(index as i32),
-            tray_index: Some(0),
-        };
-        db_switch::create(txn.as_mut(), &new_switch).await?;
-        switch_ids.push(switch_id);
-    }
-    txn.commit().await?;
-
-    for expected_switch in selected_switches {
-        env.api
-            .credential_manager
-            .set_credentials(
-                &CredentialKey::BmcCredentials {
-                    credential_type: BmcCredentialType::BmcRoot {
-                        bmc_mac_address: expected_switch.bmc_mac_address,
-                    },
-                },
-                &Credentials::UsernamePassword {
-                    username: "root".to_string(),
-                    password: "notforprod".to_string(),
-                },
-            )
-            .await
-            .map_err(|error| eyre::eyre!("failed to set switch BMC credentials: {}", error))?;
-        env.api
-            .credential_manager
-            .set_credentials(
-                &CredentialKey::SwitchNvosAdmin {
-                    bmc_mac_address: expected_switch.bmc_mac_address,
-                },
-                &Credentials::UsernamePassword {
-                    username: "nvos-admin".to_string(),
-                    password: "nvos-pass".to_string(),
-                },
-            )
-            .await
-            .map_err(|error| eyre::eyre!("failed to set switch NVOS credentials: {}", error))?;
-    }
-
-    Ok(switch_ids)
+    attach_switches(env.api.as_ref(), rack_id, expected_switches, count).await
 }
 
 async fn attach_switch_with_nvos_credentials(
@@ -553,304 +490,6 @@ pub(crate) fn new_machine_id(seed: u8) -> MachineId {
     )
 }
 
-#[crate::sqlx_test]
-async fn test_on_demand_rack_maintenance_schedules_nvos_only_scope(
-    pool: sqlx::PgPool,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let env = create_test_env_with_overrides(pool.clone(), TestEnvOverrides::default()).await;
-    let (rack_id, switch_id) = create_ready_rack_with_switch(&env, &pool).await?;
-
-    crate::handlers::rack::on_demand_rack_maintenance(
-        env.api.as_ref(),
-        Request::new(rpc::forge::RackMaintenanceOnDemandRequest {
-            rack_id: Some(rack_id.clone()),
-            scope: Some(rpc::forge::RackMaintenanceScope {
-                machine_ids: vec![],
-                switch_ids: vec![switch_id.to_string()],
-                power_shelf_ids: vec![],
-                activities: vec![rpc::forge::MaintenanceActivityConfig {
-                    activity: Some(
-                        rpc::forge::maintenance_activity_config::Activity::NvosUpdate(
-                            rpc::forge::NvosUpdateActivity {
-                                config_json: r#"{"Id":"fw-nvos"}"#.to_string(),
-                                access_token: Some("token".to_string()),
-                            },
-                        ),
-                    ),
-                }],
-            }),
-        }),
-    )
-    .await?;
-
-    let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
-    let scope = rack
-        .config
-        .maintenance_requested
-        .expect("maintenance should be scheduled");
-    assert_eq!(scope.switch_ids, vec![switch_id]);
-    assert_eq!(scope.activities.len(), 1);
-    assert!(matches!(
-        &scope.activities[0],
-        MaintenanceActivity::NvosUpdate {
-            config_json,
-        } if config_json == r#"{"Id":"fw-nvos"}"#
-    ));
-
-    Ok(())
-}
-
-#[crate::sqlx_test]
-async fn test_on_demand_rack_maintenance_schedules_configure_nmx_cluster_only_scope(
-    pool: sqlx::PgPool,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let env = create_test_env_with_overrides(pool.clone(), TestEnvOverrides::default()).await;
-    let (rack_id, switch_id) = create_ready_rack_with_switch(&env, &pool).await?;
-
-    crate::handlers::rack::on_demand_rack_maintenance(
-        env.api.as_ref(),
-        Request::new(rpc::forge::RackMaintenanceOnDemandRequest {
-            rack_id: Some(rack_id.clone()),
-            scope: Some(rpc::forge::RackMaintenanceScope {
-                machine_ids: vec![],
-                switch_ids: vec![switch_id.to_string()],
-                power_shelf_ids: vec![],
-                activities: vec![rpc::forge::MaintenanceActivityConfig {
-                    activity: Some(
-                        rpc::forge::maintenance_activity_config::Activity::ConfigureNmxCluster(
-                            rpc::forge::ConfigureNmxClusterActivity {},
-                        ),
-                    ),
-                }],
-            }),
-        }),
-    )
-    .await?;
-
-    let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
-    let scope = rack
-        .config
-        .maintenance_requested
-        .expect("maintenance should be scheduled");
-    assert_eq!(scope.switch_ids, vec![switch_id]);
-    assert_eq!(scope.activities.len(), 1);
-    assert!(matches!(
-        &scope.activities[0],
-        MaintenanceActivity::ConfigureNmxCluster
-    ));
-
-    Ok(())
-}
-
-#[crate::sqlx_test]
-async fn test_on_demand_rack_maintenance_schedules_firmware_and_nvos_scope(
-    pool: sqlx::PgPool,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let env = create_test_env_with_overrides(pool.clone(), TestEnvOverrides::default()).await;
-    let (rack_id, switch_id) = create_ready_rack_with_switch(&env, &pool).await?;
-
-    crate::handlers::rack::on_demand_rack_maintenance(
-        env.api.as_ref(),
-        Request::new(rpc::forge::RackMaintenanceOnDemandRequest {
-            rack_id: Some(rack_id.clone()),
-            scope: Some(rpc::forge::RackMaintenanceScope {
-                machine_ids: vec![],
-                switch_ids: vec![switch_id.to_string()],
-                power_shelf_ids: vec![],
-                activities: vec![
-                    rpc::forge::MaintenanceActivityConfig {
-                        activity: Some(
-                            rpc::forge::maintenance_activity_config::Activity::FirmwareUpgrade(
-                                rpc::forge::FirmwareUpgradeActivity {
-                                    firmware_version: r#"{"Id":"fw-mixed"}"#.to_string(),
-                                    components: vec!["BMC".to_string()],
-                                    access_token: Some("token".to_string()),
-                                    force_update: false,
-                                },
-                            ),
-                        ),
-                    },
-                    rpc::forge::MaintenanceActivityConfig {
-                        activity: Some(
-                            rpc::forge::maintenance_activity_config::Activity::NvosUpdate(
-                                rpc::forge::NvosUpdateActivity {
-                                    config_json: r#"{"Id":"fw-mixed"}"#.to_string(),
-                                    access_token: Some("token".to_string()),
-                                },
-                            ),
-                        ),
-                    },
-                ],
-            }),
-        }),
-    )
-    .await?;
-
-    let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
-    let scope = rack
-        .config
-        .maintenance_requested
-        .expect("maintenance should be scheduled");
-    assert_eq!(scope.switch_ids, vec![switch_id]);
-    assert_eq!(scope.activities.len(), 2);
-    assert!(matches!(
-        &scope.activities[0],
-        MaintenanceActivity::FirmwareUpgrade {
-            firmware_version: Some(id),
-            components,
-            ..
-        } if id == r#"{"Id":"fw-mixed"}"# && components == &vec!["BMC".to_string()]
-    ));
-    assert!(matches!(
-        &scope.activities[1],
-        MaintenanceActivity::NvosUpdate {
-            config_json,
-        } if config_json == r#"{"Id":"fw-mixed"}"#
-    ));
-    let token_credentials = env
-        .test_credential_manager
-        .get_credentials(&CredentialKey::RackMaintenanceAccessToken {
-            rack_id: rack_id.clone(),
-        })
-        .await
-        .expect("credential lookup should succeed")
-        .expect("access token should be stored as a credential");
-    assert_eq!(
-        token_credentials,
-        Credentials::UsernamePassword {
-            username: "access_token".to_string(),
-            password: "token".to_string(),
-        }
-    );
-
-    Ok(())
-}
-
-#[crate::sqlx_test]
-async fn test_on_demand_rack_maintenance_defaults_missing_access_token_to_noauth(
-    pool: sqlx::PgPool,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let env = create_test_env_with_overrides(pool.clone(), TestEnvOverrides::default()).await;
-    let (rack_id, switch_id) = create_ready_rack_with_switch(&env, &pool).await?;
-
-    crate::handlers::rack::on_demand_rack_maintenance(
-        env.api.as_ref(),
-        Request::new(rpc::forge::RackMaintenanceOnDemandRequest {
-            rack_id: Some(rack_id.clone()),
-            scope: Some(rpc::forge::RackMaintenanceScope {
-                machine_ids: vec![],
-                switch_ids: vec![switch_id.to_string()],
-                power_shelf_ids: vec![],
-                activities: vec![rpc::forge::MaintenanceActivityConfig {
-                    activity: Some(
-                        rpc::forge::maintenance_activity_config::Activity::FirmwareUpgrade(
-                            rpc::forge::FirmwareUpgradeActivity {
-                                firmware_version: r#"{"Id":"fw-mixed"}"#.to_string(),
-                                components: vec!["BMC".to_string()],
-                                access_token: None,
-                                force_update: false,
-                            },
-                        ),
-                    ),
-                }],
-            }),
-        }),
-    )
-    .await?;
-
-    let token_credentials = env
-        .test_credential_manager
-        .get_credentials(&CredentialKey::RackMaintenanceAccessToken {
-            rack_id: rack_id.clone(),
-        })
-        .await
-        .expect("credential lookup should succeed")
-        .expect("access token should be stored as a credential");
-    assert_eq!(
-        token_credentials,
-        Credentials::UsernamePassword {
-            username: "access_token".to_string(),
-            password: carbide_rack::firmware_object::RMS_NOAUTH_ACCESS_TOKEN.to_string(),
-        }
-    );
-
-    Ok(())
-}
-
-#[crate::sqlx_test]
-async fn test_terminate_rack_maintenance_latches_request_and_cleans_access_token(
-    pool: sqlx::PgPool,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let env = create_test_env_with_overrides(pool.clone(), TestEnvOverrides::default()).await;
-    let (rack_id, _) = create_ready_rack_with_switch(&env, &pool).await?;
-    let request = || {
-        Request::new(rpc::forge::RackMaintenanceTerminateRequest {
-            rack_id: Some(rack_id.clone()),
-        })
-    };
-
-    let error = crate::handlers::rack::terminate_rack_maintenance(env.api.as_ref(), request())
-        .await
-        .expect_err("Ready rack should reject maintenance termination");
-    assert_eq!(error.code(), tonic::Code::InvalidArgument);
-
-    let mut txn = pool.begin().await?;
-    let rack = get_db_rack(txn.as_mut(), &rack_id).await;
-    assert_eq!(
-        db_rack::try_update_controller_state(
-            txn.as_mut(),
-            &rack_id,
-            rack.controller_state.version,
-            rack.controller_state.version.increment(),
-            &RackState::Maintenance {
-                maintenance_state: RackMaintenanceState::FirmwareUpgrade {
-                    rack_firmware_upgrade: FirmwareUpgradeState::WaitForComplete,
-                },
-            },
-        )
-        .await?,
-        db::ConditionalWrite::Applied(())
-    );
-    txn.commit().await?;
-
-    env.api
-        .credential_manager
-        .set_credentials(
-            &CredentialKey::RackMaintenanceAccessToken {
-                rack_id: rack_id.clone(),
-            },
-            &Credentials::UsernamePassword {
-                username: "access_token".to_string(),
-                password: "token".to_string(),
-            },
-        )
-        .await
-        .map_err(|error| eyre::eyre!("failed to set maintenance access token: {}", error))?;
-
-    crate::handlers::rack::terminate_rack_maintenance(env.api.as_ref(), request()).await?;
-    // An exact retry while the controller has not consumed the latch is
-    // idempotent.
-    crate::handlers::rack::terminate_rack_maintenance(env.api.as_ref(), request()).await?;
-
-    let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
-    assert!(matches!(
-        rack.controller_state.value,
-        RackState::Maintenance { .. }
-    ));
-    assert!(rack.config.maintenance_termination_requested);
-    assert!(
-        env.test_credential_manager
-            .get_credentials(&CredentialKey::RackMaintenanceAccessToken {
-                rack_id: rack_id.clone(),
-            })
-            .await
-            .map_err(|error| eyre::eyre!("failed to get maintenance access token: {}", error))?
-            .is_none()
-    );
-
-    Ok(())
-}
-
 /// test_expected_no_definition_stays_parked pins the first thing `handle_created` does:
 /// with no rack profile to resolve, it parks in `Created` instead of advancing.
 ///
@@ -858,7 +497,7 @@ async fn test_terminate_rack_maintenance_latches_request_and_cleans_access_token
 /// profile and `resolve_capabilities` succeeds, so the handler falls through to the
 /// device-count check and waits for an entirely different reason -- which left the
 /// unresolved-profile branch untested until this test was pointed at it.
-#[crate::sqlx_test]
+#[sqlx_test]
 async fn test_expected_no_definition_stays_parked(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -912,7 +551,7 @@ async fn test_expected_no_definition_stays_parked(
 
 /// test_expected_incomplete_device_counts_stays verifies that a rack with a
 /// topology expecting more devices than currently exist stays in Created.
-#[crate::sqlx_test]
+#[sqlx_test]
 async fn test_expected_incomplete_device_counts_stays(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -962,7 +601,7 @@ async fn test_expected_incomplete_device_counts_stays(
     Ok(())
 }
 
-#[crate::sqlx_test]
+#[sqlx_test]
 async fn test_missing_compute_component_health_tracks_host_inventory(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -1047,7 +686,7 @@ async fn test_missing_compute_component_health_tracks_host_inventory(
     Ok(())
 }
 
-#[crate::sqlx_test]
+#[sqlx_test]
 async fn test_missing_component_health_is_persisted_only_on_rack(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -1180,7 +819,7 @@ async fn test_missing_component_health_is_persisted_only_on_rack(
     Ok(())
 }
 
-#[crate::sqlx_test]
+#[sqlx_test]
 async fn test_missing_component_health_clears_after_recovery(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -1227,7 +866,7 @@ async fn test_missing_component_health_clears_after_recovery(
     Ok(())
 }
 
-#[crate::sqlx_test]
+#[sqlx_test]
 async fn test_component_health_preserves_unresolved_profile(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -1283,7 +922,7 @@ async fn test_component_health_preserves_unresolved_profile(
     Ok(())
 }
 
-#[crate::sqlx_test]
+#[sqlx_test]
 async fn test_component_health_waits_for_successful_handler(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -1330,7 +969,7 @@ async fn test_component_health_waits_for_successful_handler(
         if recovered {
             attach_switch_with_nvos_credentials(&env, &rack_id).await?;
         }
-        super::fixtures::rack::set_rack_controller_state(
+        crate::fixtures::rack::set_rack_controller_state(
             pool.acquire().await?.as_mut(),
             &rack_id,
             maintenance.clone(),
@@ -1359,7 +998,7 @@ async fn test_component_health_waits_for_successful_handler(
                 .await?;
         assert_eq!(history_count, iteration as i64);
 
-        super::fixtures::rack::set_rack_controller_state(
+        crate::fixtures::rack::set_rack_controller_state(
             pool.acquire().await?.as_mut(),
             &rack_id,
             RackState::Created,
@@ -1395,7 +1034,7 @@ async fn test_component_health_waits_for_successful_handler(
     Ok(())
 }
 
-#[crate::sqlx_test]
+#[sqlx_test]
 async fn test_ready_rack_reports_deleted_component(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -1431,7 +1070,7 @@ async fn test_ready_rack_reports_deleted_component(
 
 /// test_expected_zero_topology_transitions_to_discovering verifies that a rack
 /// with zero expected devices in topology immediately transitions to Discovering.
-#[crate::sqlx_test]
+#[sqlx_test]
 async fn test_expected_zero_topology_transitions_to_discovering(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -1500,7 +1139,7 @@ async fn test_expected_zero_topology_transitions_to_discovering(
 /// transitions out of Created: the Created handler only waits while counts
 /// are below the expected minimum, so an over-count satisfies the threshold
 /// and advances to Discovering.
-#[crate::sqlx_test]
+#[sqlx_test]
 async fn test_expected_more_discovered_than_expected_transitions(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -1582,7 +1221,7 @@ async fn test_expected_more_discovered_than_expected_transitions(
 /// test_discovering_waits_when_compute_not_ready verifies that the Discovering
 /// handler waits (rather than erroring) when the rack does not yet have enough
 /// Ready/Assigned compute hosts to satisfy the expected count.
-#[crate::sqlx_test]
+#[sqlx_test]
 async fn test_discovering_waits_when_compute_not_ready(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -1636,7 +1275,7 @@ async fn test_discovering_waits_when_compute_not_ready(
 
 /// test_discovering_empty_rack_transitions_to_maintenance verifies that a
 /// rack in Discovering state with no devices transitions to Maintenance.
-#[crate::sqlx_test]
+#[sqlx_test]
 async fn test_discovering_empty_rack_transitions_to_maintenance(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -1699,7 +1338,7 @@ async fn test_discovering_empty_rack_transitions_to_maintenance(
 }
 
 /// test_error_state_does_nothing verifies that the Error state logs and does nothing.
-#[crate::sqlx_test]
+#[sqlx_test]
 async fn test_error_state_does_nothing(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -1747,7 +1386,7 @@ async fn test_error_state_does_nothing(
 
 /// test_maintenance_completed_transitions_to_validation verifies that
 /// Maintenance::Completed transitions to Validation(Pending).
-#[crate::sqlx_test]
+#[sqlx_test]
 async fn test_maintenance_completed_transitions_to_validation(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -1807,7 +1446,7 @@ async fn test_maintenance_completed_transitions_to_validation(
 
 /// test_ready_with_no_labels_stays_ready verifies that Ready with no
 /// validation metadata labels on machines stays in Ready (do_nothing).
-#[crate::sqlx_test]
+#[sqlx_test]
 async fn test_ready_with_no_labels_stays_ready(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -1856,7 +1495,7 @@ async fn test_ready_with_no_labels_stays_ready(
 /// test_firmware_upgrade_start_skips_without_json verifies that
 /// Maintenance::FirmwareUpgrade(Start) skips firmware flashing when no
 /// firmware object JSON source is configured for rack maintenance.
-#[crate::sqlx_test]
+#[sqlx_test]
 async fn test_firmware_upgrade_start_skips_without_json(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -1933,7 +1572,7 @@ async fn test_firmware_upgrade_start_skips_without_json(
     Ok(())
 }
 
-#[crate::sqlx_test]
+#[sqlx_test]
 async fn test_ingestion_transitions_to_firmware_upgrade_and_submits_rack_profile_firmware_object(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -2177,7 +1816,7 @@ async fn test_ingestion_transitions_to_firmware_upgrade_and_submits_rack_profile
     Ok(())
 }
 
-#[crate::sqlx_test]
+#[sqlx_test]
 async fn test_firmware_upgrade_start_rejects_desired_off_machine_before_rms_submission(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -2214,7 +1853,7 @@ async fn test_firmware_upgrade_start_rejects_desired_off_machine_before_rms_subm
     db_rack::update(txn.as_mut(), &rack_id, &config).await?;
     drop(txn);
     env.api
-        .credential_manager
+        .credential_manager()
         .set_credentials(
             &CredentialKey::RackMaintenanceAccessToken {
                 rack_id: rack_id.clone(),
@@ -2288,7 +1927,7 @@ async fn test_firmware_upgrade_start_rejects_desired_off_machine_before_rms_subm
     Ok(())
 }
 
-#[crate::sqlx_test]
+#[sqlx_test]
 async fn test_firmware_upgrade_start_submits_json_and_deletes_access_token(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -2323,9 +1962,8 @@ async fn test_firmware_upgrade_start_submits_json_and_deletes_access_token(
     let (rack_id, switch_id) = create_ready_rack_with_switch(&env, &pool).await?;
     let switch_id_string = switch_id.to_string();
 
-    crate::handlers::rack::on_demand_rack_maintenance(
-        env.api.as_ref(),
-        Request::new(rpc::forge::RackMaintenanceOnDemandRequest {
+    env.api
+        .on_demand_rack_maintenance(Request::new(rpc::forge::RackMaintenanceOnDemandRequest {
             rack_id: Some(rack_id.clone()),
             scope: Some(rpc::forge::RackMaintenanceScope {
                 machine_ids: vec![],
@@ -2344,9 +1982,8 @@ async fn test_firmware_upgrade_start_submits_json_and_deletes_access_token(
                     ),
                 }],
             }),
-        }),
-    )
-    .await?;
+        }))
+        .await?;
     env.rms_sim
         .queue_apply_firmware_object_response(rms::ApplyFirmwareObjectResponse {
             response: Some(rms::NodeBatchResponse {
@@ -2433,7 +2070,7 @@ async fn test_firmware_upgrade_start_submits_json_and_deletes_access_token(
     Ok(())
 }
 
-#[crate::sqlx_test]
+#[sqlx_test]
 async fn test_firmware_upgrade_start_missing_profile_deletes_access_token(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -2469,7 +2106,7 @@ async fn test_firmware_upgrade_start_missing_profile_deletes_access_token(
     drop(txn);
 
     env.api
-        .credential_manager
+        .credential_manager()
         .set_credentials(
             &CredentialKey::RackMaintenanceAccessToken {
                 rack_id: rack_id.clone(),
@@ -2531,7 +2168,7 @@ async fn test_firmware_upgrade_start_missing_profile_deletes_access_token(
 /// A machine that cannot consume its rack reprovision request because desired
 /// power is Off fails the rack job without clearing requests already owned by
 /// active device reprovisioning state machines.
-#[crate::sqlx_test]
+#[sqlx_test]
 async fn test_firmware_upgrade_wait_for_complete_recovers_power_blocked_machine(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -2589,7 +2226,7 @@ async fn test_firmware_upgrade_wait_for_complete_recovers_power_blocked_machine(
     .await?;
     txn.commit().await?;
     env.api
-        .credential_manager
+        .credential_manager()
         .set_credentials(
             &CredentialKey::RackMaintenanceAccessToken {
                 rack_id: rack_id.clone(),
@@ -2685,7 +2322,7 @@ async fn test_firmware_upgrade_wait_for_complete_recovers_power_blocked_machine(
     Ok(())
 }
 
-#[crate::sqlx_test]
+#[sqlx_test]
 async fn test_rack_maintenance_termination_unwinds_all_scoped_device_state(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -2722,7 +2359,7 @@ async fn test_rack_maintenance_termination_unwinds_all_scoped_device_state(
     )
     .await;
 
-    crate::tests::rack_state_controller::fixtures::rack::set_rack_controller_state(
+    crate::fixtures::rack::set_rack_controller_state(
         txn.as_mut(),
         &rack_id,
         maintenance_state.clone(),
@@ -2886,7 +2523,7 @@ async fn test_rack_maintenance_termination_unwinds_all_scoped_device_state(
     Ok(())
 }
 
-#[crate::sqlx_test]
+#[sqlx_test]
 async fn test_rack_maintenance_termination_fails_current_nvos_job(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -2906,7 +2543,7 @@ async fn test_rack_maintenance_termination_fails_current_nvos_job(
         model::switch::SwitchControllerState::Ready,
     )
     .await;
-    crate::tests::rack_state_controller::fixtures::rack::set_rack_controller_state(
+    crate::fixtures::rack::set_rack_controller_state(
         txn.as_mut(),
         &rack_id,
         maintenance_state.clone(),
@@ -3004,7 +2641,7 @@ async fn test_rack_maintenance_termination_fails_current_nvos_job(
 /// that WaitForComplete remains in a wait state while machines are still in
 /// WaitingForRackFirmwareUpgrade and writes in-progress rack firmware status
 /// back to the machine from RMS.
-#[crate::sqlx_test]
+#[sqlx_test]
 async fn test_firmware_upgrade_wait_for_complete_waits_while_jobs_running(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -3099,7 +2736,7 @@ async fn test_firmware_upgrade_wait_for_complete_waits_while_jobs_running(
 /// test_firmware_upgrade_wait_for_complete_transitions_to_error_on_job_failure
 /// verifies that a machine left WaitingForRackFirmwareUpgrade in
 /// FailedFirmwareUpgrade moves the rack into Error.
-#[crate::sqlx_test]
+#[sqlx_test]
 async fn test_firmware_upgrade_wait_for_complete_transitions_to_error_on_job_failure(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -3244,10 +2881,10 @@ async fn test_firmware_upgrade_wait_for_complete_transitions_to_error_on_job_fai
 /// WaitingForRackFirmwareUpgrade, then errors only after every machine has left
 /// that wait state and at least one failed.
 ///
-/// Expanded by hand instead of using `#[crate::sqlx_test]` so the body runs on
+/// Expanded by hand instead of using `#[sqlx_test]` so the body runs on
 /// a thread with a larger stack. This is the widest future in the crate's
 /// suite and does not fit the default one. Same shape as the measurement test
-/// in `tests::instance`.
+/// in carbide-api-core's `tests::instance`.
 #[test]
 fn test_firmware_upgrade_wait_for_complete_waits_for_all_nodes_to_be_terminal_before_error() {
     let mut args = ::sqlx::testing::TestArgs::new(concat!(
@@ -3493,7 +3130,7 @@ async fn test_firmware_upgrade_wait_for_complete_waits_for_all_nodes_to_be_termi
 /// verifies that a response-level lookup failure from GetFirmwareJobStatus does
 /// not mark the device failed and instead keeps the rack waiting while the
 /// machine remains in WaitingForRackFirmwareUpgrade.
-#[crate::sqlx_test]
+#[sqlx_test]
 async fn test_firmware_upgrade_wait_for_complete_retries_when_job_lookup_fails(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -3584,7 +3221,7 @@ async fn test_firmware_upgrade_wait_for_complete_retries_when_job_lookup_fails(
 /// test_firmware_upgrade_wait_for_complete_retries_on_transient_poll_error
 /// verifies that transport-level polling failures do not immediately fail the
 /// rack upgrade while machines remain in WaitingForRackFirmwareUpgrade.
-#[crate::sqlx_test]
+#[sqlx_test]
 async fn test_firmware_upgrade_wait_for_complete_retries_on_transient_poll_error(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -3668,7 +3305,7 @@ async fn test_firmware_upgrade_wait_for_complete_retries_on_transient_poll_error
     Ok(())
 }
 
-#[crate::sqlx_test]
+#[sqlx_test]
 async fn test_firmware_completion_enters_profile_driven_nvos_for_default_scope(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -3730,7 +3367,7 @@ async fn test_firmware_completion_enters_profile_driven_nvos_for_default_scope(
 
     db_rack::update_firmware_upgrade_job(txn.as_mut(), &rack_id, Some(&firmware_job)).await?;
 
-    crate::tests::rack_state_controller::fixtures::rack::set_rack_controller_state(
+    crate::fixtures::rack::set_rack_controller_state(
         txn.as_mut(),
         &rack_id,
         RackState::Maintenance {
@@ -3805,7 +3442,7 @@ async fn test_firmware_completion_enters_profile_driven_nvos_for_default_scope(
     Ok(())
 }
 
-#[crate::sqlx_test]
+#[sqlx_test]
 async fn test_profile_driven_nvos_start_retries_fetch_and_uses_noauth(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -3859,7 +3496,7 @@ async fn test_profile_driven_nvos_start_retries_fetch_and_uses_noauth(
     )
     .await?;
 
-    crate::tests::rack_state_controller::fixtures::rack::set_rack_controller_state(
+    crate::fixtures::rack::set_rack_controller_state(
         txn.as_mut(),
         &rack_id,
         RackState::Maintenance {
@@ -4003,7 +3640,7 @@ async fn test_profile_driven_nvos_start_retries_fetch_and_uses_noauth(
     Ok(())
 }
 
-#[crate::sqlx_test]
+#[sqlx_test]
 async fn test_explicit_nvos_with_no_selected_switches_cleans_token_and_advances(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -4047,7 +3684,7 @@ async fn test_explicit_nvos_with_no_selected_switches_cleans_token_and_advances(
     )
     .await?;
 
-    crate::tests::rack_state_controller::fixtures::rack::set_rack_controller_state(
+    crate::fixtures::rack::set_rack_controller_state(
         txn.as_mut(),
         &rack_id,
         RackState::Maintenance {
@@ -4112,7 +3749,7 @@ async fn test_explicit_nvos_with_no_selected_switches_cleans_token_and_advances(
     Ok(())
 }
 
-#[crate::sqlx_test]
+#[sqlx_test]
 async fn test_profile_sot_removal_errors_when_switch_waits_for_nvos(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -4139,7 +3776,7 @@ async fn test_profile_sot_removal_errors_when_switch_waits_for_nvos(
     )
     .await?;
 
-    crate::tests::rack_state_controller::fixtures::rack::set_rack_controller_state(
+    crate::fixtures::rack::set_rack_controller_state(
         txn.as_mut(),
         &rack_id,
         RackState::Maintenance {
@@ -4203,7 +3840,7 @@ async fn test_profile_sot_removal_errors_when_switch_waits_for_nvos(
 
 /// A retryable RMS rejection preserves the access token so the next
 /// `NVOSUpdate(Start)` iteration can resubmit the request.
-#[crate::sqlx_test]
+#[sqlx_test]
 async fn test_nvos_update_start_retries_rejection_with_access_token(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -4246,7 +3883,7 @@ async fn test_nvos_update_start_retries_rejection_with_access_token(
     let mut txn = pool.acquire().await?;
     db_rack::update(&mut txn, &rack_id, &config).await?;
 
-    crate::tests::rack_state_controller::fixtures::rack::set_rack_controller_state(
+    crate::fixtures::rack::set_rack_controller_state(
         &mut txn,
         &rack_id,
         RackState::Maintenance {
@@ -4260,7 +3897,7 @@ async fn test_nvos_update_start_retries_rejection_with_access_token(
     drop(txn);
 
     env.api
-        .credential_manager
+        .credential_manager()
         .set_credentials(
             &CredentialKey::RackMaintenanceAccessToken {
                 rack_id: rack_id.clone(),
@@ -4316,7 +3953,7 @@ async fn test_nvos_update_start_retries_rejection_with_access_token(
 
     let token = env
         .api
-        .credential_manager
+        .credential_manager()
         .get_credentials(&CredentialKey::RackMaintenanceAccessToken {
             rack_id: rack_id.clone(),
         })
@@ -4358,7 +3995,7 @@ async fn test_nvos_update_start_retries_rejection_with_access_token(
 
     assert!(
         env.api
-            .credential_manager
+            .credential_manager()
             .get_credentials(&CredentialKey::RackMaintenanceAccessToken {
                 rack_id: rack_id.clone(),
             })
@@ -4391,7 +4028,7 @@ async fn test_nvos_update_start_retries_rejection_with_access_token(
     Ok(())
 }
 
-#[crate::sqlx_test]
+#[sqlx_test]
 async fn test_nvos_update_recovery_moves_to_error_when_profile_is_missing(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -4442,7 +4079,7 @@ async fn test_nvos_update_recovery_moves_to_error_when_profile_is_missing(
 
     db_rack::update_nvos_update_job(txn.as_mut(), &rack_id, Some(&job)).await?;
 
-    crate::tests::rack_state_controller::fixtures::rack::set_rack_controller_state(
+    crate::fixtures::rack::set_rack_controller_state(
         txn.as_mut(),
         &rack_id,
         RackState::Maintenance {
@@ -4490,7 +4127,7 @@ async fn test_nvos_update_recovery_moves_to_error_when_profile_is_missing(
     Ok(())
 }
 
-#[crate::sqlx_test]
+#[sqlx_test]
 async fn test_nvos_update_recovers_password_after_rms_restart(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -4694,7 +4331,7 @@ async fn test_nvos_update_recovers_password_after_rms_restart(
     Ok(())
 }
 
-#[crate::sqlx_test]
+#[sqlx_test]
 async fn test_nvos_update_waits_for_all_images_before_failure_and_starts_password_recovery(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -4743,7 +4380,7 @@ async fn test_nvos_update_waits_for_all_images_before_failure_and_starts_passwor
     db_rack::update(txn.as_mut(), &rack_id, &config).await?;
     db_rack::update_nvos_update_job(txn.as_mut(), &rack_id, Some(&job)).await?;
 
-    crate::tests::rack_state_controller::fixtures::rack::set_rack_controller_state(
+    crate::fixtures::rack::set_rack_controller_state(
         txn.as_mut(),
         &rack_id,
         RackState::Maintenance {
@@ -4804,7 +4441,7 @@ async fn test_nvos_update_waits_for_all_images_before_failure_and_starts_passwor
     Ok(())
 }
 
-#[crate::sqlx_test]
+#[sqlx_test]
 async fn test_nvos_update_failed_password_recovery_enters_error_without_resubmission(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -4841,7 +4478,7 @@ async fn test_nvos_update_failed_password_recovery_enters_error_without_resubmis
     db_rack::update(txn.as_mut(), &rack_id, &config).await?;
     db_rack::update_nvos_update_job(txn.as_mut(), &rack_id, Some(&job)).await?;
 
-    crate::tests::rack_state_controller::fixtures::rack::set_rack_controller_state(
+    crate::fixtures::rack::set_rack_controller_state(
         txn.as_mut(),
         &rack_id,
         RackState::Maintenance {
@@ -5050,7 +4687,7 @@ async fn create_configure_nmx_cluster_test_rack(
     let mut txn = pool.acquire().await?;
     db_rack::update(&mut txn, &rack_id, &rack_config).await?;
 
-    crate::tests::rack_state_controller::fixtures::rack::set_rack_controller_state(
+    crate::fixtures::rack::set_rack_controller_state(
         &mut txn,
         &rack_id,
         RackState::Maintenance {
@@ -5304,7 +4941,7 @@ async fn assert_configure_nmx_cluster_v2_results(
     Ok(())
 }
 
-#[crate::sqlx_test]
+#[sqlx_test]
 async fn test_configure_nmx_cluster_v1_config_rotates_certificates_through_v2_workflow(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -5356,7 +4993,7 @@ async fn test_configure_nmx_cluster_v1_config_rotates_certificates_through_v2_wo
     .await
 }
 
-#[crate::sqlx_test]
+#[sqlx_test]
 async fn test_configure_nmx_cluster_requires_primary_nvos_credentials_for_telemetry_after_v2(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -5421,7 +5058,7 @@ async fn test_configure_nmx_cluster_requires_primary_nvos_credentials_for_teleme
     drop(txn);
 
     env.api
-        .credential_manager
+        .credential_manager()
         .delete_credentials(&CredentialKey::SwitchNvosAdmin { bmc_mac_address })
         .await
         .map_err(eyre::Report::from)?;
@@ -5446,7 +5083,7 @@ async fn test_configure_nmx_cluster_requires_primary_nvos_credentials_for_teleme
     Ok(())
 }
 
-#[crate::sqlx_test]
+#[sqlx_test]
 async fn test_configure_nmx_cluster_default_binds_primary_telemetry_after_v2(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -5518,7 +5155,7 @@ async fn test_configure_nmx_cluster_default_binds_primary_telemetry_after_v2(
     Ok(())
 }
 
-#[crate::sqlx_test]
+#[sqlx_test]
 async fn test_configure_nmx_cluster_failed_v2_job_requires_new_maintenance_request(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -5623,7 +5260,7 @@ async fn test_configure_nmx_cluster_failed_v2_job_requires_new_maintenance_reque
     Ok(())
 }
 
-#[crate::sqlx_test]
+#[sqlx_test]
 async fn test_configure_nmx_cluster_partial_certificate_submission_does_not_retry_or_start_v2(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -5703,7 +5340,7 @@ async fn test_configure_nmx_cluster_partial_certificate_submission_does_not_retr
     Ok(())
 }
 
-#[crate::sqlx_test]
+#[sqlx_test]
 async fn test_configure_nmx_cluster_waits_when_component_manager_is_missing_while_polling(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -5718,7 +5355,7 @@ async fn test_configure_nmx_cluster_waits_when_component_manager_is_missing_whil
 
     let mut txn = pool.acquire().await?;
 
-    crate::tests::rack_state_controller::fixtures::rack::set_rack_controller_state(
+    crate::fixtures::rack::set_rack_controller_state(
         &mut txn,
         &rack_id,
         RackState::Maintenance {
@@ -5740,7 +5377,7 @@ async fn test_configure_nmx_cluster_waits_when_component_manager_is_missing_whil
     Ok(())
 }
 
-#[crate::sqlx_test]
+#[sqlx_test]
 async fn test_configure_nmx_cluster_retries_certificate_batch_rejected_before_dispatch(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -5791,7 +5428,7 @@ async fn test_configure_nmx_cluster_retries_certificate_batch_rejected_before_di
     Ok(())
 }
 
-#[crate::sqlx_test]
+#[sqlx_test]
 async fn test_configure_nmx_cluster_stops_when_certificate_job_is_missing(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -5844,7 +5481,7 @@ async fn test_configure_nmx_cluster_stops_when_certificate_job_is_missing(
     Ok(())
 }
 
-#[crate::sqlx_test]
+#[sqlx_test]
 async fn test_configure_nmx_cluster_waits_for_certificate_job_and_stops_on_failure(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -6049,7 +5686,7 @@ async fn test_configure_nmx_cluster_waits_for_certificate_job_and_stops_on_failu
     Ok(())
 }
 
-#[crate::sqlx_test]
+#[sqlx_test]
 async fn test_configure_nmx_cluster_requires_nvos_credentials_before_rotation(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -6073,7 +5710,7 @@ async fn test_configure_nmx_cluster_requires_nvos_credentials_before_rotation(
     drop(txn);
 
     env.api
-        .credential_manager
+        .credential_manager()
         .delete_credentials(&CredentialKey::SwitchNvosAdmin { bmc_mac_address })
         .await
         .map_err(eyre::Report::from)?;
@@ -6097,7 +5734,7 @@ async fn test_configure_nmx_cluster_requires_nvos_credentials_before_rotation(
     Ok(())
 }
 
-#[crate::sqlx_test]
+#[sqlx_test]
 async fn test_configure_nmx_cluster_dual_port_certificates_match_v2_endpoints(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -6225,7 +5862,7 @@ async fn test_configure_nmx_cluster_dual_port_certificates_match_v2_endpoints(
     Ok(())
 }
 
-#[crate::sqlx_test]
+#[sqlx_test]
 async fn test_configure_nmx_cluster_requires_usable_nvos_endpoint_before_rotation(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -6273,7 +5910,7 @@ async fn test_configure_nmx_cluster_requires_usable_nvos_endpoint_before_rotatio
     Ok(())
 }
 
-#[crate::sqlx_test]
+#[sqlx_test]
 async fn test_configure_nmx_cluster_certificate_submission_does_not_require_bmc_endpoint_data(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -6307,7 +5944,7 @@ async fn test_configure_nmx_cluster_certificate_submission_does_not_require_bmc_
 
     for bmc_mac_address in bmc_mac_addresses {
         env.api
-            .credential_manager
+            .credential_manager()
             .delete_credentials(&CredentialKey::BmcCredentials {
                 credential_type: BmcCredentialType::BmcRoot { bmc_mac_address },
             })
@@ -6363,7 +6000,7 @@ async fn test_configure_nmx_cluster_certificate_submission_does_not_require_bmc_
     Ok(())
 }
 
-#[crate::sqlx_test]
+#[sqlx_test]
 async fn test_configure_nmx_cluster_unknown_profile_stops_before_certificate_submission(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -6401,10 +6038,7 @@ async fn test_configure_nmx_cluster_unknown_profile_stops_before_certificate_sub
         },
     };
 
-    crate::tests::rack_state_controller::fixtures::rack::set_rack_controller_state(
-        &mut txn, &rack_id, start,
-    )
-    .await?;
+    crate::fixtures::rack::set_rack_controller_state(&mut txn, &rack_id, start).await?;
 
     drop(txn);
 
@@ -6440,7 +6074,7 @@ async fn test_configure_nmx_cluster_unknown_profile_stops_before_certificate_sub
 /// version does not run transitions to `Error` rather than resuming, and that
 /// `maintenance_requested` is cleared so the rack does not loop back into
 /// maintenance.
-#[crate::sqlx_test]
+#[sqlx_test]
 async fn test_configure_nmx_cluster_retired_sub_state_transitions_to_error(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -6510,7 +6144,7 @@ async fn test_configure_nmx_cluster_retired_sub_state_transitions_to_error(
 
 /// test_configure_nmx_cluster_transitions_to_completed verifies that
 /// Maintenance::ConfigureNmxCluster transitions to Maintenance::Completed.
-#[crate::sqlx_test]
+#[sqlx_test]
 async fn test_configure_nmx_cluster_transitions_to_completed(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -6572,7 +6206,7 @@ async fn test_configure_nmx_cluster_transitions_to_completed(
 
 /// test_ready_topology_changed_transitions_to_discovering verifies that
 /// Ready with topology_changed=true transitions back to Discovering.
-#[crate::sqlx_test]
+#[sqlx_test]
 async fn test_ready_topology_changed_transitions_to_discovering(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -6630,7 +6264,7 @@ async fn test_ready_topology_changed_transitions_to_discovering(
 
 /// test_ready_reprovision_requested_transitions_to_maintenance verifies that
 /// Ready with reprovision_requested=true transitions back to Maintenance.
-#[crate::sqlx_test]
+#[sqlx_test]
 async fn test_ready_reprovision_requested_transitions_to_maintenance(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -6688,7 +6322,7 @@ async fn test_ready_reprovision_requested_transitions_to_maintenance(
 
 /// test_validation_failed_transitions_to_error verifies that
 /// Validation(Failed) transitions to Error state.
-#[crate::sqlx_test]
+#[sqlx_test]
 async fn test_validation_failed_transitions_to_error(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -6788,7 +6422,7 @@ async fn create_test_power_shelf(
 }
 
 /// Ready rack moves to Error when one of its switches enters Error.
-#[crate::sqlx_test]
+#[sqlx_test]
 async fn test_ready_with_failed_switch_transitions_to_error(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -6845,7 +6479,7 @@ async fn test_ready_with_failed_switch_transitions_to_error(
 }
 
 /// Ready rack moves to Error when an attached power shelf enters Error.
-#[crate::sqlx_test]
+#[sqlx_test]
 async fn test_ready_with_failed_power_shelf_transitions_to_error(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -6925,7 +6559,7 @@ async fn test_ready_with_failed_power_shelf_transitions_to_error(
 }
 
 /// Ready rack with all healthy components stays in Ready.
-#[crate::sqlx_test]
+#[sqlx_test]
 async fn test_ready_with_all_healthy_components_waits(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -6968,7 +6602,7 @@ async fn test_ready_with_all_healthy_components_waits(
 }
 
 /// Rack in Error transitions back to Ready once every component is Ready.
-#[crate::sqlx_test]
+#[sqlx_test]
 async fn test_error_recovers_to_ready_when_all_components_ready(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -6981,7 +6615,7 @@ async fn test_error_recovers_to_ready_when_all_components_ready(
         model::switch::SwitchControllerState::Ready,
     )
     .await;
-    crate::tests::rack_state_controller::fixtures::rack::set_rack_controller_state(
+    crate::fixtures::rack::set_rack_controller_state(
         pool.acquire().await?.as_mut(),
         &rack_id,
         RackState::Error {
@@ -7027,7 +6661,7 @@ async fn test_error_recovers_to_ready_when_all_components_ready(
 }
 
 /// Rack in Error does not auto-recover while any component is not yet Ready.
-#[crate::sqlx_test]
+#[sqlx_test]
 async fn test_error_stays_in_error_when_components_not_all_ready(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -7042,7 +6676,7 @@ async fn test_error_stays_in_error_when_components_not_all_ready(
         },
     )
     .await;
-    crate::tests::rack_state_controller::fixtures::rack::set_rack_controller_state(
+    crate::fixtures::rack::set_rack_controller_state(
         pool.acquire().await?.as_mut(),
         &rack_id,
         RackState::Error {

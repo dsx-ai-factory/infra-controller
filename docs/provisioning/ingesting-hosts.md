@@ -244,7 +244,8 @@ per-host fields and compatibility controls. It reads a snake_case
   See [Configure Expected Machine Interfaces](expected-machine-interfaces.md).
 - **`bmc_ip_address`** (string, optional): Compatibility top-level Host BMC
   address. With the top-level `Auto` policy, its presence infers Fixed
-  allocation.
+  allocation. NICo rejects an unspecified, multicast, or IPv4
+  limited-broadcast address, including the IPv4-mapped IPv6 form of each.
 - **`bmc_ip_allocation`** (`"Unspecified"` | `"Auto"` | `"Dynamic"` |
   `"Fixed"` | `"Retained"`, default `"Auto"`): Compatibility Host BMC policy
   in the whole-table JSON consumed by `em replace-all`. For the top-level

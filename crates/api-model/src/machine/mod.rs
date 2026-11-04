@@ -159,6 +159,11 @@ pub struct ManagedHostStateSnapshot {
     /// Health overrides inherited from the rack this host belongs to (if any).
     /// Populated at read time; not stored on the machines table.
     pub rack_health_overrides: Option<HealthReportSources>,
+    /// Which parts of `hardware_info` the host and DPU snapshots hold.
+    /// Populated at read time by the loader. Compact snapshots from
+    /// `load_compact_by_host_ids` load no topology at all, so their
+    /// `hardware_info` is always `None` and this field doesn't describe them.
+    pub hardware_info_scope: HardwareInfoScope,
 }
 
 impl<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> for ManagedHostStateSnapshot {
@@ -233,6 +238,9 @@ impl<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> for ManagedHostStateSnapshot {
             // This will need to be modified by callers, as its value depends on a
             // HardwareHealthReportsConfig being specified.
             aggregate_health: health_report::HealthReport::empty("".to_string()),
+            // Every snapshot query loads full hardware unless a `WithoutComponents`
+            // load overwrites this.
+            hardware_info_scope: HardwareInfoScope::Full,
         };
 
         result.sort_dpu_snapshots()?;
@@ -1507,6 +1515,12 @@ pub enum ManagedHostState {
         /// omit this, so their completion must leave pending requests alone.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         request: Option<MachineMaintenanceRequest>,
+    },
+
+    /// Host-owned generic NIC firmware work, separate from legacy DPA commands.
+    NicFirmwareUpdating {
+        /// Frozen requests and durable progress for the admitted cards.
+        operation: nic_firmware::NicFirmwareOperation,
     },
 
     /// Host is assigned to an Instance.
@@ -3197,6 +3211,9 @@ impl Display for ManagedHostState {
             ManagedHostState::Maintenance { operation, .. } => {
                 write!(f, "Maintenance({operation:?})")
             }
+            ManagedHostState::NicFirmwareUpdating { operation } => {
+                write!(f, "NicFirmwareUpdating/{}", operation.phase)
+            }
             ManagedHostState::Assigned { instance_state, .. } => match instance_state {
                 InstanceState::DPUReprovision { dpu_states } => {
                     let dpu_lowest_state = dpu_states
@@ -3312,6 +3329,7 @@ impl ManagedHostState {
             ManagedHostState::Maintenance { operation, .. } => {
                 format!("Maintenance({operation:?})")
             }
+            ManagedHostState::NicFirmwareUpdating { .. } => self.to_string(),
             ManagedHostState::Assigned { instance_state } => match instance_state {
                 InstanceState::DPUReprovision { dpu_states } => {
                     format!(
@@ -3571,6 +3589,15 @@ pub fn state_sla(
         ManagedHostState::Maintenance { .. } => {
             StateSla::with_sla(slas::MAINTENANCE, time_in_state)
         }
+        ManagedHostState::NicFirmwareUpdating { operation }
+            if matches!(
+                operation.phase,
+                nic_firmware::NicFirmwarePhase::Failed { .. }
+            ) =>
+        {
+            StateSla::with_sla(std::time::Duration::ZERO, time_in_state)
+        }
+        ManagedHostState::NicFirmwareUpdating { .. } => StateSla::no_sla(),
         ManagedHostState::Assigned { instance_state } => match instance_state {
             InstanceState::Ready => StateSla::no_sla(),
             InstanceState::BootingWithDiscoveryImage { retry } => {
@@ -3758,6 +3785,18 @@ impl Display for MachineValidationFilter {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         std::fmt::Debug::fmt(self, f)
     }
+}
+
+/// Which parts of each machine's `status.hardware_info` a snapshot load decodes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HardwareInfoScope {
+    /// All discovered hardware, including the component lists.
+    Full,
+    /// Everything except the component lists a SKU is built from: CPUs, memory,
+    /// block devices, NVMe devices, GPUs, InfiniBand interfaces and the TPM
+    /// description. Those aren't loaded: the lists are empty when decoded, and
+    /// `tpm_description` is `None`.
+    WithoutComponents,
 }
 
 pub struct LoadSnapshotOptions {
@@ -6012,6 +6051,137 @@ mod tests {
         assert!(
             !sla.time_in_state_above_sla,
             "a freshly entered RotatingNicLockdown state is within its SLA"
+        );
+    }
+
+    /// Pin populated persisted progress and the labels consumed outside Rust.
+    /// Active workflow age has no SLA; restored terminal failure breaches
+    /// immediately. Individual calls have their own deadlines.
+    #[test]
+    fn nic_firmware_state_serde_display_and_sla() {
+        use carbide_libmlx_model::firmware::operation::{
+            FirmwareOperation, FirmwareOperationPhase, FirmwareOperationState,
+        };
+        use carbide_libmlx_model::firmware::result::FirmwareFlashReport;
+
+        use crate::machine::nic_firmware::{NicFirmwareDeliveryErrorCode, NicFirmwarePhase};
+
+        let wire = serde_json::json!({
+            "state": "nicfirmwareupdating",
+            "operation": {
+                "operation_id": "nic-workflow",
+                "purpose": {"Baseline": {"continuation": "Ready"}},
+                "targets": [{
+                    "selector": {"BaseMac": "02:00:00:00:00:01"},
+                    "pci_name": "0000:01:00.0",
+                    "resolution": {
+                        "scope": "Site", "profile_id": "baseline", "profile_version": "V1-T0",
+                        "entry": {
+                            "firmware": {"part_number": "test-card", "psid": "test-psid", "version": "1.2.3"},
+                            "image": {"url": "https://firmware.example.test/image.bin", "sha256": "ab".repeat(32)},
+                            "device_config": null, "approach": "Scout"
+                        }
+                    },
+                    "original_lockdown": "Unlocked", "supervisor_instance_id": "helper-a",
+                    "receipt": {
+                        "operation_id": "nic-workflow", "state": "Running", "phase": "Burn",
+                        "report": {"flashed": false, "reset": null, "verified_image": null,
+                            "verified_version": null, "observed_version": null, "expected_version": "1.2.3"},
+                        "diagnostic": null
+                    },
+                    "diagnostic": "supervisor unavailable", "delivery_error_code": "Unavailable"
+                }],
+                "options": {"verify_image": false, "verify_version": false, "activation": "HostReboot"},
+                "phase": {"UpdatingFirmware": {"target_index": 0}},
+                "lockdown": {"step": "Observe", "result": null}
+            }
+        });
+        let mut operation = crate::test_support::nic_firmware::operation();
+        operation.targets[0].resolution.profile_version = "V1-T0".parse().expect("fixture version");
+        operation.phase = NicFirmwarePhase::UpdatingFirmware { target_index: 0 };
+        operation.targets[0].supervisor_instance_id = Some("helper-a".into());
+        operation.targets[0].receipt = Some(FirmwareOperation {
+            operation_id: "nic-workflow".into(),
+            state: FirmwareOperationState::Running,
+            phase: Some(FirmwareOperationPhase::Burn),
+            report: FirmwareFlashReport {
+                expected_version: Some("1.2.3".into()),
+                ..Default::default()
+            },
+            diagnostic: None,
+        });
+        operation.targets[0].diagnostic = Some("supervisor unavailable".into());
+        operation.targets[0].delivery_error_code = Some(NicFirmwareDeliveryErrorCode::Unavailable);
+        operation.validate().expect("reachable progress fixture");
+        let mut failed_operation = operation.clone();
+        let expected = ManagedHostState::NicFirmwareUpdating { operation };
+        let parsed: ManagedHostState =
+            serde_json::from_value(wire.clone()).expect("decode frozen state");
+        assert_eq!(parsed, expected);
+        assert_eq!(
+            serde_json::to_value(&parsed).expect("encode frozen state"),
+            wire
+        );
+        assert_eq!(parsed.to_string(), "NicFirmwareUpdating/UpdatingFirmware");
+        let dpu_id =
+            MachineId::from_str("fm100ds7blqjsadm2uuh3qqbf1h7k8pmf47um6v9uckrg7l03po8mhqgvng")
+                .expect("fixture DPU ID")
+                .try_into()
+                .expect("DPU machine type");
+        assert_eq!(
+            parsed.dpu_state_string(&dpu_id),
+            "NicFirmwareUpdating/UpdatingFirmware"
+        );
+
+        // Go consumes this exact terminal substate after safe restoration.
+        let failed_receipt = failed_operation.targets[0]
+            .receipt
+            .as_mut()
+            .expect("receipt");
+        failed_receipt.state = FirmwareOperationState::Failed;
+        failed_receipt.phase = Some(FirmwareOperationPhase::Inspect);
+        failed_operation.targets[0].delivery_error_code = None;
+        failed_operation.phase = NicFirmwarePhase::Failed {
+            reason: "inspection failed".into(),
+        };
+        failed_operation
+            .validate()
+            .expect("reachable safe failure fixture");
+        let failed = ManagedHostState::NicFirmwareUpdating {
+            operation: failed_operation,
+        };
+        assert_eq!(failed.to_string(), "NicFirmwareUpdating/Failed");
+        assert_eq!(
+            failed.dpu_state_string(&dpu_id),
+            "NicFirmwareUpdating/Failed"
+        );
+
+        let machine_id = "fm100ds7blqjsadm2uuh3qqbf1h7k8pmf47um6v9uckrg7l03po8mhqgvng"
+            .parse()
+            .expect("fixture host ID");
+        check_values(
+            [
+                Check {
+                    scenario: "active firmware work has no state SLA",
+                    input: &parsed,
+                    expect: (None, false),
+                },
+                Check {
+                    scenario: "restored terminal firmware failure breaches the SLA",
+                    input: &failed,
+                    expect: (Some(std::time::Duration::ZERO), true),
+                },
+            ],
+            |state| {
+                let sla = state_sla(
+                    &machine_id,
+                    state,
+                    &ConfigVersion::new(0),
+                    &health_report_with_alerts(vec![]),
+                    &slas::MachineSlaConfig::default(),
+                );
+                (sla.sla, sla.time_in_state_above_sla)
+            },
         );
     }
 

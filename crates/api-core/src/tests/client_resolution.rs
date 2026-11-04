@@ -628,6 +628,7 @@ async fn test_zero_dpu_cloud_init_prefers_instance_when_ip_matches_host_interfac
             instance_id: None,
             metadata: None,
             allow_unhealthy_machine: false,
+            external_validation_request_id: None,
         }))
         .await
         .expect("zero-DPU instance allocation should succeed")
@@ -838,6 +839,7 @@ async fn test_cloud_init_local_hostname_set_from_instance_name(pool: sqlx::PgPoo
                 labels: vec![],
             }),
             allow_unhealthy_machine: false,
+            external_validation_request_id: None,
         }))
         .await
         .expect("instance allocation with name should succeed")
@@ -951,6 +953,7 @@ async fn test_cloud_init_local_hostname_omitted_when_instance_name_is_not_a_vali
                 labels: vec![],
             }),
             allow_unhealthy_machine: false,
+            external_validation_request_id: None,
         }))
         .await
         .expect("instance allocation with name should succeed")

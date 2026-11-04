@@ -86,6 +86,10 @@ nmxc-mock = { package = "carbide-nmxc-mock", path = "../nmxc-mock" }
 [dev-dependencies]
 async-trait = { workspace = true }
 tonic-client-wrapper = { path = "../tonic-client-wrapper", default-features = false }
+http-body-util = { workspace = true }
+hyper = { workspace = true, features = ["http2", "server"] }
+hyper-util = { workspace = true, features = ["tokio"] }
+prost = { workspace = true }
 carbide-test-support = { path = "../test-support" }
 tokio = { workspace = true, features = ["test-util"] }
 toml = { workspace = true }

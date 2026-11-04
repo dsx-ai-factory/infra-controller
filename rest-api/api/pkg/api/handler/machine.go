@@ -1694,20 +1694,141 @@ func (gmsdh GetMachineStatusDetailsHandler) Handle(c echo.Context) error {
 
 // ~~~~~ Delete Handler ~~~~~ //
 
-// DeleteMachineHandler is the API Handler for updating a Machine
+// DeleteMachineHandler is the API Handler for deleting a Machine.
 type DeleteMachineHandler struct {
 	dbSession *cdb.Session
-	tc        temporalClient.Client
-	cfg       *config.Config
+	scp       common.SiteTemporalClientPool
 }
 
-// NewDeleteMachineHandler initializes and returns a new handler to update Machine
-func NewDeleteMachineHandler(dbSession *cdb.Session, tc temporalClient.Client, cfg *config.Config) DeleteMachineHandler {
+// NewDeleteMachineHandler initializes and returns a new handler to delete a Machine.
+func NewDeleteMachineHandler(dbSession *cdb.Session, scp common.SiteTemporalClientPool) DeleteMachineHandler {
 	return DeleteMachineHandler{
 		dbSession: dbSession,
-		tc:        tc,
-		cfg:       cfg,
+		scp:       scp,
 	}
+}
+
+// deleteForceDeletedMachineRecords removes the REST records whose Core
+// counterparts are removed by AdminForceDeleteMachine.
+func deleteForceDeletedMachineRecords(ctx context.Context, tx *cdb.Tx, dbSession *cdb.Session, machineID string) error {
+	mDAO := cdbm.NewMachineDAO(dbSession)
+	if _, err := mDAO.GetByID(ctx, tx, machineID, nil, true); err != nil {
+		if err == cdb.ErrDoesNotExist {
+			return nil
+		}
+		return fmt.Errorf("retrieve Machine for local force-delete cleanup: %w", err)
+	}
+
+	mcDAO := cdbm.NewMachineCapabilityDAO(dbSession)
+	caps, _, err := mcDAO.GetAll(ctx, tx, []string{machineID}, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, cutil.GetPtr(cdbp.TotalLimit), nil)
+	if err != nil {
+		return fmt.Errorf("retrieve Machine Capabilities for local force-delete cleanup: %w", err)
+	}
+	for _, capability := range caps {
+		if err = mcDAO.DeleteByID(ctx, tx, capability.ID, false); err != nil {
+			return fmt.Errorf("delete Machine Capability for local force-delete cleanup: %w", err)
+		}
+	}
+
+	miDAO := cdbm.NewMachineInterfaceDAO(dbSession)
+	interfaces, _, err := miDAO.GetAll(ctx, tx, cdbm.MachineInterfaceFilterInput{MachineIDs: []string{machineID}}, cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)}, nil)
+	if err != nil {
+		return fmt.Errorf("retrieve Machine Interfaces for local force-delete cleanup: %w", err)
+	}
+	for _, machineInterface := range interfaces {
+		if err = miDAO.Delete(ctx, tx, machineInterface.ID, false); err != nil {
+			return fmt.Errorf("delete Machine Interface for local force-delete cleanup: %w", err)
+		}
+	}
+
+	mitDAO := cdbm.NewMachineInstanceTypeDAO(dbSession)
+	machineInstanceTypes, _, err := mitDAO.GetAll(
+		ctx,
+		tx,
+		cdbm.MachineInstanceTypeFilterInput{MachineID: &machineID},
+		cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)},
+		nil,
+	)
+	if err != nil {
+		return fmt.Errorf("retrieve Machine Instance Type associations for local force-delete cleanup: %w", err)
+	}
+	for _, machineInstanceType := range machineInstanceTypes {
+		if err = mitDAO.Delete(ctx, tx, machineInstanceType.ID, false); err != nil {
+			return fmt.Errorf("delete Machine Instance Type association for local force-delete cleanup: %w", err)
+		}
+	}
+
+	if err = mDAO.Delete(ctx, tx, machineID, false); err != nil {
+		return fmt.Errorf("delete Machine for local force-delete cleanup: %w", err)
+	}
+	return nil
+}
+
+// forceDeletionRetainsRecords validates owner acknowledgments and Allocation capacity under the Machine lock.
+// It runs before dispatch and again before local cleanup, since owner records can change while Core runs.
+func (dmh DeleteMachineHandler) forceDeletionRetainsRecords(ctx context.Context, tx *cdb.Tx, machine *cdbm.Machine, deleteRequest model.APIMachineDeleteRequest, logger zerolog.Logger) (bool, error) {
+	instances, _, derr := cdbm.NewInstanceDAO(dmh.dbSession).GetAll(
+		ctx,
+		tx,
+		cdbm.InstanceFilterInput{MachineIDs: []string{machine.ID}},
+		cdbp.PageInput{Limit: cutil.GetPtr(1)},
+		nil,
+	)
+	if derr != nil {
+		logger.Error().Err(derr).Msg("error pulling Instance details for Machine in DB")
+		return false, cutil.NewAPIError(http.StatusInternalServerError, "Failed to query Instance associations for Machine", nil)
+	}
+	if (machine.IsAssigned || len(instances) > 0) && !deleteRequest.AllowDeleteWithInstance {
+		return false, cutil.NewAPIError(http.StatusBadRequest, "Machine is in use by an Instance; set allowDeleteWithInstance=true to authorize deletion on Site while retaining REST records", nil)
+	}
+
+	// Keep accounting under the same Instance Type advisory locks used by
+	// allocation updates and association deletion. Check the projected loss
+	// without deleting associations that may need to be retained.
+	associations, _, derr := cdbm.NewMachineInstanceTypeDAO(dmh.dbSession).GetAll(ctx, tx,
+		cdbm.MachineInstanceTypeFilterInput{MachineID: &machine.ID},
+		cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)}, nil)
+	if derr != nil {
+		logger.Error().Err(derr).Msg("failed to retrieve Machine Instance Type associations")
+		return false, cutil.NewAPIError(http.StatusInternalServerError, "Failed to retrieve Machine Instance Type associations", nil)
+	}
+	coreRequest := deleteRequest.ToProto(machine.ControllerMachineID)
+	if (machine.InstanceTypeID != nil || len(associations) > 0) && !coreRequest.AllowDeleteWithInstanceType {
+		return false, cutil.NewAPIError(http.StatusBadRequest, "Machine has an Instance Type; set allowDeleteWithInstanceType=true to authorize deletion", nil)
+	}
+	associationCounts := make(map[uuid.UUID]int)
+	for _, association := range associations {
+		associationCounts[association.InstanceTypeID]++
+	}
+	instanceTypeIDs := slices.Collect(maps.Keys(associationCounts))
+	slices.SortFunc(instanceTypeIDs, func(a, b uuid.UUID) int {
+		return slices.Compare(a[:], b[:])
+	})
+	retainRecords := deleteRequest.AllowDeleteWithInstance
+	for _, instanceTypeID := range instanceTypeIDs {
+		derr = tx.TryAcquireAdvisoryLock(ctx, cdb.GetAdvisoryLockIDFromString(instanceTypeID.String()), nil)
+		if derr != nil {
+			logger.Error().Err(derr).Msg("failed to lock Instance Type for Machine deletion")
+			return false, cutil.NewAPIError(http.StatusInternalServerError, "Failed to lock Instance Type for Machine deletion", nil)
+		}
+		// Account for every association row that cleanup would remove.
+		lostCapacity := associationCounts[instanceTypeID]
+		if machine.IsForceDeletionQuarantined() {
+			// A retry must not subtract capacity already excluded by the prior request.
+			lostCapacity = 0
+		}
+		fits, derr := common.CheckMachinesForInstanceTypeAllocation(ctx, tx, dmh.dbSession, logger, instanceTypeID, lostCapacity)
+		if derr != nil {
+			return false, cutil.NewAPIError(http.StatusInternalServerError, "Failed to check Allocation Constraints for Machine deletion", nil)
+		}
+		if !fits {
+			if !deleteRequest.AllowDeleteWithAllocation {
+				return false, cutil.NewAPIError(http.StatusBadRequest, "Machine deletion would violate Allocation Constraints; set allowDeleteWithAllocation=true to authorize deletion on Site while retaining REST records", nil)
+			}
+			retainRecords = true
+		}
+	}
+	return retainRecords, nil
 }
 
 // Handle godoc
@@ -1721,7 +1842,7 @@ func NewDeleteMachineHandler(dbSession *cdb.Session, tc temporalClient.Client, c
 // @Param id path string true "ID of Machine"
 // @Success 202 {object}
 // @Router /v2/org/{org}/nico/machine/{id} [delete]
-func (umh DeleteMachineHandler) Handle(c echo.Context) error {
+func (dmh DeleteMachineHandler) Handle(c echo.Context) error {
 	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Machine", "Delete", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
@@ -1755,8 +1876,23 @@ func (umh DeleteMachineHandler) Handle(c echo.Context) error {
 
 	cotel.SetAttribute(handlerSpan, attribute.String("machine_id", mID))
 
-	err = cdb.WithTx(ctx, umh.dbSession, func(tx *cdb.Tx) error {
-		mDAO := cdbm.NewMachineDAO(umh.dbSession)
+	var deleteRequest model.APIMachineDeleteRequest
+	err = new(echo.DefaultBinder).BindQueryParams(c, &deleteRequest)
+	if err != nil {
+		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Invalid Machine deletion options", err)
+	}
+	err = deleteRequest.Validate()
+	if err != nil {
+		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Invalid Machine deletion options", err)
+	}
+
+	var coreClient temporalClient.Client
+	var coreRequest *corev1.AdminForceDeleteMachineRequest
+	var forceWorkflowID, forceSiteID string
+	var startNewForceAttempt bool
+	var cleanupIncomplete bool
+	err = cdb.WithTx(ctx, dmh.dbSession, func(tx *cdb.Tx) error {
+		mDAO := cdbm.NewMachineDAO(dmh.dbSession)
 		// Check that Machine exists
 		// We do this twice:
 		// The first time is to grab a row-level lock with FOR UPDATE and without relations because they'd prevent FOR UPDATE
@@ -1781,7 +1917,7 @@ func (umh DeleteMachineHandler) Handle(c echo.Context) error {
 		}
 
 		// Check org has infra provider
-		orgInfrastructureProvider, derr := common.GetInfrastructureProviderForOrg(ctx, tx, umh.dbSession, org)
+		orgInfrastructureProvider, derr := common.GetInfrastructureProviderForOrg(ctx, tx, dmh.dbSession, org)
 		if derr != nil {
 			if derr == common.ErrOrgInstrastructureProviderNotFound {
 				return cutil.NewAPIError(http.StatusBadRequest, "Org doesn't have an Infrastructure Provider associated", nil)
@@ -1799,59 +1935,113 @@ func (umh DeleteMachineHandler) Handle(c echo.Context) error {
 			logger.Error().Msg("no Site relation found for Machine")
 			return cutil.NewAPIError(http.StatusInternalServerError, "Failed to retrieve Site detail for Machine", nil)
 		}
-
-		// Prevent deleting if seen on site
-		if !machine.IsMissingOnSite {
-			logger.Error().Msg("Machine exists on Site and cannot be deleted")
-			return cutil.NewAPIError(http.StatusBadRequest, "Machine exists on Site and cannot be deleted", nil)
-		}
-
-		// Even if IsMissingOnSite is true, we want to make sure it's been missing for a little while
-		statusDAO := cdbm.NewStatusDetailDAO(umh.dbSession)
-		statuses, _, derr := statusDAO.GetAll(ctx, tx, cdbm.StatusDetailFilterInput{EntityIDs: []string{machine.ID}}, cdbp.PageInput{Limit: cutil.GetPtr(1)})
-
-		if derr != nil {
-			logger.Error().Err(derr).Msg("error while retrieving StatusDetail for Machine")
-			return cutil.NewAPIError(http.StatusInternalServerError, "Failed to delete Machine", nil)
-		}
-
-		if len(statuses) == 0 {
-			logger.Error().Msg("IsMissingOnSite is true but no status seen from Site")
-			return cutil.NewAPIError(http.StatusBadRequest, "Machine does not have a status detail indicating when it went missing, unable to proceed with deletion", nil)
-		}
-
-		lastStatus := statuses[0]
-
-		if lastStatus.Message == nil || *lastStatus.Message != "Machine is missing on Site" {
-			lastStatusMessage := ""
-			if lastStatus.Message != nil {
-				lastStatusMessage = *lastStatus.Message
+		forceDeletionCompleted := machine.IsForceDeletionRequested && machine.IsForceDeletionComplete && machine.ForceDeletionWorkflowID == nil
+		if deleteRequest.Force {
+			// Retrieving an existing attempt cannot issue another Core deletion. Record its
+			// result before current owner or capacity changes can block local cleanup.
+			if machine.ForceDeletionWorkflowID == nil {
+				retainRecords, derr := dmh.forceDeletionRetainsRecords(ctx, tx, machine, deleteRequest, logger)
+				if derr != nil {
+					return derr
+				}
+				// Completed requests are replayed locally even if Core has rediscovered this ID.
+				if forceDeletionCompleted {
+					if !retainRecords {
+						derr = deleteForceDeletedMachineRecords(ctx, tx, dmh.dbSession, machine.ID)
+						if derr != nil {
+							return cutil.NewAPIError(http.StatusInternalServerError, "Failed to clean up force-deleted Machine, DB error", nil).WithCause(derr)
+						}
+					}
+					return nil
+				}
 			}
-			logger.Error().Msgf("IsMissingOnSite is true but most recent status `%s` does not match", lastStatusMessage)
-			return cutil.NewAPIError(http.StatusBadRequest, "Latest status detail for Machine is not regarding it's missing state, unable to proceed with deletion", nil)
+			if machine.Site.Status != cdbm.SiteStatusRegistered && machine.ForceDeletionWorkflowID == nil {
+				return cutil.NewAPIError(http.StatusBadRequest, "Site specified in request data is not in Registered state, cannot execute admin operation", nil)
+			}
+			coreClient, derr = dmh.scp.GetClientByID(machine.Site.ID)
+			if derr != nil {
+				return cutil.NewAPIError(http.StatusInternalServerError, "Failed to retrieve workflow client for Site", nil)
+			}
+			coreRequest = deleteRequest.ToProto(machine.ControllerMachineID)
+			forceSiteID = machine.SiteID.String()
+			if machine.ForceDeletionWorkflowID != nil {
+				forceWorkflowID = *machine.ForceDeletionWorkflowID
+			} else {
+				forceWorkflowID = "machine-force-delete-" + uuid.NewString()
+				startNewForceAttempt = true
+			}
+			// Commit quarantine and the exact attempt identity before any remote effect.
+			// Unknown outcomes keep this ID so retries cannot dispatch a second deletion.
+			_, derr = mDAO.Update(ctx, tx, cdbm.MachineUpdateInput{
+				MachineID: machine.ID, IsUsableByTenant: cutil.GetPtr(false),
+				IsForceDeletionRequested: cutil.GetPtr(true), IsForceDeletionComplete: cutil.GetPtr(false),
+				ForceDeletionWorkflowID: &forceWorkflowID,
+			})
+			return derr
 		}
 
-		// If the most recent status shows missing on site but it has not been in that state for very long,
-		// reject because maybe this was just a force-delete on site and the machine will come back.
-		curTime := time.Now()
-		deletionThreshold := lastStatus.Created.Add(MachineMissingDelayThreshold)
+		if machine.IsForceDeletionQuarantined() && !forceDeletionCompleted {
+			attempt := ""
+			if machine.ForceDeletionWorkflowID != nil {
+				attempt = " for attempt " + *machine.ForceDeletionWorkflowID
+			}
+			return cutil.NewAPIError(http.StatusConflict, "Force-deletion completion is unconfirmed"+attempt+"; retry the forced DELETE to retrieve its result before REST-only cleanup", nil)
+		}
 
-		if curTime.Before(deletionThreshold) {
-			timeSince := curTime.Sub(lastStatus.Created)
-			timeRemaining := deletionThreshold.Sub(curTime)
+		if !machine.IsForceDeletionQuarantined() {
+			// Prevent deleting if seen on site
+			if !machine.IsMissingOnSite {
+				logger.Error().Msg("Machine exists on Site and cannot be deleted")
+				return cutil.NewAPIError(http.StatusBadRequest, "Machine exists on Site and cannot be deleted", nil)
+			}
 
-			logger.Warn().Msgf("Machine cannot be deleted as it has been missing on Site for %d hour(s) and %d minute(s) only", int(timeSince.Hours()), int(timeSince.Minutes())%60)
+			// Even if IsMissingOnSite is true, we want to make sure it's been missing for a little while
+			statusDAO := cdbm.NewStatusDetailDAO(dmh.dbSession)
+			statuses, _, derr := statusDAO.GetAll(ctx, tx, cdbm.StatusDetailFilterInput{EntityIDs: []string{machine.ID}}, cdbp.PageInput{Limit: cutil.GetPtr(1)})
 
-			return cutil.NewAPIError(
-				http.StatusBadRequest,
-				fmt.Sprintf(
-					"Machine missing on site less than %d hour(s), reattempt after %d hour(s) and %v minute(s)",
-					int(MachineMissingDelayThreshold.Hours()),
-					int(timeRemaining.Hours()),
-					int(timeRemaining.Minutes())%60,
-				),
-				nil,
-			)
+			if derr != nil {
+				logger.Error().Err(derr).Msg("error while retrieving StatusDetail for Machine")
+				return cutil.NewAPIError(http.StatusInternalServerError, "Failed to delete Machine", nil)
+			}
+
+			if len(statuses) == 0 {
+				logger.Error().Msg("IsMissingOnSite is true but no status seen from Site")
+				return cutil.NewAPIError(http.StatusBadRequest, "Machine does not have a status detail indicating when it went missing, unable to proceed with deletion", nil)
+			}
+
+			lastStatus := statuses[0]
+
+			if lastStatus.Message == nil || *lastStatus.Message != "Machine is missing on Site" {
+				lastStatusMessage := ""
+				if lastStatus.Message != nil {
+					lastStatusMessage = *lastStatus.Message
+				}
+				logger.Error().Msgf("IsMissingOnSite is true but most recent status `%s` does not match", lastStatusMessage)
+				return cutil.NewAPIError(http.StatusBadRequest, "Latest status detail for Machine is not regarding it's missing state, unable to proceed with deletion", nil)
+			}
+
+			// If the most recent status shows missing on site but it has not been in that state for very long,
+			// reject because maybe this was just a force-delete on site and the machine will come back.
+			curTime := time.Now()
+			deletionThreshold := lastStatus.Created.Add(MachineMissingDelayThreshold)
+
+			if curTime.Before(deletionThreshold) {
+				timeSince := curTime.Sub(lastStatus.Created)
+				timeRemaining := deletionThreshold.Sub(curTime)
+
+				logger.Warn().Msgf("Machine cannot be deleted as it has been missing on Site for %d hour(s) and %d minute(s) only", int(timeSince.Hours()), int(timeSince.Minutes())%60)
+
+				return cutil.NewAPIError(
+					http.StatusBadRequest,
+					fmt.Sprintf(
+						"Machine missing on site less than %d hour(s), reattempt after %d hour(s) and %v minute(s)",
+						int(MachineMissingDelayThreshold.Hours()),
+						int(timeRemaining.Hours()),
+						int(timeRemaining.Minutes())%60,
+					),
+					nil,
+				)
+			}
 		}
 
 		// Prevent deleting if an instance exists.
@@ -1859,7 +2049,7 @@ func (umh DeleteMachineHandler) Handle(c echo.Context) error {
 		// with an instance type before allowing deletion, and you can't get an
 		// instance without an instance type, but this check here lets us be helpful
 		// to the user by giving them some details about what they need to clean up.
-		iDAO := cdbm.NewInstanceDAO(umh.dbSession)
+		iDAO := cdbm.NewInstanceDAO(dmh.dbSession)
 		instances, _, derr := iDAO.GetAll(
 			ctx, tx,
 			cdbm.InstanceFilterInput{MachineIDs: []string{machine.ID}},
@@ -1892,8 +2082,22 @@ func (umh DeleteMachineHandler) Handle(c echo.Context) error {
 			)
 		}
 
+		if machine.IsForceDeletionQuarantined() {
+			if machine.IsAssigned {
+				return cutil.NewAPIError(http.StatusBadRequest, "Machine is still assigned; wait for Instance cleanup before REST-only deletion", nil)
+			}
+			associations, _, derr := cdbm.NewMachineInstanceTypeDAO(dmh.dbSession).GetAll(ctx, tx,
+				cdbm.MachineInstanceTypeFilterInput{MachineID: &machine.ID}, cdbp.PageInput{Limit: cutil.GetPtr(1)}, nil)
+			if derr != nil {
+				return cutil.NewAPIError(http.StatusInternalServerError, "Failed to retrieve Machine Instance Type associations", nil)
+			}
+			if machine.InstanceTypeID != nil || len(associations) > 0 {
+				return cutil.NewAPIError(http.StatusBadRequest, "Remove Machine Instance Type associations before REST-only deletion", nil)
+			}
+		}
+
 		// Clean up capabilities
-		mcDAO := cdbm.NewMachineCapabilityDAO(umh.dbSession)
+		mcDAO := cdbm.NewMachineCapabilityDAO(dmh.dbSession)
 		caps, _, derr := mcDAO.GetAll(ctx, tx, []string{machine.ID}, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, cutil.GetPtr(cdbp.TotalLimit), nil)
 		if derr != nil {
 			logger.Error().Err(derr).Msg("error pulling machine capabilities for Machine in DB")
@@ -1909,7 +2113,7 @@ func (umh DeleteMachineHandler) Handle(c echo.Context) error {
 		}
 
 		// Clean up interfaces
-		mifcDAO := cdbm.NewMachineInterfaceDAO(umh.dbSession)
+		mifcDAO := cdbm.NewMachineInterfaceDAO(dmh.dbSession)
 		ifcs, _, derr := mifcDAO.GetAll(
 			ctx,
 			tx,
@@ -1945,7 +2149,76 @@ func (umh DeleteMachineHandler) Handle(c echo.Context) error {
 		return common.HandleTxError(c, logger, err, "Failed to delete Machine, DB transaction error")
 	}
 
+	if forceWorkflowID != "" {
+		var coreResponse corev1.AdminForceDeleteMachineResponse
+		apiErr, coreResultObserved := common.ExecuteCoreGRPCWithWorkflowID(ctx, coreClient,
+			corev1.Forge_AdminForceDeleteMachine_FullMethodName, coreRequest, &coreResponse,
+			forceWorkflowID, startNewForceAttempt, forceSiteID)
+		complete := coreResultObserved && ((apiErr == nil && coreResponse.AllDone) || (apiErr != nil && apiErr.Code == http.StatusNotFound))
+		var localCleanupError error
+		err = cdb.WithTx(ctx, dmh.dbSession, func(tx *cdb.Tx) error {
+			mDAO := cdbm.NewMachineDAO(dmh.dbSession)
+			machine, derr := mDAO.GetByID(ctx, tx, mID, nil, true)
+			if derr != nil {
+				return derr
+			}
+			if machine.ForceDeletionWorkflowID == nil || *machine.ForceDeletionWorkflowID != forceWorkflowID {
+				return cutil.NewAPIError(http.StatusConflict, "Force-deletion attempt changed; retry to observe the current attempt", nil)
+			}
+			if !coreResultObserved {
+				return nil
+			}
+			// A definitive rejection or incomplete result permits a later explicit attempt.
+			// Unknown timeouts/history failures never release this fence.
+			_, derr = mDAO.Clear(ctx, tx, cdbm.MachineClearInput{MachineID: mID, ForceDeletionWorkflowID: true})
+			if derr != nil {
+				return derr
+			}
+			_, derr = mDAO.Update(ctx, tx, cdbm.MachineUpdateInput{MachineID: mID, IsForceDeletionComplete: &complete})
+			if derr != nil || !complete {
+				return derr
+			}
+			localCleanupError = tx.WithSavepoint(ctx, func(cleanupTx *cdb.Tx) error {
+				retainRecords, cleanupErr := dmh.forceDeletionRetainsRecords(ctx, cleanupTx, machine, deleteRequest, logger)
+				if cleanupErr != nil {
+					return cleanupErr
+				}
+				if !retainRecords {
+					cleanupErr = deleteForceDeletedMachineRecords(ctx, cleanupTx, dmh.dbSession, mID)
+					if cleanupErr != nil {
+						return cutil.NewAPIError(http.StatusInternalServerError, "Failed to clean up force-deleted Machine, DB error", nil).WithCause(cleanupErr)
+					}
+				}
+				return nil
+			})
+			if errors.Is(localCleanupError, cdb.ErrTransactionSavepoint) {
+				return localCleanupError
+			}
+			return nil
+		})
+		if err != nil {
+			return common.HandleTxError(c, logger, err, "Failed to record force-deletion result, DB transaction error")
+		}
+		if localCleanupError != nil {
+			return common.HandleTxError(c, logger, localCleanupError, "Site deletion completed but REST cleanup failed")
+		}
+		if apiErr != nil && (!coreResultObserved || apiErr.Code != http.StatusNotFound) {
+			message := apiErr.Message
+			if !coreResultObserved {
+				message += fmt.Sprintf("; force-deletion attempt %s remains unconfirmed and the Machine remains unavailable. Retry to retrieve this attempt; if its workflow result is unavailable, ask the Site operator to investigate this attempt ID", forceWorkflowID)
+			}
+			return cutil.NewAPIErrorResponse(c, apiErr.Code, message, apiErr.Data)
+		}
+		cleanupIncomplete = !complete
+	}
+
 	logger.Info().Msg("finishing API handler")
+
+	if cleanupIncomplete {
+		c.Response().Header().Set("Retry-After", "5")
+		return cutil.NewAPIErrorResponse(c, http.StatusConflict,
+			"Machine deletion is incomplete; after 5 seconds repeat this DELETE request with the same options until it returns 202. Cleanup is not automatically retried", nil)
+	}
 
 	return c.JSON(http.StatusAccepted, model.NewAPIDeletionAcceptedResponse())
 }

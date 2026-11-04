@@ -333,6 +333,16 @@ impl ServiceConfig {
         self.interfaces.contains_key(receiving_interface)
     }
 
+    /// Reports whether any fixed service binding requires DHCPv4 so the agent can reject a
+    /// replacement when the DPU has no IPv4 server identity.
+    pub fn has_ipv4_reservations(&self) -> bool {
+        self.interfaces.values().any(|reservations| {
+            reservations
+                .values()
+                .any(|reservation| matches!(&reservation.link, ServiceLink::Ipv4(_)))
+        })
+    }
+
     /// Finds the reservation for an exact receiving-interface and client-MAC pair to preserve
     /// service-slot isolation.
     pub fn get(
@@ -363,6 +373,20 @@ impl ServiceConfig {
             )));
         }
         Ok(())
+    }
+
+    /// Consumes the validated reservation index into deterministic interface groups so control
+    /// transports preserve its receiving-interface and MAC ordering.
+    pub fn into_interface_groups(self) -> Vec<ServiceInterfaceReservations> {
+        self.interfaces
+            .into_iter()
+            .map(
+                |(receiving_interface, reservations)| ServiceInterfaceReservations {
+                    receiving_interface,
+                    reservations: reservations.into_values().collect(),
+                },
+            )
+            .collect()
     }
 }
 

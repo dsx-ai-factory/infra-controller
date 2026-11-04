@@ -228,8 +228,8 @@ impl TestApiBuilder {
         }
     }
 
-    #[cfg(test)]
-    pub(crate) fn with_firmware_object_fetcher(
+    /// Sets the firmware-object fetcher shared with controller test fixtures.
+    pub fn with_firmware_object_fetcher(
         self,
         firmware_object_fetcher: Arc<dyn FirmwareObjectFetcher>,
     ) -> Self {
