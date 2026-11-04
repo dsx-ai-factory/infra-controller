@@ -180,16 +180,27 @@ Otherwise it consults, in order, the [environment source](#environment-source), 
 | File | `CARBIDE_CREDENTIALS_FILE_ENABLED=true` and `CARBIDE_CREDENTIALS_FILE_PATH` |
 | Vault | `VAULT_ADDR` |
 
-The consumer builds a Vault client only when `VAULT_ADDR` is set. When it is set, the consumer also requires `VAULT_KV_MOUNT_LOCATION`, `VAULT_PKI_MOUNT_LOCATION`, `VAULT_PKI_ROLE_NAME`, a Vault root CA bundle (`VAULT_CACERT`, default `/var/run/secrets/forge-roots/ca.crt`), and either a Kubernetes service-account token or `VAULT_TOKEN`; an incomplete Vault configuration fails startup instead of dropping Vault from the chain. If `auth_mode` requires a credential and no source supplies it, startup fails with `Missing MQTT credentials`.
+The consumer builds a Vault client only when `VAULT_ADDR` is set. When it is set, the consumer also requires `VAULT_KV_MOUNT_LOCATION`, `VAULT_PKI_MOUNT_LOCATION`, `VAULT_PKI_ROLE_NAME`, and a Vault root CA bundle (`VAULT_CACERT`, default `/var/run/secrets/forge-roots/ca.crt`). A mounted Kubernetes service-account token selects Kubernetes authentication, which needs a Vault auth role for the pod's service account and ignores `VAULT_TOKEN`; `VAULT_TOKEN` applies only when the pod has no service-account token. An incomplete Vault configuration fails startup instead of dropping Vault from the chain.
+
+When `auth_mode` requires a credential and no source supplies it, the consumer fails with `Missing MQTT credentials for mqtt/dsx-exchange-consumer/auth` for `basic_auth` at startup, or with `Missing MQTT OAuth2 credentials for mqtt/dsx-exchange-consumer/auth` for `oauth2` when it first requests a token.
 
 To run without Vault, create a Secret whose key holds the file in the [File Source](#file-source) format, and set `credentials.secretName` and `credentials.key` in the `nico-dsx-exchange-consumer` chart. The chart mounts the whole Secret as a directory and sets both file variables. Sites that keep Vault set the `VAULT_*` variables through the chart's `extraEnv`, mount the Vault CA through `extraVolumes` and `extraVolumeMounts`, and change nothing else.
+
+For the environment source, set both fields of the credential. The type name is case-insensitive in the variable name:
+
+```bash
+export CARBIDE_CREDENTIALS_ENV_ENABLED=true
+export CARBIDE_STATIC_CREDENTIAL__MQTT_AUTH_BY_CREDENTIAL_TYPE__DSXEXCHANGECONSUMER__USERNAME=consumer
+export CARBIDE_STATIC_CREDENTIAL__MQTT_AUTH_BY_CREDENTIAL_TYPE__DSXEXCHANGECONSUMER__PASSWORD=example
+```
 
 Rotation takes effect as follows:
 
 | `auth_mode` | Source | Rotation |
 | --- | --- | --- |
 | `oauth2` | File | The watcher reloads the file. The consumer re-reads the credential at its next token fetch, so a rotated Secret applies without a restart. |
-| `oauth2` | Environment or Vault | Restart the consumer. |
+| `oauth2` | Vault | Each lookup reads Vault, so a rotated credential applies at the next token fetch without a restart. |
+| `oauth2` | Environment | Restart the consumer; the environment is read once at startup. |
 | `basic_auth` | Any | Restart the consumer; it reads the credential once at startup. |
 
 A failed file reload is reported by `carbide_static_credential_watcher_failures_total`; the consumer keeps the last valid snapshot.

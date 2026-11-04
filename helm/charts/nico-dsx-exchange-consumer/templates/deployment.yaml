@@ -80,7 +80,7 @@ spec:
         # rotated Secret reaches the file the watcher reads.
         - name: credentials
           secret:
-            secretName: {{ .Values.credentials.secretName }}
+            secretName: {{ .Values.credentials.secretName | quote }}
         {{- end }}
         {{- with .Values.extraVolumes }}
         {{- toYaml . | nindent 8 }}

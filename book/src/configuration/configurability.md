@@ -962,7 +962,8 @@ scope          = "mqtt:publish mqtt:subscribe"
 [`crates/api-core/src/cfg/README.md` → MqttAuthConfig / MqttOAuth2Config](../../../crates/api-core/src/cfg/README.md#mqttauthconfig).
 
 The `nico-dsx-exchange-consumer` chart reads its own MQTT credential and takes no Vault
-settings unless you opt in. Refer to
+credential settings unless you opt in. Its Certificate still uses the Vault-named
+issuer `vault-nico-issuer` by default. Refer to
 [DSX Exchange Consumer Credential](../../../docs/configuration/credential-sources.md#dsx-exchange-consumer-credential)
 for the supported sources and rotation behavior.
 
