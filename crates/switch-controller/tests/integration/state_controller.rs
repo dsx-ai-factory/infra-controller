@@ -1329,6 +1329,7 @@ async fn test_rack_error_unwinds_switch_waiting_for_nvos(
             rack.controller_state.version,
             rack.controller_state.version.increment(),
             &RackState::Error {
+                source: None,
                 certificate_failure: None,
                 cause: "profile SOT unavailable".to_string(),
                 recovery_policy: RackErrorRecoveryPolicy::MaintenanceRequestRequired,

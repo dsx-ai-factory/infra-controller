@@ -28,8 +28,8 @@ use model::DeletedFilter;
 use model::machine::machine_search_config::MachineSearchConfig;
 use model::power_shelf::PowerShelfSearchFilter;
 use model::rack::{
-    FirmwareUpgradeState, Rack, RackConfig, RackErrorRecoveryPolicy, RackMaintenanceState,
-    RackState,
+    FirmwareUpgradeState, Rack, RackConfig, RackErrorRecoveryPolicy, RackErrorSource,
+    RackMaintenanceState, RackState,
 };
 use model::switch::SwitchSearchFilter;
 use state_controller::state_handler::{
@@ -120,6 +120,7 @@ pub async fn handle_ready(
         );
         let txn = ctx.services.db_pool.begin().await?;
         return Ok(StateHandlerOutcome::transition(RackState::Error {
+            source: Some(RackErrorSource::ComponentFailure),
             certificate_failure: None,
             cause,
             recovery_policy: RackErrorRecoveryPolicy::ComponentsReady,
@@ -133,7 +134,7 @@ pub async fn handle_ready(
 }
 
 /// Returns a cause string if any switch, power shelf, or machine in the rack
-/// is in its terminal failure state, or `None` if every component is healthy.
+/// is in its terminal failure state, or `None` if no terminal component failure remains.
 pub(super) async fn detect_component_failure(
     rack_id: &RackId,
     ctx: &mut StateHandlerContext<'_, RackStateHandlerContextObjects>,

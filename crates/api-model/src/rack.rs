@@ -417,11 +417,20 @@ impl<'r> FromRow<'r, PgRow> for Rack {
 // RACK STATES
 // ============================================================================
 
+/// Identifies a rack error whose recovery condition is known.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RackErrorSource {
+    /// A Ready rack observed a switch/power shelf Error or a machine Failed state.
+    ComponentFailure,
+}
+
 /// Determines how a rack can leave [`RackState::Error`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RackErrorRecoveryPolicy {
-    /// The rack returns to Ready after all attached components become Ready.
+    /// Component-failure errors return to Ready when no terminal component failure remains.
+    /// Errors without a source retain the requirement that all components become Ready.
     /// Also applies when a persisted Error state has no recovery metadata.
     #[default]
     ComponentsReady,
@@ -493,6 +502,14 @@ pub enum RackState {
     Error {
         /// Description of the failure that moved the rack to Error.
         cause: String,
+
+        /// Known error source, absent for legacy and non-component errors.
+        /// With ComponentsReady, ComponentFailure permits recovery once no terminal
+        /// failure remains, including while machines are Assigned or devices initialize.
+        /// An absent source retains strict all-components-Ready recovery. Older
+        /// binaries ignore this field and retain their original recovery condition.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source: Option<RackErrorSource>,
 
         /// Certificate diagnostics, absent for older rows and unrelated errors.
         /// Exposed in lifecycle state and state history without a separate job API.
@@ -1085,6 +1102,25 @@ mod tests {
 
             "legacy error retains automatic component recovery" {
                 r#"{"state":"error","cause":"switch failed"}"# => Yields(RackState::Error {
+                    source: None,
+                    certificate_failure: None,
+                    cause: "switch failed".to_string(),
+                    recovery_policy: RackErrorRecoveryPolicy::ComponentsReady,
+                }),
+            }
+
+            "explicit legacy recovery policy has no source" {
+                r#"{"state":"error","cause":"switch failed","recovery_policy":"components_ready"}"# => Yields(RackState::Error {
+                    source: None,
+                    certificate_failure: None,
+                    cause: "switch failed".to_string(),
+                    recovery_policy: RackErrorRecoveryPolicy::ComponentsReady,
+                }),
+            }
+
+            "component source survives persistence" {
+                r#"{"state":"error","cause":"switch failed","recovery_policy":"components_ready","source":"component_failure"}"# => Yields(RackState::Error {
+                    source: Some(RackErrorSource::ComponentFailure),
                     certificate_failure: None,
                     cause: "switch failed".to_string(),
                     recovery_policy: RackErrorRecoveryPolicy::ComponentsReady,
@@ -1093,12 +1129,42 @@ mod tests {
 
             "maintenance error requires a new request" {
                 r#"{"state":"error","cause":"maintenance failed","recovery_policy":"maintenance_request_required"}"# => Yields(RackState::Error {
+                    source: None,
                     certificate_failure: None,
                     cause: "maintenance failed".to_string(),
                     recovery_policy: RackErrorRecoveryPolicy::MaintenanceRequestRequired,
                 }),
             }
         );
+    }
+
+    #[test]
+    fn rack_error_source_serializes_without_changing_legacy_shape() {
+        for (source, expected) in [
+            (
+                None,
+                serde_json::json!({
+                    "state": "error", "cause": "switch failed", "recovery_policy": "components_ready"
+                }),
+            ),
+            (
+                Some(RackErrorSource::ComponentFailure),
+                serde_json::json!({
+                    "state": "error", "cause": "switch failed", "recovery_policy": "components_ready",
+                    "source": "component_failure"
+                }),
+            ),
+        ] {
+            let state = RackState::Error {
+                cause: "switch failed".to_string(),
+                certificate_failure: None,
+                recovery_policy: RackErrorRecoveryPolicy::ComponentsReady,
+                source,
+            };
+            let encoded = serde_json::to_value(&state).unwrap();
+            assert_eq!(encoded, expected);
+            assert_eq!(serde_json::from_value::<RackState>(encoded).unwrap(), state);
+        }
     }
 
     // ── MaintenanceScope ────────────────────────────────────────────────
@@ -1348,6 +1414,7 @@ mod tests {
             "accepts in error state" {
                 (
                     RackState::Error {
+                        source: None,
                         certificate_failure: None,
                         cause: "something broke".into(),
                         recovery_policy: RackErrorRecoveryPolicy::ComponentsReady,

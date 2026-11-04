@@ -52,9 +52,9 @@ use model::rack::{
     ConfigureNmxClusterState, FirmwareProgressState, FirmwareUpgradeDeviceStatus,
     FirmwareUpgradeJob, FirmwareUpgradeState, MaintenanceActivity, MaintenanceScope,
     NvosPasswordUpdateState, NvosUpdateJob, NvosUpdateState, NvosUpdateSwitchStatus, Rack,
-    RackConfig, RackErrorRecoveryPolicy, RackFirmwareUpgradeState, RackFirmwareUpgradeStatus,
-    RackMaintenanceState, RackPowerState, RackState, RackValidationState, SwitchNvosUpdateState,
-    SwitchNvosUpdateStatus,
+    RackConfig, RackErrorRecoveryPolicy, RackErrorSource, RackFirmwareUpgradeState,
+    RackFirmwareUpgradeStatus, RackMaintenanceState, RackPowerState, RackState,
+    RackValidationState, SwitchNvosUpdateState, SwitchNvosUpdateStatus,
 };
 use model::rack_type::{
     RackCapabilitiesSet, RackCapabilityCompute, RackCapabilityPowerShelf, RackCapabilitySwitch,
@@ -1344,16 +1344,13 @@ async fn test_error_state_does_nothing(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let env = create_test_env_with_overrides(pool.clone(), TestEnvOverrides::default()).await;
 
-    let rack_id = new_rack_id();
-    let mut txn = pool.acquire().await?;
-    db_rack::create(
-        &mut txn,
-        &rack_id,
-        Some(&RackProfileId::new("Empty")),
-        &RackConfig::default(),
-        None,
+    let (rack_id, switch_id) = create_ready_rack_with_switch(&env, &pool).await?;
+    set_switch_state(
+        pool.acquire().await?.as_mut(),
+        &switch_id,
+        model::switch::SwitchControllerState::Ready,
     )
-    .await?;
+    .await;
 
     let mut rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
 
@@ -1368,6 +1365,7 @@ async fn test_error_state_does_nothing(
     };
 
     let error_state = RackState::Error {
+        source: None,
         certificate_failure: None,
         cause: "test error".to_string(),
         recovery_policy: RackErrorRecoveryPolicy::MaintenanceRequestRequired,
@@ -5215,6 +5213,7 @@ async fn test_configure_nmx_cluster_failed_v2_job_requires_new_maintenance_reque
     assert!(matches!(
         rack.controller_state.value,
         RackState::Error {
+            source: None,
             certificate_failure: None,
             ref cause,
             recovery_policy: RackErrorRecoveryPolicy::MaintenanceRequestRequired,
@@ -5298,6 +5297,7 @@ async fn test_configure_nmx_cluster_partial_certificate_submission_does_not_retr
     assert!(matches!(
         rack.controller_state.value,
         RackState::Error {
+            source: None,
             certificate_failure: Some(ref failure),
             ref cause,
             recovery_policy: RackErrorRecoveryPolicy::MaintenanceRequestRequired,
@@ -5598,6 +5598,7 @@ async fn test_configure_nmx_cluster_waits_for_certificate_job_and_stops_on_failu
     ));
 
     let RackState::Error {
+        source: None,
         certificate_failure: Some(ref failure),
         recovery_policy,
         ..
@@ -5887,6 +5888,7 @@ async fn test_configure_nmx_cluster_requires_usable_nvos_endpoint_before_rotatio
     let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
 
     assert!(matches!(rack.controller_state.value, RackState::Error {
+        source: None,
         certificate_failure: None,
         ref cause, recovery_policy: RackErrorRecoveryPolicy::MaintenanceRequestRequired,
     } if cause.contains("no usable NVOS endpoint")));
@@ -6457,6 +6459,7 @@ async fn test_ready_with_failed_switch_transitions_to_error(
     match outcome {
         StateHandlerOutcome::Transition { next_state, .. } => match next_state {
             RackState::Error {
+                source: Some(RackErrorSource::ComponentFailure),
                 certificate_failure: None,
                 cause,
                 recovery_policy: RackErrorRecoveryPolicy::ComponentsReady,
@@ -6537,6 +6540,7 @@ async fn test_ready_with_failed_power_shelf_transitions_to_error(
     match outcome {
         StateHandlerOutcome::Transition { next_state, .. } => match next_state {
             RackState::Error {
+                source: Some(RackErrorSource::ComponentFailure),
                 certificate_failure: None,
                 cause,
                 recovery_policy: RackErrorRecoveryPolicy::ComponentsReady,
@@ -6601,6 +6605,347 @@ async fn test_ready_with_all_healthy_components_waits(
     Ok(())
 }
 
+/// Reconcile and reload both directions without changing an assigned machine.
+#[sqlx_test]
+async fn test_component_error_recovers_with_assigned_machine(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use model::machine::{InstanceState, ManagedHostState};
+    use model::power_shelf::PowerShelfControllerState;
+    use model::switch::{InitializingState, SwitchControllerState};
+
+    async fn check_public_state(
+        env: &TestEnv,
+        rack_id: &RackId,
+        expected: &RackState,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let detail = env
+            .api
+            .get_rack(Request::new(rpc::forge::GetRackRequest {
+                id: Some(rack_id.to_string()),
+            }))
+            .await?
+            .into_inner();
+        let list = env
+            .api
+            .get_rack(Request::new(rpc::forge::GetRackRequest { id: None }))
+            .await?
+            .into_inner();
+        let by_ids = env
+            .api
+            .find_racks_by_ids(Request::new(rpc::forge::RacksByIdsRequest {
+                rack_ids: vec![rack_id.clone()],
+            }))
+            .await?
+            .into_inner();
+        let listed = list
+            .rack
+            .iter()
+            .find(|rack| rack.id.as_ref() == Some(rack_id))
+            .unwrap();
+        for rack in [&detail.rack[0], listed, &by_ids.racks[0]] {
+            assert_eq!(rack.rack_state, expected.to_string());
+            let lifecycle = rack.status.as_ref().unwrap().lifecycle.as_ref().unwrap();
+            assert_eq!(
+                serde_json::from_str::<RackState>(&lifecycle.state)?,
+                *expected
+            );
+        }
+        Ok(())
+    }
+
+    let mut config = config_with_rack_profiles();
+    config
+        .rack_profiles
+        .rack_profiles
+        .get_mut("NVL72")
+        .unwrap()
+        .rack_capabilities
+        .compute
+        .count = 1;
+    let env =
+        create_test_env_with_overrides(pool.clone(), TestEnvOverrides::with_config(config)).await;
+    let rack_id = new_rack_id();
+    db_rack::create(
+        pool.acquire().await?.as_mut(),
+        &rack_id,
+        Some(&RackProfileId::new("NVL72")),
+        &RackConfig::default(),
+        None,
+    )
+    .await?;
+    let host = new_host(
+        &env,
+        ManagedHostConfig::default().with_expected_machine_data(ExpectedMachineData {
+            rack_id: Some(rack_id.clone()),
+            ..Default::default()
+        }),
+    )
+    .await?;
+    let switch_id = attach_switch_with_nvos_credentials(&env, &rack_id).await?;
+    let mut conn = pool.acquire().await?;
+    let power_shelf_id = create_test_power_shelf(conn.as_mut(), &rack_id, 0xa1).await;
+    set_switch_state(conn.as_mut(), &switch_id, SwitchControllerState::Ready).await;
+    set_power_shelf_state(
+        conn.as_mut(),
+        &power_shelf_id,
+        PowerShelfControllerState::Ready,
+    )
+    .await;
+    drop(conn);
+    crate::fixtures::rack::set_rack_controller_state(
+        pool.acquire().await?.as_mut(),
+        &rack_id,
+        RackState::Ready,
+    )
+    .await?;
+    let assigned = ManagedHostState::Assigned {
+        instance_state: InstanceState::Ready,
+    };
+    db::machine::advance(
+        &host.host_snapshot,
+        pool.acquire().await?.as_mut(),
+        &assigned,
+        None,
+    )
+    .await?;
+
+    for (scenario, fail_switch) in [("switch", true), ("power shelf", false)] {
+        let mut conn = pool.acquire().await?;
+        set_switch_state(conn.as_mut(), &switch_id, SwitchControllerState::Ready).await;
+        if fail_switch {
+            set_switch_state(
+                conn.as_mut(),
+                &switch_id,
+                SwitchControllerState::Error {
+                    cause: "synthetic failure".to_string(),
+                },
+            )
+            .await;
+        } else {
+            set_power_shelf_state(
+                conn.as_mut(),
+                &power_shelf_id,
+                PowerShelfControllerState::Error {
+                    cause: "synthetic failure".to_string(),
+                },
+            )
+            .await;
+        }
+        drop(conn);
+        env.run_rack_controller_iteration().await;
+        let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+        assert!(
+            matches!(rack.controller_state.value, RackState::Error {
+            source: Some(RackErrorSource::ComponentFailure),
+            recovery_policy: RackErrorRecoveryPolicy::ComponentsReady, ref cause, ..
+        } if cause.contains(scenario)),
+            "{scenario}: persist the component error source"
+        );
+
+        check_public_state(&env, &rack_id, &rack.controller_state.value).await?;
+        let history = env
+            .api
+            .find_rack_state_histories(Request::new(rpc::forge::RackStateHistoriesRequest {
+                rack_ids: vec![rack_id.clone()],
+            }))
+            .await?
+            .into_inner();
+        assert!(
+            history.histories[&rack_id.to_string()]
+                .records
+                .iter()
+                .any(|record| {
+                    matches!(
+                        serde_json::from_str::<RackState>(&record.state).unwrap(),
+                        RackState::Error {
+                            source: Some(RackErrorSource::ComponentFailure),
+                            ..
+                        }
+                    )
+                })
+        );
+
+        env.run_rack_controller_iteration().await;
+        let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+        assert!(
+            matches!(rack.controller_state.value, RackState::Error { .. }),
+            "{scenario}: an active failure must prevent recovery"
+        );
+
+        // Recovery must check the whole rack, not just the original failing device.
+        let mut conn = pool.acquire().await?;
+        if fail_switch {
+            set_switch_state(conn.as_mut(), &switch_id, SwitchControllerState::Ready).await;
+            set_power_shelf_state(
+                conn.as_mut(),
+                &power_shelf_id,
+                PowerShelfControllerState::Error {
+                    cause: "another failure".to_string(),
+                },
+            )
+            .await;
+        } else {
+            set_power_shelf_state(
+                conn.as_mut(),
+                &power_shelf_id,
+                PowerShelfControllerState::Ready,
+            )
+            .await;
+            set_switch_state(
+                conn.as_mut(),
+                &switch_id,
+                SwitchControllerState::Error {
+                    cause: "another failure".to_string(),
+                },
+            )
+            .await;
+        }
+        drop(conn);
+        env.run_rack_controller_iteration().await;
+        let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+        assert!(
+            matches!(rack.controller_state.value, RackState::Error { .. }),
+            "{scenario}: another component failure must prevent recovery"
+        );
+
+        let mut conn = pool.acquire().await?;
+        set_switch_state(
+            conn.as_mut(),
+            &switch_id,
+            SwitchControllerState::Initializing {
+                initializing_state: InitializingState::WaitForOsMachineInterface,
+            },
+        )
+        .await;
+        set_power_shelf_state(
+            conn.as_mut(),
+            &power_shelf_id,
+            PowerShelfControllerState::Ready,
+        )
+        .await;
+        drop(conn);
+        if fail_switch {
+            let failed = ManagedHostState::Failed {
+                machine_id: host.host_snapshot.id.into(),
+                retry_count: 0,
+                details: model::machine::FailureDetails {
+                    cause: model::machine::FailureCause::UnhandledState {
+                        err: "synthetic failure".to_string(),
+                    },
+                    source: model::machine::FailureSource::StateMachine,
+                    failed_at: chrono::Utc::now(),
+                },
+            };
+            let mut conn = pool.acquire().await?;
+            let machine = db::machine::find_one(
+                conn.as_mut(),
+                &host.host_snapshot.id,
+                model::machine::machine_search_config::MachineSearchConfig::default(),
+            )
+            .await?
+            .unwrap();
+            db::machine::advance(&machine, conn.as_mut(), &failed, None).await?;
+            drop(conn);
+            env.run_rack_controller_iteration().await;
+            assert!(
+                matches!(
+                    get_db_rack(env.db_reader().as_mut(), &rack_id)
+                        .await
+                        .controller_state
+                        .value,
+                    RackState::Error { .. }
+                ),
+                "a failed machine must prevent recovery"
+            );
+            let mut conn = pool.acquire().await?;
+            let machine = db::machine::find_one(
+                conn.as_mut(),
+                &host.host_snapshot.id,
+                model::machine::machine_search_config::MachineSearchConfig::default(),
+            )
+            .await?
+            .unwrap();
+            db::machine::advance(&machine, conn.as_mut(), &assigned, None).await?;
+        }
+        env.run_rack_controller_iteration().await;
+        let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+        assert_eq!(
+            rack.controller_state.value,
+            RackState::Ready,
+            "{scenario}: no terminal failure remains, even while a switch initializes"
+        );
+        check_public_state(&env, &rack_id, &RackState::Ready).await?;
+        let machine = db::machine::find_one(
+            env.db_reader().as_mut(),
+            &host.host_snapshot.id,
+            model::machine::machine_search_config::MachineSearchConfig::default(),
+        )
+        .await?
+        .unwrap();
+        assert_eq!(
+            machine.state.value, assigned,
+            "{scenario}: preserve the assigned workload state"
+        );
+        env.run_rack_controller_iteration().await;
+        assert_eq!(
+            get_db_rack(env.db_reader().as_mut(), &rack_id)
+                .await
+                .controller_state
+                .value,
+            RackState::Ready,
+            "{scenario}: the same recovery condition must keep the rack Ready"
+        );
+    }
+    Ok(())
+}
+
+/// An explicit component source permits recovery after the last device is removed;
+/// an unattributed legacy error on an empty rack retains its previous behavior.
+#[sqlx_test]
+async fn test_empty_rack_error_recovery_requires_component_source(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = create_test_env_with_overrides(
+        pool.clone(),
+        TestEnvOverrides::with_config(config_with_rack_profiles()),
+    )
+    .await;
+    for (source, expected) in [
+        (None, false),
+        (Some(RackErrorSource::ComponentFailure), true),
+    ] {
+        let rack_id = new_rack_id();
+        db_rack::create(
+            pool.acquire().await?.as_mut(),
+            &rack_id,
+            Some(&RackProfileId::new("Empty")),
+            &RackConfig::default(),
+            None,
+        )
+        .await?;
+        let error = RackState::Error {
+            source,
+            certificate_failure: None,
+            cause: "prior failure".to_string(),
+            recovery_policy: RackErrorRecoveryPolicy::ComponentsReady,
+        };
+        crate::fixtures::rack::set_rack_controller_state(
+            pool.acquire().await?.as_mut(),
+            &rack_id,
+            error.clone(),
+        )
+        .await?;
+        env.run_rack_controller_iteration().await;
+        let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+        assert_eq!(
+            rack.controller_state.value,
+            if expected { RackState::Ready } else { error }
+        );
+    }
+    Ok(())
+}
+
 /// Rack in Error transitions back to Ready once every component is Ready.
 #[sqlx_test]
 async fn test_error_recovers_to_ready_when_all_components_ready(
@@ -6619,6 +6964,7 @@ async fn test_error_recovers_to_ready_when_all_components_ready(
         pool.acquire().await?.as_mut(),
         &rack_id,
         RackState::Error {
+            source: None,
             certificate_failure: None,
             cause: "synthetic prior failure".to_string(),
             recovery_policy: RackErrorRecoveryPolicy::ComponentsReady,
@@ -6680,6 +7026,7 @@ async fn test_error_stays_in_error_when_components_not_all_ready(
         pool.acquire().await?.as_mut(),
         &rack_id,
         RackState::Error {
+            source: None,
             certificate_failure: None,
             cause: "synthetic prior failure".to_string(),
             recovery_policy: RackErrorRecoveryPolicy::ComponentsReady,

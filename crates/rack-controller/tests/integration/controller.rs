@@ -463,6 +463,7 @@ async fn test_error_state_does_nothing_with_controller(
         pool.acquire().await?.as_mut(),
         &rack_id,
         RackState::Error {
+            source: None,
             certificate_failure: None,
             cause: "test error".to_string(),
             recovery_policy: RackErrorRecoveryPolicy::MaintenanceRequestRequired,

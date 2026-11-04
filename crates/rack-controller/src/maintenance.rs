@@ -309,6 +309,7 @@ async fn terminate_active_rack_maintenance(
     );
 
     Ok(StateHandlerOutcome::transition(RackState::Error {
+        source: None,
         certificate_failure: None,
         cause,
         recovery_policy: RackErrorRecoveryPolicy::MaintenanceRequestRequired,
@@ -800,6 +801,7 @@ async fn transition_to_rack_error(
     let cause = cause.into();
     tracing::warn!(rack_id = %rack_id, %cause, "Rack maintenance failed, transitioning to Error");
     let outcome = StateHandlerOutcome::transition(RackState::Error {
+        source: None,
         certificate_failure: None,
         cause,
         recovery_policy: RackErrorRecoveryPolicy::MaintenanceRequestRequired,
@@ -817,6 +819,7 @@ async fn transition_rack_to_switch_certificate_error(
     tracing::warn!(rack_id = %rack_id, %cause, "Rack certificate configuration failed");
     let outcome = StateHandlerOutcome::transition(RackState::Error {
         cause,
+        source: None,
         certificate_failure: failure,
         recovery_policy: RackErrorRecoveryPolicy::MaintenanceRequestRequired,
     });
@@ -849,6 +852,7 @@ async fn transition_to_rack_error_with_firmware_job(
     db_rack::update(txn.as_mut(), rack_id, &state.config).await?;
 
     Ok(StateHandlerOutcome::transition(RackState::Error {
+        source: None,
         certificate_failure: None,
         cause,
         recovery_policy: RackErrorRecoveryPolicy::MaintenanceRequestRequired,
@@ -2349,6 +2353,7 @@ pub async fn handle_maintenance(
                         db_rack::update(recovery_txn.as_mut(), id, &state.config).await?;
                     }
                     return Ok(StateHandlerOutcome::transition(RackState::Error {
+                        source: None,
                         certificate_failure: None,
                         cause,
                         recovery_policy: RackErrorRecoveryPolicy::MaintenanceRequestRequired,
@@ -2549,6 +2554,7 @@ pub async fn handle_maintenance(
                             db_rack::update(recovery_txn.as_mut(), id, &state.config).await?;
                         }
                         Ok(StateHandlerOutcome::transition(RackState::Error {
+                            source: None,
                             certificate_failure: None,
                             cause,
                             recovery_policy: RackErrorRecoveryPolicy::MaintenanceRequestRequired,
@@ -2877,6 +2883,7 @@ pub async fn handle_maintenance(
                         db_rack::update(txn.as_mut(), id, &state.config).await?;
 
                         return Ok(StateHandlerOutcome::transition(RackState::Error {
+                            source: None,
                             certificate_failure: None,
                             cause: cause.to_string(),
                             recovery_policy: RackErrorRecoveryPolicy::MaintenanceRequestRequired,
@@ -3091,6 +3098,7 @@ pub async fn handle_maintenance(
                         db_rack::update(txn.as_mut(), id, &state.config).await?;
                     }
                     return Ok(StateHandlerOutcome::transition(RackState::Error {
+                        source: None,
                         certificate_failure: None,
                         cause: format!("NVOS update failed: {}/{} switches failed", failed, total),
                         recovery_policy: RackErrorRecoveryPolicy::MaintenanceRequestRequired,
