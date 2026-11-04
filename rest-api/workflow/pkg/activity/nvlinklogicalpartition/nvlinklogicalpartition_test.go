@@ -471,6 +471,107 @@ func TestManageNVLinkLogicalPartition_UpdateNVLinkLogicalPartitionsInDB(t *testi
 			}
 		})
 	}
+
+	t.Run("recent updates during deletion reconciliation", func(t *testing.T) {
+		nvllpDAO := cdbm.NewNVLinkLogicalPartitionDAO(dbSession)
+		cases := []struct {
+			name            string
+			status          cdbm.NVLinkLogicalPartitionStatus
+			inventoryFailed bool
+			page            *corev1.InventoryPage
+			reportPartition bool
+			reportID        bool
+			wantDeleted     bool
+		}{
+			{
+				name:        "missing deleting partition is removed despite repeated updates",
+				status:      cdbm.NVLinkLogicalPartitionStatusDeleting,
+				wantDeleted: true,
+			},
+			{
+				name:        "empty paged inventory removes deleting partition",
+				status:      cdbm.NVLinkLogicalPartitionStatusDeleting,
+				page:        &corev1.InventoryPage{CurrentPage: 1, TotalPages: 0, TotalItems: 0},
+				wantDeleted: true,
+			},
+			{
+				name:            "reported deleting partition is retained",
+				status:          cdbm.NVLinkLogicalPartitionStatusDeleting,
+				reportPartition: true,
+			},
+			{
+				name:     "deleting partition reported on another page is retained",
+				status:   cdbm.NVLinkLogicalPartitionStatusDeleting,
+				page:     &corev1.InventoryPage{CurrentPage: 2, TotalPages: 2, TotalItems: 1},
+				reportID: true,
+			},
+			{
+				name:   "non-final page retains missing deleting partition",
+				status: cdbm.NVLinkLogicalPartitionStatusDeleting,
+				page:   &corev1.InventoryPage{CurrentPage: 1, TotalPages: 2, TotalItems: 1},
+			},
+			{
+				name:            "failed inventory retains missing deleting partition",
+				status:          cdbm.NVLinkLogicalPartitionStatusDeleting,
+				inventoryFailed: true,
+			},
+			{
+				name:   "recent active partition is not marked missing",
+				status: cdbm.NVLinkLogicalPartitionStatusReady,
+			},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				site := cwu.TestBuildSite(t, dbSession, ip, uuid.NewString(), cdbm.SiteStatusRegistered, nil, ipu)
+				nvllp := cwu.TestBuildNVLinkLogicalPartition(t, dbSession, uuid.NewString(), nil, site, tn, tc.status, false)
+
+				// Exercise the same DAO update used by repeated DELETE requests.
+				for range 2 {
+					var updateErr error
+					nvllp, updateErr = nvllpDAO.Update(ctx, nil, cdbm.NVLinkLogicalPartitionUpdateInput{
+						NVLinkLogicalPartitionID: nvllp.ID,
+						Status:                   &tc.status,
+					})
+					require.NoError(t, updateErr)
+				}
+				require.True(t, site.IsTimeWithinStaleInventoryThreshold(nvllp.Updated))
+
+				inventory := &corev1.NVLinkLogicalPartitionInventory{
+					InventoryStatus: corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS,
+					InventoryPage:   tc.page,
+				}
+				if tc.inventoryFailed {
+					inventory.InventoryStatus = corev1.InventoryStatus_INVENTORY_STATUS_FAILED
+				}
+				if tc.reportPartition {
+					inventory.Partitions = []*corev1.NVLinkLogicalPartition{{
+						Id:     &corev1.NVLinkLogicalPartitionId{Value: nvllp.ID.String()},
+						Status: &corev1.NVLinkLogicalPartitionStatus{State: corev1.TenantState_TERMINATING},
+					}}
+				}
+				if tc.reportID {
+					inventory.InventoryPage.ItemIds = []string{nvllp.ID.String()}
+				}
+
+				manager := NewManageNVLinkLogicalPartition(dbSession, tSiteClientPool)
+				updateErr := manager.UpdateNVLinkLogicalPartitionsInDB(ctx, site.ID, inventory)
+				require.NoError(t, updateErr)
+
+				stored, getErr := nvllpDAO.GetByID(ctx, nil, nvllp.ID, nil)
+				if tc.wantDeleted {
+					require.ErrorIs(t, getErr, cdb.ErrDoesNotExist)
+
+					return
+				}
+
+				require.NoError(t, getErr)
+				assert.Nil(t, stored.Deleted)
+				assert.Equal(t, tc.status, stored.Status)
+				assert.False(t, stored.IsMissingOnSite)
+				assert.True(t, stored.Updated.Equal(nvllp.Updated))
+			})
+		}
+	})
 }
 
 func TestNewManageNVLinkLogicalPartition(t *testing.T) {

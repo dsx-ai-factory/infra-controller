@@ -6,7 +6,6 @@ package handler
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -1635,9 +1634,6 @@ func TestNVLinkLogicalPartitionHandler_Delete(t *testing.T) {
 	nvllp1 := testBuildNVLinkLogicalPartition(t, dbSession, "test-nvllp-1", cutil.GetPtr("Test NVLink Logical Partition"), tnOrg1, site1, tn1, cutil.GetPtr(cdbm.NVLinkLogicalPartitionStatusReady), false)
 	assert.NotNil(t, nvllp1)
 
-	nvllp3 := testBuildNVLinkLogicalPartition(t, dbSession, "test-nvllp-3", cutil.GetPtr("Test NVLink Logical Partition"), tnOrg3, site2, tn3, cutil.GetPtr(cdbm.NVLinkLogicalPartitionStatusReady), false)
-	assert.NotNil(t, nvllp3)
-
 	nvllp4 := testBuildNVLinkLogicalPartition(t, dbSession, "test-nvllp-4", cutil.GetPtr("Test NVLink Logical Partition"), tnOrg4, site2, tn4, cutil.GetPtr(cdbm.NVLinkLogicalPartitionStatusReady), false)
 	assert.NotNil(t, nvllp4)
 
@@ -1684,24 +1680,6 @@ func TestNVLinkLogicalPartitionHandler_Delete(t *testing.T) {
 
 	tscWithTimeout.Mock.On("TerminateWorkflow", mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil)
 
-	//
-	// NICo not-found mocking
-	//
-	scpWithNICoNotFound := sc.NewClientPool(tcfg)
-	tscWithNICoNotFound := &tmocks.Client{}
-
-	scpWithNICoNotFound.IDClientMap[site2.ID.String()] = tscWithNICoNotFound
-
-	wrunWithNICoNotFound := &tmocks.WorkflowRun{}
-	wrunWithNICoNotFound.On("GetID").Return("workflow-WithNICoNotFound")
-
-	wrunWithNICoNotFound.Mock.On("Get", mock.Anything, mock.Anything).Return(tp.NewNonRetryableApplicationError("NICo went bananas", swe.ErrTypeNICoObjectNotFound, errors.New("NICo went bananas")))
-
-	tscWithNICoNotFound.Mock.On("ExecuteWorkflow", mock.Anything, mock.AnythingOfType("internal.StartWorkflowOptions"),
-		"DeleteNVLinkLogicalPartition", mock.Anything).Return(wrunWithNICoNotFound, nil)
-
-	tscWithNICoNotFound.Mock.On("TerminateWorkflow", mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil)
-
 	// Prepare client pool for sync calls
 	// to site(s).
 
@@ -1733,6 +1711,8 @@ func TestNVLinkLogicalPartitionHandler_Delete(t *testing.T) {
 		expectedStatus       int
 		verifyChildSpanner   bool
 		expectedErrorMessage string
+		remoteErrorType      string
+		expectedDeleted      bool
 	}{
 		{
 			fields: fields{
@@ -1849,27 +1829,61 @@ func TestNVLinkLogicalPartitionHandler_Delete(t *testing.T) {
 			verifyChildSpanner: true,
 		},
 		{
-			name: "test NVLinkLogical Partition delete API endpoint nico not-found, still success",
+			name: "Core NotFound immediately soft-deletes the REST record",
 			fields: fields{
 				dbSession: dbSession,
-				tc:        tscWithNICoNotFound,
-				scp:       scpWithNICoNotFound,
+				tc:        tc,
+				scp:       scp,
 				cfg:       cfg,
 			},
 			reqOrgName:         tnOrg3,
 			user:               tnu3,
-			nvllpID:            nvllp3.ID.String(),
 			expectedErr:        false,
 			expectedStatus:     http.StatusAccepted,
+			remoteErrorType:    swe.ErrTypeNICoObjectNotFound,
+			expectedDeleted:    true,
 			verifyChildSpanner: true,
+		},
+		{
+			name:            "legacy Core NotFound immediately soft-deletes the REST record",
+			fields:          fields{dbSession: dbSession, tc: tc, scp: scp, cfg: cfg},
+			reqOrgName:      tnOrg3,
+			user:            tnu3,
+			remoteErrorType: swe.ErrTypeCarbideObjectNotFound,
+			expectedStatus:  http.StatusAccepted,
+			expectedDeleted: true,
+		},
+		{
+			name:            "Core unavailable rolls back deletion",
+			fields:          fields{dbSession: dbSession, tc: tc, scp: scp, cfg: cfg},
+			reqOrgName:      tnOrg3,
+			user:            tnu3,
+			remoteErrorType: swe.ErrTypeNICoUnavailable,
+			expectedStatus:  http.StatusServiceUnavailable,
+			expectedErr:     true,
 		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			assert.NotEqual(t, tc.name, "")
 
+			var before *cdbm.NVLinkLogicalPartition
+			if tc.remoteErrorType != "" {
+				before = testBuildNVLinkLogicalPartition(t, dbSession, uuid.NewString(), nil, tnOrg3, site2, tn3, cutil.GetPtr(cdbm.NVLinkLogicalPartitionStatusReady), false)
+				tc.nvllpID = before.ID.String()
+				remoteClient := &tmocks.Client{}
+				remoteRun := &tmocks.WorkflowRun{}
+				remoteRun.On("GetID").Return("delete-nvlink-logical-partition")
+				remoteRun.On("Get", mock.Anything, mock.Anything).Return(
+					fmt.Errorf("delete workflow failed: %w", tp.NewNonRetryableApplicationError("Core deletion failed", tc.remoteErrorType, nil)),
+				)
+				remoteClient.On("ExecuteWorkflow", mock.Anything, mock.Anything, "DeleteNVLinkLogicalPartition", mock.Anything).Return(remoteRun, nil)
+				tc.fields.scp = sc.NewClientPool(tcfg)
+				tc.fields.scp.IDClientMap[site2.ID.String()] = remoteClient
+			}
+
 			// Setup echo server/context
-			req := httptest.NewRequest(http.MethodPost, "/", nil)
+			req := httptest.NewRequest(http.MethodDelete, "/", nil)
 
 			req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
 			rec := httptest.NewRecorder()
@@ -1895,7 +1909,13 @@ func TestNVLinkLogicalPartitionHandler_Delete(t *testing.T) {
 			assert.Nil(t, err)
 
 			assert.Equal(t, tc.expectedStatus, rec.Code)
-			assert.Equal(t, tc.expectedErr, rec.Code != http.StatusAccepted)
+			assert.Equal(t, tc.expectedErr, rec.Code >= http.StatusBadRequest)
+
+			if !tc.expectedErr {
+				var payload model.APIMessageResponse
+				require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &payload))
+				assert.Equal(t, model.DeletionRequestAcceptedMessage, payload.Message)
+			}
 
 			if tc.expectedErrorMessage != "" {
 				require.NotEmpty(t, rec.Body.Bytes())
@@ -1906,14 +1926,32 @@ func TestNVLinkLogicalPartitionHandler_Delete(t *testing.T) {
 				require.Equal(t, tc.expectedErrorMessage, payload.Message)
 			}
 
-			if !tc.expectedErr {
-				// Check that NVLinkLogical Partition status is set to deleting
+			if !tc.expectedErr || tc.remoteErrorType != "" {
 				nvllpDAO := cdbm.NewNVLinkLogicalPartitionDAO(dbSession)
-				nvllpID, err := uuid.Parse(tc.nvllpID)
-				assert.NoError(t, err)
-				nvllp, err := nvllpDAO.GetByID(ctx, nil, nvllpID, nil)
-				assert.NoError(t, err)
-				assert.Equal(t, cdbm.NVLinkLogicalPartitionStatusDeleting, nvllp.Status)
+				nvllpID, parseErr := uuid.Parse(tc.nvllpID)
+				require.NoError(t, parseErr)
+				stored, getErr := nvllpDAO.GetByID(ctx, nil, nvllpID, nil)
+				if tc.expectedDeleted {
+					require.ErrorIs(t, getErr, cdb.ErrDoesNotExist)
+
+					getRec := httptest.NewRecorder()
+					getContext := e.NewContext(httptest.NewRequest(http.MethodGet, "/", nil), getRec)
+					getContext.SetParamNames("orgName", "id")
+					getContext.SetParamValues(tc.reqOrgName, tc.nvllpID)
+					getContext.Set("user", tc.user)
+					getHandler := NewGetNVLinkLogicalPartitionHandler(dbSession, tc.fields.tc, cfg)
+					require.NoError(t, getHandler.Handle(getContext))
+					assert.Equal(t, http.StatusNotFound, getRec.Code)
+				} else {
+					require.NoError(t, getErr)
+					assert.Nil(t, stored.Deleted)
+					if tc.expectedErr {
+						assert.Equal(t, before.Status, stored.Status)
+						assert.True(t, before.Updated.Equal(stored.Updated))
+					} else {
+						assert.Equal(t, cdbm.NVLinkLogicalPartitionStatusDeleting, stored.Status)
+					}
+				}
 			}
 
 			if tc.verifyChildSpanner {
