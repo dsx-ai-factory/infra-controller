@@ -14,7 +14,9 @@ import (
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 )
 
-var trayDecommissionIDNamespaceRegexp = regexp.MustCompile(`^(fm100|sw100|ps100)`)
+var trayDecommissionIDNamespaceRegexp = regexp.MustCompile(
+	"^(" + ComputeTrayIDPrefix + "|" + NVSwitchTrayIDPrefix + "|" + PowerShelfTrayIDPrefix + ")",
+)
 
 // APITrayDecommissionRequest starts decommissioning one managed tray at a Site.
 type APITrayDecommissionRequest struct {
@@ -29,18 +31,18 @@ type APITrayDecommissionRequest struct {
 func (r *APITrayDecommissionRequest) Validate() error {
 	return validation.ValidateStruct(r,
 		validation.Field(&r.SiteID, validation.Required.Error(validationErrorValueRequired), validationis.UUID.Error(validationErrorInvalidUUID)),
-		validation.Field(&r.TrayID, validation.Required.Error(validationErrorValueRequired), validation.Match(trayDecommissionIDNamespaceRegexp).Error("must use a supported Core ID namespace: fm100, sw100, or ps100")),
+		validation.Field(&r.TrayID, validation.Required.Error(validationErrorValueRequired), validation.Match(trayDecommissionIDNamespaceRegexp).Error("must use a supported Core ID namespace: "+ComputeTrayIDPrefix+", "+NVSwitchTrayIDPrefix+", or "+PowerShelfTrayIDPrefix)),
 	)
 }
 
 // ToProto builds the Core decommission request after validation.
 func (r *APITrayDecommissionRequest) ToProto() proto.Message {
 	switch {
-	case strings.HasPrefix(r.TrayID, "fm100"):
+	case strings.HasPrefix(r.TrayID, ComputeTrayIDPrefix):
 		return &corev1.DecommissionManagedHostRequest{MachineId: &corev1.MachineId{Id: r.TrayID}}
-	case strings.HasPrefix(r.TrayID, "sw100"):
+	case strings.HasPrefix(r.TrayID, NVSwitchTrayIDPrefix):
 		return &corev1.DecommissionSwitchRequest{SwitchId: &corev1.SwitchId{Id: r.TrayID}}
-	case strings.HasPrefix(r.TrayID, "ps100"):
+	case strings.HasPrefix(r.TrayID, PowerShelfTrayIDPrefix):
 		return &corev1.DecommissionPowerShelfRequest{PowerShelfId: &corev1.PowerShelfId{Id: r.TrayID}}
 	default:
 		// Validate rejects unsupported namespaces before conversion.
