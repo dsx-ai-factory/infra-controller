@@ -15,6 +15,10 @@ NICo extends the concept of an *NVLink Partition* with the *NVLink Logical Parti
 NVLink Partitioning is supported for GB200, GB300, and Vera Rubin (VR) compute nodes.
 </Note>
 
+<Warning title="Important">
+Tenants cannot use multi-instance NVLink partitioning (GPUs on more than one Instance sharing an NVLink Partition) unless they first create an NVLink Logical Partition. NICo removes the NMX-C default partition. GPUs that are not assigned to an NVLink Logical Partition are placed in a per-tray default partition, so they can share memory only with other GPUs in the same compute tray. Refer to [Creating a NVLink Logical Partition](#creating-a-nvlink-logical-partition) for more details.
+</Warning>
+
 ## Operations: Who Does What
 
 NVLink operations are split between operator site setup against NMX-C and
@@ -41,6 +45,8 @@ The tenant rows are the REST / `nicocli` flow described next.
 ### Creating a NVLink Logical Partition
 
 NICo users can create NVLink Logical Partitions and plan GPU assignments using NVLink Interfaces for Instances (as described in steps **1-2**). NICo can also automatically generate NVLink Interfaces and assign them to Instances (as described in step **3**).
+
+Both methods require step **1** for multi-instance NVLink partitioning because each one assigns GPUs by referencing an existing NVLink Logical Partition ID.
 
 In general, the steps are:
 
