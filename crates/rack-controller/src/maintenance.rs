@@ -52,7 +52,7 @@ use db::{
     power_shelf as db_power_shelf, rack as db_rack, switch as db_switch,
 };
 use model::component_manager::ConfigureSwitchCertificateState;
-use model::machine::HostMachine;
+use model::machine::{HostMachine, MachineMaintenanceOperation};
 use model::rack::{
     ConfigureNmxClusterState, FirmwareProgressState, FirmwareUpgradeDeviceStatus,
     FirmwareUpgradeState, MaintenanceActivity, MaintenanceScope, NvosPasswordUpdateState,
@@ -92,6 +92,169 @@ async fn clear_rv_labels(
 
     txn.commit().await?;
     Ok(())
+}
+
+async fn request_compute_host_restarts(
+    rack: &mut Rack,
+    ctx: &mut StateHandlerContext<'_, RackStateHandlerContextObjects>,
+) -> Result<StateHandlerOutcome<RackState>, StateHandlerError> {
+    let mut txn = ctx.services.db_pool.begin().await?;
+    let mut machines = super::get_machines_from_rack(rack, txn.as_mut()).await?;
+    // Match allocation's lock order when claiming multiple hosts.
+    machines.sort_by_key(|machine| machine.id);
+
+    let machine_ids = machines
+        .iter()
+        .map(|machine| HostMachineId::from(machine.id))
+        .collect::<Vec<_>>();
+    let desired_off_ids = desired_off_machine_ids(txn.as_mut(), &machine_ids).await?;
+    if !desired_off_ids.is_empty() {
+        txn.rollback().await?;
+        let rack_id = rack.id.clone();
+        return transition_to_rack_error(
+            &rack_id,
+            rack,
+            format!(
+                "rack power sequence cannot target machines whose desired power state is Off: {}",
+                format_machine_ids(&desired_off_ids)
+            ),
+            ctx,
+        )
+        .await;
+    }
+
+    let unavailable_machine_ids = machines
+        .iter()
+        .filter(|machine| {
+            !machine.state.value.accepts_maintenance_request()
+                || machine.machine_maintenance_requested.is_some()
+        })
+        .map(|machine| machine.id.to_string())
+        .collect::<Vec<_>>();
+    if !unavailable_machine_ids.is_empty() {
+        txn.rollback().await?;
+        return Ok(StateHandlerOutcome::wait(format!(
+            "waiting to request compute host restarts; unavailable machines: {}",
+            unavailable_machine_ids.join(", ")
+        )));
+    }
+
+    let initiator = rack_maintenance_initiator(&rack.id);
+    for machine in &machines {
+        if !db_machine::try_set_machine_maintenance_requested(
+            txn.as_mut(),
+            machine.id,
+            &initiator,
+            MachineMaintenanceOperation::Reboot,
+        )
+        .await?
+        {
+            txn.rollback().await?;
+            return Ok(StateHandlerOutcome::wait(format!(
+                "machine {} is no longer eligible for the rack restart request",
+                machine.id
+            )));
+        }
+    }
+
+    tracing::info!(
+        rack_id = %rack.id,
+        machine_count = machines.len(),
+        "Requested compute host restarts for rack power sequence"
+    );
+    let machine_ids = machines.iter().map(|machine| machine.id.into()).collect();
+
+    Ok(StateHandlerOutcome::transition(RackState::Maintenance {
+        maintenance_state: RackMaintenanceState::PowerSequence {
+            rack_power: RackPowerState::PowerReset,
+            restart_machine_ids: Some(machine_ids),
+        },
+    })
+    .with_txn(txn))
+}
+
+async fn wait_for_compute_host_restarts(
+    rack: &mut Rack,
+    requested_machine_ids: &[HostMachineId],
+    scope: &MaintenanceScope,
+    ctx: &mut StateHandlerContext<'_, RackStateHandlerContextObjects>,
+) -> Result<StateHandlerOutcome<RackState>, StateHandlerError> {
+    let machines = {
+        let mut connection = ctx.services.db_pool.acquire().await?;
+        super::get_machines_from_rack(rack, &mut connection).await?
+    };
+    let current_machine_ids = machines
+        .iter()
+        .map(|machine| HostMachineId::from(machine.id))
+        .collect::<std::collections::HashSet<_>>();
+    let requested_machine_ids = requested_machine_ids
+        .iter()
+        .copied()
+        .collect::<std::collections::HashSet<_>>();
+    if current_machine_ids != requested_machine_ids {
+        tracing::info!(
+            rack_id = %rack.id,
+            "Compute host membership changed while restarts were in progress; restarting the current set"
+        );
+        return request_compute_host_restarts(rack, ctx).await;
+    }
+
+    let initiator = rack_maintenance_initiator(&rack.id);
+    if let Some(machine) = machines.iter().find(|machine| {
+        machine
+            .machine_maintenance_requested
+            .as_ref()
+            .is_some_and(|request| {
+                request.initiator != initiator
+                    || !matches!(
+                        request.operation,
+                        MachineMaintenanceOperation::Reboot | MachineMaintenanceOperation::Reset
+                    )
+            })
+    }) {
+        let rack_id = rack.id.clone();
+        return transition_to_rack_error(
+            &rack_id,
+            rack,
+            format!(
+                "compute host {} rack restart request was replaced by another maintenance request",
+                machine.id
+            ),
+            ctx,
+        )
+        .await;
+    }
+
+    let incomplete_machine_ids = machines
+        .iter()
+        .filter(|machine| {
+            machine.machine_maintenance_requested.is_some()
+                // Reuse the Scout RebootCompleted observation used by machine validation.
+                // A cleared request only means the power-control call succeeded.
+                || machine.status.last_reboot_time.is_none_or(|reported_at| {
+                    reported_at <= rack.controller_state.version.timestamp()
+                })
+        })
+        .map(|machine| machine.id.to_string())
+        .collect::<Vec<_>>();
+
+    if !incomplete_machine_ids.is_empty() {
+        return Ok(StateHandlerOutcome::wait(format!(
+            "waiting for compute host restarts to complete: {}",
+            incomplete_machine_ids.join(", ")
+        )));
+    }
+
+    let next = next_state_after_power(scope);
+    tracing::info!(
+        rack_id = %rack.id,
+        machine_count = machines.len(),
+        next_state = %next,
+        "Compute host restarts completed, advancing rack maintenance"
+    );
+    Ok(StateHandlerOutcome::transition(RackState::Maintenance {
+        maintenance_state: next,
+    }))
 }
 
 fn rack_maintenance_initiator(rack_id: &RackId) -> String {
@@ -288,6 +451,21 @@ async fn terminate_active_rack_maintenance(
                 job.completed_at.get_or_insert(now);
                 db_rack::update_nvos_update_job(txn.as_mut(), rack_id, Some(&job)).await?;
                 state.nvos_update_job = Some(job);
+            }
+        }
+        RackMaintenanceState::PowerSequence {
+            rack_power: RackPowerState::PowerReset,
+            restart_machine_ids: Some(machine_ids),
+        } => {
+            // Restarts cover the saved batch, not the possibly narrower maintenance scope
+            // or the rack's current membership.
+            for machine_id in machine_ids {
+                db_machine::clear_unclaimed_machine_restart_request(
+                    txn.as_mut(),
+                    machine_id,
+                    &initiator,
+                )
+                .await?;
             }
         }
         RackMaintenanceState::ConfigureNmxCluster { .. }
@@ -1014,21 +1192,34 @@ fn next_state_after_firmware(scope: &MaintenanceScope) -> RackMaintenanceState {
 /// Returns the next maintenance sub-state after NVOS update, skipping
 /// activities not requested in the scope.
 fn next_state_after_nvos(scope: &MaintenanceScope) -> RackMaintenanceState {
-    if scope.should_run(&MaintenanceActivity::ConfigureNmxCluster) {
-        RackMaintenanceState::ConfigureNmxCluster {
-            configure_nmx_cluster: ConfigureNmxClusterState::Start,
-        }
-    } else {
-        next_state_after_configure(scope)
+    if scope.should_run(&MaintenanceActivity::PowerSequence) {
+        return compute_reset_start();
+    }
+    next_state_after_power(scope)
+}
+
+fn compute_reset_start() -> RackMaintenanceState {
+    RackMaintenanceState::PowerSequence {
+        rack_power: RackPowerState::PowerReset,
+        restart_machine_ids: None,
     }
 }
 
-/// Returns the next maintenance sub-state after ConfigureNmxCluster, skipping
-/// activities not requested in the scope.
-fn next_state_after_configure(scope: &MaintenanceScope) -> RackMaintenanceState {
-    if scope.should_run(&MaintenanceActivity::PowerSequence) {
-        RackMaintenanceState::PowerSequence {
-            rack_power: RackPowerState::PoweringOn,
+fn next_state_after_successful_nvos(
+    scope: &MaintenanceScope,
+    ingestion: bool,
+) -> RackMaintenanceState {
+    if ingestion {
+        compute_reset_start()
+    } else {
+        next_state_after_nvos(scope)
+    }
+}
+
+fn next_state_after_power(scope: &MaintenanceScope) -> RackMaintenanceState {
+    if scope.should_run(&MaintenanceActivity::ConfigureNmxCluster) {
+        RackMaintenanceState::ConfigureNmxCluster {
+            configure_nmx_cluster: ConfigureNmxClusterState::Start,
         }
     } else {
         RackMaintenanceState::Completed
@@ -1052,9 +1243,8 @@ pub(crate) fn first_maintenance_state(scope: &MaintenanceScope) -> RackMaintenan
 }
 
 /// Returns the state to advance to when the current maintenance state's
-/// activity is not requested. Every [`RackMaintenanceState`] variant is
-/// checked here so a persisted or stale state cannot execute outside the
-/// current scope.
+/// activity is not requested. Submitted reset batches must finish regardless
+/// of scope so already queued requests are not abandoned.
 fn next_state_if_activity_not_requested(
     maintenance_state: &RackMaintenanceState,
     scope: &MaintenanceScope,
@@ -1071,9 +1261,15 @@ fn next_state_if_activity_not_requested(
         RackMaintenanceState::NVOSUpdate { .. } => {
             (!nvos_update_selected(scope)).then(|| next_state_after_nvos(scope))
         }
+        // Entering PowerReset persists the reset decision, including automatic
+        // ingestion resets. Do not re-derive it from the activity list on resume.
+        RackMaintenanceState::PowerSequence {
+            rack_power: RackPowerState::PowerReset,
+            ..
+        } => None,
         RackMaintenanceState::ConfigureNmxCluster { .. } => (!scope
             .should_run(&MaintenanceActivity::ConfigureNmxCluster))
-        .then(|| next_state_after_configure(scope)),
+        .then_some(RackMaintenanceState::Completed),
         RackMaintenanceState::PowerSequence { .. } => (!scope
             .should_run(&MaintenanceActivity::PowerSequence))
         .then_some(RackMaintenanceState::Completed),
@@ -1151,9 +1347,8 @@ fn filter_switch_inventory_by_scope(
 fn skip_configure_nmx_cluster_outcome(
     rack_id: &RackId,
     reason: impl AsRef<str>,
-    scope: &MaintenanceScope,
 ) -> StateHandlerOutcome<RackState> {
-    let next = next_state_after_configure(scope);
+    let next = RackMaintenanceState::Completed;
     tracing::info!(
         rack_id = %rack_id,
         reason = %reason.as_ref(),
@@ -1307,9 +1502,9 @@ async fn load_nmx_certificate_endpoints(
     Ok(endpoints)
 }
 
-/// Validates static V2 prerequisites, then rotates every rack switch's NVUE
-/// certificate before V2 fabric setup.
-/// Failures proven to occur before RMS dispatch retain `Start` for retry. All
+/// Validates NMX-C prerequisites and submits switch certificates when
+/// ConfigureNmxCluster starts, after any selected compute reboot barrier.
+/// Failures proven to occur before RMS dispatch retain the phase for retry. All
 /// other submission errors transition the rack to `Error` because no durable
 /// job ID proves whether RMS accepted all or part of the batch.
 async fn start_configure_nmx_cluster(
@@ -1323,7 +1518,6 @@ async fn start_configure_nmx_cluster(
         return Ok(skip_configure_nmx_cluster_outcome(
             id,
             "maintenance scope contains no switches",
-            scope,
         ));
     }
 
@@ -1350,7 +1544,6 @@ async fn start_configure_nmx_cluster(
         return Ok(skip_configure_nmx_cluster_outcome(
             id,
             "rack has no switches in inventory",
-            scope,
         ));
     }
 
@@ -1491,7 +1684,7 @@ async fn wait_for_switch_certificate_job(
             }
             SwitchCertificateJobCompletion::CompleteMaintenanceActivity => {
                 Ok(StateHandlerOutcome::transition(RackState::Maintenance {
-                    maintenance_state: next_state_after_configure(scope),
+                    maintenance_state: RackMaintenanceState::Completed,
                 }))
             }
         },
@@ -1603,7 +1796,6 @@ async fn configure_scale_up_fabric_manager_v2(
         return Ok(skip_configure_nmx_cluster_outcome(
             id,
             "maintenance scope contains no switches",
-            scope,
         ));
     }
 
@@ -1625,7 +1817,6 @@ async fn configure_scale_up_fabric_manager_v2(
         return Ok(skip_configure_nmx_cluster_outcome(
             id,
             "rack has no switches in inventory",
-            scope,
         ));
     }
 
@@ -1796,7 +1987,6 @@ async fn wait_for_scale_up_fabric_manager_job(
                 ctx,
                 component_manager.as_ref(),
                 rack_profile_id,
-                scope,
             )
             .await
         }
@@ -1834,7 +2024,6 @@ async fn verify_scale_up_fabric_manager_v2(
     ctx: &mut StateHandlerContext<'_, RackStateHandlerContextObjects>,
     component_manager: &ComponentManager,
     rack_profile_id: Option<&RackProfileId>,
-    scope: &MaintenanceScope,
 ) -> Result<StateHandlerOutcome<RackState>, StateHandlerError> {
     // Re-resolve the complete fabric after the asynchronous job so status reads
     // use current switch endpoints without weakening the rack-wide contract.
@@ -1850,7 +2039,6 @@ async fn verify_scale_up_fabric_manager_v2(
         return Ok(skip_configure_nmx_cluster_outcome(
             id,
             "rack has no switches in inventory",
-            scope,
         ));
     }
 
@@ -1959,15 +2147,16 @@ async fn verify_scale_up_fabric_manager_v2(
         return transition_to_rack_error(id, state, cause, ctx).await;
     }
 
-    txn.commit().await?;
-
     if !effective_switch_mtls_services(&ctx.services.switch_mtls_services)
         .contains(&SwitchMtlsService::ScaleUpFabricTelemetry)
     {
         return Ok(StateHandlerOutcome::transition(RackState::Maintenance {
-            maintenance_state: next_state_after_configure(scope),
-        }));
+            maintenance_state: RackMaintenanceState::Completed,
+        })
+        .with_txn(txn));
     }
+
+    txn.commit().await?;
 
     start_primary_switch_certificate_configuration(
         id,
@@ -3108,7 +3297,15 @@ pub async fn handle_maintenance(
                     .with_txn(txn));
                 }
 
-                let next = next_state_after_nvos(scope);
+                let next = if total > 0 {
+                    next_state_after_successful_nvos(
+                        scope,
+                        state.config.ingestion_in_progress
+                            && state.config.maintenance_requested.is_none(),
+                    )
+                } else {
+                    next_state_after_nvos(scope)
+                };
                 tracing::info!(
                     rack_id = %id,
                     completed_switch_count = completed,
@@ -3175,7 +3372,10 @@ pub async fn handle_maintenance(
                 .await
             }
         },
-        RackMaintenanceState::PowerSequence { rack_power } => match rack_power {
+        RackMaintenanceState::PowerSequence {
+            rack_power,
+            restart_machine_ids,
+        } => match rack_power {
             RackPowerState::PoweringOn => {
                 tracing::info!(
                     rack_id = %id,
@@ -3195,15 +3395,12 @@ pub async fn handle_maintenance(
                     "power sequence (off) in progress".into(),
                 ))
             }
-            RackPowerState::PowerReset => {
-                tracing::info!(
-                    rack_id = %id,
-                    "Rack power sequence (reset) - stubbed",
-                );
-                Ok(StateHandlerOutcome::wait(
-                    "power sequence (reset) in progress".into(),
-                ))
-            }
+            RackPowerState::PowerReset => match restart_machine_ids {
+                Some(machine_ids) => {
+                    wait_for_compute_host_restarts(state, machine_ids, scope, ctx).await
+                }
+                None => request_compute_host_restarts(state, ctx).await,
+            },
         },
         RackMaintenanceState::Completed => {
             tracing::info!(
@@ -3216,8 +3413,9 @@ pub async fn handle_maintenance(
                 validating_state: RackValidationState::Pending,
             });
 
-            if state.config.maintenance_requested.is_some() {
+            if state.config.maintenance_requested.is_some() || state.config.ingestion_in_progress {
                 state.config.maintenance_requested = None;
+                state.config.ingestion_in_progress = false;
                 let mut txn = ctx.services.db_pool.begin().await?;
                 db_rack::update(txn.as_mut(), id, &state.config).await?;
                 outcome = outcome.with_txn(txn);
@@ -3245,9 +3443,9 @@ mod tests {
     use model::rack_type::{RackHardwareType, RackProfile};
 
     use super::{
-        DeviceFirmwareOutcome, DeviceFirmwareProgress, delete_rack_maintenance_access_token,
-        explicit_nvos_config_json, filter_inventory_by_scope, first_maintenance_state,
-        next_state_after_configure, next_state_after_firmware, next_state_after_nvos,
+        DeviceFirmwareOutcome, DeviceFirmwareProgress, compute_reset_start,
+        delete_rack_maintenance_access_token, explicit_nvos_config_json, filter_inventory_by_scope,
+        first_maintenance_state, next_state_after_firmware, next_state_after_nvos,
         next_state_if_activity_not_requested, profile_hardware_type_or_any,
         summarize_firmware_outcomes, validate_complete_nmx_fabric_inventory,
     };
@@ -3627,6 +3825,14 @@ mod tests {
     fn powering_on() -> RackMaintenanceState {
         RackMaintenanceState::PowerSequence {
             rack_power: RackPowerState::PoweringOn,
+            restart_machine_ids: None,
+        }
+    }
+
+    fn restarting_compute_hosts() -> RackMaintenanceState {
+        RackMaintenanceState::PowerSequence {
+            rack_power: RackPowerState::PowerReset,
+            restart_machine_ids: Some(vec![]),
         }
     }
 
@@ -3676,12 +3882,12 @@ mod tests {
                     expect: None,
                 },
                 Check {
-                    scenario: "unrequested configure skips to power",
+                    scenario: "unrequested configure completes without repeating power",
                     input: (
                         configure_start(),
                         scope_of(vec![MaintenanceActivity::PowerSequence]),
                     ),
-                    expect: Some(powering_on()),
+                    expect: Some(RackMaintenanceState::Completed),
                 },
                 Check {
                     scenario: "requested power continues",
@@ -3690,6 +3896,29 @@ mod tests {
                         scope_of(vec![MaintenanceActivity::PowerSequence]),
                     ),
                     expect: None,
+                },
+                Check {
+                    scenario: "compute restart always continues",
+                    input: (
+                        restarting_compute_hosts(),
+                        scope_of(vec![firmware_upgrade()]),
+                    ),
+                    expect: None,
+                },
+                Check {
+                    scenario: "persisted automatic reset decision survives scope filtering",
+                    input: (compute_reset_start(), MaintenanceScope::default()),
+                    expect: None,
+                },
+                Check {
+                    scenario: "unrequested configuration skips after reboot barrier",
+                    input: (
+                        RackMaintenanceState::ConfigureNmxCluster {
+                            configure_nmx_cluster: ConfigureNmxClusterState::Start,
+                        },
+                        scope_of(vec![firmware_upgrade()]),
+                    ),
+                    expect: Some(RackMaintenanceState::Completed),
                 },
                 Check {
                     scenario: "unrequested power skips to completed",
@@ -3740,15 +3969,15 @@ mod tests {
                 Check {
                     scenario: "only power sequence -> power",
                     input: scope_of(vec![MaintenanceActivity::PowerSequence]),
-                    expect: powering_on(),
+                    expect: compute_reset_start(),
                 },
                 Check {
-                    scenario: "configure and power -> configure first",
+                    scenario: "configure and power -> reset first",
                     input: scope_of(vec![
                         MaintenanceActivity::ConfigureNmxCluster,
                         MaintenanceActivity::PowerSequence,
                     ]),
-                    expect: configure_start(),
+                    expect: compute_reset_start(),
                 },
             ],
             |scope| first_maintenance_state(&scope),
@@ -3769,7 +3998,7 @@ mod tests {
                 Check {
                     scenario: "firmware and power, no configure -> power",
                     input: scope_of(vec![firmware_upgrade(), MaintenanceActivity::PowerSequence]),
-                    expect: powering_on(),
+                    expect: compute_reset_start(),
                 },
                 Check {
                     scenario: "only firmware -> completed",
@@ -3826,34 +4055,10 @@ mod tests {
                 Check {
                     scenario: "nvos and power, no configure -> power",
                     input: scope_of(vec![nvos_update(), MaintenanceActivity::PowerSequence]),
-                    expect: powering_on(),
+                    expect: compute_reset_start(),
                 },
             ],
             |scope| next_state_after_nvos(&scope),
-        );
-    }
-
-    // ── next_state_after_configure ──────────────────────────────────────
-
-    #[test]
-    fn test_next_state_after_configure() {
-        check_values(
-            [
-                Check {
-                    scenario: "all activities -> power",
-                    input: MaintenanceScope::default(),
-                    expect: powering_on(),
-                },
-                Check {
-                    scenario: "firmware and configure, no power -> completed",
-                    input: scope_of(vec![
-                        firmware_upgrade(),
-                        MaintenanceActivity::ConfigureNmxCluster,
-                    ]),
-                    expect: RackMaintenanceState::Completed,
-                },
-            ],
-            |scope| next_state_after_configure(&scope),
         );
     }
 }

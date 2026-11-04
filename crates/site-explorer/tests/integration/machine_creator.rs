@@ -61,6 +61,16 @@ use super::machine_fixtures::{
 // the other needs until `wait_for_blocked_queries` times out.
 static ADMIN_LOCK_ADMISSION_TEST_SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+// Serializes the tests whose iteration records a failed managed-host creation
+// with the test that asserts that count. The latency histogram lives in the
+// process-wide test registry and `MetricsCapture` serializes only the tests
+// that assert on it, so a failure recorded by a test running alongside lands
+// in the asserted delta. To find the emitters again, print from
+// `create_identified_host` on an error and run the binary with
+// `--test-threads=1 --nocapture`.
+pub(super) static FAILED_CREATION_METRIC_TEST_SERIAL: tokio::sync::Mutex<()> =
+    tokio::sync::Mutex::const_new(());
+
 async fn assert_no_machines_created(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
     let machines = db::machine::find(
         pool,
@@ -1464,6 +1474,7 @@ async fn test_create_machines_continues_when_the_rack_pre_creation_fails(
 async fn test_create_machines_moves_on_after_a_failed_attempt_within_the_cap(
     pool: PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let _failed_creation_guard = FAILED_CREATION_METRIC_TEST_SERIAL.lock().await;
     let env = Env::new(pool).await;
     let rack_a = RackId::new(format!("rack-a-{}", uuid::Uuid::new_v4()));
     let rack_b = RackId::new(format!("rack-b-{}", uuid::Uuid::new_v4()));

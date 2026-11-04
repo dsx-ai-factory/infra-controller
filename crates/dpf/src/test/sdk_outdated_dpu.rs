@@ -130,6 +130,10 @@ impl DpuRepository for OutdatedDpuMock {
 
 #[async_trait]
 impl DpfOperatorConfigRepository for OutdatedDpuMock {
+    async fn get_version(&self, _: &str, _: &str) -> Result<String, DpfError> {
+        Ok(super::helpers::DPF_VERSION.to_string())
+    }
+
     async fn get(&self, name: &str, _ns: &str) -> Result<Option<DPFOperatorConfig>, DpfError> {
         Ok(self.operator_config.get(name).map(|c| c.clone()))
     }

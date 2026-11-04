@@ -33,6 +33,8 @@ service Forge {
   // the RBAC middleware rejects unknown RPC names with HTTP 403 before gRPC
   // dispatch, so Unimplemented is never reached on those servers.
   rpc GetRmsVersion(GetRmsVersionRequest) returns (GetRmsVersionResponse);
+  // Admin-only inspection of backend jobs; normal component callers query by device.
+  rpc GetRmsJobStatus(GetRmsJobStatusRequest) returns (GetRmsJobStatusResponse);
 
   // Stream recent and live machine console output.
   rpc StreamConsoleLogs(console_log.StreamConsoleLogsRequest)
@@ -1281,6 +1283,18 @@ service Forge {
   // read budgets, whose expiry reports ReadFailed. This method never registers
   // devices, writes policy, or submits power operations.
   rpc GetComponentPowerDetails(GetComponentPowerDetailsRequest) returns (GetComponentPowerDetailsResponse);
+  // Dispatch a reset directly, without scheduling state-controller maintenance.
+  // Valid devices proceed even when other targets cannot be resolved or accepted.
+  // Only SDN factory reset is implemented; it disrupts fabric traffic and restores
+  // SDN defaults without reinstalling NVOS. SUCCESS means accepted and tracked,
+  // not completed. A submission error may follow dispatch: do not automatically resubmit.
+  rpc ComponentReset(ComponentResetRequest) returns (ComponentResetResponse);
+  // Observe the latest successfully recorded accepted reset for each device/action.
+  // A failed or unknown submission attempt may leave an earlier reference in place.
+  // References survive NICo restarts, but RMS job state may be lost on restart.
+  // Missing/unobservable jobs never imply completion. Terminal observations are
+  // not persisted.
+  rpc GetComponentResetStatus(GetComponentResetStatusRequest) returns (GetComponentResetStatusResponse);
   rpc ComponentConfigureSwitchCertificate(ComponentConfigureSwitchCertificateRequest) returns (ComponentConfigureSwitchCertificateResponse);
   rpc GetComponentInventory(GetComponentInventoryRequest) returns (GetComponentInventoryResponse);
   rpc UpdateComponentFirmware(UpdateComponentFirmwareRequest) returns (UpdateComponentFirmwareResponse);
@@ -8044,7 +8058,8 @@ message ConfigureNmxClusterActivity {
 }
 
 message PowerSequenceActivity {
-  // Per-activity configuration (extend as needed).
+  // Explicitly gracefully reboot all rack compute hosts before NMX-C configuration.
+  // Pending maintenance, instances, or ineligible hosts block the entire batch.
 }
 
 // A single maintenance activity with its per-activity configuration.
@@ -8060,13 +8075,14 @@ message MaintenanceActivityConfig {
 
 // Scope of an on-demand rack maintenance request: which devices to include
 // and which activities to run. When all three device-id lists are empty the
-// full rack is maintained. When the activities list is empty all activities
-// are run.
+// full rack is maintained. Empty activities select all non-power activities;
+// compute resets require an explicit PowerSequenceActivity.
 message RackMaintenanceScope {
   repeated string machine_ids = 1;
   repeated string switch_ids = 2;
   repeated string power_shelf_ids = 3;
-  // Which maintenance activities to run. Empty means all activities.
+  // Activities run in firmware, NVOS, power sequence, then NMX-C order.
+  // Empty selects all non-power activities; power sequence must be explicit.
   repeated MaintenanceActivityConfig activities = 4;
 }
 
@@ -10742,6 +10758,9 @@ enum ComponentManagerStatusCode {
   COMPONENT_MANAGER_STATUS_CODE_NOT_FOUND = 3;
   COMPONENT_MANAGER_STATUS_CODE_ALREADY_EXISTS = 4;
   COMPONENT_MANAGER_STATUS_CODE_UNAVAILABLE = 5;
+  // A side effect may have started, or its outcome cannot be observed. Do not
+  // automatically retry the operation based on this result.
+  COMPONENT_MANAGER_STATUS_CODE_OUTCOME_UNKNOWN = 6;
 }
 
 message ComponentResult {
@@ -10949,8 +10968,8 @@ enum ComponentPowerActionOperation {
   COMPONENT_POWER_ACTION_OPERATION_POWER_ON = 1;
   // Power off the component; graceful identifies the saved shutdown mode.
   COMPONENT_POWER_ACTION_OPERATION_POWER_OFF = 2;
-  // Reset the component. The saved state cannot distinguish original restart
-  // and AC-cycle requests, so no original power-control variant is inferred.
+  // Restart the component. graceful=true identifies an explicit graceful host
+  // reboot. Legacy Reset records do not distinguish restart and AC-cycle requests.
   COMPONENT_POWER_ACTION_OPERATION_RESET = 3;
   // Reset a specific Redfish chassis through a compute tray's BMC.
   COMPONENT_POWER_ACTION_OPERATION_CHASSIS_RESET = 4;
@@ -10969,8 +10988,9 @@ message ComponentPowerAction {
   // Saved initiator, including an explicitly stored empty string. Absent only
   // when legacy active maintenance has no admitted request metadata.
   optional string initiator = 4;
-  // Present exactly for PowerOff. False means forced power off; true means
-  // graceful shutdown. Legacy operations without this flag default to false.
+  // Present for PowerOff (false: forced off, true: graceful shutdown) and for
+  // explicit graceful host reboots (operation Reset, true). Absent for legacy
+  // Reset records whose original restart mode was not preserved.
   optional bool graceful = 5;
   // Present exactly for ChassisReset; the recorded Redfish chassis identifier.
   optional string chassis_id = 6;
@@ -11053,6 +11073,92 @@ message ComponentConfigureSwitchCertificateRequest {
 
 message ComponentConfigureSwitchCertificateResponse {
   repeated ComponentResult results = 1;
+}
+
+// Reset operations supported by the component interface. Only SDN factory reset
+// is implemented; other valid action/target combinations return Unimplemented.
+enum ComponentResetAction {
+  COMPONENT_RESET_ACTION_UNSPECIFIED = 0;
+  // Reset the management controller on a compute, switch, or power shelf tray.
+  COMPONENT_RESET_ACTION_BMC_RESET = 1;
+  // Restore management-controller defaults on a compute, switch, or power shelf tray.
+  COMPONENT_RESET_ACTION_BMC_FACTORY_RESET = 2;
+  // Restore the switch operating system to factory defaults; switch targets only.
+  COMPONENT_RESET_ACTION_NVOS_FACTORY_RESET = 3;
+  // Restore switch SDN configuration to factory defaults; switch targets only.
+  COMPONENT_RESET_ACTION_SDN_FACTORY_RESET = 4;
+}
+
+message ComponentResetRequest {
+  // Required, non-empty explicit targets. Duplicates are InvalidArgument.
+  // Only switch IDs and switch BMC MACs are supported in this version. MACs can
+  // target expected inventory before ingestion; malformed MACs fail per device.
+  oneof target {
+    common.MachineIdList machine_ids = 1;
+    SwitchIdList switch_ids = 2;
+    PowerShelfIdList power_shelf_ids = 3;
+    MacAddressList compute_bmc_macs = 4;
+    MacAddressList switch_bmc_macs = 5;
+    MacAddressList power_shelf_pmc_macs = 6;
+  }
+  // Required; unspecified or unknown values are InvalidArgument.
+  ComponentResetAction action = 7;
+  // Optional NVL certificate-domain selector, only valid for SDN factory reset.
+  // Omission uses the RMS configured domain. This is not a DNS suffix; an
+  // explicitly empty or whitespace-only value is InvalidArgument.
+  optional string domain_name = 8;
+}
+
+message ComponentResetResponse {
+  // One result per requested device, in request order. SUCCESS means the reset
+  // was accepted and its reference recorded. OUTCOME_UNKNOWN means the reset may
+  // have started, including when RMS accepted it but NICo could not record its
+  // reference; do not automatically resubmit. INVALID_ARGUMENT means the target
+  // could not be prepared or RMS rejected it before dispatch. NOT_FOUND means the
+  // target or its credentials could not be resolved. A non-SUCCESS result leaves
+  // the previous recorded reference in place.
+  repeated ComponentResult results = 1;
+}
+
+message GetComponentResetStatusRequest {
+  // Required, non-empty explicit targets, with the same selection and duplicate
+  // rules as ComponentResetRequest. MAC status lookup requires no credentials.
+  oneof target {
+    common.MachineIdList machine_ids = 1;
+    SwitchIdList switch_ids = 2;
+    PowerShelfIdList power_shelf_ids = 3;
+    MacAddressList compute_bmc_macs = 4;
+    MacAddressList switch_bmc_macs = 5;
+    MacAddressList power_shelf_pmc_macs = 6;
+  }
+  // Required; selects the tracked reset of this action, not the latest action.
+  ComponentResetAction action = 7;
+}
+
+enum ComponentResetState {
+  COMPONENT_RESET_STATE_UNKNOWN = 0;
+  COMPONENT_RESET_STATE_QUEUED = 1;
+  COMPONENT_RESET_STATE_IN_PROGRESS = 2;
+  COMPONENT_RESET_STATE_COMPLETED = 3;
+  COMPONENT_RESET_STATE_FAILED = 4;
+}
+
+message ComponentResetStatus {
+  // Observation of the latest successfully recorded accepted reset reference,
+  // including per-device correlation and diagnostics. This may describe an
+  // earlier reset than a subsequent failed or unknown submission attempt.
+  // No reference is NOT_FOUND/UNKNOWN; it does not prove no reset occurred.
+  // A lost job or unknown backend execution state is OUTCOME_UNKNOWN/UNKNOWN, never
+  // completed. Transient observation failures return UNAVAILABLE/UNKNOWN and
+  // permit retrying the status query, not resubmitting the reset.
+  ComponentResult result = 1;
+  ComponentResetAction action = 2;
+  ComponentResetState state = 3;
+}
+
+message GetComponentResetStatusResponse {
+  // One status per requested device, in request order.
+  repeated ComponentResetStatus statuses = 1;
 }
 
 // --- Component firmware ---
@@ -13058,4 +13164,59 @@ message ComponentCredentialOverrides {
   optional UsernamePassword bmc = 1;
   // Switch NVOS credentials. Ignored for compute and power-shelf targets.
   optional UsernamePassword nvos = 2;
+}
+
+// --- RMS job diagnostics ---
+
+// Inspect one RMS job, optionally including its child records.
+message GetRmsJobStatusRequest {
+  // Required, non-whitespace backend job identifier.
+  string job_id = 1;
+  // Defaults to false. When true, RMS also returns child job records.
+  bool include_child_job_states = 2;
+}
+
+message GetRmsJobStatusResponse {
+  // RMS ordering is preserved; the queried parent is first when present.
+  repeated RmsJobStatus job_states = 1;
+}
+
+enum RmsJobExecutionState {
+  RMS_JOB_EXECUTION_STATE_UNSPECIFIED = 0;
+  RMS_JOB_EXECUTION_STATE_QUEUED = 1;
+  RMS_JOB_EXECUTION_STATE_RUNNING = 2;
+  RMS_JOB_EXECUTION_STATE_COMPLETED = 3;
+  RMS_JOB_EXECUTION_STATE_FAILED = 4;
+}
+
+enum RmsJobError {
+  RMS_JOB_ERROR_UNSPECIFIED = 0;
+  RMS_JOB_ERROR_INTERNAL = 1;
+  RMS_JOB_ERROR_OTHER = 2;
+  RMS_JOB_ERROR_INVALID_ARGUMENT = 3;
+  RMS_JOB_ERROR_CLIENT_ERROR = 11;
+  RMS_JOB_ERROR_SERVER_ERROR = 12;
+  RMS_JOB_ERROR_TIMEOUT = 13;
+  RMS_JOB_ERROR_INVALID_RESPONSE = 14;
+  RMS_JOB_ERROR_UNAUTHENTICATED = 15;
+  RMS_JOB_ERROR_TARGET_NOT_FOUND = 21;
+  RMS_JOB_ERROR_FILE_NOT_FOUND = 22;
+  RMS_JOB_ERROR_UPDATE_IN_PROGRESS = 23;
+}
+
+// Backend diagnostic record. Unknown enum values are preserved for diagnostics.
+message RmsJobStatus {
+  string job_id = 1;
+  optional string parent_job_id = 2;
+  repeated string child_job_ids = 3;
+  RmsJobExecutionState execution_state = 4;
+  string error_message = 5;
+  RmsJobError error_code = 6;
+  // Workflow-specific JSON supplied by RMS; no component-level schema is implied.
+  string result_json = 7;
+  string state_description = 8;
+  optional string rack_id = 9;
+  optional string node_id = 10;
+  google.protobuf.Timestamp created_at = 11;
+  google.protobuf.Timestamp updated_at = 12;
 }

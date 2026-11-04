@@ -230,6 +230,7 @@ jobs:
           - api
           - auth
           - cert-manager
+          - cli
           - cli-commands
           - common
           - db
