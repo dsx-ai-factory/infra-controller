@@ -23,7 +23,7 @@ mod metrics;
 pub mod nmx_c_endpoint;
 pub mod nvlink;
 mod switch_cert_monitor;
-pub mod switch_reachability;
+mod switch_reachability;
 
 use std::io;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -71,7 +71,6 @@ use model::nvl_partition::{NvlPartition, NvlPartitionName};
 use sqlx::PgPool;
 #[cfg(feature = "test-support")]
 pub use switch_cert_monitor::{SwitchCertificateMonitor, SwitchCertificateMonitorIterationResult};
-pub use switch_reachability::SwitchReachabilityMonitor;
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
@@ -1127,7 +1126,7 @@ impl NvLinkManager {
         .start(join_set, cancel_token.clone())?;
 
         if self.config.switch_reachability_enabled() {
-            SwitchReachabilityMonitor::new(
+            switch_reachability::SwitchReachabilityMonitor::new(
                 self.db_pool.clone(),
                 self.config.switch_reachability.clone(),
                 self.work_lock_manager_handle.clone(),

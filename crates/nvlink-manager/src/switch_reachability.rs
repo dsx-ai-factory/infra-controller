@@ -65,11 +65,11 @@ use crate::config::SwitchReachabilityConfig;
 use crate::errors::{NvLinkManagerError, NvLinkManagerResult};
 
 /// Source of the merge report the monitor stores on a switch.
-pub const SWITCH_REACHABILITY_SOURCE: &str = "switch-reachability-monitor";
+const SWITCH_REACHABILITY_SOURCE: &str = "switch-reachability-monitor";
 
 /// A switch service the monitor probes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum SwitchService {
+enum SwitchService {
     /// The NVOS management address, probed on every switch.
     Nvos,
     /// The NMX-T telemetry listener, probed on primary switches.
@@ -111,14 +111,14 @@ impl SwitchService {
 /// Opens a connection to a switch service. Production uses TCP; tests script
 /// outcomes.
 #[async_trait]
-pub trait SwitchProber: Send + Sync {
+trait SwitchProber: Send + Sync {
     /// Returns `Err(reason)` when `addr` did not accept a connection within
     /// `timeout`.
     async fn probe(&self, addr: SocketAddr, timeout: Duration) -> Result<(), String>;
 }
 
 /// Plain TCP connect: proves the listener accepts connections, nothing more.
-pub struct TcpProber;
+struct TcpProber;
 
 #[async_trait]
 impl SwitchProber for TcpProber {
@@ -320,7 +320,7 @@ struct SwitchOutcome {
 /// alerts. Runs in every `nico-api` replica, but only the replica holding the
 /// work lock does any work, and it keeps the lock across passes so its
 /// in-memory streaks see every pass.
-pub struct SwitchReachabilityMonitor {
+pub(super) struct SwitchReachabilityMonitor {
     db_pool: PgPool,
     config: SwitchReachabilityConfig,
     work_lock_manager_handle: WorkLockManagerHandle,
@@ -334,7 +334,7 @@ pub struct SwitchReachabilityMonitor {
 impl SwitchReachabilityMonitor {
     const ITERATION_WORK_KEY: &'static str = "SwitchReachabilityMonitor::run_single_iteration";
 
-    pub fn new(
+    pub(super) fn new(
         db_pool: PgPool,
         config: SwitchReachabilityConfig,
         work_lock_manager_handle: WorkLockManagerHandle,
@@ -348,7 +348,7 @@ impl SwitchReachabilityMonitor {
     }
 
     /// Builds a monitor with a custom prober, for tests that script outcomes.
-    pub fn with_prober(
+    fn with_prober(
         db_pool: PgPool,
         config: SwitchReachabilityConfig,
         work_lock_manager_handle: WorkLockManagerHandle,
@@ -366,7 +366,7 @@ impl SwitchReachabilityMonitor {
 
     /// Spawns the monitor. The caller decides whether it runs; see
     /// [`crate::config::NvLinkConfig::switch_reachability_enabled`].
-    pub fn start(
+    pub(super) fn start(
         self,
         join_set: &mut JoinSet<()>,
         cancel_token: CancellationToken,
@@ -378,7 +378,7 @@ impl SwitchReachabilityMonitor {
         Ok(())
     }
 
-    pub async fn run(&self, cancel_token: CancellationToken) {
+    async fn run(&self, cancel_token: CancellationToken) {
         let timer = PeriodicTimer::new(self.config.run_interval);
         loop {
             let tick = timer.tick();
@@ -396,7 +396,7 @@ impl SwitchReachabilityMonitor {
     }
 
     /// Runs one pass. Returns the number of switches whose report was written.
-    pub async fn run_single_iteration(&self) -> NvLinkManagerResult<usize> {
+    async fn run_single_iteration(&self) -> NvLinkManagerResult<usize> {
         let pass_id: String = format!("{:#x}", u64::from_le_bytes(rand::random::<[u8; 8]>()));
         let span = tracing::span!(
             parent: None,
