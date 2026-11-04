@@ -31,6 +31,8 @@ REST_IMAGES := nico-rest-api nico-rest-workflow nico-rest-site-manager \
 	nico-rest-site-agent nico-rest-db nico-rest-cert-manager nico-flow \
 	nico-psm nico-nsm nico-mcp
 
+TEST_PACKAGES ?= ./...
+
 # PostgreSQL container configuration
 POSTGRES_CONTAINER_NAME := project-test
 POSTGRES_PORT := 30432
@@ -216,7 +218,7 @@ test-site-agent: core-mock-server-start flow-mock-server-start
 
 test-api:
 	$(MAKE) ensure-postgres
-	cd api && go test -p 1 ./... -count=1
+	cd api && go test -p 1 $(TEST_PACKAGES) -count=1
 
 test-auth:
 	$(MAKE) ensure-postgres
@@ -246,7 +248,7 @@ test-flow:
 		DB_USER=$(POSTGRES_USER) \
 		DB_PASSWORD=$(POSTGRES_PASSWORD) \
 		DB_NAME=$(POSTGRES_DB) \
-		go test -p 1 ./... -count=1
+		go test -p 1 $(TEST_PACKAGES) -count=1
 
 test-powershelf-manager:
 	$(MAKE) ensure-postgres

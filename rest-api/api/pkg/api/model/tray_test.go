@@ -5,6 +5,8 @@ package model
 
 import (
 	"encoding/json"
+	"google.golang.org/protobuf/encoding/protojson"
+	"os"
 	"testing"
 
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
@@ -647,25 +649,61 @@ func TestAPITrayGetAllRequest_ToProto(t *testing.T) {
 }
 
 func TestTrayFilter_ToTargetSpec(t *testing.T) {
-	t.Run("component ID and type", func(t *testing.T) {
-		trayType := "Compute"
-		filter := &TrayFilter{IDs: []string{"machine-1"}, Type: &trayType}
-
-		targets := filter.ToTargetSpec().GetComponents().GetTargets()
-		require.Len(t, targets, 1)
-		assert.Equal(t, "machine-1", targets[0].GetExternal().GetId())
-		assert.Equal(t, flowv1.ComponentType_COMPONENT_TYPE_COMPUTE, targets[0].GetExternal().GetType())
-	})
-
-	t.Run("rack ID", func(t *testing.T) {
-		rackID := "rack-1"
-		filter := &TrayFilter{RackID: &rackID}
-
-		targets := filter.ToTargetSpec().GetRacks().GetTargets()
-		require.Len(t, targets, 1)
-		assert.Equal(t, rackID, targets[0].GetExternalId())
-		assert.Nil(t, targets[0].GetId())
-	})
+	data, err := os.ReadFile("../../../../proto/flow/testdata/tray_batch_targets.json")
+	require.NoError(t, err)
+	var fixtures map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(data, &fixtures))
+	components := []*flowv1.Component{
+		{Info: &flowv1.DeviceInfo{Id: &flowv1.UUID{Id: "550e8400-e29b-41d4-a716-446655440001"}}, Type: flowv1.ComponentType_COMPONENT_TYPE_COMPUTE},
+		{Info: &flowv1.DeviceInfo{Id: &flowv1.UUID{Id: "550e8400-e29b-41d4-a716-446655440002"}}, Type: flowv1.ComponentType_COMPONENT_TYPE_NVSWITCH},
+	}
+	tests := []struct {
+		name       string
+		filter     *TrayFilter
+		components []*flowv1.Component
+		fixture    string
+		check      func(*testing.T, *flowv1.OperationTargetSpec)
+	}{
+		{name: "omitted filter", components: components, fixture: "all"},
+		{name: "empty filter", filter: &TrayFilter{}, components: components, fixture: "all"},
+		{name: "type-only filter", filter: &TrayFilter{Type: cutil.GetPtr("Compute")}, components: components[:1], fixture: "compute"},
+		{
+			name:   "component ID and type",
+			filter: &TrayFilter{IDs: []string{"machine-1"}, Type: cutil.GetPtr("Compute")},
+			check: func(t *testing.T, spec *flowv1.OperationTargetSpec) {
+				targets := spec.GetComponents().GetTargets()
+				require.Len(t, targets, 1)
+				assert.Equal(t, "machine-1", targets[0].GetExternal().GetId())
+				assert.Equal(t, flowv1.ComponentType_COMPONENT_TYPE_COMPUTE, targets[0].GetExternal().GetType())
+			},
+		},
+		{
+			name:   "rack ID",
+			filter: &TrayFilter{RackID: cutil.GetPtr("rack-1")},
+			check: func(t *testing.T, spec *flowv1.OperationTargetSpec) {
+				targets := spec.GetRacks().GetTargets()
+				require.Len(t, targets, 1)
+				assert.Equal(t, "rack-1", targets[0].GetExternalId())
+				assert.Nil(t, targets[0].GetId())
+			},
+		},
+		{
+			name:  "no matching inventory",
+			check: func(t *testing.T, spec *flowv1.OperationTargetSpec) { assert.Nil(t, spec) },
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			spec := tt.filter.ToTargetSpec(tt.components)
+			if tt.fixture != "" {
+				wire, err := protojson.Marshal(spec)
+				require.NoError(t, err)
+				assert.JSONEq(t, string(fixtures[tt.fixture]), string(wire))
+			} else {
+				tt.check(t, spec)
+			}
+		})
+	}
 }
 
 func TestTrayFilter_SlotFilter(t *testing.T) {

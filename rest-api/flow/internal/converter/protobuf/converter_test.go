@@ -4,7 +4,10 @@
 package protobuf
 
 import (
+	"encoding/json"
+	"google.golang.org/protobuf/encoding/protojson"
 	"net"
+	"os"
 	"testing"
 	"time"
 
@@ -1791,6 +1794,29 @@ func TestTaskKindTo(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(string(tc.kind), func(t *testing.T) {
 			require.Equal(t, tc.want, TaskKindTo(tc.kind))
+		})
+	}
+}
+
+// The REST model test compares its serialized output to this shared fixture.
+// Separate tests avoid registering two generated copies of Flow's descriptors
+// in one process while checking both sides of the actual wire contract.
+func TestTargetSpecFrom_TrayBatchTargets(t *testing.T) {
+	data, err := os.ReadFile("../../../../proto/flow/testdata/tray_batch_targets.json")
+	require.NoError(t, err)
+	var fixtures map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(data, &fixtures))
+	for name, wire := range fixtures {
+		t.Run(name, func(t *testing.T) {
+			var target pb.OperationTargetSpec
+			require.NoError(t, protojson.Unmarshal(wire, &target))
+			got, err := TargetSpecFrom(&target)
+			require.NoError(t, err)
+			require.NoError(t, got.Validate())
+			require.Len(t, got.Components, len(target.GetComponents().GetTargets()))
+			for i, component := range got.Components {
+				assert.Equal(t, target.GetComponents().GetTargets()[i].GetId().GetId(), component.UUID.String())
+			}
 		})
 	}
 }
