@@ -76,8 +76,8 @@ stateDiagram-v2
         state R_Maintenance {
             [*] --> R_Maintenance_FirmwareUpgrade
             R_Maintenance_FirmwareUpgrade --> R_Maintenance_NVOSUpdate
-            R_Maintenance_NVOSUpdate --> R_Maintenance_ConfigureNmxCluster : no reset required, NMX selected
-            R_Maintenance_NVOSUpdate --> R_Maintenance_Completed : no reset required, NMX not selected
+            R_Maintenance_NVOSUpdate --> R_Maintenance_ConfigureNmxCluster : no reboot required, NMX selected
+            R_Maintenance_NVOSUpdate --> R_Maintenance_Completed : no reboot required, NMX not selected
             R_Maintenance_NVOSUpdate --> R_Maintenance_PowerSequence : ingestion update succeeded or explicit power activity
             R_Maintenance_PowerSequence --> R_Maintenance_ConfigureNmxCluster : reboot barrier passed, NMX selected
             R_Maintenance_PowerSequence --> R_Maintenance_Completed : reboot barrier passed, NMX not selected
@@ -199,13 +199,13 @@ both update phases. If a switch in the maintenance scope is already in
 of skipping the NVOS phase.
 
 Discovery persists `ingestion_in_progress` when entering maintenance. Only an
-actual successful NVOS update in that ingestion cycle automatically resets
+actual successful NVOS update in that ingestion cycle automatically reboots
 compute hosts; skipping the update does not. On-demand maintenance requires an
 explicit `PowerSequence` activity, including when other activities default to
 all. Reprovision does not enable the ingestion flag. Predecessor rows without
-the flag do not gain an automatic reset.
+the flag do not gain an automatic reboot.
 
-When an NVOS update triggers a reset, its completion commits the transition to
+When an NVOS update triggers a reboot, its completion commits the transition to
 `PowerReset` before any reboot request is queued. `PowerReset` then atomically
 queues asynchronous graceful `Reboot` requests for every compute host in the rack,
 regardless of device scope. The rack waits, without queuing any request, while
@@ -224,13 +224,21 @@ restart requests that no host has claimed. Membership changes start a fresh batc
 conflicting maintenance requests move the rack to `Error`. After the batch
 completes, maintenance runs NMX-C configuration if selected, or completes. A
 persisted `PoweringOn` state remains a no-op that completes maintenance without
-another reset.
+another reboot.
 
 Graceful reboots do not fall back to forced restarts. Both direct Redfish and
 RMS compute backends receive `GracefulRestart`. Saved legacy `Reset` requests
 retain their existing forced-restart/power-cycle behavior and can still complete
 or be cancelled by the rack. All controllers reading machine maintenance must
 support the `Reboot` operation before a rack queues it.
+
+The RMS compute adapter preserves `GracefulRestart` for all callers, not only
+rack maintenance. This also affects pre-ingestion power control and ingested
+power control that bypasses or disables the machine state controller. RMS
+`ForceRestart` and `AcPowercycle` still map to `RESET`; switch and power-shelf
+mapping is unchanged. Existing power API requests routed through the machine
+state controller still map all three restart actions to legacy `Reset`, so
+those requests do not acquire graceful semantics from this change.
 
 | Sub-state | Description |
 |-----------|-------------|
@@ -387,7 +395,7 @@ These cross-state dependencies are shown in the [Combined State Diagram](#combin
 | Rack state | Effect on Power Shelf |
 |------------|-----------------------|
 | R_Discovering | Rack waits until all power shelves in the rack profile are `Ready` before moving to `Maintenance`. |
-| R_Maintenance | Scoped power shelves participate in firmware upgrade, and the rack waits for their firmware outcome. Power shelves do not participate in the compute-host Reset batch. |
+| R_Maintenance | Scoped power shelves participate in firmware upgrade, and the rack waits for their firmware outcome. Power shelves do not participate in the compute-host reboot batch. |
 | R_Ready | Rack monitors for power shelves in `Error`; any failed shelf can move the rack to `Error`. |
 
 See [Power Shelf State Diagram](power_shelf.md) for the power-shelf FSM.

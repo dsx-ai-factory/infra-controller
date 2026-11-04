@@ -16,7 +16,7 @@ When no device IDs are specified (all three lists empty), the scope is treated a
 
 ## Activities
 
-The request also carries an optional list of **maintenance activities** to perform. When the list is empty, all non-power activities are selected. Compute-host resets require an explicit `PowerSequence` activity. Available activities:
+The request also carries an optional list of **maintenance activities** to perform. When the list is empty, all non-power activities are selected. On-demand compute-host reboots require an explicit `PowerSequence` activity. Available activities:
 
 | Activity | Proto `oneof` variant | Per-activity config | Description |
 |----------|----------------------|---------------------|-------------|
@@ -27,7 +27,7 @@ The request also carries an optional list of **maintenance activities** to perfo
 
 Each activity is represented as a `MaintenanceActivityConfig` message with a `oneof activity` field. The `oneof` discriminant identifies the activity type, and each variant carries only the configuration fields relevant to that activity.
 
-Selected activities execute in firmware upgrade, NVOS update, power sequence, then NMX-C configuration order, regardless of request ordering. An on-demand NVOS update alone does not reset compute hosts. See the [rack maintenance flow](rackstatemachine.md#maintenance-r_maintenance) for ingestion, reboot completion, and resume behavior.
+Selected activities execute in firmware upgrade, NVOS update, power sequence, then NMX-C configuration order, regardless of request ordering. An on-demand NVOS update alone does not reboot compute hosts. See the [rack maintenance flow](rackstatemachine.md#maintenance-r_maintenance) for ingestion, reboot completion, and resume behavior.
 
 ### Firmware Configuration Source
 
@@ -81,7 +81,7 @@ Without a configured rack-profile firmware object, implicit update phases are sk
 2. The handler validates that the rack is in `Ready` or `Error` state and no maintenance is already pending.
 3. It writes a `MaintenanceScope` to `RackConfig.maintenance_requested` and persists the config.
 4. On the next state-handler tick, `handle_ready` or `handle_error` detects `maintenance_requested` and enters the first selected maintenance activity.
-5. Update activities use the configuration source described above and filter device reprovisioning and firmware-upgrade operations to the scope. An explicitly selected power sequence resets all rack compute hosts, regardless of device scope.
+5. Update activities use the configuration source described above and filter device reprovisioning and firmware-upgrade operations to the scope. An explicitly selected power sequence gracefully reboots all rack compute hosts, regardless of device scope.
 6. After maintenance completes, the rack flows through `Validating` back to `Ready` as usual.
 
 ## gRPC API
@@ -108,7 +108,7 @@ message NvosUpdateActivity {
   optional string access_token = 3;  // omitted/empty = NOAUTH
 }
 message ConfigureNmxClusterActivity {}
-message PowerSequenceActivity {}  // explicit compute-host Reset
+message PowerSequenceActivity {}  // explicit graceful compute-host reboot
 
 message MaintenanceActivityConfig {
   oneof activity {
