@@ -559,11 +559,35 @@ impl TestEnv {
         ID: MachineIdSubtypeTrait,
         db::DatabaseError: From<<ID as TryFrom<MachineId>>::Error>,
     {
+        self.run_machine_state_controller_iteration_until_state_condition_with_requeue(
+            host_machine_id,
+            max_iterations,
+            true,
+            state_check,
+        )
+        .await
+    }
+
+    /// Disabling requeue lets fixtures observe intermediate states before the
+    /// controller handles the next transition.
+    pub(in crate::tests) async fn run_machine_state_controller_iteration_until_state_condition_with_requeue<
+        ID,
+    >(
+        &self,
+        host_machine_id: &ID,
+        max_iterations: u32,
+        allow_requeue: bool,
+        state_check: impl Fn(&Machine<ID>) -> bool,
+    ) -> ManagedHostState
+    where
+        ID: MachineIdSubtypeTrait,
+        db::DatabaseError: From<<ID as TryFrom<MachineId>>::Error>,
+    {
         for _ in 0..max_iterations {
             self.machine_state_controller
                 .lock()
                 .await
-                .run_single_iteration()
+                .run_single_iteration_ext(allow_requeue)
                 .boxed()
                 .await;
 
