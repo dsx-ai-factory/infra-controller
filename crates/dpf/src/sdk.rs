@@ -1129,8 +1129,7 @@ pub fn build_service_configuration(
             deployment_service_name: svc.name.clone(),
             interfaces: interfaces.none_if_empty(),
             service_configuration,
-            // NICo-owned services can update independently; other services wait
-            // for the DPU service sync handler to open the NodeEffect gate.
+            // Service upgrades wait for the NodeEffect gate unless explicitly overridden.
             upgrade_policy: DpuServiceConfigurationUpgradePolicy {
                 apply_node_effect: Some(svc.apply_node_effect.unwrap_or(true)),
             },

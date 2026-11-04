@@ -2029,10 +2029,9 @@ pub struct DpfConfig {
     /// Whether carbide automatically releases DPF maintenance holds for changed
     /// DPUDeployment-owned DPUService revisions whose upgrade policy enables NodeEffect.
     ///
-    /// This selects *who* opens an existing gate; it does not add one. NICo sets
-    /// `upgradePolicy.applyNodeEffect=false` for the DPU agent, DHCP server, FMDS, and OTel
-    /// Collector, so this setting does not gate those revisions. HBN, DTS, and extra services use
-    /// the gated default. Direct, detached DPUService objects do not use this setting.
+    /// This selects *who* opens an existing gate; it does not add one. NICo services,
+    /// HBN, DTS, and extra services use the gated default. Direct, detached DPUService
+    /// objects do not use this setting.
     ///
     /// On by default. Setting it to false does not resume unchecked rollout: it
     /// means the held DPUs wait for an operator to release them deliberately,
