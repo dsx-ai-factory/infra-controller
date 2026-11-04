@@ -131,7 +131,12 @@ func (s *SiteManager) tlsSetup(ctx context.Context) error {
 			break
 		}
 		log.Info().Err(err).Msg("failed to get a TLS certificate from Cert Manager, retrying in 10s")
-		time.Sleep(10 * time.Second)
+		// A shutdown signal cancels ctx, which ends the retries.
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(10 * time.Second):
+		}
 	}
 	err = os.WriteFile(mgrCertFile, []byte(resp.Certificate), 0644)
 	if err != nil {
