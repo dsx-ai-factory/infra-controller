@@ -14,12 +14,18 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+use std::collections::HashMap;
+
 use carbide_uuid::DbTable;
+use carbide_uuid::machine::MachineId;
 use mac_address::MacAddress;
 use model::predicted_machine_interface::{NewPredictedMachineInterface, PredictedMachineInterface};
 use sqlx::PgConnection;
 
-use crate::{ColumnInfo, DatabaseError, FilterableQueryBuilder, ObjectColumnFilter};
+use crate::db_read::DbReader;
+use crate::{
+    ColumnInfo, DatabaseError, DatabaseResult, FilterableQueryBuilder, ObjectColumnFilter,
+};
 
 #[derive(Clone, Copy)]
 pub struct MachineIdColumn;
@@ -144,6 +150,25 @@ pub async fn find_by_mac_address(
             .into_iter()
             .next(),
     )
+}
+
+/// Returns the machine IDs owning predictions for the requested MACs.
+/// Missing MACs are omitted; real interface ownership is not consulted.
+pub async fn find_machine_ids_by_mac_addresses(
+    db: impl DbReader<'_>,
+    mac_addresses: &[MacAddress],
+) -> DatabaseResult<HashMap<MacAddress, MachineId>> {
+    if mac_addresses.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let query = "SELECT mac_address, machine_id FROM predicted_machine_interfaces \
+                 WHERE mac_address = ANY($1)";
+    let rows: Vec<(MacAddress, MachineId)> = sqlx::query_as(query)
+        .bind(mac_addresses)
+        .fetch_all(db)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))?;
+    Ok(rows.into_iter().collect())
 }
 
 pub async fn create(

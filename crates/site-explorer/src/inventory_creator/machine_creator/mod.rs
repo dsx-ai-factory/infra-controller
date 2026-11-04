@@ -762,20 +762,23 @@ impl MachineCreator {
             )
             .await?;
 
+        let machine_ids_by_mac =
+            db::machine::find_machine_ids_by_mac_addresses(&mut *txn, mac_addresses).await?;
+        let predicted_machine_ids_by_mac =
+            db::predicted_machine_interface::find_machine_ids_by_mac_addresses(
+                &mut *txn,
+                mac_addresses,
+            )
+            .await?;
         let mut existing_predicted_host_machine_id = None;
         for mac_address in mac_addresses {
-            let machine_id =
-                if let Some(machine) = db::machine::find_by_mac_address(txn, mac_address).await? {
-                    machine.id
-                } else if let Some(prediction) =
-                    db::predicted_machine_interface::find_by_mac_address(&mut *txn, *mac_address)
-                        .await?
-                {
-                    // A pending prediction identifies the host before its first DHCP.
-                    prediction.machine_id
-                } else {
-                    continue;
-                };
+            let Some(machine_id) = machine_ids_by_mac
+                .get(mac_address)
+                .or_else(|| predicted_machine_ids_by_mac.get(mac_address))
+                .copied()
+            else {
+                continue;
+            };
 
             match machine_id.machine_id_subtype() {
                 MachineIdSubtype::StableHost(machine_id) => {
