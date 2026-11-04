@@ -38,7 +38,9 @@ fn parse_hardware_profile(value: &str) -> Result<HardwareType, String> {
     // NVSwitch trays run as a host-role BMC: the machine model already gives
     // them their switch chassis, NVOS MAC and serial, and no DPUs.
     match hardware_type {
-        HardwareType::LiteOnPowerShelf | HardwareType::DeltaPowerShelf => Err(format!(
+        HardwareType::LiteOnPowerShelf
+        | HardwareType::DeltaPowerShelf
+        | HardwareType::DeltaVrnvl72PowerShelf => Err(format!(
             "hardware profile is not a host, DPU or NVSwitch tray: {value}"
         )),
         hardware_type => Ok(hardware_type),

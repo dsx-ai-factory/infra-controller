@@ -72,6 +72,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "NetworkAdapter.NetworkAdapter",
         "NetworkDeviceFunction.NetworkDeviceFunction",
         "PCIeDevice.PCIeDevice",
+        "PowerEquipment.PowerEquipment",
+        "PowerDistribution.PowerDistribution",
         "PowerSubsystem.PowerSubsystem",
         "PowerSupply.PowerSupply",
         "Processor.Processor",

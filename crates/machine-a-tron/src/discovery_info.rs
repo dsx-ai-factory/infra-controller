@@ -49,6 +49,7 @@ fn for_dpu(dpu: &DpuMachineInfo) -> DiscoveryInfo {
         | HardwareType::GenericSupermicro => bluefield3(dpu),
         HardwareType::LiteOnPowerShelf
         | HardwareType::DeltaPowerShelf
+        | HardwareType::DeltaVrnvl72PowerShelf
         | HardwareType::NvidiaSwitchNd5200Ld
         | HardwareType::NvidiaSwitchN5700Ld => {
             panic!("DPU discovery is not defined for {}", dpu.hw_type)
@@ -99,6 +100,7 @@ fn for_host(host: &HostMachineInfo) -> DiscoveryInfo {
         }
         HardwareType::LiteOnPowerShelf
         | HardwareType::DeltaPowerShelf
+        | HardwareType::DeltaVrnvl72PowerShelf
         | HardwareType::NvidiaSwitchNd5200Ld
         | HardwareType::NvidiaSwitchN5700Ld => {
             panic!("discovery_info requested for {}", host.hw_type)

@@ -122,6 +122,7 @@ pub(crate) mod network_adapter;
 pub(crate) mod network_device_function;
 pub(crate) mod oem;
 pub(crate) mod pcie_device;
+pub(crate) mod power_equipment;
 mod power_subsystem;
 pub(crate) mod power_supply;
 pub(crate) mod processor;

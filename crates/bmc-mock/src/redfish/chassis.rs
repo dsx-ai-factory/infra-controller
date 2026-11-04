@@ -16,11 +16,13 @@
  */
 
 use std::borrow::Cow;
+use std::sync::atomic::{AtomicBool, Ordering};
 
-use axum::Router;
 use axum::extract::{Path, State};
-use axum::response::Response;
-use axum::routing::get;
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
+use axum::routing::{get, post};
+use axum::{Json, Router};
 use nv_redfish_server_core::AdditionalProperties;
 
 use super::schema::chassis::{Chassis, ChassisRequired, ChassisType};
@@ -28,7 +30,7 @@ use super::schema::resource::Uuid;
 use crate::bmc_state::BmcState;
 use crate::json::JsonExt;
 use crate::redfish::ModelExt;
-use crate::{Callbacks, http, redfish};
+use crate::{ActionError, Callbacks, ResourceResetType, http, redfish};
 
 pub(super) fn resource<'a>(chassis_id: &'a str) -> redfish::Resource<'a> {
     let odata_id = format!("{}/{chassis_id}", collection().odata_id);
@@ -38,6 +40,10 @@ pub(super) fn resource<'a>(chassis_id: &'a str) -> redfish::Resource<'a> {
         id: Cow::Borrowed(chassis_id),
         name: Cow::Borrowed("Chassis"),
     }
+}
+
+pub(super) fn reset_target(chassis_id: &str) -> String {
+    format!("{}/Actions/Chassis.Reset", resource(chassis_id).odata_id)
 }
 
 pub(super) fn collection() -> redfish::Collection<'static> {
@@ -58,6 +64,7 @@ pub(crate) fn add_routes<C: Callbacks>(r: Router<BmcState<C>>) -> Router<BmcStat
     const LEAK_DETECTOR_ID: &str = "{leak_detector_id}";
     r.route(&collection().odata_id, get(get_chassis_collection::<C>))
         .route(&resource(CHASSIS_ID).odata_id, get(get_chassis::<C>))
+        .route(&reset_target(CHASSIS_ID), post(post_reset_chassis::<C>))
         .route(
             &redfish::network_adapter::chassis_collection(CHASSIS_ID).odata_id,
             get(get_chassis_network_adapters::<C>),
@@ -130,6 +137,11 @@ pub(crate) fn add_routes<C: Callbacks>(r: Router<BmcState<C>>) -> Router<BmcStat
         )
 }
 
+pub(crate) struct PowerControlConfig {
+    pub(crate) initial_powered_on: bool,
+    pub(crate) allowed_reset_types: Vec<ResourceResetType>,
+}
+
 pub(crate) struct SingleChassisConfig {
     pub(crate) id: Cow<'static, str>,
     pub(crate) serial_number: Option<Cow<'static, str>>,
@@ -150,6 +162,8 @@ pub(crate) struct SingleChassisConfig {
     pub(crate) oem: Option<AdditionalProperties>,
     /// Whether the chassis serves the NVIDIA `AuxPowerReset` AC power cycle action.
     pub(crate) aux_power_reset: bool,
+    /// Optional chassis power protocol. None omits actions and returns 404 for them.
+    pub(crate) power_control: Option<PowerControlConfig>,
 }
 
 impl SingleChassisConfig {
@@ -173,6 +187,7 @@ impl SingleChassisConfig {
             power_supplies: None,
             oem: None,
             aux_power_reset: false,
+            power_control: None,
         }
     }
 }
@@ -181,11 +196,26 @@ pub(crate) struct ChassisConfig {
     pub(crate) chassis: Vec<SingleChassisConfig>,
 }
 
-pub(crate) struct ChassisState {
+/// Configured chassis resources and their mutable, application-published observations.
+pub struct ChassisState {
     chassis: Vec<SingleChassisState>,
 }
 
 impl ChassisState {
+    /// Publishes the commanded On/Off state for all chassis with configured power control.
+    /// Their chassis and PSU responses read this observation directly from resource state.
+    /// Returns false when no chassis in this BMC supports this power protocol.
+    pub fn set_powered_on(&self, powered_on: bool) -> bool {
+        let mut supported = false;
+        for chassis in &self.chassis {
+            if let Some(power) = chassis.powered_on.as_ref() {
+                power.store(powered_on, Ordering::SeqCst);
+                supported = true;
+            }
+        }
+        supported
+    }
+
     pub(crate) fn from_config(config: ChassisConfig) -> Self {
         let chassis = config
             .chassis
@@ -208,11 +238,22 @@ impl ChassisState {
 
 pub(crate) struct SingleChassisState {
     pub(crate) config: SingleChassisConfig,
+    powered_on: Option<AtomicBool>,
 }
 
 impl SingleChassisState {
     fn new(config: SingleChassisConfig) -> Self {
-        Self { config }
+        let powered_on = config
+            .power_control
+            .as_ref()
+            .map(|control| AtomicBool::new(control.initial_powered_on));
+        Self { config, powered_on }
+    }
+
+    fn powered_on(&self) -> Option<bool> {
+        self.powered_on
+            .as_ref()
+            .map(|power| power.load(Ordering::SeqCst))
     }
 
     pub(crate) fn pcie_devices_resources(&self) -> Vec<redfish::Resource<'static>> {
@@ -341,13 +382,65 @@ async fn get_chassis<C: Callbacks>(
             chassis_type: config.chassis_type,
         })
     };
+    let mut model = model;
+    if let Some(on) = chassis_state.powered_on() {
+        model = model.power_state(if on {
+            super::schema::resource::PowerState::On
+        } else {
+            super::schema::resource::PowerState::Off
+        });
+    }
     let mut document = model.into_json();
     if config.aux_power_reset {
         document = document.patch(redfish::oem::nvidia::chassis::aux_power_reset_action(
             &chassis_id,
         ));
     }
+    if let Some(control) = config.power_control.as_ref() {
+        document = document.patch(serde_json::json!({"Actions": {"#Chassis.Reset": {
+            "target": reset_target(&chassis_id),
+            "ResetType@Redfish.AllowableValues": control.allowed_reset_types
+        }}}));
+    }
     document.into_ok_response()
+}
+
+async fn post_reset_chassis<C: Callbacks>(
+    State(state): State<BmcState<C>>,
+    Path(id): Path<String>,
+    body: Result<Json<serde_json::Value>, axum::extract::rejection::JsonRejection>,
+) -> Response {
+    let Some(control) = state
+        .chassis_state
+        .find(&id)
+        .and_then(|c| c.config.power_control.as_ref())
+    else {
+        return http::not_found();
+    };
+    let Json(body) = match body {
+        Ok(body) => body,
+        Err(_) => return http::bad_request("Chassis.Reset requires a JSON body"),
+    };
+    let Some(reset) = body
+        .get("ResetType")
+        .and_then(|v| serde_json::from_value::<ResourceResetType>(v.clone()).ok())
+    else {
+        return http::bad_request("Chassis.Reset requires a valid ResetType");
+    };
+    if !control.allowed_reset_types.contains(&reset) {
+        return http::bad_request("Chassis.Reset does not support the requested ResetType");
+    }
+    let Some(callbacks) = state.callbacks.as_ref() else {
+        return http::not_found();
+    };
+    match callbacks.chassis_reset(reset).await {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(ActionError::BadRequest(error)) => http::bad_request(&error.to_string()),
+        Err(ActionError::Internal(error)) => {
+            tracing::error!(%error, chassis_id = %id, "Chassis reset failed");
+            http::redfish_error(StatusCode::INTERNAL_SERVER_ERROR, "Chassis reset failed")
+        }
+    }
 }
 
 async fn get_chassis_network_adapters<C: Callbacks>(
@@ -561,9 +654,10 @@ async fn get_chassis_power_supply<C: Callbacks>(
     let Some(chassis_state) = state.chassis_state.find(&chassis_id) else {
         return http::not_found();
     };
+    let observed = chassis_state.powered_on();
     chassis_state
         .find_power_supply(&power_supply_id)
-        .map(|v| v.to_json().into_ok_response())
+        .map(|v| v.to_json_with_power_state(observed).into_ok_response())
         .unwrap_or_else(http::not_found)
 }
 

@@ -91,6 +91,10 @@ impl Callbacks for PowerShelfCallbacks {
         self.set_power_state(reset_type)
     }
 
+    async fn chassis_reset(&self, reset_type: ResourceResetType) -> Result<(), ActionError> {
+        self.set_power_state(reset_type)
+    }
+
     async fn device_effect(&self, effect: DeviceEffect) -> Result<(), ActionError> {
         if !matches!(&effect, DeviceEffect::ResetBmcToDefaults(_)) {
             return Err(ActionError::BadRequest(eyre::eyre!(
@@ -134,6 +138,7 @@ pub(crate) struct PowerShelfActor {
     live_state: Arc<RwLock<PowerShelfLiveState>>,
     bmc_injection: Arc<InjectionStore>,
     _bmc_mock: Option<Arc<BmcMockWrapperHandle>>,
+    bmc_chassis_state: Option<Arc<bmc_mock::ChassisState>>,
     bmc_dhcp_info: Option<DhcpResponseInfo>,
     bmc_recovery: BmcDhcpRecovery,
     fsm: PowerShelfFsm,
@@ -167,6 +172,7 @@ impl PowerShelfActor {
             live_state: Arc::new(RwLock::new(PowerShelfLiveState::new(&fsm))),
             bmc_injection: Arc::new(InjectionStore::new()),
             _bmc_mock: None,
+            bmc_chassis_state: None,
             bmc_dhcp_info: None,
             bmc_recovery: Default::default(),
             fsm,
@@ -213,6 +219,7 @@ impl PowerShelfActor {
             live_state: Arc::new(RwLock::new(live_state)),
             bmc_injection: Arc::new(InjectionStore::new()),
             _bmc_mock: None,
+            bmc_chassis_state: None,
             bmc_dhcp_info: None,
             bmc_recovery: Default::default(),
             fsm,
@@ -403,10 +410,11 @@ impl PowerShelfActor {
         &mut self,
         mailbox: &ActorMailbox<PowerShelfMessage>,
     ) -> Result<(), MachineStateError> {
-        let dhcp_info = self
+        let bmc_ip = self
             .bmc_dhcp_info
             .as_ref()
-            .ok_or(MachineStateError::NoBmcDhcpInfo)?;
+            .ok_or(MachineStateError::NoBmcDhcpInfo)?
+            .ip_address;
         let machine_info = MachineInfo::Host(self.host_info.clone());
         let bmc_mock = BmcMockWrapper::new(
             &machine_info,
@@ -436,11 +444,13 @@ impl PowerShelfActor {
             live_state.bmc_persistence.attach(bmc_mock.state());
         }
 
+        self.attach_chassis_state(bmc_mock.state().chassis_state.clone());
+
         let bmc_handle = {
             self.bmc_recovery
                 .mount(
                     &self.app_context.bmc_registry,
-                    dhcp_info.ip_address,
+                    bmc_ip,
                     bmc_mock.router().clone(),
                 )
                 .await;
@@ -457,7 +467,7 @@ impl PowerShelfActor {
 
         {
             let mut state = self.live_state.write().unwrap();
-            state.bmc_ip = Some(dhcp_info.ip_address);
+            state.bmc_ip = Some(bmc_ip);
             state.ipmi_port = bmc_handle.as_ref().and_then(|handle| handle.ipmi_port());
             state.ssh_endpoint_port = bmc_handle
                 .as_ref()
@@ -502,10 +512,19 @@ impl PowerShelfActor {
         self.fsm = next_state;
     }
 
+    fn attach_chassis_state(&mut self, chassis: Arc<bmc_mock::ChassisState>) {
+        self.bmc_chassis_state = Some(chassis);
+        self.update_live_state();
+    }
+
     fn update_live_state(&self) {
         let mut state = self.live_state.write().unwrap();
         state.power_state = self.fsm.power_state();
         state.state = self.fsm.state_string();
+        if let Some(chassis) = self.bmc_chassis_state.as_ref() {
+            // The shelf FSM has only On/Off observations, shared by its chassis and PSUs.
+            chassis.set_powered_on(state.power_state == PowerState::On);
+        }
     }
 }
 
@@ -720,6 +739,113 @@ mod tests {
     use mac_address::MacAddress;
 
     use super::*;
+
+    #[tokio::test]
+    async fn vr_delta_actor_publishes_chassis_and_psu_power() {
+        let app_context = MachineATronContext::for_test();
+        let config: MachineConfig = toml::from_str(
+            r#"
+hw_type = "delta_vrnvl72_power_shelf"
+host_count = 1
+dpu_per_host_count = 0
+underlay_dhcp_relay_address = "192.0.2.1"
+bmc_dhcp_relay_address = "192.0.2.1"
+"#,
+        )
+        .unwrap();
+        let mac = MacAddress::new([2, 0, 0, 0, 3, 38]);
+        let pool_config = MacAddressPoolConfig::new(mac, 24).unwrap();
+        let mut mac_pool = MacAddressPool::new_pool(pool_config);
+        let mut actor = PowerShelfActor::new(
+            app_context,
+            "vr-delta".into(),
+            Arc::new(config),
+            &mut mac_pool,
+            pool_config,
+        );
+        let (runtime, mailbox) = Actor::new();
+        let callbacks = Arc::new(PowerShelfCallbacks {
+            state: actor.live_state.clone(),
+            mailbox,
+        });
+        let (router, state) = bmc_mock::machine_router(
+            &MachineInfo::Host(actor.host_info.clone()),
+            callbacks,
+            "vr-delta-actor".into(),
+            false,
+            bmc_mock::MachineRouterOptions::default(),
+        );
+        actor.fsm_event(Event::Pause);
+        actor.attach_chassis_state(state.chassis_state.clone());
+        assert_eq!(
+            crate::status::DeviceKind::from(actor.host_info.hw_type),
+            crate::status::DeviceKind::PowerShelf
+        );
+        let task = tokio::spawn(runtime.run(actor));
+        let (_server, base) = bmc_mock::test_support::serve_https("vr-delta-actor", router);
+        let client = reqwest::Client::builder()
+            .danger_accept_invalid_certs(true)
+            .build()
+            .unwrap();
+        let chassis = base.join("redfish/v1/Chassis/PowerShelf_0").unwrap();
+        let psu = base
+            .join("redfish/v1/Chassis/PowerShelf_0/PowerSubsystem/PowerSupplies/1")
+            .unwrap();
+        let initial: serde_json::Value = client
+            .get(chassis.clone())
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(
+            initial["PowerState"], "Off",
+            "actor state must be published before serving the BMC"
+        );
+        let initial: serde_json::Value = client
+            .get(psu.clone())
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(initial["Oem"]["deltaenergysystems"]["Power"], false);
+        let response = client
+            .post(
+                base.join("redfish/v1/Chassis/PowerShelf_0/Actions/Chassis.Reset")
+                    .unwrap(),
+            )
+            .json(&serde_json::json!({"ResetType":"On"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::NO_CONTENT);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let observed: serde_json::Value = client
+                    .get(chassis.clone())
+                    .send()
+                    .await
+                    .unwrap()
+                    .json()
+                    .await
+                    .unwrap();
+                if observed["PowerState"] == "On" {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("shelf actor must publish the accepted chassis reset");
+        let observed: serde_json::Value =
+            client.get(psu).send().await.unwrap().json().await.unwrap();
+        assert_eq!(observed["Oem"]["deltaenergysystems"]["Power"], true);
+        task.abort();
+        let _ = task.await;
+    }
 
     #[tokio::test]
     async fn first_run_offset_waits_for_resume() {

@@ -37,7 +37,9 @@ pub struct BmcState<C: Callbacks> {
     pub(crate) oem_state: redfish::oem::State,
     pub manager: Arc<ManagerState>,
     pub system_state: Arc<SystemState<C>>,
-    pub(crate) chassis_state: Arc<ChassisState>,
+    /// Chassis resources and their application-published power observations.
+    pub chassis_state: Arc<ChassisState>,
+    pub(crate) power_equipment: Option<Arc<redfish::power_equipment::Config>>,
     pub update_service_state: Arc<UpdateServiceState>,
     pub account_service_state: Arc<AccountServiceState>,
     pub(crate) session_service_state: Arc<SessionServiceState>,
@@ -70,6 +72,7 @@ impl<C: Callbacks> Clone for BmcState<C> {
             manager: self.manager.clone(),
             system_state: self.system_state.clone(),
             chassis_state: self.chassis_state.clone(),
+            power_equipment: self.power_equipment.clone(),
             update_service_state: self.update_service_state.clone(),
             account_service_state: self.account_service_state.clone(),
             session_service_state: self.session_service_state.clone(),

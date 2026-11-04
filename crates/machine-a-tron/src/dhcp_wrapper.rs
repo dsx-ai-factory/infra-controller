@@ -88,6 +88,7 @@ fn vendor_class_for(machine: DhcpMachine, requester: DhcpRequester) -> Option<&'
                 | HardwareType::NvidiaDgxVr
                 | HardwareType::LiteOnPowerShelf
                 | HardwareType::DeltaPowerShelf
+                | HardwareType::DeltaVrnvl72PowerShelf
                 | HardwareType::NvidiaSwitchNd5200Ld
                 | HardwareType::NvidiaSwitchN5700Ld
                 | HardwareType::NvidiaDgxH100
@@ -107,6 +108,7 @@ fn vendor_class_for(machine: DhcpMachine, requester: DhcpRequester) -> Option<&'
                 | HardwareType::NvidiaDgxVr
                 | HardwareType::LiteOnPowerShelf
                 | HardwareType::DeltaPowerShelf
+                | HardwareType::DeltaVrnvl72PowerShelf
                 | HardwareType::NvidiaSwitchNd5200Ld
                 | HardwareType::NvidiaSwitchN5700Ld
                 | HardwareType::NvidiaDgxH100

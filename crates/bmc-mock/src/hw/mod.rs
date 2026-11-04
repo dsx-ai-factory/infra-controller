@@ -118,6 +118,9 @@ pub(super) mod liteon_power_shelf;
 /// Support of Delta Energy Systems Power Shelf.
 pub(super) mod delta_power_shelf;
 
+/// VR NVL72 Delta shelf, PMC 3.3.8 and PSU 04320409.
+pub(super) mod delta_vrnvl72_power_shelf;
+
 /// The NVOS the NVLink switch trays run, as their NVUE REST API shows it.
 pub(super) mod nvos;
 

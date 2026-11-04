@@ -126,6 +126,7 @@ pub use rack_info::RackInfo;
 /// BMC account state and the credential snapshot type used to persist and
 /// restore rotated passwords across a mock rebuild.
 pub use redfish::account_service::AccountServiceState;
+pub use redfish::chassis::ChassisState;
 pub use redfish::event_service::{
     EventServiceConfig, EventServiceError, EventServiceLimits, EventServiceState, EventServiceStats,
 };
@@ -181,6 +182,9 @@ pub enum HardwareType {
     LiteOnPowerShelf,
     #[serde(rename = "delta_power_shelf")]
     DeltaPowerShelf,
+    /// VR NVL72 Delta AHE54V2037A shelf, modeled from PMC 3.3.8.
+    #[serde(rename = "delta_vrnvl72_power_shelf")]
+    DeltaVrnvl72PowerShelf,
     #[serde(rename = "nvidia_switch_nd5200_ld")]
     NvidiaSwitchNd5200Ld,
     #[serde(rename = "nvidia_switch_n5700_ld")]
@@ -210,6 +214,7 @@ impl fmt::Display for HardwareType {
             Self::NvidiaDgxVr => "NVIDIA DGX VR NVL".fmt(f),
             Self::LiteOnPowerShelf => "Lite-On Power Shelf".fmt(f),
             Self::DeltaPowerShelf => "Delta Power Shelf".fmt(f),
+            Self::DeltaVrnvl72PowerShelf => "Delta VR NVL72 Power Shelf".fmt(f),
             Self::NvidiaSwitchNd5200Ld => "NVIDIA Switch ND5200_LD".fmt(f),
             Self::NvidiaSwitchN5700Ld => "NVIDIA Switch N5700_LD".fmt(f),
             Self::NvidiaDgxH100 => "NVIDIA DGX H100".fmt(f),
@@ -244,7 +249,7 @@ impl HardwareType {
             Self::SupermicroGb300Nvl => Some(1),
             Self::NvidiaDgxVr => Some(1),
             Self::LiteOnPowerShelf => Some(0),
-            Self::DeltaPowerShelf => Some(0),
+            Self::DeltaPowerShelf | Self::DeltaVrnvl72PowerShelf => Some(0),
             Self::NvidiaSwitchNd5200Ld => Some(0),
             Self::NvidiaSwitchN5700Ld => Some(0),
             Self::NvidiaDgxH100 => Some(1),
@@ -349,6 +354,18 @@ pub trait Callbacks: Send + Sync + 'static {
         std::future::ready(Ok(()))
     }
 
+    /// Accepts a reset of the configured chassis into the backend's execution path.
+    /// The owning application publishes resulting chassis and PSU observations through
+    /// [`ChassisState::set_powered_on`]. The default rejects unsupported chassis resets.
+    fn chassis_reset(
+        &self,
+        reset_type: ResourceResetType,
+    ) -> impl Future<Output = Result<(), ActionError>> + Send {
+        std::future::ready(Err(ActionError::BadRequest(eyre::eyre!(
+            "bmc-mock: backend does not support chassis reset {reset_type:?}"
+        ))))
+    }
+
     fn state_refresh_indication(&self);
 }
 
@@ -365,6 +382,21 @@ pub enum BootOptionKind {
 #[cfg(test)]
 mod hardware_type_tests {
     use super::HardwareType;
+
+    #[test]
+    fn vr_delta_shelf_serde_preserves_distinct_zero_dpu_identity() {
+        let hardware = HardwareType::DeltaVrnvl72PowerShelf;
+        assert_eq!(
+            serde_json::to_string(&hardware).unwrap(),
+            r#""delta_vrnvl72_power_shelf""#
+        );
+        assert_eq!(
+            serde_json::from_str::<HardwareType>(r#""delta_vrnvl72_power_shelf""#).unwrap(),
+            hardware
+        );
+        assert_eq!(hardware.fixed_number_of_dpu(), Some(0));
+        assert_ne!(hardware, HardwareType::DeltaPowerShelf);
+    }
 
     #[test]
     fn nvidia_switch_n5700_ld_serde_and_dpu_count() {

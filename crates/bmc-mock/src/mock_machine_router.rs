@@ -202,6 +202,7 @@ fn machine_router_inner<C: Callbacks>(
         manager,
         system_state,
         chassis_state,
+        power_equipment: machine_info.power_equipment_config().map(Arc::new),
         update_service_state,
         account_service_state,
         session_service_state,
@@ -218,9 +219,11 @@ fn machine_router_inner<C: Callbacks>(
         MachineInfo::Host(h) if matches!(
             h.hw_type,
             HardwareType::LiteOnPowerShelf | HardwareType::DeltaPowerShelf
+            | HardwareType::DeltaVrnvl72PowerShelf
         )
     );
     let router = router
+        .add_routes(crate::redfish::power_equipment::add_routes)
         .add_routes(|router| crate::redfish::computer_system::add_routes(router, bmc_vendor))
         .add_routes(crate::ipmi::add_routes)
         .with_state(state.clone())

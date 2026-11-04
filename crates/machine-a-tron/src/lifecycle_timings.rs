@@ -362,6 +362,7 @@ impl PlatformTimingProfile {
             // which stays at 5 s to match the bmc-mock constant).
             HardwareType::LiteOnPowerShelf
             | HardwareType::DeltaPowerShelf
+            | HardwareType::DeltaVrnvl72PowerShelf
             | HardwareType::NvidiaSwitchNd5200Ld
             | HardwareType::NvidiaSwitchN5700Ld => LifecycleTimings {
                 power_on_os_ready: Duration::ZERO,
