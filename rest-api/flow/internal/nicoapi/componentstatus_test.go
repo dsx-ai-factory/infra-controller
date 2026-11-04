@@ -32,10 +32,12 @@ func TestMapComponentOperationStatus_Compute(t *testing.T) {
 		{"post_assigned_measuring", "PostAssignedMeasuring/MeasuredBoot/Idle", types.PhaseInitializing, allComputeOps()},
 		{"bom_validating", "BomValidating/Some", types.PhaseInitializing, allComputeOps()},
 
-		// InUse buckets — tenant owns the host, or core is mid-reprovision.
-		{"assigned_ready", "Assigned/Ready", types.PhaseInUse, allComputeOps()},
-		{"assigned_provisioning", "Assigned/Provisioning", types.PhaseInUse, allComputeOps()},
-		{"assigned_reprovision", "Assigned/Reprovision/Init", types.PhaseInUse, allComputeOps()},
+		// Assigned heads — no operations blocked, regardless of substate.
+		{"assigned_ready", "Assigned/Ready", types.PhaseReady, nil},
+		{"assigned_provisioning", "Assigned/Provisioning", types.PhaseReady, nil},
+		{"assigned_reprovision", "Assigned/Reprovision/Init", types.PhaseReady, nil},
+
+		// InUse buckets — cleanup, reprovisioning, or maintenance.
 		{"waiting_for_cleanup", "WaitingForCleanup/Init", types.PhaseInUse, allComputeOps()},
 		{"dpu_reprovision", "Reprovisioning/Init", types.PhaseInUse, allComputeOps()},
 		{"host_reprovision", "HostReprovisioning/Init", types.PhaseInUse, allComputeOps()},
