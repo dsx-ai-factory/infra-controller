@@ -382,8 +382,20 @@ impl SwitchReachabilityMonitor {
         let timer = PeriodicTimer::new(self.config.run_interval);
         loop {
             let tick = timer.tick();
-            if let Err(error) = self.run_single_iteration().await {
-                tracing::warn!(%error, "SwitchReachabilityMonitor iteration failed");
+            // A pass can take up to `probe_timeout` per switch service, so
+            // shutdown interrupts an in-flight pass instead of waiting for it.
+            // Dropping the pass abandons its probes and any uncommitted write;
+            // the held work lock is released with the monitor.
+            tokio::select! {
+                result = self.run_single_iteration() => {
+                    if let Err(error) = result {
+                        tracing::warn!(%error, "SwitchReachabilityMonitor iteration failed");
+                    }
+                }
+                _ = cancel_token.cancelled() => {
+                    tracing::info!("SwitchReachabilityMonitor stop was requested");
+                    return;
+                }
             }
             tokio::select! {
                 _ = tick.sleep() => {},
@@ -1428,6 +1440,58 @@ mod tests {
 
         drop(stale_lock);
         replica.shutdown().await;
+        Ok(())
+    }
+
+    /// Prober whose connections never complete, as a blackholed port's would
+    /// until `probe_timeout`.
+    struct HangingProber;
+
+    #[async_trait]
+    impl SwitchProber for HangingProber {
+        async fn probe(&self, _addr: SocketAddr, _timeout: Duration) -> Result<(), String> {
+            std::future::pending().await
+        }
+    }
+
+    #[carbide_macros::sqlx_test]
+    async fn shutdown_interrupts_an_in_flight_pass(
+        pool: PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use model::switch::SwitchControllerState;
+
+        let mut txn = pool.begin().await?;
+        let switch =
+            db::test_support::switch::create_seeded_discovered(txn.as_mut(), 1, "Switch1").await?;
+        txn.commit().await?;
+        set_controller_state(&pool, &switch.id, &SwitchControllerState::Ready).await?;
+
+        let mut join_set = JoinSet::new();
+        let work_lock_manager =
+            db::work_lock_manager::start(&mut join_set, pool.clone(), Default::default()).await?;
+        let mut monitor_tasks = JoinSet::new();
+        let cancel = CancellationToken::new();
+        SwitchReachabilityMonitor::with_prober(
+            pool.clone(),
+            SwitchReachabilityConfig {
+                probe_timeout: Duration::from_secs(3600),
+                ..SwitchReachabilityConfig::default()
+            },
+            work_lock_manager,
+            Arc::new(HangingProber),
+        )
+        .start(&mut monitor_tasks, cancel.clone())?;
+
+        // Let the first pass reach its probe, then stop the monitor; it must
+        // return without waiting for the probe.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        cancel.cancel();
+        tokio::time::timeout(Duration::from_secs(5), monitor_tasks.join_next())
+            .await
+            .expect("monitor stopped while its pass was probing")
+            .expect("monitor task present")?;
+
+        join_set.shutdown().await;
         Ok(())
     }
 
