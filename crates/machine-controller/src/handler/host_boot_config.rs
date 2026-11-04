@@ -773,6 +773,71 @@ mod tests {
         assert_eq!(applied, vec![profiles_with("Disabled")]);
     }
 
+    #[tokio::test]
+    async fn configure_bios_retries_a_failed_host_identity_read_without_restarting() {
+        let redfish_sim = Arc::new(RedfishSim::default());
+        let redfish_client = redfish_sim
+            .create_client("named-bios-profile", None, RedfishAuth::Anonymous, None)
+            .await
+            .unwrap();
+        redfish_sim.set_machine_setup_bios_job_id(Some("bios-job".to_string()));
+        redfish_sim.set_service_root_vendor(Some("Dell".to_string()));
+        redfish_sim.fail_next_system_read("connection reset by peer");
+        let mut site_config = MachineStateHandlerSiteConfig::test_default();
+        site_config.named_bios_profiles = HashMap::from([(
+            "gpu-perf".to_string(),
+            NamedBiosProfile {
+                vendor: RedfishVendor::Dell,
+                model: "PowerEdge_XE9680".to_string(),
+                attributes: HashMap::new(),
+            },
+        )]);
+        let mut services = test_services(redfish_sim.clone(), site_config);
+        let mut metrics = MachineMetrics::default();
+        let mut pending_db_writes = DbWriteBatch::new();
+        let mut ctx = StateHandlerContext {
+            services: &mut services,
+            metrics: &mut metrics,
+            pending_db_writes: &mut pending_db_writes,
+        };
+        let mut mh_snapshot = managed_host_state_snapshot();
+        mh_snapshot
+            .host_snapshot
+            .metadata
+            .labels
+            .insert("bios-profile".to_string(), "gpu-perf".to_string());
+        let explicit_target = BootInterfaceTarget::Pair(MachineBootInterface {
+            mac_address: "10:00:00:00:00:01".parse().unwrap(),
+            interface_id: "NIC.Slot.5-1".to_string(),
+        });
+        let timepoint = redfish_sim.timepoint();
+
+        let error = run_host_boot_config_stage(
+            &mut ctx,
+            &reachability_params(),
+            redfish_client.as_ref(),
+            &mh_snapshot,
+            Some(&explicit_target),
+            HostBootConfigStage::ConfigureBios { retry_count: 0 },
+        )
+        .await
+        .expect_err("a failed host identity read fails the step so it is retried");
+        assert!(
+            error.to_string().contains("connection reset by peer"),
+            "unexpected error: {error}"
+        );
+        let actions = redfish_sim.actions_since(&timepoint).all_hosts();
+        assert!(
+            !actions.iter().any(|action| matches!(
+                action,
+                RedfishSimAction::MachineSetup { .. }
+                    | RedfishSimAction::Power(_)
+                    | RedfishSimAction::PowerFailed(_)
+            )),
+            "a failed host identity read must not set up or restart the host: {actions:?}"
+        );
+    }
+
     #[test]
     fn boot_config_decision_chooses_the_smallest_remediation() {
         value_scenarios!(decide_host_boot_config:

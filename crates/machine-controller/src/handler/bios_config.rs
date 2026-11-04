@@ -23,14 +23,15 @@ use std::str::FromStr;
 use carbide_redfish::boot_interface::BootInterfaceTarget;
 use carbide_redfish::libredfish::error::state_handler_redfish_error as redfish_error;
 use carbide_uuid::machine::AsMachineId;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use eyre::eyre;
 use futures_util::FutureExt;
 use health_report::{HealthProbeAlert, HealthProbeId, HealthReport, HealthReportApplyMode};
 use libredfish::model::service_root::RedfishVendor;
 use libredfish::{BiosProfileVendor, Redfish, RedfishError, SystemPowerControl};
 use model::machine::{
-    BiosConfigInfo, BiosConfigState, ManagedHostState, ManagedHostStateSnapshot, PowerState,
+    BiosConfigInfo, BiosConfigState, HostMachine, ManagedHostState, ManagedHostStateSnapshot,
+    PowerState,
 };
 use state_controller::db_write_batch::WriteOpFn;
 use state_controller::state_handler::{
@@ -107,6 +108,34 @@ impl HostBiosProfiles {
         }
     }
 
+    fn health(&self, host: &HostMachine, now: DateTime<Utc>) -> BiosProfileHealth {
+        if let Self::Fallback(reason) = self {
+            return BiosProfileHealth::Alert(HealthReport {
+                source: BIOS_PROFILE_HEALTH_SOURCE.to_string(),
+                triggered_by: None,
+                observed_at: Some(now),
+                alerts: vec![HealthProbeAlert {
+                    id: HealthProbeId::from_str("BiosProfileNotApplied").expect("valid probe id"),
+                    target: host.metadata.labels.get(BIOS_PROFILE_LABEL).cloned(),
+                    in_alert_since: Some(now),
+                    message: reason.clone(),
+                    tenant_message: None,
+                    classifications: vec![],
+                }],
+                successes: vec![],
+            });
+        }
+        if host
+            .health_reports
+            .merges
+            .contains_key(BIOS_PROFILE_HEALTH_SOURCE)
+        {
+            BiosProfileHealth::Clear
+        } else {
+            BiosProfileHealth::Unchanged
+        }
+    }
+
     fn record(
         &self,
         ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
@@ -114,64 +143,56 @@ impl HostBiosProfiles {
     ) {
         let host = &mh_snapshot.host_snapshot;
         let name = host.metadata.labels.get(BIOS_PROFILE_LABEL);
-        if let Self::Fallback(reason) = self {
-            tracing::warn!(
+        match self {
+            Self::Fallback(reason) => tracing::warn!(
                 machine_id = %host.id,
                 bios_profile = ?name,
                 %reason,
                 "named BIOS profile not applied, using site bios_profiles"
-            );
-            ctx.pending_db_writes
-                .push(MachineWriteOp::InsertMachineHealthReport {
-                    machine_id: host.id.to_machine_id(),
-                    mode: HealthReportApplyMode::Merge,
-                    health_report: HealthReport {
-                        source: BIOS_PROFILE_HEALTH_SOURCE.to_string(),
-                        triggered_by: None,
-                        observed_at: Some(Utc::now()),
-                        alerts: vec![HealthProbeAlert {
-                            id: HealthProbeId::from_str("BiosProfileNotApplied")
-                                .expect("valid probe id"),
-                            target: name.cloned(),
-                            in_alert_since: Some(Utc::now()),
-                            message: reason.clone(),
-                            tenant_message: None,
-                            classifications: vec![],
-                        }],
-                        successes: vec![],
-                    },
-                });
-            return;
-        }
-        if let Self::Named(_) = self {
-            tracing::info!(
+            ),
+            Self::Named(_) => tracing::info!(
                 machine_id = %host.id,
                 bios_profile = ?name,
                 "applying named BIOS profile"
-            );
+            ),
+            Self::SiteDefault => {}
         }
-        if host
-            .health_reports
-            .merges
-            .contains_key(BIOS_PROFILE_HEALTH_SOURCE)
-        {
-            let machine_id = host.id.to_machine_id();
-            let write: WriteOpFn = Box::new(move |txn| {
-                async move {
-                    db::machine::remove_health_report(
-                        txn,
-                        &machine_id,
-                        HealthReportApplyMode::Merge,
-                        BIOS_PROFILE_HEALTH_SOURCE,
-                    )
-                    .await?;
-                    Ok(())
-                }
-                .boxed()
-            });
-            ctx.pending_db_writes.push(write);
+        match self.health(host, Utc::now()) {
+            BiosProfileHealth::Alert(health_report) => {
+                ctx.pending_db_writes
+                    .push(MachineWriteOp::InsertMachineHealthReport {
+                        machine_id: host.id.to_machine_id(),
+                        mode: HealthReportApplyMode::Merge,
+                        health_report,
+                    });
+            }
+            BiosProfileHealth::Clear => {
+                let machine_id = host.id.to_machine_id();
+                let write: WriteOpFn = Box::new(move |txn| {
+                    async move {
+                        db::machine::remove_health_report(
+                            txn,
+                            &machine_id,
+                            HealthReportApplyMode::Merge,
+                            BIOS_PROFILE_HEALTH_SOURCE,
+                        )
+                        .await?;
+                        Ok(())
+                    }
+                    .boxed()
+                });
+                ctx.pending_db_writes.push(write);
+            }
+            BiosProfileHealth::Unchanged => {}
         }
     }
+}
+
+#[derive(Debug, PartialEq)]
+enum BiosProfileHealth {
+    Alert(HealthReport),
+    Clear,
+    Unchanged,
 }
 
 /// Outcome of configure_host_bios function.
@@ -656,7 +677,8 @@ mod tests {
     use carbide_redfish::libredfish::test_support::RedfishSim;
     use carbide_redfish::libredfish::{RedfishAuth, RedfishClientPool};
     use carbide_test_support::Outcome::*;
-    use carbide_test_support::{Case, check_cases_async};
+    use carbide_test_support::{Case, check_cases, check_cases_async};
+    use model::test_support::machine_snapshot::managed_host_state_snapshot;
 
     use super::*;
     use crate::config::NamedBiosProfile;
@@ -736,6 +758,79 @@ mod tests {
             },
         )
         .await;
+    }
+
+    #[test]
+    fn bios_profile_alert_is_raised_on_fallback_and_cleared_once_resolved() {
+        let now = Utc::now();
+        let alert = |reason: &str| {
+            BiosProfileHealth::Alert(HealthReport {
+                source: BIOS_PROFILE_HEALTH_SOURCE.to_string(),
+                triggered_by: None,
+                observed_at: Some(now),
+                alerts: vec![HealthProbeAlert {
+                    id: HealthProbeId::from_str("BiosProfileNotApplied").unwrap(),
+                    target: Some("gpu-perf".to_string()),
+                    in_alert_since: Some(now),
+                    message: reason.to_string(),
+                    tenant_message: None,
+                    classifications: vec![],
+                }],
+                successes: vec![],
+            })
+        };
+        let fallback = || HostBiosProfiles::Fallback("vendor mismatch".to_string());
+        let named = || HostBiosProfiles::Named(HashMap::new());
+
+        check_cases(
+            [
+                Case {
+                    scenario: "fallback raises the alert",
+                    input: (fallback(), Some("gpu-perf"), false),
+                    expect: Yields(alert("vendor mismatch")),
+                },
+                Case {
+                    scenario: "fallback keeps an earlier alert raised",
+                    input: (fallback(), Some("gpu-perf"), true),
+                    expect: Yields(alert("vendor mismatch")),
+                },
+                Case {
+                    scenario: "applying the named profile clears the alert",
+                    input: (named(), Some("gpu-perf"), true),
+                    expect: Yields(BiosProfileHealth::Clear),
+                },
+                Case {
+                    scenario: "removing the label clears the alert",
+                    input: (HostBiosProfiles::SiteDefault, None, true),
+                    expect: Yields(BiosProfileHealth::Clear),
+                },
+                Case {
+                    scenario: "applying the named profile without an alert changes nothing",
+                    input: (named(), Some("gpu-perf"), false),
+                    expect: Yields(BiosProfileHealth::Unchanged),
+                },
+                Case {
+                    scenario: "no label and no alert changes nothing",
+                    input: (HostBiosProfiles::SiteDefault, None, false),
+                    expect: Yields(BiosProfileHealth::Unchanged),
+                },
+            ],
+            |(selection, label, alerted): (HostBiosProfiles, Option<&str>, bool)| {
+                let mut host = managed_host_state_snapshot().host_snapshot;
+                if let Some(label) = label {
+                    host.metadata
+                        .labels
+                        .insert(BIOS_PROFILE_LABEL.to_string(), label.to_string());
+                }
+                if alerted {
+                    host.health_reports.merges.insert(
+                        BIOS_PROFILE_HEALTH_SOURCE.to_string(),
+                        HealthReport::empty(BIOS_PROFILE_HEALTH_SOURCE.to_string()),
+                    );
+                }
+                Ok::<_, ()>(selection.health(&host, now))
+            },
+        );
     }
 
     #[test]

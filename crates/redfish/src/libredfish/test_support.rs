@@ -158,6 +158,7 @@ struct RedfishSimState {
     /// Optional ComputerSystem identifier used to drive platform classification.
     system_id: Option<String>,
     system_model: Option<String>,
+    next_system_error: Option<String>,
     /// Physical-port MAC addresses exposed through the adapter Ports collection.
     network_adapter_port_mac_addresses: Vec<MacAddress>,
     /// Chassis linked from the simulated ComputerSystem.
@@ -631,6 +632,10 @@ impl RedfishSim {
 
     pub fn set_system_model(&self, model: impl Into<String>) {
         self.state.lock().unwrap().system_model = Some(model.into());
+    }
+
+    pub fn fail_next_system_read(&self, error: &str) {
+        self.state.lock().unwrap().next_system_error = Some(error.to_string());
     }
 
     /// Configure the physical-port MAC addresses returned by the simulated
@@ -1474,6 +1479,9 @@ impl Redfish for RedfishSimClient {
     ) -> libredfish::RedfishFuture<'a, Result<libredfish::model::ComputerSystem, RedfishError>>
     {
         Box::pin(async move {
+            if let Some(error) = self.state.lock().unwrap().next_system_error.take() {
+                return Err(RedfishError::GenericError { error });
+            }
             let id = self
                 .state
                 .lock()
