@@ -1223,6 +1223,11 @@ mod tests {
         let status: serde_json::Value = serde_json::from_slice(&body).unwrap();
         let machines = status["machines"].as_array().unwrap();
 
+        for machine in machines {
+            assert!(machine.get("api_state").is_none());
+            assert!(machine.get("power_state").is_some());
+        }
+
         assert_eq!(machines[0]["bmc"]["ipmi"]["reachable_port"], 16_020);
         assert_eq!(machines[0]["bmc"]["ipmi"]["listen_port"], 16_020);
         assert_eq!(machines[0]["bmc"]["ssh"]["reachable_port"], 22_020);

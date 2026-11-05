@@ -254,7 +254,6 @@ async fn machines_status(State(mat): State<FakeMachineATron>) -> Response {
             "device_kind": "machine",
             "device_id": format!("{}-device", mat.name),
             "machine_id": format!("{}-machine", mat.name),
-            "api_state": "Ready",
             "power_state": "On",
             "infiniband_ports": ports,
             "bmc": { "redfish": { "reachable_port": 443, "listen_port": 1266 } },
