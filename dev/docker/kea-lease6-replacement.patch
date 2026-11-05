@@ -37,7 +37,7 @@
 +    lease->current_cltt_ = replacement->cltt_;
 +    lease->current_valid_lft_ = replacement->valid_lft_;
 +    leases.updateLease6(lease);
-+    if (lease->fqdn_fwd_ || lease->fqdn_rev_) {
++    if (!lease->hostname_.empty() && (lease->fqdn_fwd_ || lease->fqdn_rev_)) {
 +        // Kea 3 checks DUID changes and chains REMOVE/ADD in one NCR. Preserve
 +        // that native ordering contract, including for an unchanged hostname.
 +        ctx.currentIA().changed_leases_.push_back(replacement);
@@ -251,6 +251,47 @@
  
          skipped = callout_handle->getStatus() == CalloutHandle::NEXT_STEP_SKIP;
      }
+--- a/src/lib/dhcpsrv/csv_lease_file6.cc
++++ b/src/lib/dhcpsrv/csv_lease_file6.cc
+@@ -10,6 +10,8 @@
+ #include <dhcpsrv/csv_lease_file6.h>
+ 
+ #include <ctime>
++#include <sys/stat.h>
++#include <unistd.h>
+ 
+ using namespace isc::asiolink;
+ using namespace isc::data;
+@@ -70,11 +72,29 @@
+         row.writeAtEscaped(getColumnIndex("user_context"), lease.getContext()->str());
+     }
+     row.writeAt(getColumnIndex("pool_id"), lease.pool_id_);
++    // Memfile serializes appends and rotation. Remember the last committed
++    // offset before writing: a failed fstream flush can retain output and
++    // replay it on a later append or close, despite the failed transaction.
++    struct stat before;
++    if (::stat(getFilename().c_str(), &before) != 0) {
++        ++write_errs_;
++        isc_throw(CSVFileFatalError, "cannot inspect IPv6 lease file before append: "
++                  << strerror(errno));
++    }
+     try {
+         VersionedCSVFile::append(row);
+     } catch (const std::exception&) {
+         // Catch any errors so we can bump the error counter than rethrow it
+         ++write_errs_;
++        // Closing may retry the refused bytes; truncate only AFTER that retry.
++        // Leave the stream closed if rollback fails, so subsequent appends
++        // cannot silently build on an uncertain row.
++        close();
++        if (::truncate(getFilename().c_str(), before.st_size) != 0) {
++            isc_throw(CSVFileFatalError, "cannot roll back failed IPv6 lease append; "
++                      "repair lease file before restarting: " << strerror(errno));
++        }
++        VersionedCSVFile::open(true);
+         throw;
+     }
+ 
 --- a/src/lib/dhcpsrv/memfile_lease_mgr.cc
 +++ b/src/lib/dhcpsrv/memfile_lease_mgr.cc
 @@ -938,8 +938,8 @@
