@@ -30,7 +30,11 @@ pub use machine_info_provider::{
     MachineInfoProvider, MachineLocationError, MachineLocationObservation, MachineLocationTarget,
 };
 pub use nvos_update_manager::{NvosUpdateManager, NvosUpdateRequest};
-pub use rack_firmware_update_manager::{RackFirmwareUpdateManager, RackFirmwareUpdateRequest};
+pub use rack_firmware_update_manager::{
+    DeviceFirmwareExpectations, FirmwareExpectation, FirmwareExpectationError,
+    FirmwareExpectationStatus, RackFirmwareExpectationsRequest, RackFirmwareUpdateManager,
+    RackFirmwareUpdateRequest,
+};
 
 pub mod proto {
     #[allow(clippy::enum_variant_names)]

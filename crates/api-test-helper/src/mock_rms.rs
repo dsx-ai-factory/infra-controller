@@ -110,6 +110,11 @@ pub struct MockRmsApi {
     batch_get_firmware_inventory_calls: Mutex<Vec<rms::BatchGetFirmwareInventoryRequest>>,
     blocked_firmware_inventory_read: Mutex<Option<BlockedRmsRequest>>,
 
+    compare_firmware_object_responses:
+        Mutex<VecDeque<Result<rms::CompareFirmwareObjectResponse, RackManagerError>>>,
+    compare_firmware_object_calls: Mutex<Vec<rms::CompareFirmwareObjectRequest>>,
+    blocked_firmware_comparison: Mutex<Option<BlockedRmsRequest>>,
+
     get_node_firmware_inventory_responses:
         Mutex<VecDeque<Result<rms::GetNodeFirmwareInventoryResponse, RackManagerError>>>,
     get_node_firmware_inventory_calls: Mutex<Vec<rms::GetNodeFirmwareInventoryRequest>>,
@@ -303,6 +308,9 @@ impl MockRmsApi {
             batch_get_firmware_inventory_responses: Default::default(),
             batch_get_firmware_inventory_calls: Default::default(),
             blocked_firmware_inventory_read: Default::default(),
+            compare_firmware_object_responses: Default::default(),
+            compare_firmware_object_calls: Default::default(),
+            blocked_firmware_comparison: Default::default(),
             get_node_firmware_inventory_responses: Default::default(),
             get_node_firmware_inventory_calls: Default::default(),
             get_rack_firmware_inventory_responses: Default::default(),
@@ -571,6 +579,44 @@ impl MockRmsApi {
     );
 
     // Node firmware
+    /// Queues one passive manifest comparison response.
+    pub async fn enqueue_compare_firmware_object(
+        &self,
+        response: Result<rms::CompareFirmwareObjectResponse, RackManagerError>,
+    ) {
+        self.compare_firmware_object_responses
+            .lock()
+            .await
+            .push_back(response);
+    }
+
+    /// Returns descriptors, selected manifest and filters supplied to comparisons.
+    pub async fn compare_firmware_object_calls(&self) -> Vec<rms::CompareFirmwareObjectRequest> {
+        self.compare_firmware_object_calls.lock().await.clone()
+    }
+
+    /// Pauses the next comparison after recording it, before consuming its
+    /// response. Arrival signals ownership; sending or dropping the sender
+    /// releases it. A closed sender after arrival proves the read was dropped.
+    /// Another blocker can be armed after arrival.
+    ///
+    /// # Panics
+    ///
+    /// Panics if an earlier blocker has not been taken by a comparison.
+    pub async fn block_next_compare_firmware_object(
+        &self,
+    ) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
+        let (entered, arrival) = oneshot::channel();
+        let (release, resume) = oneshot::channel();
+        let mut blocked = self.blocked_firmware_comparison.lock().await;
+        assert!(
+            blocked.is_none(),
+            "a firmware comparison blocker is already armed"
+        );
+        *blocked = Some(BlockedRmsRequest { entered, resume });
+        (arrival, release)
+    }
+
     /// Queues one batch firmware response for the next read to consume.
     pub async fn enqueue_batch_get_firmware_inventory(
         &self,
@@ -1391,9 +1437,15 @@ impl RmsApi for MockRmsApi {
 
     async fn compare_firmware_object(
         &self,
-        _cmd: rms::CompareFirmwareObjectRequest,
+        cmd: rms::CompareFirmwareObjectRequest,
     ) -> Result<rms::CompareFirmwareObjectResponse, RackManagerError> {
-        Err(tonic::Status::unimplemented("compare_firmware_object is not implemented").into())
+        self.compare_firmware_object_calls.lock().await.push(cmd);
+        let blocked = self.blocked_firmware_comparison.lock().await.take();
+        if let Some(blocked) = blocked {
+            blocked.entered.send(()).ok();
+            blocked.resume.await.ok();
+        }
+        pop_or_err(&mut self.compare_firmware_object_responses.lock().await)
     }
 
     async fn get_rack_firmware_inventory(

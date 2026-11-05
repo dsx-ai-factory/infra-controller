@@ -15,6 +15,7 @@
  * limitations under the License.
  */
 
+mod firmware_expectations;
 mod firmware_jobs;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -84,7 +85,8 @@ use crate::power_shelf_manager::{
 };
 use crate::types::FirmwareUpdateOptions;
 use crate::{
-    NvosUpdateManager, NvosUpdateRequest, RackFirmwareUpdateManager, RackFirmwareUpdateRequest,
+    DeviceFirmwareExpectations, NvosUpdateManager, NvosUpdateRequest,
+    RackFirmwareExpectationsRequest, RackFirmwareUpdateManager, RackFirmwareUpdateRequest,
 };
 
 mod firmware_inventory;
@@ -457,7 +459,7 @@ impl RmsSwitchSystemImageStatusApi for librms::RackManagerApi {
     }
 }
 
-/// RMS implementation of durable rack-level firmware-object operations.
+/// RMS implementation of rack firmware updates and passive manifest comparisons.
 struct RmsRackFirmwareUpdateManager {
     client: Arc<dyn RmsApi>,
 }
@@ -545,6 +547,13 @@ impl crate::rack_firmware_update_manager::sealed::Sealed for RmsRackFirmwareUpda
 
 #[async_trait::async_trait]
 impl RackFirmwareUpdateManager for RmsRackFirmwareUpdateManager {
+    async fn get_firmware_expectations(
+        &self,
+        request: RackFirmwareExpectationsRequest<'_>,
+    ) -> Result<Vec<DeviceFirmwareExpectations>, ComponentManagerError> {
+        self.read_firmware_expectations(request).await
+    }
+
     async fn start_firmware_update(
         &self,
         request: RackFirmwareUpdateRequest<'_>,
@@ -1328,7 +1337,27 @@ pub fn rms_machine_info_provider(client: Arc<dyn RmsApi>) -> impl MachineInfoPro
     RmsMachineInfoProvider { client }
 }
 
-/// Creates the RMS implementation of durable rack-level firmware-object operations.
+/// Creates the RMS manager for durable firmware updates and passive manifest comparisons.
+///
+/// Comparison admits 256 total caller slots and sends at most 64 unique nodes
+/// per RPC. Batches never mix roles, so one call can require six sequential RPCs.
+/// One 30-second ceiling covers preparation, SDK connection setup and retries,
+/// RPCs and projection. This bounds caller work; QA must assess full-rack latency.
+/// It does not guarantee that every admitted device completes.
+///
+/// The manifest limit is 16 MiB. The rack ID, each filter and endpoint field
+/// (including credentials), vendor/product family and descriptor key/value are
+/// each limited to 1024 bytes. Filters and each attribute map allow 256 entries.
+/// Filter text has a 64 KiB budget; all four profile attribute maps share another
+/// 64 KiB text budget. These local admission limits do not guarantee that a
+/// deployment's transport accepts the request; remote rejection is `ReadFailed`.
+///
+/// Each decoded reply allows 256 comparison records and 256 operation records.
+/// Exceeding either limit makes that batch `LimitExceeded` before node scans.
+/// Within those limits, invalid evidence for one node preserves healthy peers.
+/// Each device allows 256 rows, 1024 bytes per retained field and 64 KiB of
+/// retained metadata. Response limits apply after decoding and do not cap SDK
+/// wire allocations.
 pub fn rms_rack_firmware_update_manager(client: Arc<dyn RmsApi>) -> impl RackFirmwareUpdateManager {
     RmsRackFirmwareUpdateManager { client }
 }
