@@ -1053,8 +1053,8 @@ overrides.
 | Field | Default | Description |
 |-------|---------|-------------|
 | `autoupdate` | `false` | Master switch for background firmware updates. |
-| `host_enable_autoupdate` | `[]` | Host model names to force-enable, regardless of `autoupdate`. |
-| `host_disable_autoupdate` | `[]` | Host model names to force-disable. |
+| `host_enable_autoupdate` | `[]` | Legacy field; automatic host selection does not read it. |
+| `host_disable_autoupdate` | `[]` | Host machine IDs excluded from automatic host selection. |
 | `run_interval` | `30s` | How often the firmware manager evaluates pending updates. |
 | `max_uploads` | `4` | Concurrent firmware uploads in flight. |
 | `concurrency_limit` | `16` | Concurrent firmware flashing operations across the fleet. |
