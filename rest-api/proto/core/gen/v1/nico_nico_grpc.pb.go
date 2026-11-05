@@ -142,6 +142,7 @@ const (
 	Forge_FindIpAddress_FullMethodName                                      = "/forge.Forge/FindIpAddress"
 	Forge_FindMachineIds_FullMethodName                                     = "/forge.Forge/FindMachineIds"
 	Forge_FindMachinesByIds_FullMethodName                                  = "/forge.Forge/FindMachinesByIds"
+	Forge_FindMachineStatesByIds_FullMethodName                             = "/forge.Forge/FindMachineStatesByIds"
 	Forge_FindHostStatesByIds_FullMethodName                                = "/forge.Forge/FindHostStatesByIds"
 	Forge_FindMachineStateHistories_FullMethodName                          = "/forge.Forge/FindMachineStateHistories"
 	Forge_FindMachineHealthHistories_FullMethodName                         = "/forge.Forge/FindMachineHealthHistories"
@@ -826,6 +827,9 @@ type ForgeClient interface {
 	FindIpAddress(ctx context.Context, in *FindIpAddressRequest, opts ...grpc.CallOption) (*FindIpAddressResponse, error)
 	FindMachineIds(ctx context.Context, in *MachineSearchConfig, opts ...grpc.CallOption) (*MachineIdList, error)
 	FindMachinesByIds(ctx context.Context, in *MachinesByIdsRequest, opts ...grpc.CallOption) (*MachineList, error)
+	// Current host and DPU lifecycle states without full machine records.
+	// Query or state-decoding errors fail the entire request with INTERNAL.
+	FindMachineStatesByIds(ctx context.Context, in *MachineStatesByIdsRequest, opts ...grpc.CallOption) (*MachineStateList, error)
 	// Compact per-host state for monitoring: allocatability, update eligibility
 	// and the explored firmware report, read from one database snapshot.
 	FindHostStatesByIds(ctx context.Context, in *HostStatesByIdsRequest, opts ...grpc.CallOption) (*HostStateList, error)
@@ -2954,6 +2958,16 @@ func (c *forgeClient) FindMachinesByIds(ctx context.Context, in *MachinesByIdsRe
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(MachineList)
 	err := c.cc.Invoke(ctx, Forge_FindMachinesByIds_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *forgeClient) FindMachineStatesByIds(ctx context.Context, in *MachineStatesByIdsRequest, opts ...grpc.CallOption) (*MachineStateList, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(MachineStateList)
+	err := c.cc.Invoke(ctx, Forge_FindMachineStatesByIds_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -7605,6 +7619,9 @@ type ForgeServer interface {
 	FindIpAddress(context.Context, *FindIpAddressRequest) (*FindIpAddressResponse, error)
 	FindMachineIds(context.Context, *MachineSearchConfig) (*MachineIdList, error)
 	FindMachinesByIds(context.Context, *MachinesByIdsRequest) (*MachineList, error)
+	// Current host and DPU lifecycle states without full machine records.
+	// Query or state-decoding errors fail the entire request with INTERNAL.
+	FindMachineStatesByIds(context.Context, *MachineStatesByIdsRequest) (*MachineStateList, error)
 	// Compact per-host state for monitoring: allocatability, update eligibility
 	// and the explored firmware report, read from one database snapshot.
 	FindHostStatesByIds(context.Context, *HostStatesByIdsRequest) (*HostStateList, error)
@@ -8888,6 +8905,9 @@ func (UnimplementedForgeServer) FindMachineIds(context.Context, *MachineSearchCo
 }
 func (UnimplementedForgeServer) FindMachinesByIds(context.Context, *MachinesByIdsRequest) (*MachineList, error) {
 	return nil, status.Error(codes.Unimplemented, "method FindMachinesByIds not implemented")
+}
+func (UnimplementedForgeServer) FindMachineStatesByIds(context.Context, *MachineStatesByIdsRequest) (*MachineStateList, error) {
+	return nil, status.Error(codes.Unimplemented, "method FindMachineStatesByIds not implemented")
 }
 func (UnimplementedForgeServer) FindHostStatesByIds(context.Context, *HostStatesByIdsRequest) (*HostStateList, error) {
 	return nil, status.Error(codes.Unimplemented, "method FindHostStatesByIds not implemented")
@@ -12360,6 +12380,24 @@ func _Forge_FindMachinesByIds_Handler(srv interface{}, ctx context.Context, dec 
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(ForgeServer).FindMachinesByIds(ctx, req.(*MachinesByIdsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Forge_FindMachineStatesByIds_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(MachineStatesByIdsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ForgeServer).FindMachineStatesByIds(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Forge_FindMachineStatesByIds_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ForgeServer).FindMachineStatesByIds(ctx, req.(*MachineStatesByIdsRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -20751,6 +20789,10 @@ var Forge_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "FindMachinesByIds",
 			Handler:    _Forge_FindMachinesByIds_Handler,
+		},
+		{
+			MethodName: "FindMachineStatesByIds",
+			Handler:    _Forge_FindMachineStatesByIds_Handler,
 		},
 		{
 			MethodName: "FindHostStatesByIds",

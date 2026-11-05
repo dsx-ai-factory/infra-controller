@@ -33,7 +33,7 @@ Create a domain owned by a VPC:
 pub(crate) struct Args {
     #[clap(
         value_name = "NAME",
-        help = "Domain name. Reverse zones (in-addr.arpa, ip6.arpa) and duplicate live names are rejected"
+        help = "Lowercase domain name. Reverse zones (in-addr.arpa, ip6.arpa) and duplicate live names are rejected"
     )]
     pub(super) name: String,
 

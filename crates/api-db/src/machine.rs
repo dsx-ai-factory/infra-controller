@@ -1290,6 +1290,23 @@ impl DpuHostAssociations {
     }
 }
 
+/// `find_states_by_ids` reads each machine's own controller state without loading
+/// the full machine snapshot. Results contain one row per existing requested
+/// machine, sorted by ID.
+/// Missing IDs are omitted; a query or state-decoding error fails the whole read.
+pub async fn find_states_by_ids(
+    conn: impl DbReader<'_>,
+    machine_ids: &[MachineId],
+) -> DatabaseResult<Vec<(MachineId, ManagedHostState)>> {
+    let query = "SELECT id, controller_state FROM machines WHERE id = ANY($1) ORDER BY id";
+    let rows: Vec<(MachineId, sqlx::types::Json<ManagedHostState>)> = sqlx::query_as(query)
+        .bind(machine_ids)
+        .fetch_all(conn)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))?;
+    Ok(rows.into_iter().map(|(id, state)| (id, state.0)).collect())
+}
+
 /// Return the [`ManagedHostState`] for a machine given its id without returning the whole snapshot.
 pub async fn lookup_managed_host_state(
     conn: impl DbReader<'_>,
