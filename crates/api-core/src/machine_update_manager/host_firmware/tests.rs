@@ -649,6 +649,223 @@ async fn nic_work_excludes_host_admission_even_with_spare_capacity(
     Ok(())
 }
 
+/// Creates a host awaiting cleanup with its production firmware health report.
+async fn host_awaiting_cleanup(pool: &sqlx::PgPool, index: u8) -> TestResult<HostMachineId> {
+    let host: HostMachineId = MachineId::new(
+        MachineIdSource::ProductBoardChassisSerial,
+        [index; 32],
+        MachineType::Host,
+    )
+    .try_into()?;
+    let mut txn = pool.begin().await?;
+    db::machine::create(
+        &mut txn,
+        None,
+        &host.into(),
+        ManagedHostState::Ready,
+        None,
+        CURRENT_STATE_MODEL_VERSION,
+    )
+    .await?;
+    db::machine::update_update_complete(&host, false, &mut txn).await?;
+    db::machine::insert_health_report(
+        &mut txn,
+        &host,
+        health_report::HealthReportApplyMode::Merge,
+        &carbide_machine_controller::health_report::create_host_update_health_report_hostfw(),
+        false,
+    )
+    .await?;
+    txn.commit().await?;
+    Ok(host)
+}
+
+/// Reloads the full request and health reports from the pool after transactions finish.
+async fn completion_state(
+    pool: &sqlx::PgPool,
+    host: HostMachineId,
+) -> Result<(Option<serde_json::Value>, bool, serde_json::Value), sqlx::Error> {
+    sqlx::query_as(
+        "SELECT host_reprovisioning_requested, update_complete, health_reports
+         FROM machines WHERE id = $1",
+    )
+    .bind(host)
+    .fetch_one(pool)
+    .await
+}
+
+/// Checks that cleanup returned exactly one Host/Completed event for this host.
+fn assert_host_completed(events: &[FirmwareUpdateProgress], host: HostMachineId) {
+    assert_eq!(events.len(), 1);
+    assert_eq!(
+        (events[0].machine_id, events[0].phase, events[0].target),
+        (
+            host,
+            FirmwareUpdatePhase::Completed,
+            FirmwareUpdateTarget::Host,
+        ),
+    );
+}
+
+/// A request committed during selection keeps its exact contents,
+/// `update_complete=false`, and firmware health report, while another eligible
+/// host completes in the same pass.
+#[crate::sqlx_test]
+async fn completion_rechecks_host_request_after_waiting_for_writer(
+    pool: sqlx::PgPool,
+) -> TestResult {
+    let host = host_awaiting_cleanup(&pool, 23).await?;
+    let unaffected = host_awaiting_cleanup(&pool, 24).await?;
+    let (_, _, health_before) = completion_state(&pool, host).await?;
+    assert!(
+        health_before["merges"]
+            .get(HOST_FW_UPDATE_HEALTH_REPORT_SOURCE)
+            .is_some()
+    );
+    let updater = updater("1.0")?;
+
+    // Keep the real request writer uncommitted so selection sees the old
+    // completed candidate and has to wait before deciding it is eligible.
+    let mut writer = pool.begin().await?;
+    db::host_machine_update::trigger_host_reprovisioning_request(&mut writer, "Manual", &host)
+        .await?;
+    let request: serde_json::Value =
+        sqlx::query_scalar("SELECT host_reprovisioning_requested FROM machines WHERE id = $1")
+            .bind(host)
+            .fetch_one(writer.as_mut())
+            .await?;
+    let writer_pid = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(writer.as_mut())
+        .await?;
+
+    let events = tokio::time::timeout(Duration::from_secs(60), async {
+        let cleanup = async {
+            let mut txn = pool.begin().await?;
+            let events = updater.clear_completed_updates(txn.as_mut()).await?;
+            txn.commit().await?;
+            Ok::<_, Box<dyn std::error::Error>>(events)
+        };
+        tokio::pin!(cleanup);
+        tokio::select! {
+            result = &mut cleanup => match result {
+                Ok(events) => panic!("completion selection returned {} events before the request writer committed", events.len()),
+                Err(error) => panic!("completion selection failed before the request writer committed: {error}"),
+            },
+            _ = wait_for_blocked_query(&pool, writer_pid, "SELECT id FROM machines") => {},
+        }
+        writer.commit().await?;
+        cleanup.await
+    })
+    .await
+    .expect("cleanup must finish after the request writer commits")?;
+
+    let (stored_request, update_complete, health_after) = completion_state(&pool, host).await?;
+    assert_eq!(stored_request, Some(request));
+    assert!(!update_complete);
+    assert_eq!(health_after, health_before);
+    assert_host_completed(&events, unaffected);
+    assert_eq!(completion_markers(&pool, unaffected).await?, (true, false));
+    Ok(())
+}
+
+/// A selected host stays locked through cleanup commit, then its next request
+/// commits with `update_complete=false`.
+#[crate::sqlx_test]
+async fn completion_holds_host_lock_until_cleanup_commits(pool: sqlx::PgPool) -> TestResult {
+    let host = host_awaiting_cleanup(&pool, 23).await?;
+    let updater = updater("1.0")?;
+    let mut cleanup = pool.begin().await?;
+    // Select before any cleanup writes so the request writer must wait for
+    // the selection lock itself, rather than a later UPDATE's row lock.
+    assert_eq!(
+        db::host_machine_update::find_completed_updates(cleanup.as_mut()).await?,
+        vec![host],
+    );
+    let cleanup_pid = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(cleanup.as_mut())
+        .await?;
+
+    let request = tokio::time::timeout(Duration::from_secs(60), async {
+        let writer = async {
+            let mut txn = pool.begin().await?;
+            db::host_machine_update::trigger_host_reprovisioning_request(
+                &mut txn, "rack-test", &host,
+            )
+            .await?;
+            let request: serde_json::Value = sqlx::query_scalar(
+                "SELECT host_reprovisioning_requested FROM machines WHERE id = $1",
+            )
+            .bind(host)
+            .fetch_one(txn.as_mut())
+            .await?;
+            txn.commit().await?;
+            Ok::<_, Box<dyn std::error::Error>>(request)
+        };
+        tokio::pin!(writer);
+        tokio::select! {
+            result = &mut writer => panic!("request writer escaped the completion lock: {result:?}"),
+            _ = wait_for_blocked_query(&pool, cleanup_pid, "UPDATE machines SET host_reprovisioning_requested") => {},
+        }
+
+        // Run the production cleanup while the next request waits, then let
+        // that writer replace the completion flag only after cleanup commits.
+        let events = updater.clear_completed_updates(cleanup.as_mut()).await?;
+        assert_host_completed(&events, host);
+        cleanup.commit().await?;
+        writer.await
+    })
+    .await
+    .expect("request writer must finish after cleanup commits")?;
+
+    let (stored_request, update_complete, health_after) = completion_state(&pool, host).await?;
+    assert_eq!(stored_request, Some(request));
+    assert!(!update_complete);
+    assert!(
+        !health_after["merges"]
+            .as_object()
+            .expect("cleanup leaves the health report merges object")
+            .contains_key(HOST_FW_UPDATE_HEALTH_REPORT_SOURCE)
+    );
+    Ok(())
+}
+
+/// Completion can commit while an uncommitted console row references its machine.
+#[crate::sqlx_test]
+async fn completion_allows_an_open_machine_foreign_key_check(pool: sqlx::PgPool) -> TestResult {
+    let host = host_awaiting_cleanup(&pool, 25).await?;
+    let updater = updater("1.0")?;
+    let mut reference = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO machine_console_metadata (machine_id, username, role, password)
+         VALUES ($1, 'cleanup-test', 'user', 'test-password')",
+    )
+    .bind(host)
+    .execute(reference.as_mut())
+    .await?;
+
+    // The foreign key check holds a key-share lock until this insert commits.
+    // Completion only changes non-key fields and must finish while it stays open.
+    let events = tokio::time::timeout(Duration::from_secs(60), async {
+        let mut cleanup = pool.begin().await?;
+        let events = updater.clear_completed_updates(cleanup.as_mut()).await?;
+        cleanup.commit().await?;
+        Ok::<_, Box<dyn std::error::Error>>(events)
+    })
+    .await
+    .expect("cleanup must finish while the referencing insert remains uncommitted")?;
+    assert_host_completed(&events, host);
+    reference.commit().await?;
+
+    assert_eq!(completion_markers(&pool, host).await?, (true, false));
+    let referenced_host: HostMachineId = sqlx::query_scalar(
+        "SELECT machine_id FROM machine_console_metadata WHERE username = 'cleanup-test'",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(referenced_host, host);
+    Ok(())
+}
+
 // A fresh updater has a changed nonempty catalog to publish. Losing ownership
 // must leave the previously committed catalog intact.
 #[crate::sqlx_test]
