@@ -8,7 +8,7 @@
  
  #include <algorithm>
  #include <sstream>
-@@ -54,7 +55,42 @@
+@@ -54,7 +55,43 @@
  using namespace isc::data;
  namespace ph = std::placeholders;
  
@@ -21,7 +21,8 @@
 +// supplying the snapshot it explicitly approved. Keep that row until the
 +// replacement write succeeds; an absent snapshot retains INSERT collision checks.
 +bool persistLease6Replacement(AllocEngine::ClientContext6& ctx,
-+                              const Lease6Ptr& lease, const Lease6Ptr& replacement) {
++                              const Lease6Ptr& lease, const Lease6Ptr& replacement,
++                              const bool response_fqdn) {
 +    auto& leases = LeaseMgrFactory::instance();
 +    if (!replacement) {
 +        return (leases.addLease(lease));
@@ -37,7 +38,7 @@
 +    lease->current_cltt_ = replacement->cltt_;
 +    lease->current_valid_lft_ = replacement->valid_lft_;
 +    leases.updateLease6(lease);
-+    if (!lease->hostname_.empty() && (lease->fqdn_fwd_ || lease->fqdn_rev_)) {
++    if (response_fqdn && (lease->fqdn_fwd_ || lease->fqdn_rev_)) {
 +        // Kea 3 checks DUID changes and chains REMOVE/ADD in one NCR. Preserve
 +        // that native ordering contract, including for an unchanged hostname.
 +        ctx.currentIA().changed_leases_.push_back(replacement);
@@ -51,7 +52,7 @@
  
  /// Structure that holds registered hook indexes
  struct AllocEngineHooks {
-@@ -62,6 +98,7 @@
+@@ -62,6 +99,7 @@
      int hook_index_lease4_renew_;  ///< index for "lease4_renew" hook point
      int hook_index_lease4_expire_; ///< index for "lease4_expire" hook point
      int hook_index_lease4_recover_;///< index for "lease4_recover" hook point
@@ -59,7 +60,7 @@
      int hook_index_lease6_select_; ///< index for "lease6_select" hook point
      int hook_index_lease6_renew_;  ///< index for "lease6_renew" hook point
      int hook_index_lease6_rebind_; ///< index for "lease6_rebind" hook point
-@@ -74,6 +111,7 @@
+@@ -74,6 +112,7 @@
          hook_index_lease4_renew_  = HooksManager::registerHook("lease4_renew");
          hook_index_lease4_expire_ = HooksManager::registerHook("lease4_expire");
          hook_index_lease4_recover_= HooksManager::registerHook("lease4_recover");
@@ -67,7 +68,7 @@
          hook_index_lease6_select_ = HooksManager::registerHook("lease6_select");
          hook_index_lease6_renew_  = HooksManager::registerHook("lease6_renew");
          hook_index_lease6_rebind_ = HooksManager::registerHook("lease6_rebind");
-@@ -87,6 +125,24 @@
+@@ -87,6 +126,24 @@
  // As a result, the hook indexes will be defined before any method in this
  // module is called.
  AllocEngineHooks Hooks;
@@ -92,7 +93,7 @@
  
  }  // namespace
  
-@@ -483,6 +539,17 @@
+@@ -483,6 +540,17 @@
          Lease6Collection leases;
          while (subnet) {
              for (auto const& l : all_leases) {
@@ -110,7 +111,7 @@
                  if (((l)->state_ != Lease::STATE_REGISTERED) &&
                      ((l)->subnet_id_ == subnet->getID())) {
                      leases.push_back(l);
-@@ -491,6 +558,8 @@
+@@ -491,6 +559,8 @@
  
              subnet = subnet->getNextSubnet(ctx.subnet_);
          }
@@ -119,42 +120,45 @@
  
          // Now do the checks:
          // Case 1. if there are no leases, and there are reservations...
-@@ -1760,6 +1829,10 @@
+@@ -1760,6 +1830,11 @@
                                 uint8_t prefix_len,
                                 CalloutHandle::CalloutNextStep& callout_status) {
  
 +    const auto original_address = expired->addr_;
 +    Lease6Ptr replacement;
++    bool response_fqdn = false;
 +    std::map<std::string, int64_t> stat_adjustments;
 +
      if (!expired->expired()) {
          isc_throw(BadValue, "Attempt to recycle lease that is still valid");
      }
-@@ -1826,6 +1899,8 @@
+@@ -1826,6 +1901,9 @@
  
          // The lease that will be assigned to a client
          ctx.callout_handle_->setArgument("lease6", expired);
 +        ctx.callout_handle_->setArgument("lease6_replacement", replacement);
 +        ctx.callout_handle_->setArgument("lease6_stat_adjustments", stat_adjustments);
++        ctx.callout_handle_->setArgument("nico_lease6_ddns_response", response_fqdn);
  
          // Call the callouts
          HooksManager::callCallouts(hook_index_lease6_select_, *ctx.callout_handle_);
-@@ -1848,6 +1923,8 @@
+@@ -1848,6 +1926,9 @@
          // Let's use whatever callout returned. Hopefully it is the same lease
          // we handed to it.
          ctx.callout_handle_->getArgument("lease6", expired);
 +        ctx.callout_handle_->getArgument("lease6_replacement", replacement);
 +        ctx.callout_handle_->getArgument("lease6_stat_adjustments", stat_adjustments);
++        ctx.callout_handle_->getArgument("nico_lease6_ddns_response", response_fqdn);
      }
  
      if (!ctx.fake_allocation_) {
-@@ -1860,7 +1937,14 @@
+@@ -1860,7 +1941,14 @@
          }
  
          // for REQUEST we do update the lease
 -        LeaseMgrFactory::instance().updateLease6(expired);
 +        if (original_address != expired->addr_) {
-+            if (!persistLease6Replacement(ctx, expired, replacement)) {
++            if (!persistLease6Replacement(ctx, expired, replacement, response_fqdn)) {
 +                return (Lease6Ptr());
 +            }
 +            ctx.currentIA().addNewResource(expired->addr_, prefix_len);
@@ -164,7 +168,7 @@
  
          // If the lease is in the current subnet we need to account
          // for the re-assignment of The lease.
-@@ -1898,6 +1982,9 @@
+@@ -1898,6 +1986,9 @@
              StatsMgr::instance().addValue(ctx.currentIA().type_ == Lease::TYPE_NA ?
                                            "cumulative-assigned-nas" : "cumulative-assigned-pds",
                                            static_cast<int64_t>(1));
@@ -174,44 +178,47 @@
          }
      }
  
-@@ -1987,6 +2074,8 @@
+@@ -1987,6 +2078,9 @@
          prefix_len = 128; // non-PD lease types must be always /128
      }
  
 +    Lease6Ptr replacement;
++    bool response_fqdn = false;
 +    std::map<std::string, int64_t> stat_adjustments;
      uint32_t preferred = 0;
      uint32_t valid = 0;
      getLifetimes6(ctx, preferred, valid);
-@@ -2026,6 +2115,8 @@
+@@ -2026,6 +2120,9 @@
  
          // The lease that will be assigned to a client
          ctx.callout_handle_->setArgument("lease6", lease);
 +        ctx.callout_handle_->setArgument("lease6_replacement", replacement);
 +        ctx.callout_handle_->setArgument("lease6_stat_adjustments", stat_adjustments);
++        ctx.callout_handle_->setArgument("nico_lease6_ddns_response", response_fqdn);
  
          // This is the first callout, so no need to clear any arguments
          HooksManager::callCallouts(hook_index_lease6_select_, *ctx.callout_handle_);
-@@ -2043,6 +2134,8 @@
+@@ -2043,6 +2140,9 @@
          // Let's use whatever callout returned. Hopefully it is the same lease
          // we handed to it.
          ctx.callout_handle_->getArgument("lease6", lease);
 +        ctx.callout_handle_->getArgument("lease6_replacement", replacement);
 +        ctx.callout_handle_->getArgument("lease6_stat_adjustments", stat_adjustments);
++        ctx.callout_handle_->getArgument("nico_lease6_ddns_response", response_fqdn);
      }
  
      if (!ctx.fake_allocation_) {
-@@ -2055,7 +2148,8 @@
+@@ -2055,7 +2155,8 @@
          }
  
          // That is a real (REQUEST) allocation
 -        bool status = LeaseMgrFactory::instance().addLease(lease);
-+        bool status = addr != lease->addr_ ? persistLease6Replacement(ctx, lease, replacement)
++        bool status = addr != lease->addr_ ? persistLease6Replacement(ctx, lease, replacement, response_fqdn)
 +                                          : LeaseMgrFactory::instance().addLease(lease);
  
          if (status) {
              // The lease insertion succeeded - if the lease is in the
-@@ -2096,8 +2190,12 @@
+@@ -2096,8 +2197,12 @@
                                                static_cast<int64_t>(1));
              }
  
@@ -225,7 +232,7 @@
  
              return (lease);
          } else {
-@@ -2143,6 +2241,8 @@
+@@ -2143,6 +2248,8 @@
              }
              subnet = subnet->getNextSubnet(ctx.subnet_);
          }
@@ -234,7 +241,7 @@
  
          if (!leases.empty()) {
              LOG_DEBUG(alloc_engine_logger, ALLOC_ENGINE_DBG_TRACE,
-@@ -2916,8 +3016,16 @@
+@@ -2916,8 +3023,16 @@
          callout_handle->setArgument("lease6", lease);
          callout_handle->setArgument("remove_lease", reclaim_mode == DB_RECLAIM_REMOVE);
  
@@ -262,7 +269,7 @@
  
  using namespace isc::asiolink;
  using namespace isc::data;
-@@ -70,11 +72,29 @@
+@@ -70,11 +72,34 @@
          row.writeAtEscaped(getColumnIndex("user_context"), lease.getContext()->str());
      }
      row.writeAt(getColumnIndex("pool_id"), lease.pool_id_);
@@ -288,7 +295,12 @@
 +            isc_throw(CSVFileFatalError, "cannot roll back failed IPv6 lease append; "
 +                      "repair lease file before restarting: " << strerror(errno));
 +        }
-+        VersionedCSVFile::open(true);
++        try {
++            VersionedCSVFile::open(true);
++        } catch (const std::exception& error) {
++            isc_throw(CSVFileFatalError, "cannot reopen IPv6 lease file after rollback: "
++                      << error.what());
++        }
          throw;
      }
  

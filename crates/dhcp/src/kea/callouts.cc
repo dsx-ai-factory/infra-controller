@@ -130,6 +130,7 @@ const int IPV6_ADDR_SIZEB = 16;
 const char LEASE_TRANSACTION_BUSY[] = "lease_transaction_busy";
 const char LEASE6_REPLACEMENT[] = "lease6_replacement";
 const char LEASE6_STAT_ADJUSTMENTS[] = "lease6_stat_adjustments";
+const char LEASE6_DDNS_RESPONSE[] = "nico_lease6_ddns_response";
 const char REQUESTED_PREFIX_IAIDS[] = "requested_prefix_iaids";
 
 const uint8_t *nullable_data(const OptionBuffer &buffer) {
@@ -1534,6 +1535,16 @@ int lease6_existing(CalloutHandle &handle) {
   return 0;
 }
 
+int ddns6_update(CalloutHandle &handle) {
+  Pkt6Ptr response;
+  handle.getArgument("response6", response);
+  // An empty accepted FQDN requests a generated name after allocation. A
+  // scrubbed-empty FQDN never reaches this hook or creates a response option.
+  handle.setContext(LEASE6_DDNS_RESPONSE,
+                    response && bool(response->getOption(D6O_CLIENT_FQDN)));
+  return 0;
+}
+
 int lease6_select(CalloutHandle &handle) try {
   Lease6Ptr lease6;
   handle.getArgument("lease6", lease6);
@@ -1626,6 +1637,12 @@ int lease6_select(CalloutHandle &handle) try {
     }
     handle.setArgument(LEASE6_REPLACEMENT, previous);
     handle.setArgument(LEASE6_STAT_ADJUSTMENTS, adjustments);
+    bool response_fqdn = false;
+    try {
+      handle.getContext(LEASE6_DDNS_RESPONSE, response_fqdn);
+    } catch (const isc::hooks::NoSuchCalloutContext &) {
+    }
+    handle.setArgument(LEASE6_DDNS_RESPONSE, response_fqdn);
   }
   handle.setStatus(CalloutHandle::NEXT_STEP_CONTINUE);
   return 0;

@@ -434,11 +434,13 @@ impl DHCPv6Factory {
         let payload = Self::relay_msg_payload(packet).expect("relay packet");
         let mut message = Message::decode(&mut Decoder::new(payload)).unwrap();
         let mut fqdn = vec![1]; // S: server performs forward and reverse updates.
-        for label in hostname.trim_end_matches('.').split('.') {
-            fqdn.push(u8::try_from(label.len()).unwrap());
-            fqdn.extend_from_slice(label.as_bytes());
+        if !hostname.is_empty() {
+            for label in hostname.trim_end_matches('.').split('.') {
+                fqdn.push(u8::try_from(label.len()).unwrap());
+                fqdn.extend_from_slice(label.as_bytes());
+            }
+            fqdn.push(0);
         }
-        fqdn.push(0);
         message.opts_mut().remove(OptionCode::ClientFqdn);
         message
             .opts_mut()

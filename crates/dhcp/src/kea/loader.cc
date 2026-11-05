@@ -299,6 +299,7 @@ bool configure_v6(LibraryHandle *handle) {
 
   handle->registerCallout("pkt6_receive", pkt6_receive);
   handle->registerCallout("lease6_existing", lease6_existing);
+  handle->registerCallout("ddns6_update", ddns6_update);
   handle->registerCallout("lease6_select", lease6_select);
   handle->registerCallout("lease6_renew", lease6_renew);
   handle->registerCallout("lease6_rebind", lease6_rebind);
