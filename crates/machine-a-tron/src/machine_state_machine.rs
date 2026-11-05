@@ -459,9 +459,8 @@ impl MachineStateMachine {
             actions: actions.into_iter().collect(),
             bmc_mock: None,
             bmc_state: None,
-            bmc_recovery: BmcDhcpRecovery::with_renewal(
-                app_context.app_config.bmc_dhcp_renewal_interval,
-            ),
+            bmc_recovery: app_context
+                .bmc_dhcp_recovery(app_context.app_config.bmc_dhcp_renewal_interval),
             bmc_injection: Arc::new(InjectionStore::new()),
             power_cycle_deadline: None,
             machine_on_deadline: None,
@@ -516,9 +515,8 @@ impl MachineStateMachine {
             bmc_dhcp_info: None,
             bmc_mock: None,
             bmc_state: None,
-            bmc_recovery: BmcDhcpRecovery::with_renewal(
-                app_context.app_config.bmc_dhcp_renewal_interval,
-            ),
+            bmc_recovery: app_context
+                .bmc_dhcp_recovery(app_context.app_config.bmc_dhcp_renewal_interval),
             bmc_injection: Arc::new(InjectionStore::new()),
             machine_dhcp_info: None,
             machine_interface_id: None,
