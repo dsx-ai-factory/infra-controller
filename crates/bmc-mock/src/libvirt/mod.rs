@@ -16,13 +16,15 @@
  */
 
 use std::collections::BTreeMap;
+use std::ffi::OsString;
 use std::path::PathBuf;
+use std::process::Output;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock, Weak};
 use std::time::Duration;
 
 use nv_redfish::schema::resource::PowerState;
-use tokio::sync::{oneshot, watch};
+use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinSet;
 use tokio::time::Instant;
 use tokio_util::sync::{CancellationToken, DropGuard};
@@ -160,6 +162,13 @@ pub struct Config {
     pub uri: String,
     pub domain: String,
     pub virtual_media_targets: BTreeMap<String, String>,
+    /// Whether the connection recreates the guest from its persistent definition
+    /// on reboot and reset, as on start. When set, the backend applies the
+    /// effective boot order before a restart and treats a completed restart as a
+    /// boot from the saved configuration, which consumes a one-time boot override.
+    /// Native libvirt keeps the running configuration across a restart; leave this
+    /// unset for it.
+    pub restart_loads_persistent_definition: bool,
 }
 
 /// Backend handle that sends operations to one sequential libvirt actor.
@@ -201,9 +210,103 @@ enum LibvirtMessage {
         update: BmcResetUpdate,
         reply: oneshot::Sender<Result<(), ActionError>>,
     },
+    Session {
+        reply: oneshot::Sender<LibvirtSession>,
+    },
     Refresh,
     PersistState,
     Stop(oneshot::Sender<Result<(), PersistenceError>>),
+}
+
+/// Exclusive use of the libvirt backend by an embedding application.
+///
+/// While a session is open, the backend's actor runs only the session's requests:
+/// Redfish power commands, media changes, state refreshes and power polling queue
+/// behind it in order. Dropping the session ends it. Keep sessions short and do not
+/// await another backend operation, such as a Redfish request to this BMC, while
+/// holding one: that operation waits for the session to end.
+#[derive(Debug)]
+pub struct LibvirtSession {
+    requests: mpsc::UnboundedSender<SessionRequest>,
+}
+
+#[derive(Debug)]
+enum SessionRequest {
+    Virsh {
+        arguments: Vec<OsString>,
+        reply: oneshot::Sender<eyre::Result<Output>>,
+    },
+    PowerState {
+        reply: oneshot::Sender<Option<PowerState>>,
+    },
+    Power {
+        reset_type: ResourceResetType,
+        boot_order: SessionBootOrder,
+        reply: oneshot::Sender<Result<(), ActionError>>,
+    },
+}
+
+/// Whether a session's power command applies the BMC's boot order first.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SessionBootOrder {
+    /// Apply the effective Redfish boot order when the command loads the saved
+    /// definition, as a Redfish `ComputerSystem.Reset` does.
+    Apply,
+    /// Leave the domain's boot configuration as the session prepared it.
+    Keep,
+}
+
+impl LibvirtSession {
+    async fn request<T>(
+        &self,
+        request: impl FnOnce(oneshot::Sender<T>) -> SessionRequest,
+    ) -> Result<T, ActionError> {
+        let (reply, response) = oneshot::channel();
+        self.requests.send(request(reply)).map_err(|error| {
+            ActionError::Internal(eyre::eyre!("libvirt session closed: {error}"))
+        })?;
+        response
+            .await
+            .map_err(|error| ActionError::Internal(error.into()))
+    }
+
+    /// Runs the configured virsh as `virsh --connect URI ARGUMENTS...` and returns
+    /// its output when it exits successfully. The arguments are passed unchanged;
+    /// they name the domain themselves.
+    pub async fn virsh(
+        &self,
+        arguments: impl IntoIterator<Item = impl Into<OsString>>,
+    ) -> Result<Output, ActionError> {
+        let arguments = arguments.into_iter().map(Into::into).collect();
+        self.request(|reply| SessionRequest::Virsh { arguments, reply })
+            .await?
+            .map_err(ActionError::Internal)
+    }
+
+    /// Observes the domain's power state, as the backend's polling does. `None`
+    /// means the state could not be read or was not recognized.
+    pub async fn power_state(&self) -> Result<Option<PowerState>, ActionError> {
+        self.request(|reply| SessionRequest::PowerState { reply })
+            .await
+    }
+
+    /// Runs a power command as a Redfish `ComputerSystem.Reset` would, with
+    /// lifecycle publication and, for [`SessionBootOrder::Apply`], boot-order
+    /// handling, and returns its outcome instead of only enqueueing it. Unlike a
+    /// Redfish request, the command is not validated against the published power
+    /// state first.
+    pub async fn power(
+        &self,
+        reset_type: ResourceResetType,
+        boot_order: SessionBootOrder,
+    ) -> Result<(), ActionError> {
+        self.request(|reply| SessionRequest::Power {
+            reset_type,
+            boot_order,
+            reply,
+        })
+        .await?
+    }
 }
 
 struct LibvirtBackend {
@@ -489,16 +592,25 @@ impl LibvirtBackend {
     async fn send_power_command(
         &mut self,
         reset_type: ResourceResetType,
+        boot_order: SessionBootOrder,
     ) -> Result<(), ActionError> {
         use ResourceResetType::*;
-        // Only a cold start loads the saved domain XML. Reboot and reset keep
-        // the running domain's boot configuration and their existing semantics.
-        if matches!(reset_type, On | ForceOn | PowerCycle | FullPowerCycle) {
+        // Natively, only a cold start loads the saved domain XML. Reboot and reset
+        // keep the running domain's boot configuration, unless the connection
+        // recreates the guest from its persistent definition on restart too.
+        let restart_is_cold = self.config.restart_loads_persistent_definition;
+        if boot_order == SessionBootOrder::Apply
+            && (matches!(reset_type, On | ForceOn | PowerCycle | FullPowerCycle)
+                || (restart_is_cold && matches!(reset_type, GracefulRestart | ForceRestart)))
+        {
             self.reapply_effective_boot_order().await?;
         }
         for command in VirshCommand::power(reset_type)? {
             let boot = match command {
                 VirshCommand::Start => Some(BootKind::Cold),
+                VirshCommand::Reset | VirshCommand::Reboot if restart_is_cold => {
+                    Some(BootKind::Cold)
+                }
                 VirshCommand::Reset | VirshCommand::Reboot => Some(BootKind::Warm),
                 _ => None,
             };
@@ -513,6 +625,59 @@ impl LibvirtBackend {
             }
         }
         Ok(())
+    }
+
+    async fn execute_power_command(
+        &mut self,
+        reset_type: ResourceResetType,
+        boot_order: SessionBootOrder,
+    ) -> Result<(), ActionError> {
+        if matches!(reset_type, ResourceResetType::PowerCycle) {
+            self.power_state
+                .write()
+                .expect("power state lock poisoned")
+                .cycling = true;
+            self.publish_power_state(PowerState::Off);
+        }
+        let result = self.send_power_command(reset_type, boot_order).await;
+        match &result {
+            Ok(()) => {
+                if let Some(state) = self.bmc_state.upgrade() {
+                    state.record_power_command_completed(reset_type);
+                }
+            }
+            Err(error) => {
+                tracing::error!(domain = %self.config.domain, ?reset_type, %error, "libvirt power command failed");
+            }
+        }
+        self.refresh_power_state().await;
+        self.power_state
+            .write()
+            .expect("power state lock poisoned")
+            .cycling = false;
+        result
+    }
+
+    async fn session_request(&mut self, request: SessionRequest) {
+        match request {
+            SessionRequest::Virsh { arguments, reply } => {
+                reply
+                    .send(self.virsh().execute_arguments(&arguments).await)
+                    .ok();
+            }
+            SessionRequest::PowerState { reply } => {
+                reply.send(self.observe_power_state().await).ok();
+            }
+            SessionRequest::Power {
+                reset_type,
+                boot_order,
+                reply,
+            } => {
+                reply
+                    .send(self.execute_power_command(reset_type, boot_order).await)
+                    .ok();
+            }
+        }
     }
 
     async fn refresh(&mut self) {
@@ -591,28 +756,20 @@ impl ActorCallbacks<LibvirtMessage> for LibvirtBackend {
                 ActorResult::Noop
             }
             LibvirtMessage::SendPowerCommand { reset_type } => {
-                if matches!(reset_type, ResourceResetType::PowerCycle) {
-                    self.power_state
-                        .write()
-                        .expect("power state lock poisoned")
-                        .cycling = true;
-                    self.publish_power_state(PowerState::Off);
-                }
-                match self.send_power_command(reset_type).await {
-                    Ok(()) => {
-                        if let Some(state) = self.bmc_state.upgrade() {
-                            state.record_power_command_completed(reset_type);
-                        }
-                    }
-                    Err(error) => {
-                        tracing::error!(domain = %self.config.domain, ?reset_type, %error, "libvirt power command failed");
+                // Failures are logged; a Redfish caller observes the published state.
+                self.execute_power_command(reset_type, SessionBootOrder::Apply)
+                    .await
+                    .ok();
+                ActorResult::Noop
+            }
+            LibvirtMessage::Session { reply } => {
+                let (requests, mut received) = mpsc::unbounded_channel();
+                if reply.send(LibvirtSession { requests }).is_ok() {
+                    while let Some(request) = received.recv().await {
+                        self.session_request(request).await;
                     }
                 }
                 self.refresh_power_state().await;
-                self.power_state
-                    .write()
-                    .expect("power state lock poisoned")
-                    .cycling = false;
                 ActorResult::Noop
             }
             LibvirtMessage::Refresh => {
@@ -628,6 +785,17 @@ impl ActorCallbacks<LibvirtMessage> for LibvirtBackend {
 }
 
 impl LibvirtCallbacks {
+    /// Opens a [`LibvirtSession`] once the backend's earlier operations have finished.
+    pub async fn session(&self) -> Result<LibvirtSession, ActionError> {
+        let (reply, response) = oneshot::channel();
+        self.mailbox
+            .send(LibvirtMessage::Session { reply })
+            .map_err(|error| ActionError::Internal(error.into()))?;
+        response
+            .await
+            .map_err(|error| ActionError::Internal(error.into()))
+    }
+
     /// Flushes the latest BMC state and stops the actor after the application stops HTTP requests.
     /// The owner must still join its supervised task. A failed final save is returned to the owner.
     pub async fn finish(&self) -> eyre::Result<()> {

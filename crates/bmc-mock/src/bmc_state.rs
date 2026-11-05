@@ -182,6 +182,19 @@ impl<C: Callbacks> BmcState<C> {
         self.manager.record_integrated_event(draft, &created);
     }
 
+    /// The virtual-media drive `device_id` of ComputerSystem `system_id`, or
+    /// `None` when the system has no such drive.
+    pub fn virtual_media_drive(
+        &self,
+        system_id: &str,
+        device_id: &str,
+    ) -> Option<crate::VirtualMediaDrive> {
+        self.system_state
+            .find(system_id)?
+            .virtual_media()?
+            .drive(device_id)
+    }
+
     /// Returns whether this BMC advertises an enabled SSH serial console.
     pub fn has_enabled_ssh_serial_console(&self) -> bool {
         self.system_state.has_enabled_ssh_serial_console()

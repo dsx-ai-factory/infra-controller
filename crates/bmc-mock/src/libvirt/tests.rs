@@ -26,6 +26,7 @@ fn unstarted() -> (TestDomain, LibvirtActor) {
             uri: "test:///default".into(),
             domain: "test-domain".into(),
             virtual_media_targets: Default::default(),
+            restart_loads_persistent_definition: false,
         },
         stop.drop_guard(),
     );
@@ -237,6 +238,7 @@ async fn hpe_integrated_event_log_records_only_successful_backend_commands() {
                 uri: format!("test://{}", path.display()),
                 domain: "test-domain".into(),
                 virtual_media_targets: Default::default(),
+                restart_loads_persistent_definition: false,
             },
             stop.clone().drop_guard(),
         );
@@ -284,4 +286,217 @@ async fn hpe_integrated_event_log_records_only_successful_backend_commands() {
         stop.cancel();
         tasks.shutdown().await;
     }
+}
+
+/// A started backend driven by the checked-in virsh stub. Each reset exits with
+/// `exit_code` as soon as it starts.
+struct StubDomain {
+    directory: tempfile::TempDir,
+    router: Router,
+    state: Arc<BmcState<LibvirtCallbacks>>,
+    callbacks: Arc<LibvirtCallbacks>,
+    stop: CancellationToken,
+    tasks: JoinSet<()>,
+}
+
+impl StubDomain {
+    async fn start(restart_loads_persistent_definition: bool, exit_code: i32) -> Self {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("exit-code"), exit_code.to_string()).unwrap();
+        std::fs::write(directory.path().join("release"), "").unwrap();
+        let stop = CancellationToken::new();
+        let (actor, callbacks) = LibvirtActor::new(
+            Config {
+                state_file: None,
+                virsh_path: PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .join("src/libvirt/testdata/fake-virsh"),
+                uri: format!("test://{}", directory.path().display()),
+                domain: "test-domain".into(),
+                virtual_media_targets: Default::default(),
+                restart_loads_persistent_definition,
+            },
+            stop.clone().drop_guard(),
+        );
+        let callbacks = Arc::new(callbacks);
+        let (router, state) = crate::machine_router(
+            &host_info(HardwareType::GenericAmi),
+            callbacks.clone(),
+            "test".into(),
+            false,
+            MachineRouterOptions::default(),
+        );
+        let state = Arc::new(state);
+        let mut tasks = JoinSet::new();
+        actor.run(&state, &mut tasks, stop.clone()).await.unwrap();
+        Self {
+            directory,
+            router,
+            state,
+            callbacks,
+            stop,
+            tasks,
+        }
+    }
+
+    fn log(&self) -> Vec<String> {
+        std::fs::read_to_string(self.directory.path().join("log"))
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_owned)
+            .collect()
+    }
+
+    async fn request(
+        &self,
+        method: &str,
+        path: &str,
+        body: &str,
+    ) -> (StatusCode, serde_json::Value) {
+        let response = self
+            .router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri(path)
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_owned()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (
+            status,
+            serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null),
+        )
+    }
+
+    async fn stop(mut self) {
+        self.stop.cancel();
+        self.tasks.shutdown().await;
+    }
+}
+
+#[tokio::test]
+async fn libvirt_session_runs_its_requests_before_queued_backend_work() {
+    let domain = StubDomain::start(false, 0).await;
+    let system = domain.state.system_state.primary_system_odata_id().unwrap();
+    let session = domain.callbacks.session().await.unwrap();
+    let output = session.virsh(["domstate", "test-domain"]).await.unwrap();
+    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "running");
+    assert_eq!(session.power_state().await.unwrap(), Some(PowerState::On));
+
+    // A Redfish reset is accepted, then waits for the session to end.
+    let (status, _) = domain
+        .request(
+            "POST",
+            &format!("{system}/Actions/ComputerSystem.Reset"),
+            r#"{"ResetType":"ForceRestart"}"#,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    session.virsh(["domstate", "test-domain"]).await.unwrap();
+    assert!(
+        !domain.log().iter().any(|line| line == "reset test-domain"),
+        "queued backend work does not run during a session"
+    );
+    drop(session);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !domain.log().iter().any(|line| line == "reset test-domain") {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the queued reset runs after the session ends");
+    domain.stop().await;
+}
+
+#[tokio::test]
+async fn libvirt_session_reports_power_command_and_virsh_failures() {
+    let domain = StubDomain::start(false, 1).await;
+    let session = domain.callbacks.session().await.unwrap();
+    assert!(matches!(
+        session
+            .power(ResourceResetType::ForceRestart, SessionBootOrder::Apply)
+            .await,
+        Err(ActionError::Internal(_))
+    ));
+    assert!(matches!(
+        session.virsh(["reset", "test-domain"]).await,
+        Err(ActionError::Internal(_))
+    ));
+    drop(session);
+    domain.stop().await;
+}
+
+#[tokio::test]
+async fn restart_consumes_a_one_time_override_only_when_it_loads_the_saved_definition() {
+    for restart_loads_persistent_definition in [false, true] {
+        let domain = StubDomain::start(restart_loads_persistent_definition, 0).await;
+        let system = domain.state.system_state.primary_system_odata_id().unwrap();
+        let (status, _) = domain
+            .request(
+                "PATCH",
+                &system,
+                r#"{"Boot":{"BootSourceOverrideEnabled":"Once","BootSourceOverrideTarget":"Pxe"}}"#,
+            )
+            .await;
+        assert!(status.is_success(), "{status}");
+        let session = domain.callbacks.session().await.unwrap();
+        let before = domain.log().len();
+        session
+            .power(ResourceResetType::ForceRestart, SessionBootOrder::Apply)
+            .await
+            .unwrap();
+        drop(session);
+        let restart = domain.log()[before..].to_vec();
+        let reset = restart
+            .iter()
+            .position(|line| line == "reset test-domain")
+            .expect("the restart ran");
+        assert_eq!(
+            restart[..reset]
+                .iter()
+                .any(|line| line.starts_with("define")),
+            restart_loads_persistent_definition,
+            "the override is applied before the restart only when the restart loads it: {restart:?}"
+        );
+        let (_, body) = domain.request("GET", &system, "").await;
+        assert_eq!(
+            body["Boot"]["BootSourceOverrideEnabled"],
+            if restart_loads_persistent_definition {
+                "Disabled"
+            } else {
+                "Once"
+            },
+            "a warm restart keeps the override for the next cold start"
+        );
+        domain.stop().await;
+    }
+}
+
+#[tokio::test]
+async fn session_power_can_keep_the_boot_configuration_it_prepared() {
+    let domain = StubDomain::start(true, 0).await;
+    let session = domain.callbacks.session().await.unwrap();
+    let before = domain.log().len();
+    session
+        .power(ResourceResetType::ForceRestart, SessionBootOrder::Keep)
+        .await
+        .unwrap();
+    drop(session);
+    let restart = domain.log()[before..].to_vec();
+    assert!(
+        restart.iter().any(|line| line == "reset test-domain"),
+        "{restart:?}"
+    );
+    assert!(
+        !restart.iter().any(|line| line.starts_with("define")),
+        "the session's boot configuration is not replaced: {restart:?}"
+    );
+    domain.stop().await;
 }
