@@ -765,6 +765,38 @@ async fn test_exploration_refreshes_pending_predicted_boot_interface_id(
         }),
     );
 
+    // The persisted host must also be reconciled with creation disabled and
+    // no BMC exploration in this iteration.
+    sqlx::query("DELETE FROM machine_boot_interfaces WHERE machine_id = $1")
+        .bind(predicted.machine_id)
+        .execute(&env.pool)
+        .await?;
+    let explorer = super::env::test_site_explorer(
+        &env.test_harness,
+        SiteExplorerConfig {
+            explorations_per_run: 0,
+            create_machines: Arc::new(false.into()),
+            ..Default::default()
+        },
+    );
+    explorer.run_single_iteration().await?;
+    assert!(
+        explorer
+            .endpoint_explorer()
+            .explore_endpoint_calls
+            .lock()
+            .unwrap()
+            .is_empty(),
+        "the reconciliation must not need a fresh exploration report",
+    );
+    let reconciled = db::machine_desired_boot_interface::get(
+        &env.pool,
+        &predicted.machine_id.try_into().unwrap(),
+    )
+    .await?
+    .expect("the independent reconciliation pass should initialize the boot target");
+    assert_eq!(reconciled.value, desired.value);
+
     Ok(())
 }
 

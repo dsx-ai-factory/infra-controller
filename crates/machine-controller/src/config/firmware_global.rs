@@ -18,6 +18,7 @@
 use std::path::PathBuf;
 
 use carbide_firmware::downloader::FirmwareDownloadConfig;
+use carbide_libmlx_model::firmware::FirmwareDeliveryMode;
 use carbide_utils::config::as_duration;
 use chrono::Duration;
 use duration_str::deserialize_duration_chrono;
@@ -32,12 +33,10 @@ pub struct FirmwareGlobal {
     /// background firmware manager.
     #[serde(default)]
     pub autoupdate: bool,
-    /// Host model names to force-enable autoupdate on,
-    /// regardless of the global `autoupdate` setting.
+    /// Legacy field. Automatic host selection does not read it.
     #[serde(default)]
     pub host_enable_autoupdate: Vec<String>,
-    /// Host model names to force-disable autoupdate on,
-    /// regardless of the global `autoupdate` setting.
+    /// Host machine IDs excluded from automatic host selection.
     #[serde(default)]
     pub host_disable_autoupdate: Vec<String>,
     /// Frequency at which the firmware manager checks for
@@ -78,6 +77,14 @@ pub struct FirmwareGlobal {
     /// outside this limit. Changes require a Core restart.
     #[serde(default = "FirmwareGlobal::nic_firmware_cache_capacity_bytes_default")]
     pub nic_firmware_cache_capacity_bytes: u64,
+    /// Site-wide policy for new NIC firmware operations: `site_cache` (default)
+    /// uses authenticated Core delivery; `direct` uses anonymous origin HTTP(S).
+    /// Changes require a Core restart. Copying this policy at production
+    /// admission is tracked in [NIC firmware lifecycle integration](https://github.com/dsx-ai-factory/infra-controller/issues/6680).
+    /// Saved operations retain their frozen mode; an omitted mode means
+    /// `Direct`. Legacy host-script and DPU updates do not use this policy.
+    #[serde(default = "FirmwareGlobal::nic_firmware_delivery_mode_default")]
+    pub nic_firmware_delivery_mode: FirmwareDeliveryMode,
     /// Delay before retrying a failed host firmware
     /// upgrade.
     /// Default is 60 minutes.
@@ -113,6 +120,10 @@ pub struct FirmwareGlobal {
 }
 
 impl FirmwareGlobal {
+    fn nic_firmware_delivery_mode_default() -> FirmwareDeliveryMode {
+        FirmwareDeliveryMode::SiteCache
+    }
+
     #[cfg(any(test, feature = "test-support"))]
     pub fn test_default() -> Self {
         FirmwareGlobal {
@@ -127,6 +138,7 @@ impl FirmwareGlobal {
             downloads: FirmwareDownloadConfig::default(),
             nic_firmware_cache_capacity_bytes:
                 FirmwareGlobal::nic_firmware_cache_capacity_bytes_default(),
+            nic_firmware_delivery_mode: FirmwareGlobal::nic_firmware_delivery_mode_default(),
             host_firmware_upgrade_retry_interval: Self::get_retry_interval(),
             instance_updates_manual_tagging: false,
             no_reset_retries: false,
@@ -197,6 +209,7 @@ impl Default for FirmwareGlobal {
             downloads: FirmwareDownloadConfig::default(),
             nic_firmware_cache_capacity_bytes:
                 FirmwareGlobal::nic_firmware_cache_capacity_bytes_default(),
+            nic_firmware_delivery_mode: FirmwareGlobal::nic_firmware_delivery_mode_default(),
             host_firmware_upgrade_retry_interval:
                 FirmwareGlobal::host_firmware_upgrade_retry_interval_default(),
             instance_updates_manual_tagging: false,

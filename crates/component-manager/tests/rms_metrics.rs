@@ -24,6 +24,7 @@ use api_test_helper::mock_rms::MockRmsApi;
 use carbide_instrument::testing::MetricsCapture;
 use carbide_secrets::credentials::Credentials;
 use carbide_uuid::rack::{RackId, RackProfileId};
+use component_manager::firmware_inventory::FirmwareReadError;
 use component_manager::power_shelf_manager::{
     PowerShelfEndpoint, PowerShelfManager, PowerShelfVendor,
 };
@@ -36,10 +37,13 @@ use model::rack_type::{
     RackProfileConfig,
 };
 
+/// Counts each outbound batch once, including a locally expired firmware RPC,
+/// so a new reader cannot silently omit or duplicate RED observations.
 #[carbide_macros::sqlx_test]
 async fn rms_calls_record_the_external_call_histogram_by_outcome(pool: sqlx::PgPool) {
     let device_mac = "AA:BB:CC:DD:EE:01".parse().unwrap();
     let rack_id = RackId::new(uuid::Uuid::new_v4().to_string());
+    let peer_mac = "AA:BB:CC:DD:EE:02".parse().unwrap();
     let profile_id = RackProfileId::new("rms-metrics");
     let mut txn = pool.begin().await.unwrap();
     db::rack::create(
@@ -51,17 +55,19 @@ async fn rms_calls_record_the_external_call_histogram_by_outcome(pool: sqlx::PgP
     )
     .await
     .unwrap();
-    db::expected_power_shelf::create(
-        &mut txn,
-        ExpectedPowerShelf {
-            bmc_mac_address: device_mac,
-            serial_number: "PS-001".to_owned(),
-            rack_id: Some(rack_id),
-            ..Default::default()
-        },
-    )
-    .await
-    .unwrap();
+    for (mac, serial) in [(device_mac, "PS-001"), (peer_mac, "PS-002")] {
+        db::expected_power_shelf::create(
+            &mut txn,
+            ExpectedPowerShelf {
+                bmc_mac_address: mac,
+                serial_number: serial.to_owned(),
+                rack_id: Some(rack_id.clone()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    }
     txn.commit().await.unwrap();
 
     let profiles = RackProfileConfig {
@@ -71,7 +77,7 @@ async fn rms_calls_record_the_external_call_histogram_by_outcome(pool: sqlx::PgP
                 product_family: Some(RackProductFamily::Gb200),
                 rack_capabilities: RackCapabilitiesSet {
                     power_shelf: RackCapabilityPowerShelf {
-                        count: 1,
+                        count: 2,
                         vendor: Some("LiteOn".to_owned()),
                         ..Default::default()
                     },
@@ -90,8 +96,8 @@ async fn rms_calls_record_the_external_call_histogram_by_outcome(pool: sqlx::PgP
         tonic::Status::unavailable("down"),
     )))
     .await;
-    let backend = RmsBackend::new(mock, None, pool, Arc::new(profiles), false);
-    let endpoints = [PowerShelfEndpoint {
+    let backend = RmsBackend::new(mock.clone(), None, pool, Arc::new(profiles), false);
+    let mut endpoints = vec![PowerShelfEndpoint {
         pmc_ip: "10.0.0.1".parse().unwrap(),
         pmc_mac: device_mac,
         pmc_vendor: PowerShelfVendor::Liteon,
@@ -100,6 +106,11 @@ async fn rms_calls_record_the_external_call_histogram_by_outcome(pool: sqlx::PgP
             password: "pass".to_owned(),
         },
     }];
+
+    let mut peer = endpoints[0].clone();
+    peer.pmc_mac = peer_mac;
+    peer.pmc_ip = "10.0.0.2".parse().unwrap();
+    endpoints.push(peer);
 
     let metrics = MetricsCapture::start();
     let mut observed = Vec::new();
@@ -111,18 +122,79 @@ async fn rms_calls_record_the_external_call_histogram_by_outcome(pool: sqlx::PgP
         "transport failure surfaces as an error"
     );
 
-    for outcome in ["ok", "error"] {
+    // RED `ok` means the transport completed, not that inventory evidence is
+    // valid. An absent envelope still fails both endpoint observations.
+    mock.enqueue_batch_get_firmware_inventory(
+        Ok(rms::BatchGetFirmwareInventoryResponse::default()),
+    )
+    .await;
+    mock.enqueue_batch_get_firmware_inventory(Err(tonic::Status::unavailable("down").into()))
+        .await;
+    for _ in 0..2 {
+        let observed = backend.get_firmware_inventory(&endpoints).await.unwrap();
+        assert_eq!(observed.len(), 2);
+        assert!(
+            observed
+                .iter()
+                .all(|result| result.inventory == Err(FirmwareReadError::ReadFailed))
+        );
+    }
+    let (arrival, release) = mock.block_next_batch_get_firmware_inventory().await;
+    let read = backend.get_firmware_inventory(&endpoints);
+    tokio::pin!(read);
+    tokio::select! {
+        arrived = tokio::time::timeout(std::time::Duration::from_secs(10), arrival) => arrived.unwrap().unwrap(),
+        _ = &mut read => panic!("firmware read must block"),
+    }
+
+    // SQL preparation has completed before the gate. Advance only the owned
+    // RPC deadline; virtual time cannot stand in for a database timeout.
+    tokio::time::pause();
+    tokio::time::advance(std::time::Duration::from_secs(30)).await;
+    let timed_out = tokio::time::timeout(std::time::Duration::from_secs(120), read)
+        .await
+        .unwrap()
+        .unwrap();
+    tokio::time::resume();
+    assert_eq!(timed_out.len(), 2);
+    assert!(
+        timed_out
+            .iter()
+            .all(|result| result.inventory == Err(FirmwareReadError::DeadlineExceeded))
+    );
+    assert!(release.is_closed());
+    let calls = mock.batch_get_firmware_inventory_calls().await;
+    assert_eq!(calls.len(), 3);
+    for call in calls {
+        let nodes = &call.nodes.as_ref().unwrap().nodes;
+        assert_eq!(nodes.len(), 2);
+        assert!(nodes.iter().all(|node| node.rack_id == rack_id.to_string()));
+        assert_eq!(
+            nodes
+                .iter()
+                .map(|node| node.node_id.as_str())
+                .collect::<Vec<_>>(),
+            ["AA:BB:CC:DD:EE:01", "AA:BB:CC:DD:EE:02"]
+        );
+    }
+
+    for (operation, outcome, count) in [
+        ("batch_get_power_state", "ok", 1),
+        ("batch_get_power_state", "error", 1),
+        ("batch_get_firmware_inventory", "ok", 1),
+        ("batch_get_firmware_inventory", "error", 2),
+    ] {
         assert_eq!(
             metrics.histogram_count_delta(
                 "carbide_external_call_duration_milliseconds",
                 &[
                     ("backend", "rms"),
-                    ("operation", "batch_get_power_state"),
+                    ("operation", operation),
                     ("outcome", outcome),
                 ],
             ),
-            1,
-            "{outcome}"
+            count,
+            "{operation} {outcome}"
         );
     }
 }

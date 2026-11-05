@@ -24,6 +24,7 @@ use ::rpc::protos::mlx_device::{
     PublishMlxObservationReportResponse,
 };
 use carbide_instrument::emit;
+use carbide_libmlx_model::firmware::FirmwareDeliveryMode;
 use carbide_uuid::machine::MachineId;
 use libmlx::device::discovery;
 use libmlx::device::report::MlxDeviceReport;
@@ -1375,8 +1376,9 @@ pub(super) async fn update_firmware(
     device: &str,
     task: &rpc::forge_agent_control_response::MlxDeviceUpdateFirmware,
     config: &SupervisorConfig,
+    core_options: Option<&Options>,
 ) -> Option<mlx_device_pb::MlxDeviceUpdateFirmwareResult> {
-    let result = submit_firmware_update(device, task, config).await;
+    let result = submit_firmware_update(device, task, config, core_options).await;
     firmware_update_result(device, &task.operation_id, &task.phase_id, result)
 }
 
@@ -1439,6 +1441,10 @@ fn firmware_update_result(
                 _ => None,
             };
             let (code, diagnostic) = match error {
+                SupervisorLaunchError::InvalidConfiguration(_) => (
+                    Code::Unavailable,
+                    "local firmware supervisor or core transport configuration is invalid",
+                ),
                 SupervisorLaunchError::Client(FirmwareSupervisorClientError::InvalidRequest(_)) => {
                     (
                         Code::InvalidTask,
@@ -1448,7 +1454,7 @@ fn firmware_update_result(
                 SupervisorLaunchError::Client(
                     FirmwareSupervisorClientError::UnsupportedProtocol(_),
                 ) => (
-                    Code::Unsupported,
+                    Code::Unavailable,
                     "firmware supervisor protocol version does not match the client",
                 ),
                 SupervisorLaunchError::Client(FirmwareSupervisorClientError::Rpc(status)) => {
@@ -1541,6 +1547,7 @@ async fn submit_firmware_update(
     device: &str,
     task: &rpc::forge_agent_control_response::MlxDeviceUpdateFirmware,
     config: &SupervisorConfig,
+    core_options: Option<&Options>,
 ) -> Result<mlx_device_pb::mlx_device_update_firmware_result::Result, SupervisorLaunchError> {
     use mlx_device_pb::mlx_device_update_firmware_result::Result as UpdateResult;
 
@@ -1551,6 +1558,7 @@ async fn submit_firmware_update(
         task.profile.clone(),
         task.expected_digests.clone(),
         task.expected_device.clone(),
+        task.delivery_mode,
     )?;
     let expected_instance = task.supervisor_instance_id.as_deref();
     if expected_instance.is_some_and(|instance| !is_firmware_identifier(instance)) {
@@ -1561,7 +1569,7 @@ async fn submit_firmware_update(
     }
 
     let mut client = connect_or_launch(device, config).await?;
-    let Some(expected_instance) = expected_instance else {
+    if expected_instance.is_none() && context.delivery_mode == FirmwareDeliveryMode::Direct {
         let operation = client
             .submit_update(
                 &task.operation_id,
@@ -1571,8 +1579,8 @@ async fn submit_firmware_update(
             )
             .await?;
         return Ok(UpdateResult::Receipt(operation.into()));
-    };
-    match client
+    }
+    let observed_instance = match client
         .observe_update(
             &task.operation_id,
             profile.clone(),
@@ -1583,18 +1591,38 @@ async fn submit_firmware_update(
     {
         FirmwareOperationObservation::MissingReceipt {
             supervisor_instance_id,
-        } if supervisor_instance_id == expected_instance => {}
+        } if expected_instance.is_none_or(|expected| supervisor_instance_id == expected) => {
+            supervisor_instance_id
+        }
         observation => return Ok(observation_result(observation)),
-    }
-    let operation = client
-        .submit_update_on_instance(
-            &task.operation_id,
-            profile,
-            context,
-            ObserverExitBehavior::Continue,
-            expected_instance,
-        )
-        .await?;
+    };
+    let operation = if context.delivery_mode == FirmwareDeliveryMode::SiteCache {
+        let options = core_options.ok_or_else(|| {
+            SupervisorLaunchError::InvalidConfiguration(
+                "site_cache delivery requires scout core transport settings",
+            )
+        })?;
+        client
+            .submit_update_via_core(
+                &task.operation_id,
+                profile,
+                context,
+                ObserverExitBehavior::Continue,
+                &observed_instance,
+                client::firmware_download_config(options)?,
+            )
+            .await?
+    } else {
+        client
+            .submit_update_on_instance(
+                &task.operation_id,
+                profile,
+                context,
+                ObserverExitBehavior::Continue,
+                &observed_instance,
+            )
+            .await?
+    };
     Ok(UpdateResult::Receipt(operation.into()))
 }
 
@@ -1613,6 +1641,7 @@ async fn observe_firmware_operation(
         task.profile.clone(),
         task.expected_digests.clone(),
         task.expected_device.clone(),
+        task.delivery_mode,
     )?;
     let mut client = connect_or_launch(device, config).await?;
     let observation = client
@@ -1651,6 +1680,7 @@ fn checked_firmware_request(
     profile: Option<mlx_device_pb::FirmwareFlasherProfile>,
     expected_digests: Option<mlx_device_pb::FirmwareArtifactDigests>,
     expected_device: Option<mlx_device_pb::MlxDeviceSelector>,
+    delivery_mode: i32,
 ) -> Result<(FirmwareFlasherProfile, FirmwareUpdateContext), FirmwareSupervisorClientError> {
     let invalid = || {
         FirmwareSupervisorClientError::InvalidRequest(
@@ -1669,6 +1699,9 @@ fn checked_firmware_request(
         .map_err(|_| invalid())?;
     let context = FirmwareUpdateContext {
         phase_id: phase_id.to_string(),
+        delivery_mode: mlx_device_pb::FirmwareDeliveryMode::try_from(delivery_mode)
+            .map_err(|_| invalid())?
+            .into(),
         expected_digests: FirmwareArtifactDigests::try_from(expected_digests.ok_or_else(invalid)?)
             .map_err(|_| invalid())?,
         expected_device: expected_device
@@ -2467,6 +2500,8 @@ mod tests {
         invalid_phase.phase_id = "invalid phase".to_string();
         let mut empty_instance = task.clone();
         empty_instance.supervisor_instance_id = Some(String::new());
+        let mut unknown_delivery = task.clone();
+        unknown_delivery.delivery_mode = i32::MAX;
         for (scenario, pci_name, task) in [
             // The old command's absent-profile completion is not this contract.
             ("required profile", DEVICE_ID, missing_profile),
@@ -2483,6 +2518,8 @@ mod tests {
             ("phase context", DEVICE_ID, invalid_phase),
             // A present but empty guard is not an unguarded submission.
             ("supervisor instance", DEVICE_ID, empty_instance),
+            // Unknown wire modes cannot fall back to Direct delivery.
+            ("delivery mode", DEVICE_ID, unknown_delivery),
         ] {
             let directory = firmware_state_directory();
             let config = SupervisorConfig {
@@ -2504,6 +2541,7 @@ mod tests {
                 &machine_id,
                 vec![action],
                 Ok(&config),
+                None,
                 |_| panic!("invalid generic task must not discover hardware"),
                 |request| {
                     published = Some(request);
@@ -2544,6 +2582,7 @@ mod tests {
         use std::sync::Arc;
         use std::sync::atomic::{AtomicUsize, Ordering};
 
+        use mlx_device_pb::FirmwareDeliveryMode::{Direct, SiteCache};
         use mlx_device_pb::MlxDeviceUpdateFirmwareErrorCode as Code;
         use mlx_device_pb::mlx_device_update_firmware_result::Result as UpdateResult;
         use rpc::forge_agent_control_response as fac;
@@ -2564,6 +2603,7 @@ mod tests {
         /// Serve only admission failures; no fixture path executes firmware.
         struct Supervisor {
             protocol_version: u32,
+            site_cache: bool,
             boot_id: String,
             admission_error: Status,
             submissions: Arc<AtomicUsize>,
@@ -2574,8 +2614,53 @@ mod tests {
         impl FirmwareSupervisor for Supervisor {
             async fn submit_firmware_operation(
                 &self,
-                _: Request<SubmitFirmwareOperationRequest>,
+                request: Request<SubmitFirmwareOperationRequest>,
             ) -> Result<Response<SubmitFirmwareOperationResponse>, Status> {
+                let request = request.into_inner();
+                if self.site_cache {
+                    assert_eq!(
+                        request.expected_supervisor_instance_id.as_deref(),
+                        Some("cache-instance")
+                    );
+                    assert_eq!(
+                        request.update_context.as_ref().unwrap().delivery_mode,
+                        mlx_device_pb::FirmwareDeliveryMode::SiteCache as i32
+                    );
+                    assert_eq!(
+                        request
+                            .profile
+                            .as_ref()
+                            .unwrap()
+                            .flash_spec
+                            .as_ref()
+                            .unwrap()
+                            .firmware_url,
+                        "https://firmware.example/image.bin"
+                    );
+                    let runtime = request.core_download_config.unwrap();
+                    assert_eq!(runtime.core_url, "https://cache.example.test:1079");
+                    let directory = std::env::current_dir().unwrap();
+                    assert_eq!(
+                        std::path::Path::new(&runtime.root_ca_path),
+                        directory.join("relative-root.pem")
+                    );
+                    assert_eq!(
+                        std::path::Path::new(&runtime.client_cert_path),
+                        directory.join("relative-cert.pem")
+                    );
+                    assert_eq!(
+                        std::path::Path::new(&runtime.client_key_path),
+                        directory.join("relative-key.pem")
+                    );
+                    assert!(runtime.enforce_tls);
+                } else {
+                    assert_eq!(request.expected_supervisor_instance_id, None);
+                    assert_eq!(
+                        request.update_context.as_ref().unwrap().delivery_mode,
+                        mlx_device_pb::FirmwareDeliveryMode::Direct as i32
+                    );
+                    assert!(request.core_download_config.is_none());
+                }
                 self.submissions.fetch_add(1, Ordering::SeqCst);
                 Err(self.admission_error.clone())
             }
@@ -2601,8 +2686,24 @@ mod tests {
 
             async fn observe_firmware_update(
                 &self,
-                _: Request<ObserveFirmwareUpdateRequest>,
+                request: Request<ObserveFirmwareUpdateRequest>,
             ) -> Result<Response<ObserveFirmwareOperationResponse>, Status> {
+                if self.site_cache {
+                    assert_eq!(
+                        request
+                            .get_ref()
+                            .update_context
+                            .as_ref()
+                            .unwrap()
+                            .delivery_mode,
+                        mlx_device_pb::FirmwareDeliveryMode::SiteCache as i32
+                    );
+                    return Ok(Response::new(ObserveFirmwareOperationResponse {
+                        result: Some(rpc::protos::firmware_supervisor::observe_firmware_operation_response::Result::MissingReceipt(
+                            mlx_device_pb::FirmwareOperationMissingReceipt { supervisor_instance_id: "cache-instance".into() },
+                        )),
+                    }));
+                }
                 Err(Status::unimplemented("checked updates submit exact inputs"))
             }
 
@@ -2622,7 +2723,10 @@ mod tests {
         struct Case {
             name: &'static str,
             supervisor: Option<(u32, Status)>,
-            expected_code: Option<Code>,
+            expected_error: Option<(Code, &'static str, &'static str)>,
+            expected_submissions: usize,
+            delivery_mode: mlx_device_pb::FirmwareDeliveryMode,
+            core_options: Option<Options>,
         }
 
         const SECRET: &str = "fixture-remote-secret";
@@ -2630,46 +2734,130 @@ mod tests {
             .unwrap()
             .trim()
             .to_string();
+        let core_options = || {
+            <Options as clap::Parser>::parse_from([
+                "forge-scout",
+                "--api=https://cache.example.test:1079",
+                "--root-ca",
+                "relative-root.pem",
+                "--client-cert",
+                "relative-cert.pem",
+                "--client-key",
+                "relative-key.pem",
+            ])
+        };
+        let invalid_core_options = || {
+            let mut options = core_options();
+            options.api = format!("https://user:{SECRET}@cache.example.test");
+            options
+        };
         for case in [
             // A mismatched helper must fail at the handshake, before admission.
             Case {
+                delivery_mode: Direct,
+                core_options: None,
                 name: "incompatible supervisor rejects before Submit",
-                supervisor: Some((3, Status::unimplemented("must not receive submit"))),
-                expected_code: Some(Code::Unsupported),
+                supervisor: Some((4, Status::unimplemented("must not receive submit"))),
+                expected_error: Some((
+                    Code::Unavailable,
+                    "firmware supervisor protocol version does not match the client",
+                    "protocol",
+                )),
+                expected_submissions: 0,
             },
-            // A matching handshake can still expose an unsupported RPC.
+            // Available Core settings leave Direct unguarded and anonymous,
+            // even when a matching helper reports an unsupported admission RPC.
             Case {
-                name: "unimplemented Submit reports unsupported",
-                supervisor: Some((4, Status::unimplemented("checked admission unavailable"))),
-                expected_code: Some(Code::Unsupported),
+                delivery_mode: Direct,
+                core_options: Some(core_options()),
+                name: "Direct omits available Core transport and reports unsupported Submit",
+                supervisor: Some((5, Status::unimplemented("checked admission unavailable"))),
+                expected_error: Some((
+                    Code::Unsupported,
+                    "firmware supervisor does not support checked NIC firmware updates",
+                    "rpc",
+                )),
+                expected_submissions: 1,
             },
             Case {
+                delivery_mode: Direct,
+                core_options: None,
                 name: "invalid Submit reports an invalid task",
-                supervisor: Some((4, Status::invalid_argument("invalid checked context"))),
-                expected_code: Some(Code::InvalidTask),
+                supervisor: Some((5, Status::invalid_argument("invalid checked context"))),
+                expected_error: Some((
+                    Code::InvalidTask,
+                    "invalid NIC firmware update identity, profile, source, or digest",
+                    "rpc",
+                )),
+                expected_submissions: 1,
             },
             // Capacity is a deferred poll, not a failed or empty publication.
             Case {
+                delivery_mode: Direct,
+                core_options: None,
                 name: "occupied supervisor defers publication",
-                supervisor: Some((4, Status::resource_exhausted("host is occupied"))),
-                expected_code: None,
+                supervisor: Some((5, Status::resource_exhausted("host is occupied"))),
+                expected_error: None,
+                expected_submissions: 1,
             },
             // An uncertain reply cannot leak URLs or authorize replacement work.
             Case {
+                delivery_mode: Direct,
+                core_options: None,
                 name: "failed precondition keeps correlated redacted uncertainty",
                 supervisor: Some((
-                    4,
+                    5,
                     Status::failed_precondition(format!(
                         "cannot resolve https://user:{SECRET}@firmware.example/image.bin"
                     )),
                 )),
-                expected_code: Some(Code::Unavailable),
+                expected_error: Some((
+                    Code::Unavailable,
+                    "firmware supervisor returned no authoritative receipt; admission may have happened",
+                    "rpc",
+                )),
+                expected_submissions: 1,
+            },
+            // SiteCache uses the production Scout configuration factory after
+            // observing absence, without replacing the frozen original source.
+            Case {
+                delivery_mode: SiteCache,
+                name: "SiteCache hands resolved Core transport to the worker",
+                supervisor: Some((5, Status::failed_precondition("controlled admission stop"))),
+                expected_error: Some((
+                    Code::Unavailable,
+                    "firmware supervisor returned no authoritative receipt; admission may have happened",
+                    "rpc",
+                )),
+                expected_submissions: 1,
+                core_options: Some(core_options()),
+            },
+            // Local settings are repairable; they cannot invalidate saved work
+            // or expose the URL that failed configuration validation.
+            Case {
+                delivery_mode: SiteCache,
+                name: "invalid local Core settings defer before Submit",
+                supervisor: Some((5, Status::internal("must not receive submit"))),
+                expected_error: Some((
+                    Code::Unavailable,
+                    "local firmware supervisor or core transport configuration is invalid",
+                    "configuration",
+                )),
+                expected_submissions: 0,
+                core_options: Some(invalid_core_options()),
             },
             // No listener exists, so the configured missing executable reaches spawn.
             Case {
+                delivery_mode: Direct,
+                core_options: None,
                 name: "local launch failure keeps its cause without exposing the path",
                 supervisor: None,
-                expected_code: Some(Code::Unavailable),
+                expected_error: Some((
+                    Code::Unavailable,
+                    "firmware supervisor returned no authoritative receipt; admission may have happened",
+                    "launch firmware supervisor",
+                )),
+                expected_submissions: 0,
             },
         ] {
             let directory = firmware_state_directory();
@@ -2697,6 +2885,7 @@ mod tests {
                 std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600)).unwrap();
                 let supervisor = Supervisor {
                     protocol_version,
+                    site_cache: case.delivery_mode == SiteCache,
                     boot_id: boot_id.clone(),
                     admission_error,
                     submissions: submissions.clone(),
@@ -2717,6 +2906,7 @@ mod tests {
                 .parse()
                 .unwrap();
             let task = fac::MlxDeviceUpdateFirmware {
+                delivery_mode: case.delivery_mode.into(),
                 operation_id: "checked-update".to_string(),
                 phase_id: "firmware-phase".to_string(),
                 profile: Some(
@@ -2738,6 +2928,7 @@ mod tests {
                     )),
                 }],
                 Ok(&config),
+                case.core_options.as_ref(),
                 |_| panic!("generic dispatch must not discover hardware"),
                 |request| {
                     published = Some(request);
@@ -2748,28 +2939,15 @@ mod tests {
 
             assert_eq!(
                 submissions.load(Ordering::SeqCst),
-                usize::from(protocol_version == Some(4)),
+                case.expected_submissions,
                 "{}",
                 case.name,
             );
             assert_eq!(lookups.load(Ordering::SeqCst), 0, "{}", case.name);
-            if let Some(code) = case.expected_code {
+            if let Some((code, diagnostic, failure_stage)) = case.expected_error {
                 let report = published.expect(case.name).report.unwrap();
                 assert_eq!(report.machine_id, Some(machine_id), "{}", case.name);
-                let diagnostic = match code {
-                    Code::InvalidTask => {
-                        "invalid NIC firmware update identity, profile, source, or digest"
-                    }
-                    Code::Unsupported if protocol_version == Some(3) => {
-                        "firmware supervisor protocol version does not match the client"
-                    }
-                    Code::Unsupported => {
-                        "firmware supervisor does not support checked NIC firmware updates"
-                    }
-                    _ => {
-                        "firmware supervisor returned no authoritative receipt; admission may have happened"
-                    }
-                };
+
                 assert_eq!(
                     report.observations,
                     vec![mlx_device_pb::MlxObservation {
@@ -2810,15 +2988,11 @@ mod tests {
                 );
                 assert_eq!(
                     failure.field("failure_stage"),
-                    Some(match protocol_version {
-                        Some(3) => "protocol",
-                        Some(_) => "rpc",
-                        None => "launch firmware supervisor",
-                    }),
+                    Some(failure_stage),
                     "{}",
                     case.name
                 );
-                let expected_status = if protocol_version == Some(4) {
+                let expected_status = if failure_stage == "rpc" {
                     format!("{status_code:?}")
                 } else {
                     "None".to_string()
@@ -2940,6 +3114,7 @@ mod tests {
                 &machine_id,
                 commands(),
                 Ok(&config),
+                None,
                 |_| panic!("deferred automatic commands must not even discover the card"),
                 |_| async { panic!("deferred automatic commands must not publish a report") },
             )
@@ -2960,7 +3135,7 @@ mod tests {
             // Stop there in this fixture; no test path invokes real vendor tools.
             std::fs::remove_file(claim).unwrap();
             let mut queries = 0;
-            crate::collect_mlx_observations(&machine_id, commands(), &config, |_| {
+            crate::collect_mlx_observations(&machine_id, commands(), &config, None, |_| {
                 queries += 1;
                 Err(discovery::DeviceDiscoveryError::InvalidReport(
                     "fixture ends before mutation".into(),
@@ -3000,6 +3175,7 @@ mod tests {
                 DpaCommand { op: OpCode::Noop },
             )]),
             &config,
+            None,
             |_| panic!("Noop must not discover hardware"),
         )
         .await;
@@ -3021,16 +3197,17 @@ mod tests {
         ]);
         let mut queries = 0;
 
-        let report = crate::collect_mlx_observations(&machine_id, commands, &config, |device| {
-            assert_eq!(device, next_device);
-            queries += 1;
-            assert!(config.state_directory.join("mutation.json").is_file());
-            // Stop before the lock command invokes a vendor tool.
-            Err(discovery::DeviceDiscoveryError::InvalidReport(
-                "fixture ends before mutation".into(),
-            ))
-        })
-        .await;
+        let report =
+            crate::collect_mlx_observations(&machine_id, commands, &config, None, |device| {
+                assert_eq!(device, next_device);
+                queries += 1;
+                assert!(config.state_directory.join("mutation.json").is_file());
+                // Stop before the lock command invokes a vendor tool.
+                Err(discovery::DeviceDiscoveryError::InvalidReport(
+                    "fixture ends before mutation".into(),
+                ))
+            })
+            .await;
 
         assert_eq!(queries, 1);
         assert!(report.observations.is_empty());
@@ -3071,7 +3248,7 @@ mod tests {
             ),
         ]);
         let mut queries = 0;
-        let report = crate::collect_mlx_observations(&machine_id, commands, &config, |_| {
+        let report = crate::collect_mlx_observations(&machine_id, commands, &config, None, |_| {
             queries += 1;
             Err(discovery::DeviceDiscoveryError::DirectQuery(
                 MlxRunnerError::ProcessUnsettled {
@@ -3603,7 +3780,7 @@ mod tests {
                 lookups: lookups.clone(),
                 operation_id: operation_id.clone(),
                 boot_id: boot_id.clone(),
-                protocol_version: if incompatible_helper { 3 } else { 4 },
+                protocol_version: if incompatible_helper { 4 } else { 5 },
             };
             let stop = CancellationToken::new();
             let server = tokio::spawn(
@@ -3672,6 +3849,7 @@ mod tests {
                             ),
                         ]),
                         Ok(&config),
+                        None,
                         |_| panic!("a firmware claim must prevent automatic hardware discovery"),
                         |request| {
                             // Match Core's rejection so publishing a deferred
@@ -3764,7 +3942,7 @@ mod tests {
                 assert!(
                     logs.iter().any(|log| {
                         log.field("error")
-                            == Some("firmware supervisor readiness failed: unsupported firmware supervisor protocol version 3")
+                            == Some("firmware supervisor readiness failed: unsupported firmware supervisor protocol version 4")
                     }),
                     "{}",
                     case.name,
@@ -3832,13 +4010,14 @@ mod tests {
                         observer_exit_behavior: 0,
                         expected_identity: Some(
                             rpc::protos::firmware_supervisor::SupervisorIdentity {
-                                protocol_version: 4,
+                                protocol_version: 5,
                                 device_identity: "0000:03:00".to_string(),
                                 boot_id: boot_id.clone(),
                                 execution_device: "0000:03:00.0".to_string(),
                             },
                         ),
                         update_context: None,
+                        core_download_config: None,
                         expected_supervisor_instance_id: None,
                     }],
                     "{}",

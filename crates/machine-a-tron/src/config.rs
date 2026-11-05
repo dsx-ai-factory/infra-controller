@@ -44,7 +44,6 @@ use uuid::Uuid;
 
 use crate::BmcMockRegistry;
 use crate::api_client::ApiClient;
-use crate::api_throttler::ApiThrottler;
 use crate::lifecycle_timings::LifecycleTimingOverrides;
 use crate::machine_state_machine::OsImage;
 use crate::rack::{RackMemberRegistration, RackRegistration};
@@ -572,9 +571,9 @@ pub struct MachineATronConfig {
     #[serde(default)]
     pub dpu_bmc_password: Option<String>,
 
-    /// How often to refresh the API state from the server. Longer durations are appropriate for
-    /// mocking lots of hosts, shorter durations are appropriate for integration tests where the
-    /// interval should be shorter than the state controller update interval
+    /// Interval for the binary's desired-firmware fetches and for host actors to
+    /// adopt the shared firmware targets. Library callers arrange their own fetches.
+    /// Defaults to two seconds. Machine lifecycle states are not polled.
     #[serde(
         default = "default_api_refresh_interval",
         deserialize_with = "deserialize_duration",
@@ -1087,7 +1086,6 @@ pub struct MachineATronContext {
     pub forge_client_config: ForgeClientConfig,
     pub bmc_mock_certs_dir: Option<PathBuf>,
     pub bmc_registry: BmcMockRegistry,
-    pub api_throttler: ApiThrottler,
     /// These are the firmware versions the server wants us to be on. If not configured for other
     /// firmware, DPU's can mock that they already have this installed. Refreshed in the
     /// background by `spawn_desired_firmware_refresher`.
@@ -1138,10 +1136,6 @@ scout_run_interval = "5s"
             forge_client_config,
             bmc_mock_certs_dir: None,
             bmc_registry: BmcMockRegistry::default(),
-            api_throttler: crate::api_throttler::run(
-                tokio::time::interval(Duration::from_secs(2)),
-                api_client.clone(),
-            ),
             desired_firmware_versions: std::sync::RwLock::new(Vec::new()),
             forge_api_client,
             dhcp_client: crate::dhcp_wrapper::DhcpClient::Api(api_client),

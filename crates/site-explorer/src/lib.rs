@@ -77,9 +77,12 @@ mod redfish;
 pub use bmc_endpoint_explorer::{AuthenticatedBmcClient, BmcEndpointExplorer};
 pub use redfish::{BmcAccess, EstablishedBmc, ProxiedPools};
 mod boot_interfaces;
+mod host_interfaces;
 use boot_interfaces::NicBootInterfaces;
 mod host_dpu_matches;
 use host_dpu_matches::{HostDpuMatches, MatchedDpu};
+mod host_reconciler;
+use host_reconciler::HostReconciler;
 mod boot_order_tracker;
 use boot_order_tracker::BootOrderTracker;
 mod inventory_creator;
@@ -584,6 +587,7 @@ pub struct SiteExplorer {
     endpoint_exploration_service: Arc<EndpointExplorationService>,
     work_lock_manager_handle: WorkLockManagerHandle,
     inventory_creator: InventoryCreator,
+    host_reconciler: HostReconciler,
     machine_location_reconciler: MachineLocationReconciler,
     boot_order_tracker: BootOrderTracker,
     /// Backstops the persisted BMC-reset timestamps for the reset rate limit,
@@ -624,6 +628,7 @@ impl SiteExplorer {
         let endpoint_explorer = endpoint_exploration_service.endpoint_explorer();
 
         SiteExplorer {
+            host_reconciler: HostReconciler::new(database_connection.clone()),
             machine_location_reconciler: MachineLocationReconciler::new(
                 database_connection.clone(),
                 rack_profiles.clone(),
@@ -1263,12 +1268,34 @@ impl SiteExplorer {
         );
 
         self.inventory_creator
-            .create_inventory(
+            .create_or_reconcile_hosts(
                 metrics,
                 &mut identified_hosts,
                 &expected_endpoint_index,
                 &already_ingested_bmc_ips,
                 &explored_this_run,
+                &run_context.suppressed_bmc_macs,
+            )
+            .await;
+
+        let reconcile_desired_boot_interfaces_start = Instant::now();
+        let reconcile_desired_boot_interfaces_res =
+            self.host_reconciler.run_single_iteration().await;
+        metrics.record_phase_latency(
+            "reconcile_desired_boot_interfaces",
+            reconcile_desired_boot_interfaces_start.elapsed(),
+        );
+        if let Err(error) = reconcile_desired_boot_interfaces_res {
+            tracing::warn!(
+                %error,
+                "Desired boot-interface reconciliation pass failed; a later Site Explorer run will retry"
+            );
+        }
+
+        self.inventory_creator
+            .create_switches_and_power_shelves(
+                metrics,
+                &expected_endpoint_index,
                 &run_context.suppressed_bmc_macs,
             )
             .await?;

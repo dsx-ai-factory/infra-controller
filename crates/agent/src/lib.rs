@@ -79,6 +79,7 @@ pub mod network_monitor;
 pub mod nvue; // pub so that integration tests can read nvue::PATH
 mod ovs;
 mod periodic_config_fetcher;
+mod service_network;
 mod supplemental_config;
 mod sysfs;
 #[cfg(test)]
@@ -648,7 +649,7 @@ pub async fn start(cmdline: command_line::Options) -> eyre::Result<()> {
             // --dhcp-servers 10.217.126.2  # comma separated list
             // --l3-domain 4096,10.0.0.1,svi  # repeat for multiple
             // --ct-external-access 4096  # comma separated list
-            // --ct-port-config '{"interface_name": "if1", "vlan": 123, "vni": 456, "gateway_cidr": "10.0.0.100/32"}' # repeated for multiple
+            // --ct-port-config '{"interface_name": "if1", "vlan": 123, "vni": 456, "gateway_cidrs": ["10.0.0.100/32"]}' # repeated for multiple
             // --hbn_version 1.5.0-doca2.2.0
             WriteTarget::Nvue(opts) => {
                 let mut port_configs = Vec::with_capacity(opts.ct_port_config.len());

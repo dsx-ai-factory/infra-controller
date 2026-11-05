@@ -28,7 +28,9 @@ use ::machine_a_tron::{
     MachineConfig,
 };
 use api_test_helper::api_server::{TEST_BMC_DHCP_RELAY_ADDRESS, TEST_BMC_NETWORK_PREFIX};
-use api_test_helper::machine_a_tron::MachineATronHandle;
+use api_test_helper::machine_a_tron::{
+    MachineATronHandle, wait_for_dpu_state, wait_for_host_state,
+};
 use api_test_helper::utils::TestApiServerArgs;
 use api_test_helper::{
     IntegrationTestEnvironment, domain, instance, machine, measured_boot, metrics, scout_stream,
@@ -36,16 +38,19 @@ use api_test_helper::{
 };
 use bmc_mock::test_support::TEST_MAC_POOL;
 use bmc_mock::{HardwareType, ListenerOrAddress};
+use carbide_uuid::extension_service::ExtensionServiceId;
 use carbide_uuid::machine::StableHostMachineId;
 use carbide_uuid::power_shelf::{PowerShelfId, PowerShelfIdSource, PowerShelfType};
 use carbide_uuid::rack::RackId;
 use carbide_uuid::site_prefix::SitePrefixId;
 use carbide_uuid::switch::{SwitchId, SwitchIdSource, SwitchType};
+use config_version::ConfigVersion;
 use eyre::{ContextCompat, WrapErr};
 use futures::FutureExt;
 use futures::future::join_all;
 use itertools::Itertools;
 use mac_address::MacAddress;
+use model::extension_service::{DpuTarget, ExtensionServiceDeploymentType, ExtensionServiceType};
 use model::machine_boot_interface::BootInterfaceSelectionSource;
 use model::metadata::Metadata;
 use model::power_shelf::{NewPowerShelf, PowerShelfConfig};
@@ -290,6 +295,28 @@ async fn run_integration() -> eyre::Result<()> {
 
     let tenant_org_id = "tenant_organization";
     tenant::create(carbide_api_addrs, tenant_org_id, "Tenant Organization").await?;
+    // Extension-service controller families only appear in the catalogue
+    // scrape once the controller processes an object. The controller only
+    // reconciles DPF Helm chart services; without DPF this one waits in Creating.
+    let mut txn = test_env.db_pool.begin().await?;
+    db::extension_service::create(
+        &mut txn,
+        ConfigVersion::initial(),
+        &ExtensionServiceId::new(),
+        &ExtensionServiceType::DpfHelmChart,
+        ExtensionServiceDeploymentType::DemandDriven,
+        Some(DpuTarget::Primary),
+        "metric-catalogue-service",
+        &tenant_org_id.parse()?,
+        None,
+        &[],
+        r#"{"repoURL":"oci://registry.example.com/charts","chartName":"metric-catalogue","chartVersion":"1.0.0","serviceID":"metric-catalogue","deployInCluster":false,"security":{"privileged":false}}"#,
+        Some("metric-catalogue"),
+        None,
+        false,
+    )
+    .await?;
+    txn.commit().await?;
 
     // The first enqueue is immediate; allow later 30-second passes and jitter.
     tokio::time::timeout(Duration::from_secs(120), async {
@@ -566,6 +593,23 @@ async fn run_integration() -> eyre::Result<()> {
             )
             .await?;
         }
+    }
+    // The extension service never leaves Creating, so the state-transition
+    // families are not expected here.
+    for (family, metric_type) in [
+        ("object_tasks_dispatched_total", "counter"),
+        ("object_tasks_completed_total", "counter"),
+        ("object_tasks_requeued_total", "counter"),
+        ("handler_latency_in_state_milliseconds", "histogram"),
+        ("per_state", "gauge"),
+        ("per_state_above_sla", "gauge"),
+        ("with_state_handling_errors_per_state", "gauge"),
+    ] {
+        metrics::wait_for_metric_line(
+            &test_env.carbide_metrics_addrs,
+            &format!("# TYPE carbide_extension_services_{family} {metric_type}\n"),
+        )
+        .await?;
     }
     wait_for_count_metric_aliases(&test_env).await?;
     prepare_measured_boot_metric_aliases(&test_env).await?;
@@ -1312,7 +1356,13 @@ async fn run_metrics_integration() -> eyre::Result<()> {
             let carbide_api_addrs = carbide_api_addrs.to_vec();
             let carbide_metrics_addrs = carbide_metrics_addrs.to_vec();
             async move {
-                machine_handle.dpus()[0].wait_until_machine_up_with_api_state("Ready", Duration::from_secs(90)).await?;
+                wait_for_dpu_state(
+                    &carbide_api_addrs,
+                    &machine_handle.dpus()[0],
+                    "Ready",
+                    Duration::from_secs(90),
+                )
+                .await?;
 
                 // After the host_bootstrap, the dns_records view
                 // should contain 8 entries:
@@ -1461,9 +1511,13 @@ async fn test_force_delete_waits_for_instance_dpu(
         bmc_mock_registry,
         UNDERLAY_DHCP_RELAY_ADDRESS,
         |machine_handle| async move {
-            machine_handle
-                .wait_until_machine_up_with_api_state("Ready", Duration::from_secs(90))
-                .await?;
+            wait_for_host_state(
+                &test_env.carbide_api_addrs,
+                &machine_handle,
+                "Ready",
+                Duration::from_secs(90),
+            )
+            .await?;
             let machine_ids = [
                 machine_handle
                     .observed_machine_id()
@@ -1570,9 +1624,13 @@ async fn test_machine_a_tron_multidpu(
                 )
             });
             async move {
-                machine_handle
-                    .wait_until_machine_up_with_api_state("Ready", Duration::from_secs(90))
-                    .await?;
+                wait_for_host_state(
+                    &test_env.carbide_api_addrs,
+                    &machine_handle,
+                    "Ready",
+                    Duration::from_secs(90),
+                )
+                .await?;
                 let machine_id: StableHostMachineId = machine_handle
                     .observed_machine_id()
                     .expect("Machine ID should be set if host is ready")
@@ -1606,9 +1664,13 @@ async fn test_machine_a_tron_multidpu(
                 )
                 .await?;
 
-                machine_handle
-                    .wait_until_machine_up_with_api_state("Assigned/Ready", Duration::from_secs(90))
-                    .await?;
+                wait_for_host_state(
+                    &test_env.carbide_api_addrs,
+                    &machine_handle,
+                    "Assigned/Ready",
+                    Duration::from_secs(90),
+                )
+                .await?;
 
                 let instances = instance::get_by_machine_id(
                     carbide_api_addrs,
@@ -1635,9 +1697,13 @@ async fn test_machine_a_tron_multidpu(
                 );
                 instance::release(carbide_api_addrs, &machine_id, &instance_id, false).await?;
 
-                machine_handle
-                    .wait_until_machine_up_with_api_state("Ready", Duration::from_secs(90))
-                    .await?;
+                wait_for_host_state(
+                    &test_env.carbide_api_addrs,
+                    &machine_handle,
+                    "Ready",
+                    Duration::from_secs(90),
+                )
+                .await?;
                 tracing::info!(
                     machine_id = %machine_id,
                     "Machine has made it to Ready again, all done",
@@ -1667,9 +1733,13 @@ async fn test_machine_a_tron_zerodpu(
             let carbide_api_addrs = &test_env.carbide_api_addrs;
             let flat_vpc_id = flat_vpc_id.to_string();
             async move {
-                machine_handle
-                    .wait_until_machine_up_with_api_state("Ready", Duration::from_secs(90))
-                    .await?;
+                wait_for_host_state(
+                    &test_env.carbide_api_addrs,
+                    &machine_handle,
+                    "Ready",
+                    Duration::from_secs(90),
+                )
+                .await?;
                 let machine_id: StableHostMachineId = machine_handle
                     .observed_machine_id()
                     .expect("Machine ID should be set if host is ready")
@@ -1686,9 +1756,13 @@ async fn test_machine_a_tron_zerodpu(
                 )
                 .await?;
 
-                machine_handle
-                    .wait_until_machine_up_with_api_state("Assigned/Ready", Duration::from_secs(90))
-                    .await?;
+                wait_for_host_state(
+                    &test_env.carbide_api_addrs,
+                    &machine_handle,
+                    "Assigned/Ready",
+                    Duration::from_secs(90),
+                )
+                .await?;
                 assert_auto_instance_network(carbide_api_addrs, &instance_id, &flat_vpc_id).await?;
                 tracing::info!(
                     machine_id = %machine_id,
@@ -1697,9 +1771,13 @@ async fn test_machine_a_tron_zerodpu(
 
                 instance::release(carbide_api_addrs, &machine_id, &instance_id, false).await?;
 
-                machine_handle
-                    .wait_until_machine_up_with_api_state("Ready", Duration::from_secs(90))
-                    .await?;
+                wait_for_host_state(
+                    &test_env.carbide_api_addrs,
+                    &machine_handle,
+                    "Ready",
+                    Duration::from_secs(90),
+                )
+                .await?;
                 tracing::info!(
                     machine_id = %machine_id,
                     "Machine has made it to Ready again, all done",
@@ -1738,9 +1816,13 @@ async fn test_machine_a_tron_nic_mode(
                 .host_mac_address
                 .to_string();
             async move {
-                machine_handle
-                    .wait_until_machine_up_with_api_state("Ready", Duration::from_secs(90))
-                    .await?;
+                wait_for_host_state(
+                    &test_env.carbide_api_addrs,
+                    &machine_handle,
+                    "Ready",
+                    Duration::from_secs(90),
+                )
+                .await?;
                 let machine_id: StableHostMachineId = machine_handle
                     .observed_machine_id()
                     .expect("Machine ID should be set if host is ready")
@@ -1765,9 +1847,13 @@ async fn test_machine_a_tron_nic_mode(
                 )
                 .await?;
 
-                machine_handle
-                    .wait_until_machine_up_with_api_state("Assigned/Ready", Duration::from_secs(90))
-                    .await?;
+                wait_for_host_state(
+                    &test_env.carbide_api_addrs,
+                    &machine_handle,
+                    "Assigned/Ready",
+                    Duration::from_secs(90),
+                )
+                .await?;
                 assert_auto_instance_network(carbide_api_addrs, &instance_id, &flat_vpc_id).await?;
                 tracing::info!(
                     machine_id = %machine_id,
@@ -1776,9 +1862,13 @@ async fn test_machine_a_tron_nic_mode(
 
                 instance::release(carbide_api_addrs, &machine_id, &instance_id, false).await?;
 
-                machine_handle
-                    .wait_until_machine_up_with_api_state("Ready", Duration::from_secs(90))
-                    .await?;
+                wait_for_host_state(
+                    &test_env.carbide_api_addrs,
+                    &machine_handle,
+                    "Ready",
+                    Duration::from_secs(90),
+                )
+                .await?;
                 tracing::info!(
                     machine_id = %machine_id,
                     "Machine has made it to Ready again, all done",
@@ -1911,9 +2001,13 @@ async fn test_machine_a_tron_dual_stack(
             let tenant_organization_id = tenant_organization_id.to_string();
             let carbide_api_addrs = &test_env.carbide_api_addrs;
             async move {
-                machine_handle
-                    .wait_until_machine_up_with_api_state("Ready", Duration::from_secs(90))
-                    .await?;
+                wait_for_host_state(
+                    &test_env.carbide_api_addrs,
+                    &machine_handle,
+                    "Ready",
+                    Duration::from_secs(90),
+                )
+                .await?;
                 let machine_id: StableHostMachineId = machine_handle
                     .observed_machine_id()
                     .expect("Machine ID should be set if host is ready")
@@ -1930,12 +2024,13 @@ async fn test_machine_a_tron_dual_stack(
                 )
                 .await?;
 
-                machine_handle
-                    .wait_until_machine_up_with_api_state(
-                        "Assigned/Ready",
-                        Duration::from_secs(90),
-                    )
-                    .await?;
+                wait_for_host_state(
+                    &test_env.carbide_api_addrs,
+                    &machine_handle,
+                    "Assigned/Ready",
+                    Duration::from_secs(90),
+                )
+                .await?;
 
                 // Wait for the agent to report interface addresses. The agent runs
                 // a network observation loop that populates addresses asynchronously
@@ -1989,9 +2084,13 @@ async fn test_machine_a_tron_dual_stack(
                 instance::release(carbide_api_addrs, &machine_id, &instance_id, false)
                     .await?;
 
-                machine_handle
-                    .wait_until_machine_up_with_api_state("Ready", Duration::from_secs(90))
-                    .await?;
+                wait_for_host_state(
+                    &test_env.carbide_api_addrs,
+                    &machine_handle,
+                    "Ready",
+                    Duration::from_secs(90),
+                )
+                .await?;
                 tracing::info!(
                     machine_id = %machine_id,
                     "Machine back to Ready after dual-stack release",
@@ -2026,9 +2125,13 @@ async fn test_machine_a_tron_dual_stack_l2(
             let segment_id = dual_stack_segment_id.to_string();
             let carbide_api_addrs = &test_env.carbide_api_addrs;
             async move {
-                machine_handle
-                    .wait_until_machine_up_with_api_state("Ready", Duration::from_secs(90))
-                    .await?;
+                wait_for_host_state(
+                    &test_env.carbide_api_addrs,
+                    &machine_handle,
+                    "Ready",
+                    Duration::from_secs(90),
+                )
+                .await?;
                 let machine_id: StableHostMachineId = machine_handle
                     .observed_machine_id()
                     .expect("Machine ID should be set if host is ready")
@@ -2048,12 +2151,13 @@ async fn test_machine_a_tron_dual_stack_l2(
                 )
                 .await?;
 
-                machine_handle
-                    .wait_until_machine_up_with_api_state(
-                        "Assigned/Ready",
-                        Duration::from_secs(120),
-                    )
-                    .await?;
+                wait_for_host_state(
+                    &test_env.carbide_api_addrs,
+                    &machine_handle,
+                    "Assigned/Ready",
+                    Duration::from_secs(120),
+                )
+                .await?;
 
                 tracing::info!(
                     machine_id = %machine_id,
@@ -2062,9 +2166,13 @@ async fn test_machine_a_tron_dual_stack_l2(
 
                 instance::release(carbide_api_addrs, &machine_id, &instance_id, false).await?;
 
-                machine_handle
-                    .wait_until_machine_up_with_api_state("Ready", Duration::from_secs(90))
-                    .await?;
+                wait_for_host_state(
+                    &test_env.carbide_api_addrs,
+                    &machine_handle,
+                    "Ready",
+                    Duration::from_secs(90),
+                )
+                .await?;
                 tracing::info!(
                     machine_id = %machine_id,
                     "Machine back to Ready after dual-stack L2 release",
@@ -2082,10 +2190,16 @@ async fn prepare_dpu_certificate_expiry(
     dpu: &DpuMachineHandle,
     test_env: &IntegrationTestEnvironment,
 ) -> eyre::Result<()> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(90);
+    wait_for_dpu_state(
+        &test_env.carbide_api_addrs,
+        dpu,
+        "Ready",
+        deadline.saturating_duration_since(tokio::time::Instant::now()),
+    )
+    .await?;
     // MaT reports no expiry; pause it so later reports cannot replace the persisted timestamp.
-    dpu.pause()?;
-    // The waiter runs on the same actor queue as pause, so its return acknowledges the pause.
-    dpu.wait_until_machine_up_with_api_state("Ready", Duration::from_secs(90))
+    dpu.pause_and_wait(deadline.saturating_duration_since(tokio::time::Instant::now()))
         .await?;
     let dpu_id: carbide_uuid::machine::DpuMachineId = dpu
         .observed_machine_id()
@@ -2151,9 +2265,13 @@ async fn test_machine_a_tron_scout_stream(
             let carbide_metrics_addrs = test_env.carbide_metrics_addrs.clone();
             let db_pool = test_env.db_pool.clone();
             async move {
-                machine_handle
-                    .wait_until_machine_up_with_api_state("Ready", Duration::from_secs(90))
-                    .await?;
+                wait_for_host_state(
+                    &test_env.carbide_api_addrs,
+                    &machine_handle,
+                    "Ready",
+                    Duration::from_secs(90),
+                )
+                .await?;
                 let machine_id = machine_handle
                     .observed_machine_id()
                     .context("ready machine has no observed machine ID")?;

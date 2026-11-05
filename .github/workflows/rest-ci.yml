@@ -24,7 +24,10 @@ concurrency:
 jobs:
   changes:
     name: Detect REST CI Gate
-    runs-on: linux-amd64-cpu4
+    # Hosted ubuntu-slim, because every other job waits on this one and the
+    # cpu4 pool can queue for minutes.
+    runs-on: ubuntu-slim
+    timeout-minutes: 10
     outputs:
       run_rest_ci: ${{ steps.gate.outputs.run_rest_ci }}
       rest_api_changed: ${{ steps.filter.outputs.rest_api }}
@@ -57,6 +60,8 @@ jobs:
               - '.github/ci/prepare-rest-umbrella-chart.sh'
               - '.github/workflows/rest-*.yml'
               - '.github/actions/go-mod-download/**'
+              - '.github/actions/go-cache-restore/**'
+              - '.github/actions/go-cache-save/**'
               - 'helm/rest/**'
             core_proto:
               - 'crates/rpc/proto/**'
@@ -253,7 +258,10 @@ jobs:
   # Update `.github/ci/check_ci_gate.py` when a job gains an allowed skip.
   rest-ci-pass:
     name: rest-ci-pass
-    runs-on: linux-amd64-cpu4
+    # Hosted ubuntu-slim, because a superseded run keeps its concurrency slot
+    # until this always() job finishes and the cpu4 pool can queue for minutes.
+    runs-on: ubuntu-slim
+    timeout-minutes: 10
     if: always()
     needs:
       - changes

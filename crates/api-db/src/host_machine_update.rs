@@ -189,6 +189,10 @@ pub async fn find_completed_updates(
         .map_err(|e| DatabaseError::query(query, e))
 }
 
+/// Creates or replaces a host reprovisioning request and clears its completion
+/// flag in the caller's transaction. A missing machine returns an error wrapping
+/// [`sqlx::Error::RowNotFound`]. Automatic admission uses
+/// [`try_trigger_host_reprovisioning_request`] to preserve existing requests.
 pub async fn trigger_host_reprovisioning_request(
     txn: &mut PgConnection,
     initiator: &str,
@@ -202,7 +206,6 @@ pub async fn trigger_host_reprovisioning_request(
         request_reset: Some(false),
     };
 
-    // The WHERE on controller state means that we'll update it in the case where we were in ready, but not when assigned.
     let query = r#"UPDATE machines SET host_reprovisioning_requested=$2, update_complete = false WHERE id=$1 RETURNING id"#;
     let _id = sqlx::query_as::<_, HostMachineId>(query)
         .bind(machine_id)
@@ -212,6 +215,39 @@ pub async fn trigger_host_reprovisioning_request(
         .map_err(|e| DatabaseError::query(query, e))?;
 
     Ok(())
+}
+
+/// Creates a reprovisioning request only when
+/// `host_reprovisioning_requested IS NULL`. Pending and started requests both
+/// prevent this write.
+///
+/// Returns `false` if the machine is missing or already has a request, leaving
+/// its request and completion flag unchanged. The caller owns the transaction
+/// and must commit an applied request.
+pub async fn try_trigger_host_reprovisioning_request(
+    txn: &mut PgConnection,
+    initiator: &str,
+    machine_id: &HostMachineId,
+) -> Result<bool, DatabaseError> {
+    let req = HostReprovisionRequest {
+        requested_at: chrono::Utc::now(),
+        started_at: None,
+        initiator: initiator.to_string(),
+        user_approval_received: false,
+        request_reset: Some(false),
+    };
+    let query = r#"UPDATE machines
+        SET host_reprovisioning_requested = $2, update_complete = false
+        WHERE id = $1 AND host_reprovisioning_requested IS NULL
+        RETURNING id"#;
+    let updated = sqlx::query_as::<_, HostMachineId>(query)
+        .bind(machine_id)
+        .bind(sqlx::types::Json(req))
+        .fetch_optional(txn)
+        .await
+        .map_err(|e| DatabaseError::query(query, e))?;
+
+    Ok(updated.is_some())
 }
 
 pub async fn clear_host_reprovisioning_request(
@@ -259,7 +295,6 @@ pub async fn reset_host_reprovisioning_request(
     machine_id: &HostMachineId,
     clear_reset: bool,
 ) -> Result<(), DatabaseError> {
-    // The WHERE on controller state means that we'll update it in the case where we were in ready, but not when assigned.
     let query = r#"UPDATE machines SET host_reprovisioning_requested = jsonb_set(host_reprovisioning_requested, '{request_reset}', $2::jsonb) WHERE id=$1 RETURNING id"#;
     let _id = sqlx::query_as::<_, MachineId>(query)
         .bind(machine_id)

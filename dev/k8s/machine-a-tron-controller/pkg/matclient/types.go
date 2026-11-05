@@ -24,8 +24,6 @@ type MachineStatus struct {
 	HardwareType *string `json:"hardware_type,omitempty"`
 	// MatState is the machine-a-tron FSM state.
 	MatState *string `json:"mat_state,omitempty"`
-	// APIState is the observed NICo API state.
-	APIState string `json:"api_state"`
 	// PowerState is the current power state ("On", "Off", etc.).
 	PowerState string `json:"power_state"`
 	// MachineIP is the machine's management IP, if known.

@@ -670,6 +670,50 @@ impl CurrentNetworkVersion {
         self.supplemental_config_hash = supplemental_config.map(Self::hash_supplemental_config);
     }
 
+    /// Updates `CurrentNetworkVersion` after successful HBN and DHCP results only when cached
+    /// versions and the normalized response fingerprint still match `applied`. Clears it after any
+    /// other HBN attempt so later iterations cannot skip a response that may no longer match HBN.
+    ///
+    /// Callers must supply the update and DHCP results for `applied`, set `hbn_attempted`
+    /// when NVUE reconciliation was attempted, and read `latest` from the cache after that work.
+    fn record_reconciled_version(
+        &mut self,
+        applied: &ManagedHostNetworkConfigResponse,
+        latest: Option<&ManagedHostNetworkConfigResponse>,
+        supplemental_config: Option<&str>,
+        hbn_attempted: bool,
+        hbn_result: &eyre::Result<bool>,
+        dhcp_result: &eyre::Result<bool>,
+    ) -> bool {
+        // Record only when HBN and DHCP accepted the response and it remains desired.
+        if hbn_result.is_ok()
+            && dhcp_result.is_ok()
+            && latest.is_some_and(|latest| Self::describes_same_desired_network(applied, latest))
+        {
+            self.update_from(applied, supplemental_config);
+            return true;
+        }
+
+        // Clear `CurrentNetworkVersion` because an HBN attempt may change HBN before failing.
+        if hbn_attempted {
+            *self = Self::default();
+        }
+        false
+    }
+
+    /// Compares `managed_host_config_version`, `instance_network_config_version`, and normalized
+    /// response fingerprints so obsolete completions cannot acknowledge newer desired service inputs.
+    fn describes_same_desired_network(
+        applied: &ManagedHostNetworkConfigResponse,
+        latest: &ManagedHostNetworkConfigResponse,
+    ) -> bool {
+        get_non_empty_str(&applied.managed_host_config_version)
+            == get_non_empty_str(&latest.managed_host_config_version)
+            && get_non_empty_str(&applied.instance_network_config_version)
+                == get_non_empty_str(&latest.instance_network_config_version)
+            && Self::hash_rendered_inputs(applied) == Self::hash_rendered_inputs(latest)
+    }
+
     /// Hashes the supplemental network config file's contents for change
     /// detection. Hashing the path alone would make in-place edits invisible.
     fn hash_supplemental_config(contents: &str) -> u64 {
@@ -742,8 +786,9 @@ impl CurrentNetworkVersion {
 
         // Fetch-time address normalization mirrors the admin V6 host `/128`
         // and SVI into the compatibility sidecar before this fingerprint is
-        // built. The canonical segment prefix is the only distinct address-list
-        // render input; V4 address-list entries do not feed HBN rendering.
+        // built. Canonical IPv6 segment prefixes and VRF loopbacks remain
+        // distinct address-list render inputs; V4 values are covered by the
+        // compatibility fields.
         let renders_admin_ipv6 = config.use_admin_network
             && config.is_primary_dpu
             && config.network_virtualization_type() == ::rpc::forge::VpcVirtualizationType::Fnn;
@@ -757,7 +802,6 @@ impl CurrentNetworkVersion {
                     address.interface_prefix.clear();
                     address.gateway = None;
                     address.svi_ip = None;
-                    address.tenant_vrf_loopback_ip = None;
                 }
             } else {
                 admin_interface.addresses.clear();
@@ -775,8 +819,9 @@ impl CurrentNetworkVersion {
 
             // Routed tenant RA consumes the V6 mode, linknet, and allocated
             // prefix. L2 rendering consumes only the prefix when deriving the
-            // SVI's VRR address. Remove all other family-neutral fields so
-            // DHCP-only or future staged values do not cause an HBN apply.
+            // SVI's VRR address. Retain the optional IPv6 VRF loopback too,
+            // removing other family-neutral fields so DHCP-only or future
+            // staged values do not cause an HBN apply.
             interface.addresses.retain(|address| {
                 address.address_family == i32::from(::rpc::forge::AddressFamily::V6)
             });
@@ -787,7 +832,6 @@ impl CurrentNetworkVersion {
                 }
                 address.gateway = None;
                 address.svi_ip = None;
-                address.tenant_vrf_loopback_ip = None;
             }
         }
     }
@@ -815,6 +859,7 @@ impl CurrentNetworkVersion {
         for interface in &mut config.tenant_interfaces {
             Self::normalize_interface(interface);
         }
+        crate::service_network::normalize_interfaces(&mut config.service_interfaces);
 
         for rule in &mut config.network_security_policy_overrides {
             Self::normalize_security_group_rule(rule);
@@ -1212,6 +1257,7 @@ impl MainLoop {
                             },
                         };
 
+                    let mut hbn_attempted = false;
                     let mut nvue_applied_before_fmds = false;
                     let update_result = if let Err(error) =
                         require_dhcp_before_ipv6_only_network_update(&conf, &dhcp_result)
@@ -1288,6 +1334,7 @@ impl MainLoop {
                             if nvue_first {
                                 // A duplicate or tentative metadata address must not prevent
                                 // tenant changes, especially quarantine, from reaching NVUE.
+                                hbn_attempted = true;
                                 let hbn_changed = apply_nvue.await?;
                                 nvue_applied_before_fmds = true;
                                 has_changed_hbn_config = hbn_changed;
@@ -1297,6 +1344,7 @@ impl MainLoop {
                             } else {
                                 // Keep the existing IPv4 address/route-before-NVUE ordering.
                                 apply_fmds.await?;
+                                hbn_attempted = true;
                                 apply_nvue.await
                             }
                         }
@@ -1314,10 +1362,27 @@ impl MainLoop {
                         );
                     }
 
+                    let latest_network_config = self.periodic_config_reader.net_conf_read();
+                    let version_recorded = self.current_network_version.record_reconciled_version(
+                        &conf,
+                        latest_network_config.as_deref(),
+                        supplemental_config.as_deref(),
+                        hbn_attempted,
+                        &update_result,
+                        &dhcp_result,
+                    );
                     match (update_result, dhcp_result) {
+                        (Ok(hbn_changed), Ok(dhcp_changed)) if !version_recorded => {
+                            // Leave an obsolete successful apply pending so the next iteration
+                            // reconciles the latest cached response. Retain its change flags for the
+                            // post-config health wait and active loop period.
+                            has_changed_hbn_config = hbn_changed;
+                            has_changed_configs = hbn_changed || dhcp_changed;
+                            tracing::info!(
+                                "Desired network configuration changed during the update"
+                            );
+                        }
                         (Ok(hbn_changed), Ok(dhcp_changed)) => {
-                            self.current_network_version
-                                .update_from(&conf, supplemental_config.as_deref());
                             has_changed_hbn_config = hbn_changed;
                             has_changed_configs = hbn_changed || dhcp_changed;
                             hbn_dhcp_applied_ok = true;

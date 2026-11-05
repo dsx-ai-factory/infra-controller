@@ -85,6 +85,14 @@ pub struct NvLinkConfig {
     )]
     pub partition_monitor_full_check_interval: std::time::Duration,
 
+    /// Consecutive iterations a rack's NMX-C must be unusable before the
+    /// monitor raises the rack's `NmxcUnreachable` health alert. A single
+    /// failed pass is common under load and is not reported; the alert is
+    /// cleared on the first pass that reaches NMX-C again. Defaults to 3.
+    /// Must be non-zero; deserialization rejects 0.
+    #[serde(default = "NvLinkConfig::default_partition_monitor_unreachable_alert_after")]
+    pub partition_monitor_unreachable_alert_after: std::num::NonZeroU32,
+
     /// Periodic TCP reachability checks of ready switches, raising debounced
     /// `SwitchUnreachable` and `NmxtUnreachable` switch health alerts.
     #[serde(default)]
@@ -326,6 +334,10 @@ impl NvLinkConfig {
     /// Upper end of the documented `partition_monitor_max_concurrent_groups` range.
     pub(crate) const MAX_DOCUMENTED_PARTITION_MONITOR_CONCURRENT_GROUPS: usize = 256;
 
+    pub const fn default_partition_monitor_unreachable_alert_after() -> std::num::NonZeroU32 {
+        std::num::NonZeroU32::new(3).expect("3 is non-zero")
+    }
+
     pub const fn default_partition_monitor_full_check_interval() -> std::time::Duration {
         std::time::Duration::from_secs(10 * 60)
     }
@@ -405,6 +417,8 @@ impl Default for NvLinkConfig {
                 Self::default_partition_monitor_max_concurrent_groups(),
             partition_monitor_full_check_interval:
                 Self::default_partition_monitor_full_check_interval(),
+            partition_monitor_unreachable_alert_after:
+                Self::default_partition_monitor_unreachable_alert_after(),
             switch_reachability: SwitchReachabilityConfig::default(),
         }
     }
@@ -553,7 +567,28 @@ mod test {
                     NvLinkConfig::default_partition_monitor_max_concurrent_groups(),
                 partition_monitor_full_check_interval:
                     NvLinkConfig::default_partition_monitor_full_check_interval(),
+                partition_monitor_unreachable_alert_after:
+                    NvLinkConfig::default_partition_monitor_unreachable_alert_after(),
                 switch_reachability: SwitchReachabilityConfig::default(),
+            }
+        );
+    }
+
+    #[test]
+    fn unreachable_alert_after_defaults_to_three_and_rejects_zero() {
+        value_scenarios!(run = |json: &str| {
+            serde_json::from_str::<NvLinkConfig>(json)
+                .map(|config| config.partition_monitor_unreachable_alert_after.get())
+                .ok()
+        };
+            "default" {
+                r#"{"allow_insecure":false}"# => Some(3),
+            }
+            "explicit" {
+                r#"{"allow_insecure":false,"partition_monitor_unreachable_alert_after":1}"# => Some(1),
+            }
+            "rejected" {
+                r#"{"allow_insecure":false,"partition_monitor_unreachable_alert_after":0}"# => None,
             }
         );
     }

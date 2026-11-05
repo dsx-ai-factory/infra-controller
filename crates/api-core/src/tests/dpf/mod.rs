@@ -46,6 +46,26 @@ fn dpf_config() -> crate::cfg::file::DpfConfig {
     }
 }
 
+/// Builds BF4 test configuration with BlueFieldSoftware so mocked ingestion satisfies the production provisioning-source contract.
+///
+/// Callers must use distinct names for deployments in the same configuration.
+pub(super) fn bf4_deployment_config(name: &str) -> crate::cfg::file::DpfDeploymentConfig {
+    crate::cfg::file::DpfDeploymentConfig {
+        bfb_url: None, // BF4 provisioning requires the BlueFieldSoftware source below.
+        bluefield_software: Some(crate::cfg::file::DpfBlueFieldSoftwareConfig {
+            os_iso: format!("http://example.com/{name}.iso"),
+            pldm_fw_bundle: std::collections::BTreeMap::from([(
+                "test-psid".to_string(),
+                format!("http://example.com/{name}.pldm"),
+            )]),
+        }),
+        flavor_name: format!("test-{name}-flavor"),
+        deployment_name: format!("test-{name}"),
+        node_label_key: format!("test.nvidia.com/{name}"),
+        ..Default::default()
+    }
+}
+
 /// Models the successful DPF service lookup after the fixture registers a DPU CR.
 pub(super) fn expect_dpf_service_inventory(mock: &mut MockDpfOperations) {
     mock.expect_get_service_versions_for_dpu().returning(|_| {

@@ -214,10 +214,11 @@ async fn test_find_machines_by_ids_returns_unassociated_dpus(pool: sqlx::PgPool)
         .unwrap();
 
     assert!(
-        db::machine::lookup_host_machine_ids_by_dpu_ids(&mut *txn, &[dpu_id])
+        db::machine::DpuHostAssociations::load(&mut *txn, &[dpu_id])
             .await
             .unwrap()
-            .is_empty()
+            .host_machine_id(&dpu_id)
+            .is_none()
     );
 
     txn.commit().await.unwrap();
