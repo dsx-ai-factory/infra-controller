@@ -315,7 +315,14 @@ Indicates issues regarding the start of the DHCP relay on the DPU
 
 ### `DhcpServer`
 
-Indicates issues regarding the start of the DHCP server on the DPU
+Indicates that the DHCP server on the DPU is not working. Its meaning depends on how `dpu-agent` configures HBN:
+
+- ContainerExec: the DHCP server process in the HBN container is not running. While HBN is up, the agent checks it on the primary DPU and on any DPU that uses the tenant network. The alert prevents allocations and host state changes.
+- NVUE, which DPF uses: the agent's latest attempt to update the DHCP server failed, and the message contains the error. On a secondary DPU that uses the admin network, the update stops the server. If service VPC slots are configured, it instead keeps the server running for those slots only. On DPF, the DHCP server runs in its own pod. The agent skips the update while HBN is down and reports no result then. The alert prevents allocations but not host state changes, so instance release can proceed.
+
+### `Fmds`
+
+Indicates that `dpu-agent` could not connect to FMDS or push configuration to it in its latest iteration, and the message contains the error. Only the NVUE path, which DPF uses, reports this probe. On every iteration, the agent connects to the external FMDS that DPF deploys, so the alert also appears when FMDS is down on a host without an instance. The alert prevents allocations but not host state changes, so instance release can proceed.
 
 ### `Ifreload`
 
