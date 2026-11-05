@@ -29,12 +29,16 @@ func TestConfig_BuildDSN(t *testing.T) {
 		host              string
 		wantHost          string
 		caCertificatePath string
+		sslMode           string
+		wantSSLMode       string
 	}{
-		{name: "hostname", host: "db.example.internal", wantHost: "db.example.internal"},
-		{name: "IPv4", host: "192.0.2.1", wantHost: "192.0.2.1"},
-		{name: "IPv6", host: "2001:db8::1", wantHost: "2001:db8::1"},
-		{name: "bracketed IPv6", host: "[2001:db8::1]", wantHost: "2001:db8::1"},
-		{name: "CA certificate", host: "db.example.internal", caCertificatePath: "/var/secrets/db/ca.crt"},
+		{name: "hostname", host: "db.example.internal", wantHost: "db.example.internal", wantSSLMode: "prefer"},
+		{name: "IPv4", host: "192.0.2.1", wantHost: "192.0.2.1", wantSSLMode: "prefer"},
+		{name: "IPv6", host: "2001:db8::1", wantHost: "2001:db8::1", wantSSLMode: "prefer"},
+		{name: "bracketed IPv6", host: "[2001:db8::1]", wantHost: "2001:db8::1", wantSSLMode: "prefer"},
+		{name: "CA certificate", host: "db.example.internal", caCertificatePath: "/var/secrets/db/ca.crt", wantSSLMode: "prefer"},
+		{name: "explicit SSL mode", host: "db.example.internal", wantHost: "db.example.internal", sslMode: "verify-full", wantSSLMode: "verify-full"},
+		{name: "explicit SSL mode with CA", host: "db.example.internal", wantHost: "db.example.internal", sslMode: "verify-ca", caCertificatePath: "/var/secrets/db/ca.crt", wantSSLMode: "verify-ca"},
 	}
 
 	for _, tt := range tests {
@@ -45,13 +49,14 @@ func TestConfig_BuildDSN(t *testing.T) {
 				DBName:            "forge",
 				Credential:        credential.New("forge+%/?", "s3cr3t:@+%/?"),
 				CACertificatePath: tt.caCertificatePath,
+				SSLMode:           tt.sslMode,
 			}
 
 			dsn := cfg.BuildDSN()
 			parsedURL, err := url.Parse(dsn)
 			require.NoError(t, err)
 
-			wantQuery := url.Values{"sslmode": {"prefer"}}
+			wantQuery := url.Values{"sslmode": {tt.wantSSLMode}}
 			if tt.caCertificatePath != "" {
 				wantQuery.Set("sslrootcert", tt.caCertificatePath)
 			}
@@ -70,6 +75,30 @@ func TestConfig_BuildDSN(t *testing.T) {
 			assert.Equal(t, cfg.Credential.User, parsed.User)
 			assert.Equal(t, cfg.Credential.Password.Value, parsed.Password)
 			assert.Equal(t, cfg.DBName, parsed.Database)
+		})
+	}
+}
+
+func TestValidateSSLMode(t *testing.T) {
+	tests := []struct {
+		name    string
+		mode    string
+		wantErr bool
+	}{
+		{name: "prefer", mode: "prefer"},
+		{name: "invalid mode", mode: "strict", wantErr: true},
+		{name: "empty mode is rejected", mode: "", wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := ValidateSSLMode(tt.mode)
+			if tt.wantErr {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), "invalid SSL mode")
+			} else {
+				require.NoError(t, err)
+			}
 		})
 	}
 }
