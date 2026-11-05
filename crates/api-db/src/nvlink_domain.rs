@@ -143,10 +143,7 @@ async fn find_ids(
 }
 
 /// Read configuration, member claims, and progress from one database snapshot.
-async fn find_by_ids(
-    reader: impl DbReader<'_>,
-    ids: &[Uuid],
-) -> DatabaseResult<Vec<NvLinkDomain>> {
+async fn find_by_ids(reader: impl DbReader<'_>, ids: &[Uuid]) -> DatabaseResult<Vec<NvLinkDomain>> {
     let query = "SELECT d.*,
         COALESCE((SELECT jsonb_agg(jsonb_build_object(
             'component_type', m.component_type, 'rack_id', m.rack_id, 'tray_index', m.tray_index)

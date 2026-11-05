@@ -304,11 +304,13 @@ async fn positions_can_be_declared_before_hardware_is_known(pool: sqlx::PgPool) 
     let domain = find_by_ids(&pool, &[id]).await.unwrap().remove(0);
     assert_eq!(domain.config.members, config.members);
     assert_eq!(*domain.controller_state, NvLinkDomainState::Discovering);
-    assert!(resolve_members(&pool, id)
-        .await
-        .unwrap()
-        .iter()
-        .all(|member| member.tray.is_none()));
+    assert!(
+        resolve_members(&pool, id)
+            .await
+            .unwrap()
+            .iter()
+            .all(|member| member.tray.is_none())
+    );
     sqlx::query("UPDATE expected_rack_groups SET racks = '[]' WHERE rack_group_id = $1")
         .bind(&config.rack_group_id)
         .execute(&pool)
