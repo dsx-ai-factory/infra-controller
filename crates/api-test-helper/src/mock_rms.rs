@@ -199,7 +199,7 @@ pub struct MockRmsApi {
     get_firmware_job_status_responses:
         Mutex<VecDeque<Result<rms::GetFirmwareJobStatusResponse, RackManagerError>>>,
     get_firmware_job_status_calls: Mutex<Vec<rms::GetFirmwareJobStatusRequest>>,
-    blocked_firmware_status: Mutex<Option<BlockedRmsRequest>>,
+    blocked_firmware_status: Mutex<VecDeque<BlockedRmsRequest>>,
 
     // Switch firmware calls.
     list_switch_firmware_responses:
@@ -467,17 +467,39 @@ impl MockRmsApi {
     pub async fn block_next_get_firmware_job_status(
         &self,
     ) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
-        let (entered, arrival) = oneshot::channel();
-        let (release, resume) = oneshot::channel();
-        let mut blocked = self.blocked_firmware_status.lock().await;
+        self.block_next_firmware_job_status_requests(1)
+            .await
+            .pop()
+            .expect("one firmware status gate was requested")
+    }
 
+    /// Arms `count` firmware-status gates in request order. Each arrival is sent
+    /// after request recording and before its queued response is consumed.
+    /// Gates are consumed in call order; responses are taken in resume order.
+    /// Dropping a request leaves its queued response for a later call. A new
+    /// set can be armed once every previous call has taken its gate, even while
+    /// those calls are paused. A zero count arms no gates.
+    ///
+    /// # Panics
+    ///
+    /// Panics if any firmware status gate is already armed.
+    pub async fn block_next_firmware_job_status_requests(
+        &self,
+        count: usize,
+    ) -> Vec<(oneshot::Receiver<()>, oneshot::Sender<()>)> {
+        let mut blocked = self.blocked_firmware_status.lock().await;
         assert!(
-            blocked.is_none(),
+            blocked.is_empty(),
             "a firmware status blocker is already armed"
         );
-
-        *blocked = Some(BlockedRmsRequest { entered, resume });
-        (arrival, release)
+        (0..count)
+            .map(|_| {
+                let (entered, arrival) = oneshot::channel();
+                let (release, resume) = oneshot::channel();
+                blocked.push_back(BlockedRmsRequest { entered, resume });
+                (arrival, release)
+            })
+            .collect()
     }
 
     // Inventory
@@ -1525,7 +1547,7 @@ impl RmsApi for MockRmsApi {
     ) -> Result<rms::GetFirmwareJobStatusResponse, RackManagerError> {
         self.get_firmware_job_status_calls.lock().await.push(cmd);
 
-        let blocked = self.blocked_firmware_status.lock().await.take();
+        let blocked = self.blocked_firmware_status.lock().await.pop_front();
 
         if let Some(blocked) = blocked {
             blocked.entered.send(()).ok();

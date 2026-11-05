@@ -113,8 +113,10 @@ pub async fn get(
 }
 
 /// Fetch firmware references only; reset jobs must not enter firmware status aggregation.
+/// Accepts a pool, connection, or transaction through `DbReader` and performs one
+/// SELECT. Rows have no guaranteed order; consumers define their own order.
 pub async fn get_firmware_jobs(
-    db: &sqlx::PgPool,
+    db: impl crate::db_read::DbReader<'_>,
     bmc_mac: MacAddress,
 ) -> Result<Vec<(RmsJobKind, String)>, DatabaseError> {
     let sql = "SELECT job_kind, job_id FROM direct_dispatch_rms_jobs \
