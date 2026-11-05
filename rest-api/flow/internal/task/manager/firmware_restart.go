@@ -7,7 +7,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"maps"
 	"slices"
 
 	"github.com/google/uuid"
@@ -18,6 +17,7 @@ import (
 	taskdef "github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/task"
 	identifier "github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/Identifier"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/devicetypes"
+	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/firmwareversion"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/inventoryobjects/rack"
 )
 
@@ -38,6 +38,11 @@ func (m *ManagerImpl) newFirmwareTaskForRack(
 		return task, nil
 	}
 
+	_, switchSelected := firmwareversion.Extract(info.TargetVersion, devicetypes.ComponentTypeNVSwitch)
+	if !switchSelected {
+		return task, nil
+	}
+
 	fullRack, err := m.inventoryStore.GetRackByIdentifier(ctx, identifier.Identifier{ID: task.RackID}, true)
 	if err != nil {
 		return task, fmt.Errorf("resolve NVOS restart compute: %w", err)
@@ -45,23 +50,15 @@ func (m *ManagerImpl) newFirmwareTaskForRack(
 	if fullRack == nil || fullRack.Info.ID != task.RackID {
 		return task, fmt.Errorf("NVOS restart rack %s not found", task.RackID)
 	}
-	// Both selections live in the same task row. The union participates in
-	// normal component conflict checks; the original selection alone flashes.
-	task.Attributes.FirmwareTargetsByType = task.Attributes.ComponentsByType
-	task.Attributes.ComponentsByType = maps.Clone(task.Attributes.FirmwareTargetsByType)
-	computeType := devicetypes.ComponentTypeCompute
-	computeIDs := slices.Clone(task.Attributes.ComponentsByType[computeType])
-	for _, comp := range fullRack.Components {
-		if comp.Type == computeType && !slices.Contains(computeIDs, comp.Info.ID) {
-			computeIDs = append(computeIDs, comp.Info.ID)
-		}
-	}
-	if len(computeIDs) > 0 {
-		task.Attributes.ComponentsByType[computeType] = computeIDs
-	}
+	// An older manager must still see only the original firmware selection.
+	// Keep restart-only membership in an additive field, never in that map.
 	reserved := rack.New(fullRack.Info, fullRack.Loc)
 	for _, comp := range fullRack.Components {
-		if slices.Contains(task.Attributes.ComponentsByType[comp.Type], comp.Info.ID) {
+		if comp.Type == devicetypes.ComponentTypeCompute {
+			task.Attributes.FirmwareRestartComputeIDs = append(task.Attributes.FirmwareRestartComputeIDs, comp.Info.ID)
+		}
+		if comp.Type == devicetypes.ComponentTypeCompute ||
+			slices.Contains(task.Attributes.ComponentsByType[comp.Type], comp.Info.ID) {
 			reserved.AddComponent(comp)
 		}
 	}

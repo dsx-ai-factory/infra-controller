@@ -19,7 +19,6 @@ import (
 
 	activitypkg "github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/executor/temporalworkflow/activity"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/executor/temporalworkflow/common"
-	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/operationrules"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/operations"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/report"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/task"
@@ -28,20 +27,22 @@ import (
 
 func testNVOSRestartWorkflow(t *testing.T) {
 	for _, tc := range []struct {
-		name        string
-		subTargets  []string
-		version     string
-		legacy      bool
-		flashFails  bool
-		powerFails  bool
-		staysOn     bool
-		wantRestart bool
+		name         string
+		subTargets   []string
+		version      string
+		legacy       bool
+		legacyWorker bool
+		flashFails   bool
+		powerFails   bool
+		staysOn      bool
+		wantRestart  bool
 	}{
 		{name: "NVOS waits for update then restarts all compute", subTargets: []string{"nvos"}, wantRestart: true},
 		{name: "whole bundle restarts compute", wantRestart: true},
 		{name: "BMC-only never restarts compute", subTargets: []string{"bmc"}},
 		{name: "omitted switch version layer never restarts", version: `{"compute":{"Id":"compute-fw"}}`},
 		{name: "predecessor history has no new commands", legacy: true},
+		{name: "old worker history with new input does not add commands", legacyWorker: true},
 		{name: "firmware failure prevents reboot", subTargets: []string{"nvos"}, flashFails: true},
 		{name: "restart rejection fails task", subTargets: []string{"nvos"}, powerFails: true, wantRestart: true},
 		{name: "shutdown must be observed before power on", subTargets: []string{"nvos"}, staysOn: true, wantRestart: true},
@@ -62,6 +63,9 @@ func testNVOSRestartWorkflow(t *testing.T) {
 			env := (&testsuite.WorkflowTestSuite{}).NewTestWorkflowEnvironment()
 			env.RegisterWorkflowWithOptions(genericComponentStepWorkflow, temporalworkflow.RegisterOptions{Name: nameGenericComponentStepWorkflow})
 			registerTaskUpdateActivities(env)
+			if tc.legacyWorker {
+				env.OnGetVersion(nvosComputeRestartChangeID, temporalworkflow.DefaultVersion, 1).Return(temporalworkflow.DefaultVersion)
+			}
 			env.RegisterActivityWithOptions(mockFirmwareControl, activity.RegisterOptions{Name: activitypkg.NameFirmwareControl})
 			env.RegisterActivityWithOptions(mockGetFirmwareStatus, activity.RegisterOptions{Name: activitypkg.NameGetFirmwareStatus})
 			env.RegisterActivityWithOptions(mockGetPowerStatus, activity.RegisterOptions{Name: activitypkg.NameGetPowerStatus})
@@ -133,6 +137,14 @@ func testNVOSRestartWorkflow(t *testing.T) {
 			require.NotNil(t, final)
 			rep, err := report.Unmarshal(final.Report)
 			require.NoError(t, err)
+			if tc.flashFails {
+				require.Empty(t, events)
+				require.Len(t, rep.Stages, 3)
+				require.Equal(t, report.StatusFailed, rep.Stages[0].Status)
+				require.Equal(t, report.StatusPending, rep.Stages[1].Status)
+				require.Equal(t, report.StatusPending, rep.Stages[2].Status)
+				return
+			}
 			if tc.wantRestart {
 				require.Len(t, rep.Stages, 3)
 				require.Equal(t, 9, rep.Stages[1].Number)
@@ -146,11 +158,7 @@ func testNVOSRestartWorkflow(t *testing.T) {
 					require.Equal(t, report.StatusFailed, rep.Stages[1].Status)
 				}
 			} else {
-				if tc.flashFails {
-					require.Empty(t, events)
-				} else {
-					require.NotContains(t, events, "power_off")
-				}
+				require.NotContains(t, events, "power_off")
 				require.Len(t, rep.Stages, 1)
 			}
 			// Parent timeout includes the full restart continuation, not only flashing.

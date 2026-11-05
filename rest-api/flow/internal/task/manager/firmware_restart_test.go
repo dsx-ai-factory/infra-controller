@@ -8,6 +8,9 @@ import (
 	"encoding/json"
 	"testing"
 
+	"github.com/google/uuid"
+	"github.com/stretchr/testify/require"
+
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/operation"
 	taskcommon "github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/common"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/conflict"
@@ -16,14 +19,13 @@ import (
 	taskdef "github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/task"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/devicetypes"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/inventoryobjects/component"
-	"github.com/google/uuid"
-	"github.com/stretchr/testify/require"
 )
 
 func testNVOSRestartSubmission(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
 		targets  []string
+		version  string
 		snapshot bool
 		missing  bool
 		unlinked bool
@@ -33,6 +35,7 @@ func testNVOSRestartSubmission(t *testing.T) {
 		{name: "NVOS snapshots full compute scope", targets: []string{"nvos"}, snapshot: true},
 		{name: "whole bundle includes NVOS", snapshot: true},
 		{name: "BMC-only retains original scope", targets: []string{"bmc"}},
+		{name: "omitted switch layer does not reserve compute", version: `{"compute":{"Id":"compute-fw"}}`},
 		{name: "missing reserved compute fails recovery", targets: []string{"nvos"}, snapshot: true, missing: true},
 		{name: "unaddressable compute rejects before persistence", targets: []string{"nvos"}, unlinked: true},
 		{name: "compute power task blocks switch NVOS update", targets: []string{"nvos"}, conflict: true},
@@ -48,12 +51,12 @@ func testNVOSRestartSubmission(t *testing.T) {
 			}
 			fullRack.AddComponent(sw)
 			fullRack.AddComponent(compute)
-			inv := &submitTaskInventory{rack: fullRack, components: map[uuid.UUID]*component.Component{switchID: sw}}
+			inv := &submitTaskInventory{rack: fullRack, components: map[uuid.UUID]*component.Component{switchID: &sw}}
 			store := &managerTaskStore{}
 			exec := &managerExecutor{executionID: "execution-1"}
 			m := &ManagerImpl{inventoryStore: inv, taskStore: store, executor: exec,
 				ruleResolver: operationrules.NewResolver(store), conflictResolver: conflict.NewResolver(store)}
-			raw, err := (&operations.FirmwareControlTaskInfo{Operation: operations.FirmwareOperationUpgrade, SubTargets: tc.targets}).Marshal()
+			raw, err := (&operations.FirmwareControlTaskInfo{Operation: operations.FirmwareOperationUpgrade, SubTargets: tc.targets, TargetVersion: tc.version}).Marshal()
 			require.NoError(t, err)
 			if tc.conflict {
 				active := newTaskForRack(&operation.Request{Operation: testPowerControlOperation(t)}, fullRack)
@@ -78,15 +81,20 @@ func testNVOSRestartSubmission(t *testing.T) {
 			data, err := json.Marshal(saved.Attributes)
 			require.NoError(t, err)
 			require.NoError(t, json.Unmarshal(data, &saved.Attributes))
+			var predecessor struct {
+				ComponentsByType map[devicetypes.ComponentType][]uuid.UUID `json:"components_by_type"`
+			}
+			require.NoError(t, json.Unmarshal(data, &predecessor))
+			require.Empty(t, predecessor.ComponentsByType[devicetypes.ComponentTypeCompute], "old readers must not flash restart-only compute")
 			if tc.snapshot {
-				require.Equal(t, []uuid.UUID{computeID}, saved.Attributes.ComponentsByType[devicetypes.ComponentTypeCompute])
+				require.Equal(t, []uuid.UUID{computeID}, saved.Attributes.FirmwareRestartComputeIDs)
 				require.Equal(t, []taskdef.WorkflowComponent{{Type: devicetypes.ComponentTypeCompute, ComponentID: "compute-1"}}, exec.lastRequest.Info.FirmwareRestartComponents)
 			} else {
-				require.Nil(t, saved.Attributes.FirmwareTargetsByType)
+				require.Nil(t, saved.Attributes.FirmwareRestartComputeIDs)
 				require.Empty(t, exec.lastRequest.Info.FirmwareRestartComponents)
 			}
 			if tc.legacy {
-				saved.Attributes.FirmwareTargetsByType = nil
+				saved.Attributes.FirmwareRestartComputeIDs = nil
 				delete(saved.Attributes.ComponentsByType, devicetypes.ComponentTypeCompute)
 			}
 			if tc.missing {

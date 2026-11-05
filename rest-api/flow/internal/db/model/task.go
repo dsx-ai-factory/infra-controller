@@ -209,7 +209,8 @@ func (t *Task) UpdateTaskReport(
 
 // taskComponentIDFilter restricts a query to tasks whose attributes
 // reference a specific component UUID. The UUID may live under any bucket
-// of attributes.components_by_type, which rules out a fixed @> check
+// of attributes.components_by_type or its firmware_restart_compute_ids scope,
+// which rules out a fixed @> check
 // against a known key and forces a jsonpath expression. The predicate is
 // served by the GIN (jsonb_path_ops) index on task.attributes added in
 // migration 20260517000000.
@@ -224,8 +225,8 @@ func (f taskComponentIDFilter) ApplyTo(q *bun.SelectQuery) *bun.SelectQuery {
 	// bun does not rescan it for '?'. uuid.UUID.String() emits only hex
 	// and hyphens, so it cannot close the SQL string literal or inject.
 	expr := fmt.Sprintf(
-		`attributes @? '$.components_by_type.*[*] ? (@ == "%s")'::jsonpath`,
-		f.componentID.String(),
+		`(attributes @? '$.components_by_type.*[*] ? (@ == "%s")'::jsonpath OR attributes @? '$.firmware_restart_compute_ids[*] ? (@ == "%s")'::jsonpath)`,
+		f.componentID.String(), f.componentID.String(),
 	)
 	return q.Where("?", bun.Safe(expr))
 }

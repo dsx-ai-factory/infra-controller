@@ -1171,7 +1171,7 @@ func (m *ManagerImpl) executeTask(
 
 	// Reload the durable union rather than admitting new devices on promotion
 	// or an idempotent retry of an unscheduled task.
-	if task.Attributes.FirmwareTargetsByType != nil {
+	if len(task.Attributes.FirmwareRestartComputeIDs) > 0 {
 		var err error
 		targetRack, err = m.loadRackForTask(ctx, task)
 		if err != nil {
@@ -1207,13 +1207,13 @@ func (m *ManagerImpl) executeTask(
 		Async: true,
 	}
 
-	if task.Attributes.FirmwareTargetsByType != nil {
+	if len(task.Attributes.FirmwareRestartComputeIDs) > 0 {
 		firmwareRack := rack.New(targetRack.Info, targetRack.Loc)
 		for _, comp := range targetRack.Components {
-			if slices.Contains(task.Attributes.FirmwareTargetsByType[comp.Type], comp.Info.ID) {
+			if slices.Contains(task.Attributes.ComponentsByType[comp.Type], comp.Info.ID) {
 				firmwareRack.AddComponent(comp)
 			}
-			if comp.Type == devicetypes.ComponentTypeCompute {
+			if slices.Contains(task.Attributes.FirmwareRestartComputeIDs, comp.Info.ID) {
 				req.Info.FirmwareRestartComponents = append(req.Info.FirmwareRestartComponents,
 					taskdef.WorkflowComponent{Type: comp.Type, ComponentID: comp.ComponentID, MACAddress: comp.ManagementMAC()})
 			}

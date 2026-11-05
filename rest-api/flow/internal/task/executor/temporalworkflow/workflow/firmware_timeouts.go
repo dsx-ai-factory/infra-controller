@@ -121,7 +121,8 @@ func ExecutionTimeout(info *task.ExecutionInfo, operationInfo any, fallback time
 	}
 	for _, continuation := range continuations {
 		for _, step := range continuation.rule.Steps {
-			total += childWorkflowExecutionTimeout(step, continuation.targets[step.ComponentType].Len())
+			target := continuation.targets[step.ComponentType]
+			total += childWorkflowExecutionTimeout(step, target.Len())
 		}
 	}
 	// Reserve the original task envelope for setup, report persistence and

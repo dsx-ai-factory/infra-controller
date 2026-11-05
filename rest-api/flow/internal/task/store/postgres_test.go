@@ -5,6 +5,7 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"testing"
@@ -22,6 +23,7 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/operation"
 	taskcommon "github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/common"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/operations"
+	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/devicetypes"
 )
 
 func TestPostgresStore_LatestLeakageShutdownTaskStatuses(t *testing.T) {
@@ -171,4 +173,57 @@ func TestTaskComponentsAnyPredicate(t *testing.T) {
 		`(t.attributes @? '$.components_by_type.*[*] ? (@ == "11111111-2222-3333-4444-555555555555")'::jsonpath OR t.attributes @? '$.components_by_type.*[*] ? (@ == "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")'::jsonpath)`,
 		got,
 	)
+}
+
+func TestPostgresStore_ListTasks(t *testing.T) {
+	if os.Getenv("DB_PORT") == "" {
+		t.Skip("no PostgreSQL test environment")
+	}
+	config, err := cdb.ConfigFromEnv()
+	require.NoError(t, err)
+	session, err := utils.UnitTestDB(t.Context(), t, config)
+	require.NoError(t, err)
+	t.Cleanup(session.Close)
+	store := NewPostgres(session)
+	computeID, switchID, rackID := uuid.New(), uuid.New(), uuid.New()
+	for _, tc := range []struct {
+		name       string
+		attributes taskcommon.TaskAttributes
+		wantMatch  bool
+	}{
+		{name: "predecessor firmware membership", attributes: taskcommon.TaskAttributes{
+			ComponentsByType: map[devicetypes.ComponentType][]uuid.UUID{devicetypes.ComponentTypeCompute: {computeID}},
+		}, wantMatch: true},
+		{name: "NVOS restart membership", attributes: taskcommon.TaskAttributes{
+			ComponentsByType:          map[devicetypes.ComponentType][]uuid.UUID{devicetypes.ComponentTypeNVSwitch: {switchID}},
+			FirmwareRestartComputeIDs: []uuid.UUID{computeID},
+		}, wantMatch: true},
+		{name: "unrelated task", attributes: taskcommon.TaskAttributes{
+			ComponentsByType: map[devicetypes.ComponentType][]uuid.UUID{devicetypes.ComponentTypeNVSwitch: {switchID}},
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			id := uuid.New()
+			attributes, err := json.Marshal(tc.attributes)
+			require.NoError(t, err)
+			_, err = session.DB.ExecContext(t.Context(), `INSERT INTO task
+				(id, type, executor_type, information, rack_id, execution_id, status, attributes)
+				VALUES (?, 'firmware_control', 'temporal', '{"operation":1}', ?, '', 'waiting', ?)`, id, rackID, string(attributes))
+			require.NoError(t, err)
+			loaded, err := store.GetTask(t.Context(), id)
+			require.NoError(t, err)
+			require.Equal(t, tc.attributes, loaded.Attributes)
+			listed, _, err := store.ListTasks(t.Context(), &taskcommon.TaskListOptions{
+				TaskType: taskcommon.TaskTypeFirmwareControl, RackID: rackID, ComponentID: computeID,
+			}, nil)
+			require.NoError(t, err)
+			found := false
+			for _, item := range listed {
+				if item.ID == id {
+					found = true
+				}
+			}
+			require.Equal(t, tc.wantMatch, found)
+		})
+	}
 }

@@ -18,6 +18,7 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/operations"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/task"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/devicetypes"
+	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/firmwareversion"
 )
 
 // init registers the FirmwareControl workflow descriptor with the package registry.
@@ -39,6 +40,7 @@ var firmwareControlActivityOptions = workflow.ActivityOptions{
 }
 
 const firmwareLayeredComponentSelectionChangeID = "firmware-layered-component-selection"
+const nvosComputeRestartChangeID = "nvos-compute-restart"
 
 // firmwareControl orchestrates firmware updates using operation rules.
 // The execution sequence is driven by the RuleDefinition attached to the
@@ -69,6 +71,11 @@ func firmwareControl(
 	}
 
 	continuations := firmwareRestartContinuations(&reqInfo, info, executionTargets)
+	if len(continuations) > 0 && workflow.GetVersion(ctx, nvosComputeRestartChangeID, workflow.DefaultVersion, 1) == workflow.DefaultVersion {
+		// An older worker may have started this history during a rolling update.
+		// Preserve its command sequence even when the input has a new snapshot.
+		continuations = nil
+	}
 	report, err := executeRuleBasedOperation(
 		ctx,
 		reqInfo.TaskID,
@@ -88,7 +95,7 @@ func selectFirmwareTargets(
 ) map[devicetypes.ComponentType]common.Target {
 	selectedTargets := maps.Clone(targets)
 	for componentType := range selectedTargets {
-		if _, selected := extractComponentTargetVersion(targetVersion, componentType); !selected {
+		if _, selected := firmwareversion.Extract(targetVersion, componentType); !selected {
 			delete(selectedTargets, componentType)
 		}
 	}
@@ -114,8 +121,9 @@ func firmwareRestartContinuations(
 	firmware *operations.FirmwareControlTaskInfo,
 	selected map[devicetypes.ComponentType]common.Target,
 ) []ruleContinuation {
+	switchTarget := selected[devicetypes.ComponentTypeNVSwitch]
 	if len(info.FirmwareRestartComponents) == 0 ||
-		selected[devicetypes.ComponentTypeNVSwitch].Len() == 0 || info.RuleDefinition == nil {
+		switchTarget.Len() == 0 || info.RuleDefinition == nil {
 		return nil
 	}
 	hasNVOSUpdate := false
