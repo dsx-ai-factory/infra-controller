@@ -68,7 +68,7 @@ Before promoting the migration release to a site, its release integration owner 
 
 ## Build and validation
 
-Container builds and native setup use ISC's signed public `kea-3-0` repository and the exact package version in `dev/docker/kea.version`. The repository key is checked in with fingerprint `9DA570BB192211885E4EB280B16C44CD45514C3C`. The distro's older `kea-common` package must be removed from native development hosts so obsolete libraries cannot be selected when linking the hook.
+Container builds and native setup use ISC's signed public `kea-3-0` repository and the exact package version in `dev/docker/kea.version`. The repository key is checked in with fingerprint `9DA570BB192211885E4EB280B16C44CD45514C3C`. The allocation library is rebuilt from checksum-verified ISC source with NICo's [DHCPv6 handoff contract](dhcpv6-deployment.md#kea-runtime-compatibility); the remaining ISC package files retain their original content. Stock packages alone cannot load the DHCPv6 hook. The distro's older `kea-common` package must be removed from native development hosts so obsolete libraries cannot be selected when linking the hook.
 
 The DHCP tests execute the compiled hook inside real Kea daemons. They cover packet options, stateful and stateless exchanges, retained leases, release/decline/expiry, and restarts. The migration also covers import of the legacy DHCPv6 memfile schema. Run them in the matching compiler image:
 

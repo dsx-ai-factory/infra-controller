@@ -112,6 +112,7 @@ int lease4_renew(CalloutHandle &handle);
 int pkt4_send(CalloutHandle &handle);
 int lease4_expire(CalloutHandle &handle);
 int pkt6_receive(CalloutHandle &handle);
+int lease6_existing(isc::hooks::CalloutHandle &handle);
 int lease6_select(CalloutHandle &handle);
 int lease6_renew(CalloutHandle &handle);
 int lease6_rebind(CalloutHandle &handle);

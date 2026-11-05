@@ -14,7 +14,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-FROM arm64v8/debian:12-slim@sha256:6bd27d44e6c32a66bbd72d7cb2b76a8ae3497ec2e5274a81abd1b37f6013fa1f
+ARG CONTAINER_BASE_IMAGE=arm64v8/debian:12-slim@sha256:6bd27d44e6c32a66bbd72d7cb2b76a8ae3497ec2e5274a81abd1b37f6013fa1f
+FROM ${CONTAINER_BASE_IMAGE} AS kea-builder
+ARG KEA_VERSION
+COPY dev/docker/build-kea.sh dev/docker/kea-lease6-replacement.patch dev/docker/setup-kea-repository.sh dev/docker/isc-kea-3-0.asc /tmp/kea-build/
+RUN /tmp/kea-build/build-kea.sh "${KEA_VERSION}"
+
+FROM ${CONTAINER_BASE_IMAGE}
 
 ARG KEA_VERSION
 
@@ -78,6 +84,9 @@ RUN CACHEKEY=${CI_COMMIT_SHORT_SHA} apt-get update && \
 		tpm2-tools \
 		zlib1g && \
 	rm -rf /var/lib/apt/lists/*
+
+COPY --from=kea-builder /kea-packages/isc-kea-common.deb /tmp/isc-kea-common.deb
+RUN dpkg -i /tmp/isc-kea-common.deb && rm /tmp/isc-kea-common.deb
 
 RUN sh /tmp/kea-repository/configure-kea-runtime.sh && rm -rf /tmp/kea-repository
 

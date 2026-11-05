@@ -43,8 +43,12 @@ environment.
      "isc-kea-common=${kea_version}" "isc-kea-hooks=${kea_version}" \
      "isc-kea-dev=${kea_version}" "isc-kea-dhcp4=${kea_version}" \
      "isc-kea-dhcp6=${kea_version}"
+   sudo sh dev/docker/build-kea.sh "${kea_version}"
+   sudo dpkg -i /kea-packages/isc-kea-common.deb
    sudo usermod -aG _kea "$(id -un)"
    ```
+
+   The source build applies the DHCPv6 handoff contract required by the hook; stock packages alone are insufficient. See [Kea Runtime Compatibility](provisioning/dhcpv6-deployment.md#kea-runtime-compatibility).
 
    Start a fresh login session to activate the `_kea` group membership. Use the repository's compiler container on other distributions so the hook and daemon versions match. See [Upgrade Kea to 3.0 LTS](provisioning/kea-lts-upgrade.md) for configuration, file-path, and lease-state requirements.
 

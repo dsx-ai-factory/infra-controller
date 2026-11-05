@@ -4,6 +4,33 @@ Use this guide to enable NICo's opt-in Dynamic Host Configuration Protocol for I
 
 The Core chart runs Kea DHCPv4 in `nico-dhcp` and, when enabled, Kea DHCPv6 in `nico-dhcp6`. The Deployments have separate pods, selectors, configuration, Services, probes, and rollouts. Both use the same image, hook library, ServiceAccount, client certificate, and application programming interface (API) identity. Both hooks call the same API through gRPC with mutual Transport Layer Security (mTLS). API role-based access control (RBAC) continues to apply.
 
+## Kea Runtime Compatibility
+
+Use the NICo hook and patched Kea runtime built from the same repository
+revision. The build and runtime images use the ISC Kea 3.0 LTS packages pinned in
+[`kea.version`](https://github.com/dsx-ai-factory/infra-controller/blob/main/dev/docker/kea.version).
+[`build-kea.sh`](https://github.com/dsx-ai-factory/infra-controller/blob/main/dev/docker/build-kea.sh)
+verifies the release source checksum and rebuilds the allocation library with
+[`kea-lease6-replacement.patch`](https://github.com/dsx-ai-factory/infra-controller/blob/main/dev/docker/kea-lease6-replacement.patch).
+It preserves the other ISC package libraries and files. The patch provides safe
+lease replacement, existing-lease validation, reclamation refusal, and correct
+memfile pool accounting after restart. The Kea 2
+null-result backport is unnecessary in Kea 3.
+
+The DHCPv6 hook checks `nico_kea_lease6_handoff_contract` at startup. Stock Kea
+and an older NICo patch lack that contract and fail with
+`NICo DHCPv6 requires patched Kea`. The package version alone does not establish
+compatibility. Reinstalling the stock allocation library prevents DHCPv6 startup;
+rebuild and redeploy the matching NICo image. DHCPv4 does not require this DHCPv6
+contract. No chart value or lease-file schema change is required by the handoff.
+
+The repository build images, DevSpace, Tilt, and native Ubuntu preparation all
+install the patched package. Native preparation builds against its host
+distribution; do not copy a Debian library into Ubuntu. Manual package-manager
+installation alone does not apply the patch. For DHCP tests, use the repository
+build image or rerun
+[`prepare-ubuntu-host-for-dev.sh`](https://github.com/dsx-ai-factory/infra-controller/blob/main/dev/deployment/devspace/prepare-ubuntu-host-for-dev.sh).
+
 ## Network and Identity Requirements
 
 Before enabling the DHCPv6 workload, review the following requirements:
@@ -76,6 +103,46 @@ nico-dhcp:
 Apply through the site's normal Helm upgrade workflow, using the Core image and chart from the same repository revision as required by the [image compatibility policy](https://github.com/dsx-ai-factory/infra-controller/blob/main/helm/README.md#image-configuration). When upgrading from a revision without the `dhcp` and `v6ExternalService` maps, update both the chart and Core image. DSX, hardware-health, and PXE use their dual-stack listener defaults unless an explicit listener configuration overrides them. Setting `dhcp.v6Enabled: false` removes the v6 resources while preserving the v4 pod template. The v6 Deployment uses `Recreate` so old and replacement v6 pods do not serve simultaneously.
 
 The example enables address allocation, not HTTP boot. Refer to [Helm Values](#helm-values) for the complete settings and defaults, then complete [Deployment Verification and Metrics](#deployment-verification-and-metrics).
+
+## Lease Handoff and Refusal
+
+Firmware and the installed OS can use different DUIDs or IAIDs for the same NIC.
+The hook redirects allocation to Core's IA_NA address. Replacing an assigned or
+reclaimed lease at that target requires a matching stored MAC and subnet. A
+foreign or unknown MAC, another subnet, or a declined target is refused.
+Ordinary SOLICIT preserves the old owner; REQUEST or jointly enabled Rapid
+Commit persists the replacement in one native update. A failed update leaves
+the old target available for retry. This handoff does not expire Core's
+assignment for the target address. Reclamation of another expired allocation
+candidate is a separate operation and can succeed before the target write fails.
+
+Kea 3 enables multithreading by default; the repository chart explicitly disables
+it. For configurations that enable multithreading, the hook holds MAC and address guards
+through native packet processing; contention is refused with
+`lease_transaction_busy`, allowing the client to retry. Existing-DUID paths
+also validate their persisted lease snapshots and acquire each address guard
+before native reservation cleanup or updates, including queued continuations.
+A different relay MAC cannot use an unhinted firmware DUID/IAID request to
+restore a stale owner after handoff. Unrelated clients can continue while Core
+discovery is pending. These guards coordinate one Kea process, not external
+lease writers or multiple active servers.
+
+A failed retirement write vetoes native reclamation before counters change and
+before allocation or renewal continues. Kea 3's default memfile failure policy
+stops the server on fatal storage I/O errors; restore storage and restart with
+the retained lease files before retrying. A custom `serve-retry-continue` policy
+permits in-process retries, but still cannot bypass a refused retirement. Delayed RENEW or REBIND with the previous DUID or IAID is dropped with
+`stale_lease_identity` and does not extend or replace the new owner's lease.
+The receive-side drop sends no reply; refusal in the native existing-lease path
+can return an IA-scoped failure. Inspect the `reason` label on
+`carbide_dhcp_v6_requests_dropped_total` when diagnosing retries across boot stages.
+
+The chart does not enable native D2 updates. If a custom configuration enables
+D2, successful replacement queues removal using the old target's DUID and FQDN
+before native response processing adds the new identity. This applies when the
+hostname stays the same as well as when it changes. Failed persistence queues
+no replacement cleanup. D2 delivery and DNS-server acceptance remain subject to
+Kea's configured queue, transport, and DNS policy.
 
 ## Deployment Verification and Metrics
 

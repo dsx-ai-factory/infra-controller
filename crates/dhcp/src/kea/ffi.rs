@@ -40,12 +40,16 @@ pub unsafe extern "C" fn load(a: *mut libc::c_void) -> libc::c_int {
         }
     };
 
-    crate::tracing_setup::init();
-
     // SAFETY: Initial lint enablement: this C++ boundary needs owner review.
     // Kea keeps `a` as a live `LibraryHandle` for the synchronous matching-ABI
     // shim call, whose C++ implementation must not unwind into Rust.
-    unsafe { shim_load(a) }
+    let result = unsafe { shim_load(a) };
+    // A rejected library can be dlclosed immediately. Start exporter threads
+    // only after runtime compatibility and hook configuration are accepted.
+    if result == 0 {
+        crate::tracing_setup::init();
+    }
+    result
 }
 
 #[unsafe(no_mangle)]
