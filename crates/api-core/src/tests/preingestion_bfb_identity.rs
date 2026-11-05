@@ -234,9 +234,9 @@ async fn bfb_recovery_rechecks_identity_before_external_actions(pool: sqlx::PgPo
     // manager must consume the persisted identity, not process-local memory.
     for boundary in [
         "copy",
-        "pre-cycle",
         "power-off",
         "after-power-cycle",
+        "post-install",
         "restart",
         "console",
         "legacy",
@@ -254,11 +254,7 @@ async fn bfb_recovery_rechecks_identity_before_external_actions(pool: sqlx::PgPo
             .unwrap();
         txn.commit().await.unwrap();
         env.api
-            .copy_bfb_to_dpu_rshim(request(
-                dpu_ip,
-                None,
-                boundary == "pre-cycle" || boundary == "power-off",
-            ))
+            .copy_bfb_to_dpu_rshim(request(dpu_ip, None, boundary == "power-off"))
             .await
             .unwrap();
 
@@ -273,13 +269,15 @@ async fn bfb_recovery_rechecks_identity_before_external_actions(pool: sqlx::PgPo
                 }
             ));
             assert_eq!(state.bfb_target_mac(), Some(original_mac));
-        } else if boundary == "after-power-cycle" {
+        } else if boundary == "after-power-cycle" || boundary == "post-install" {
+            // The DPU BMC answers the probe, so a changed identity must still
+            // block both the follow-up copy and post-install completion.
             let mut txn = env.pool.begin().await.unwrap();
             db::explored_endpoints::set_preingestion_bfb_platform_powercycle(
                 dpu_ip,
                 HOST_BMC_IP,
                 BfbPlatformPowercyclePhase::WaitingForDpuBmc,
-                false,
+                boundary == "post-install",
                 Some(original_mac),
                 &mut txn,
             )

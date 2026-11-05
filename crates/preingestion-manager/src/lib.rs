@@ -2939,13 +2939,6 @@ impl PreingestionManagerStatic {
         self.bfb_copy_state.clear(&address.to_string());
 
         if pre_copy_powercycle {
-            if self
-                .validate_bfb_target(db, endpoint, *host_bmc_ip)
-                .await?
-                .is_none()
-            {
-                return Ok(());
-            }
             db.with_txn(|txn| {
                 db::explored_endpoints::set_preingestion_bfb_platform_powercycle(
                     address,
@@ -3093,13 +3086,6 @@ impl PreingestionManagerStatic {
                 .await??;
             }
             BfbPlatformPowercyclePhase::WaitingForDpuBmc => {
-                if self
-                    .validate_bfb_target(db, endpoint, *host_bmc_ip)
-                    .await?
-                    .is_none()
-                {
-                    return Ok(());
-                }
                 let dpu_addr = std::net::SocketAddr::new(address, 443);
                 match self
                     .redfish_client_pool
@@ -3107,6 +3093,14 @@ impl PreingestionManagerStatic {
                     .await
                 {
                     Ok(()) if post_install => {
+                        // Guard completion against a probe answered by a different device.
+                        if self
+                            .validate_bfb_target(db, endpoint, *host_bmc_ip)
+                            .await?
+                            .is_none()
+                        {
+                            return Ok(());
+                        }
                         tracing::info!(bmc_ip_address = %address, "DPU BMC online after post-install power-cycle, completing preingestion");
                         db.with_txn(|txn| {
                             async move {
