@@ -10916,7 +10916,7 @@ mod tests {
     async fn sw_batch_reset_switch_factory_default_preserves_parent_for_aggregate_polling(
         pool: sqlx::PgPool,
     ) {
-        let (mock, backend, _, _, _, sw1, _) = make_backend(&pool).await;
+        let (mock, backend, _, _, _, sw1, sw2) = make_backend(&pool).await;
         let manager = crate::component_manager::ComponentManager::new(
             Arc::new(backend),
             Arc::new(crate::mock::MockPowerShelfManager),
@@ -10925,7 +10925,7 @@ mod tests {
             false,
             false,
         );
-        let endpoint = make_sw_endpoint(SW_MAC_1);
+        let endpoints = [make_sw_endpoint(SW_MAC_1), make_sw_endpoint(SW_MAC_2)];
         let tls_server_domain = "switches.example.test";
         sqlx::query(
             "ALTER TABLE direct_dispatch_rms_jobs ADD CHECK (job_id <> 'unrecorded-reset')",
@@ -10933,28 +10933,56 @@ mod tests {
         .execute(&pool)
         .await
         .unwrap();
-        for response in [
-            nvos_reset_batch_response("factory-reset-job-1", &[&sw1.to_string()], &[]),
-            nvos_reset_batch_response("factory-reset-job-1", &[], &[&sw1.to_string()]),
-            // A known parent remains usable by decommissioning if tracking fails.
-            nvos_reset_batch_response("unrecorded-reset", &[&sw1.to_string()], &[]),
+        for (scenario, response, targets, expected_parent) in [
+            (
+                "accepted reset",
+                nvos_reset_batch_response("factory-reset-job-1", &[&sw1.to_string()], &[]),
+                &endpoints[..1],
+                Some("factory-reset-job-1"),
+            ),
+            (
+                "all targets rejected despite a parent ID",
+                nvos_reset_batch_response("factory-reset-job-1", &[], &[&sw1.to_string()]),
+                &endpoints[..1],
+                None,
+            ),
+            (
+                "known parent survives tracking failure",
+                nvos_reset_batch_response("unrecorded-reset", &[&sw1.to_string()], &[]),
+                &endpoints[..1],
+                Some("unrecorded-reset"),
+            ),
+            (
+                "rejected first target does not hide accepted peer",
+                nvos_reset_batch_response(
+                    "partial-reset-job",
+                    &[&sw2.to_string()],
+                    &[&sw1.to_string()],
+                ),
+                &endpoints[..],
+                Some("partial-reset-job"),
+            ),
         ] {
-            let expected_parent = response.response.as_ref().unwrap().job_id.clone();
             mock.enqueue_batch_reset_switch_factory_default(Ok(response))
                 .await;
-            let parent_job_id = manager
-                .batch_reset_switch_factory_default(
-                    std::slice::from_ref(&endpoint),
-                    Some(tls_server_domain),
-                )
-                .await
-                .unwrap();
-            assert_eq!(parent_job_id, expected_parent);
+            let result = manager
+                .batch_reset_switch_factory_default(targets, Some(tls_server_domain))
+                .await;
+            match expected_parent {
+                Some(expected) => assert_eq!(result.unwrap(), expected, "{scenario}"),
+                None => assert!(
+                    matches!(
+                        result,
+                        Err(ComponentManagerError::RejectedBeforeDispatch(_))
+                    ),
+                    "{scenario}: {result:?}",
+                ),
+            }
         }
 
         let calls = mock.batch_reset_switch_factory_default_calls().await;
 
-        assert_eq!(calls.len(), 3);
+        assert_eq!(calls.len(), 4);
         assert_eq!(calls[0].domain.as_deref(), Some(tls_server_domain));
         assert!(calls[0].allow_ssh_fallback);
 

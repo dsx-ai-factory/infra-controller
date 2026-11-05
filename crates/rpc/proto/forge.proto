@@ -11515,17 +11515,14 @@ message ComponentConfigureSwitchCertificateResponse {
   repeated ComponentResult results = 1;
 }
 
-// Reset operations supported by the component interface. The RMS backend supports
-// SDN and NVOS factory reset on switches. BMC resets return Unimplemented.
+// Reset operations supported by the component manager.
 enum ComponentResetAction {
   COMPONENT_RESET_ACTION_UNSPECIFIED = 0;
   // Reset the management controller on a compute, switch, or power shelf tray.
   COMPONENT_RESET_ACTION_BMC_RESET = 1;
   // Restore management-controller defaults on a compute, switch, or power shelf tray.
   COMPONENT_RESET_ACTION_BMC_FACTORY_RESET = 2;
-  // Erase switch operating-system configuration and reboot; switch targets only.
-  // Completion requires SSH access with factory-default credentials. Uses the RMS
-  // configured default NVL certificate domain; domain_name is invalid for this action.
+  // Initiate NVOS factory reset and reboot the switch; switch targets only.
   COMPONENT_RESET_ACTION_NVOS_FACTORY_RESET = 3;
   // Restore switch SDN configuration to factory defaults; switch targets only.
   COMPONENT_RESET_ACTION_SDN_FACTORY_RESET = 4;
