@@ -5,6 +5,8 @@
 // result.json on the journal PVC, and the small Status in the result ConfigMap, whose claim and CAS write it owns.
 package result
 
+import "encoding/json"
+
 // Verdict is how a run ended, as the result JSON names it.
 type Verdict string
 
@@ -34,13 +36,23 @@ func ExitCode(v Verdict) int {
 	}
 }
 
-// Outcome is a verdict and the exit code it gives, never set apart. It flattens into RunResult and Status.
+// Outcome is a verdict and the exit code it gives, never set apart. It flattens into RunResult and Status. Reasons and
+// Detail are what a test found; the runner moves them into the RunResult, so they are never written from here.
 type Outcome struct {
-	Verdict  Verdict `json:"verdict"`
-	ExitCode int     `json:"exitCode"`
+	Verdict  Verdict         `json:"verdict"`
+	ExitCode int             `json:"exitCode"`
+	Reasons  []string        `json:"-"`
+	Detail   json.RawMessage `json:"-"`
 }
 
-func OutcomeOf(v Verdict) Outcome { return Outcome{v, ExitCode(v)} }
+func OutcomeOf(v Verdict) Outcome { return Outcome{Verdict: v, ExitCode: ExitCode(v)} }
+
+// Found is the outcome of a test that reports why it reached v and its findings as JSON.
+func Found(v Verdict, reasons []string, detail json.RawMessage) Outcome {
+	o := OutcomeOf(v)
+	o.Reasons, o.Detail = reasons, detail
+	return o
+}
 
 // IsSuccess is a verdict a clean run reached.
 func IsSuccess(v Verdict) bool { return v == Passed || v == Go }

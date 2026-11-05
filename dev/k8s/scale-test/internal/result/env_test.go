@@ -223,7 +223,7 @@ func TestEnvResult(t *testing.T) {
 		if err := jsonx.Decode(data, &got); err != nil {
 			t.Fatalf("decode result.json: %v", err)
 		}
-		if got.RunID != run || got.Outcome != want.Outcome {
+		if got.RunID != run || got.Verdict != want.Verdict || got.ExitCode != want.ExitCode {
 			t.Fatalf("result.json did not round-trip: got %+v", got)
 		}
 	})

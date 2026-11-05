@@ -240,33 +240,37 @@ func (c *Client) recentWindow() time.Duration {
 	return min(max(2*c.meta.ScrapeInterval+c.delay, recent), limit)
 }
 
-// StoreStatus is the newest host sweep end sample in the store, and how old
-// it is.
+// StoreStatus is the FamilyStatus of hosts.
 func (c *Client) StoreStatus(ctx context.Context, until time.Time) (Status, error) {
+	return c.FamilyStatus(ctx, until, probeapi.FamilyHost)
+}
+
+// FamilyStatus is the newest scrape of a family sweep by the probe process
+// that served the metadata, joined as a summary joins them, and how old it is.
+// A sweep of an earlier process is no evidence.
+func (c *Client) FamilyStatus(ctx context.Context, until time.Time, family probeapi.Family) (Status, error) {
 	var status Status
-	q := query{names: []string{probeapi.MetricSweepComplete}, matchers: c.selector([3]string{"family", "=", string(probeapi.FamilyHost)}), span: c.recentWindow()}
+	// The empty alternative picks the process start, which has no family label.
+	q := query{names: []string{probeapi.MetricSweepStart, probeapi.MetricSweepComplete, probeapi.MetricProcessStart},
+		matchers: c.selector([3]string{"family", "=~", string(family) + "|"}), span: c.recentWindow()}
 	now := time.Now()
 	series, err := bounded(ctx, c.end(until), func(ctx context.Context) ([]history.RawSeries, error) {
 		return c.raw(ctx, q, now)
 	})
-	var last *history.Sample
-	for _, s := range series {
-		for i := range s.Samples {
-			if last == nil || s.Samples[i].AtMs > last.AtMs {
-				last = &s.Samples[i]
-			}
-		}
-	}
-	switch {
-	case err != nil || last == nil:
+	if err != nil {
 		return status, err
-	case !history.IsTime(last.Value):
+	}
+	at, end, ok, err := history.LatestSweep(series, c.meta.Info.ProcessStartSeconds)
+	switch {
+	case err != nil || !ok:
+		return status, err
+	case !history.IsTime(end):
 		return status, history.Unavailable{Text: "the stored series are not the probe's: a sweep or process time is out of range"}
 	}
 	nowSecs := float64(now.Unix()) + float64(now.Nanosecond())/1e9
-	status.LastSampleAt = new(history.AtSecs(msSecs(last.AtMs)))
-	status.SampleAgeSeconds = new(max(nowSecs-msSecs(last.AtMs), 0))
-	status.SweepCompleteAt = new(history.AtSecs(last.Value))
+	status.LastSampleAt = new(history.AtSecs(msSecs(at)))
+	status.SampleAgeSeconds = new(max(nowSecs-msSecs(at), 0))
+	status.SweepCompleteAt = new(history.AtSecs(end))
 	return status, nil
 }
 

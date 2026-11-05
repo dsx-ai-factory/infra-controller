@@ -449,7 +449,22 @@ func TestStoreStatus(t *testing.T) {
 		s.scrape(-12, 1, -20)
 		status, err = s.client.StoreStatus(t.Context(), time.Now().Add(time.Minute))
 		eq(t, []any{err, opt(status.LastSampleAt), opt(status.SampleAgeSeconds), opt(status.SweepCompleteAt)}, []any{nil, at(-12), "12", at(-20)})
-		s.store.Add(probeapi.MetricSweepComplete, ms(-5), 1e300, append([]string{"reader", "devices", "family", "host"}, selector...)...)
+		dpu := func(at, end, proc float64) {
+			for name, v := range map[string]float64{probeapi.MetricSweepComplete: base + end, probeapi.MetricSweepStart: base + end - 10} {
+				s.store.Add(name, ms(at), v, append([]string{"reader", "devices", "family", "dpu"}, selector...)...)
+			}
+			s.store.Add(probeapi.MetricProcessStart, ms(at), proc, selector...)
+		}
+		status, err = s.client.FamilyStatus(t.Context(), time.Now().Add(time.Minute), probeapi.FamilyDpu)
+		eq(t, []any{err, status}, []any{nil, Status{}}, "host sweeps are no DPU evidence")
+		dpu(-20, -30, process-1) // scraped before the host scrape that shows the current process
+		status, err = s.client.FamilyStatus(t.Context(), time.Now().Add(time.Minute), probeapi.FamilyDpu)
+		eq(t, []any{err, status, s.client.Preflight(t.Context(), time.Now().Add(time.Minute))}, []any{nil, Status{}, nil},
+			"an earlier process's DPU sweep is no evidence, though the current process passes preflight")
+		dpu(-8, -25, process)
+		status, err = s.client.FamilyStatus(t.Context(), time.Now().Add(time.Minute), probeapi.FamilyDpu)
+		eq(t, []any{err, status.SampleAgeSeconds != nil, opt(status.SweepCompleteAt)}, []any{nil, true, at(-25)})
+		s.scrape(-5, 1, 1e300)
 		_, err = s.client.StoreStatus(t.Context(), time.Now().Add(time.Minute))
 		eq(t, err, unavailableText("a time sample is out of range"))
 	})

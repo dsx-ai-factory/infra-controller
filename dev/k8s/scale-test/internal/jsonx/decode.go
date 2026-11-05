@@ -87,6 +87,7 @@ func (d decoder) token(path string) (json.Token, error) {
 
 var (
 	timeType  = reflect.TypeFor[Time]()
+	rawType   = reflect.TypeFor[json.RawMessage]()
 	errOffset = errors.New("offset out of range")
 )
 
@@ -125,8 +126,17 @@ func (t Time) MarshalJSON() ([]byte, error) {
 	return []byte(`"` + u.Format(layout) + `Z"`), nil
 }
 
-// value reads the next JSON value into v.
+// value reads the next JSON value into v. A json.RawMessage, such as a test's findings, keeps the value's bytes,
+// unchecked past the whole input's UTF-8 and surrogate checks; null is still refused.
 func (d decoder) value(path string, v reflect.Value) error {
+	if v.Type() == rawType {
+		var raw json.RawMessage
+		if err := d.Decode(&raw); err != nil || string(raw) == "null" {
+			return fail(path, "is null or malformed JSON")
+		}
+		v.SetBytes(raw)
+		return nil
+	}
 	tok, err := d.token(path)
 	if err != nil {
 		return err
@@ -375,6 +385,9 @@ func structInfoOf(t reflect.Type) *structInfo {
 				continue
 			}
 			name, opts, _ := strings.Cut(sf.Tag.Get("json"), ",")
+			if name == "-" && opts == "" { // never on the wire, as encoding/json
+				continue
+			}
 			if _, dup := info.byName[name]; dup || name == "" {
 				panic("jsonx: " + t.Name() + "." + sf.Name + " needs a unique json name")
 			}
