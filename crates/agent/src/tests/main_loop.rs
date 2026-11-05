@@ -558,6 +558,74 @@ fn comparison_network_config() -> ManagedHostNetworkConfigResponse {
     }
 }
 
+/// Adds two service endpoints sharing one fixed slot so fingerprint tests exercise complete
+/// `service_interfaces` and `service_vpc_slot_inventory` values.
+fn comparison_service_network_config() -> ManagedHostNetworkConfigResponse {
+    // Extend the retained full response fixture with one complete fixed service slot.
+    let mut config = comparison_network_config();
+    // Service slots require per-VPC VNIs, so disable the base fixture's site-global VNI.
+    config.site_global_vpc_vni = None;
+    config.service_vpc_slot_inventory = Some(rpc::ServiceVpcSlotInventory {
+        slots: vec![rpc::ServiceVpcSlot {
+            slot_index: 0, // Both endpoints intentionally share the fixed service port.
+            hbn_interface_name: "iface_svc_0".to_string(),
+        }],
+    });
+
+    // Add two independently identified endpoints that intentionally share every port policy field.
+    config.service_interfaces = [
+        (1, "192.0.2.10/31", "02:00:00:00:00:01"),
+        (2, "192.0.2.12/31", "02:00:00:00:00:02"),
+    ]
+    .into_iter()
+    .map(
+        |(identity, link_prefix, mac_address)| rpc::ManagedHostServiceInterfaceConfig {
+            service_id: format!("10000000-0000-0000-0000-{identity:012}"),
+            attachment_id: Some(::rpc::common::Uuid {
+                value: format!("20000000-0000-0000-0000-{identity:012}"),
+            }),
+            interface_ordinal: 0,
+            slot_index: 0, // Both endpoints bind to the fixed inventory slot above.
+            vpc_id: Some("30000000-0000-0000-0000-000000000001".parse().unwrap()),
+            vpc_vni: 1_400, // Keep service policy separate from the inherited host VPCs.
+            vpc_prefixes: vec!["198.51.100.0/24".to_string(), "192.0.2.0/24".to_string()],
+            vpc_peer_prefixes: vec!["203.0.113.0/25".to_string(), "203.0.113.128/25".to_string()],
+            vpc_peer_vnis: vec![2_002, 2_001],
+            vpc_routing_profile: Some(comparison_routing_profile()),
+            interface_routing_profile: Some(rpc::FlatInterfaceRoutingProfile {
+                allowed_anycast_prefixes: vec![
+                    rpc::PrefixFilterPolicyEntry {
+                        prefix: "203.0.113.0/25".to_string(),
+                    },
+                    rpc::PrefixFilterPolicyEntry {
+                        prefix: "203.0.113.128/25".to_string(),
+                    },
+                ],
+            }),
+            network_security_group: Some(rpc::FlatInterfaceNetworkSecurityGroupConfig {
+                id: "service-vpc-nsg".to_string(),
+                version: "nsg-v1".to_string(),
+                source: rpc::NetworkSecurityGroupSource::NsgSourceVpc.into(),
+                rules: vec![comparison_security_group_rule(
+                    "service-rule",
+                    100,
+                    rpc::NetworkSecurityGroupRuleAction::NsgRuleActionPermit,
+                )],
+                stateful_egress: false,
+            }),
+            mtu: Some(9_000), // Gives the MTU mutation case its valid service baseline.
+            link_prefix: link_prefix.to_string(),
+            mac_address: mac_address.to_string(),
+            internal_uuid: Some(::rpc::common::Uuid {
+                value: format!("40000000-0000-0000-0000-{identity:012}"),
+            }),
+            tenant_vrf_loopback_ip: Some("10.0.0.3".to_string()),
+        },
+    )
+    .collect();
+    config
+}
+
 /// Selects the unchanged baseline or one response mutation used to verify the
 /// HBN skip decision.
 #[derive(Clone, Copy, Debug)]
@@ -571,9 +639,11 @@ enum RenderedInputChange {
     SiteFabricNullRoute,
     AdminInterfaceVni,
     AdminIpv6Prefix,
+    AdminIpv6Loopback,
     TenantInterfaceVni,
     TenantInterfaceIp,
     TenantIpv6Prefix,
+    TenantIpv6Loopback,
     TenantIpv6Mode,
     TenantIpv6Removal,
     TenantVpcPrefix,
@@ -629,6 +699,14 @@ impl RenderedInputChange {
                     .addresses[0]
                     .prefix = "2001:db8:1::/64".to_string();
             }
+            Self::AdminIpv6Loopback => {
+                config
+                    .admin_interface
+                    .as_mut()
+                    .expect("comparison fixture has an admin interface")
+                    .addresses[0]
+                    .tenant_vrf_loopback_ip = Some("2001:db8::4".to_string());
+            }
             Self::TenantInterfaceVni => config.tenant_interfaces[1].vni += 1,
             Self::TenantInterfaceIp => {
                 config.tenant_interfaces[1].ip = Some("10.0.0.99".to_string());
@@ -638,6 +716,10 @@ impl RenderedInputChange {
                 address.ip = "2001:db8:1::1".to_string();
                 address.interface_prefix = "2001:db8:1::1/128".to_string();
                 address.prefix = "2001:db8:1::/127".to_string();
+            }
+            Self::TenantIpv6Loopback => {
+                config.tenant_interfaces[1].addresses[0].tenant_vrf_loopback_ip =
+                    Some("2001:db8::4".to_string());
             }
             Self::TenantIpv6Mode => {
                 let address = &mut config.tenant_interfaces[1].addresses[0];
@@ -732,20 +814,39 @@ fn current_network_version_tracks_supplemental_config_hash() {
 }
 
 /// Every input consumed by HBN must invalidate the cache, and either
-/// explicit version must do the same.
+/// explicit version must do the same. Canonical IPv6 VRF loopback replacement must also invalidate
+/// the fingerprint when the deprecated IPv4 loopback field remains absent.
 #[test]
+#[allow(deprecated)]
 fn current_network_version_detects_rendered_input_changes() {
     use carbide_test_support::value_scenarios;
 
     value_scenarios!(run = |change| {
         let mut config = comparison_network_config();
-        if matches!(change, RenderedInputChange::AdminIpv6Prefix) {
+        // Enable Admin rendering so its canonical IPv6 fields participate in the fingerprint.
+        if matches!(
+            change,
+            RenderedInputChange::AdminIpv6Prefix | RenderedInputChange::AdminIpv6Loopback
+        ) {
             config.use_admin_network = true;
             config
                 .admin_interface
                 .as_mut()
                 .expect("comparison fixture has an admin interface")
                 .is_l2_segment = true;
+        }
+        // Seed only the canonical loopback so a legacy-field change cannot satisfy these cases.
+        if matches!(
+            change,
+            RenderedInputChange::AdminIpv6Loopback | RenderedInputChange::TenantIpv6Loopback
+        ) {
+            let interface = if matches!(change, RenderedInputChange::AdminIpv6Loopback) {
+                config.admin_interface.as_mut().expect("Admin interface")
+            } else {
+                &mut config.tenant_interfaces[1]
+            };
+            interface.tenant_vrf_loopback_ip = None;
+            interface.addresses[0].tenant_vrf_loopback_ip = Some("2001:db8::3".to_string());
         }
         let mut current = CurrentNetworkVersion::default();
         current.update_from(&config, None);
@@ -771,10 +872,14 @@ fn current_network_version_detects_rendered_input_changes() {
             RenderedInputChange::AdminInterfaceVni => false,
             // Admin prefix replacement changes the SVI VRR/RA desired state.
             RenderedInputChange::AdminIpv6Prefix => false,
+            // An Admin VRF loopback replacement changes the rendered IPv6 /128.
+            RenderedInputChange::AdminIpv6Loopback => false,
             RenderedInputChange::TenantInterfaceVni => false,
             RenderedInputChange::TenantInterfaceIp => false,
             // Prefix replacement must replace the advertised desired state.
             RenderedInputChange::TenantIpv6Prefix => false,
+            // A tenant VRF loopback must remain visible without an IPv4 compatibility value.
+            RenderedInputChange::TenantIpv6Loopback => false,
             // Stateful-to-SLAAC replacement changes the rendered M/A flags.
             RenderedInputChange::TenantIpv6Mode => false,
             // IPv6 removal must withdraw the complete RA/RDNSS stanza.
@@ -788,6 +893,329 @@ fn current_network_version_detects_rendered_input_changes() {
             RenderedInputChange::NetworkSecurityPolicyOverride => false,
         }
     );
+}
+
+/// Selects one service endpoint or fixed-slot inventory mutation so `CurrentNetworkVersion`
+/// distinguishes the changed response from the previously recorded response.
+#[derive(Clone, Copy, Debug)]
+enum ServiceInputChange {
+    MacAddress,
+    LinkRemoval,
+    SelectedVpcPolicy,
+    Mtu,
+    InventoryName,
+}
+
+impl ServiceInputChange {
+    /// Mutates one service or inventory field while retaining unrelated fingerprint inputs
+    /// so each case isolates one reason to reconcile.
+    fn apply(self, config: &mut ManagedHostNetworkConfigResponse) {
+        match self {
+            Self::MacAddress => {
+                config.service_interfaces[0].mac_address = "02:00:00:00:00:0a".to_string();
+            }
+            Self::LinkRemoval => {
+                config.service_interfaces.remove(0);
+            }
+            Self::SelectedVpcPolicy => {
+                config.service_interfaces[0]
+                    .network_security_group
+                    .as_mut()
+                    .expect("service fixture has a VPC security group")
+                    .rules[0]
+                    .src_prefixes
+                    .push("100.64.0.0/10".to_string());
+            }
+            Self::Mtu => config.service_interfaces[0].mtu = Some(8_999),
+            Self::InventoryName => {
+                config
+                    .service_vpc_slot_inventory
+                    .as_mut()
+                    .expect("service fixture has fixed inventory")
+                    .slots[0]
+                    .hbn_interface_name = "iface_svc_replacement".to_string();
+            }
+        }
+    }
+}
+
+/// Service MAC, NSG policy, endpoint removal, MTU, and `service_vpc_slot_inventory` changes must
+/// invalidate `CurrentNetworkVersion` even when `instance_network_config_version` is unchanged.
+#[test]
+fn current_network_version_tracks_service_inputs_and_inventory() {
+    let cases = [
+        // A MAC-only change invalidates the fingerprint even though it leaves the HBN address unchanged.
+        ServiceInputChange::MacAddress,
+        // Removing one endpoint must invalidate the fingerprint so HBN can withdraw
+        // only that endpoint's HBN address.
+        ServiceInputChange::LinkRemoval,
+        // An NSG rule change must invalidate the fingerprint without an instance network version change.
+        ServiceInputChange::SelectedVpcPolicy,
+        // MTU remains in the fetched contract shared by HBN and the service NAD.
+        ServiceInputChange::Mtu,
+        // Changing `service_vpc_slot_inventory` must invalidate the fingerprint before reconciliation.
+        ServiceInputChange::InventoryName,
+    ];
+
+    for change in cases {
+        // Record one successfully reconciled response before changing exactly one service input.
+        let mut config = comparison_service_network_config();
+        let mut current = CurrentNetworkVersion::default();
+        current.update_from(&config, None);
+        change.apply(&mut config);
+
+        // No service mutation may match the previously recorded `CurrentNetworkVersion`.
+        assert!(
+            !current.matches_versions_from(&config, None),
+            "{change:?} still matched CurrentNetworkVersion"
+        );
+    }
+
+    // Change `service_vpc_slot_inventory` with no endpoints to prove its HBN interface name
+    // still participates in the fingerprint.
+    let mut inventory_only = comparison_service_network_config();
+    inventory_only.service_interfaces.clear();
+    let mut current = CurrentNetworkVersion::default();
+    current.update_from(&inventory_only, None);
+    inventory_only
+        .service_vpc_slot_inventory
+        .as_mut()
+        .expect("service fixture has fixed inventory")
+        .slots[0]
+        .hbn_interface_name = "iface_svc_replacement".to_string();
+
+    // Inventory changes remain pending even when no endpoint currently renders an HBN address.
+    assert!(!current.matches_versions_from(&inventory_only, None));
+}
+
+/// Verifies service set reordering leaves `matches_versions_from` and
+/// `describes_same_desired_network` returning true, avoiding unnecessary HBN applies and rejection
+/// of equivalent applied responses as obsolete.
+#[test]
+fn current_network_version_ignores_service_set_order() {
+    // Record one applied grouped response before reordering only set-like service inputs.
+    let mut reordered = comparison_service_network_config();
+    let mut current = CurrentNetworkVersion::default();
+    current.update_from(&reordered, None);
+
+    // Reverse only collections whose member order has no service networking meaning.
+    reordered.service_interfaces.reverse();
+    for interface in &mut reordered.service_interfaces {
+        interface.vpc_prefixes.reverse();
+        interface.vpc_peer_prefixes.reverse();
+        interface.vpc_peer_vnis.reverse();
+        let profile = interface
+            .vpc_routing_profile
+            .as_mut()
+            .expect("service fixture has a routing profile");
+        profile.route_target_imports.reverse();
+        profile.route_targets_on_exports.reverse();
+        profile.accepted_leaks_from_underlay.reverse();
+        profile.allowed_anycast_prefixes.reverse();
+        interface
+            .interface_routing_profile
+            .as_mut()
+            .expect("service fixture has an interface profile")
+            .allowed_anycast_prefixes
+            .reverse();
+        let rule = &mut interface
+            .network_security_group
+            .as_mut()
+            .expect("service fixture has a VPC security group")
+            .rules[0];
+        rule.src_prefixes.reverse();
+        rule.dst_prefixes.reverse();
+    }
+
+    // Equivalent service sets match both `CurrentNetworkVersion` and the original desired response.
+    assert!(current.matches_versions_from(&reordered, None));
+    assert!(CurrentNetworkVersion::describes_same_desired_network(
+        &comparison_service_network_config(),
+        &reordered
+    ));
+}
+
+/// Verifies reversing equal-priority service NSG rules invalidates `CurrentNetworkVersion` because
+/// their stable ACL order controls first-match policy.
+#[test]
+fn current_network_version_preserves_equal_priority_service_nsg_order() {
+    // Give every grouped endpoint the same two equal-priority rules so the response remains valid.
+    let mut applied = comparison_service_network_config();
+    for interface in &mut applied.service_interfaces {
+        interface
+            .network_security_group
+            .as_mut()
+            .expect("service fixture has a VPC security group")
+            .rules
+            .push(comparison_security_group_rule(
+                "second-service-rule",
+                100,
+                rpc::NetworkSecurityGroupRuleAction::NsgRuleActionDeny,
+            ));
+    }
+    let mut current = CurrentNetworkVersion::default();
+    current.update_from(&applied, None);
+
+    // Reverse only the equal-priority rules whose relative order is rendered into each ACL.
+    let mut reordered = applied.clone();
+    for interface in &mut reordered.service_interfaces {
+        interface
+            .network_security_group
+            .as_mut()
+            .expect("service fixture has a VPC security group")
+            .rules
+            .swap(0, 1);
+    }
+
+    // The changed first-match order must force another HBN reconciliation.
+    assert!(!current.matches_versions_from(&reordered, None));
+}
+
+/// A failed HBN result leaves `CurrentNetworkVersion` unmatched until HBN and DHCP results both
+/// succeed for the same current response, preventing failed updates from advancing network
+/// acknowledgement.
+#[test]
+fn failed_service_apply_keeps_version_pending_until_success() {
+    // Prepare one desired response with a failed HBN result and successful DHCP result.
+    let config = comparison_service_network_config();
+    let mut current = CurrentNetworkVersion::default();
+    let hbn_failure = Err(eyre::eyre!("injected HBN apply failure"));
+    let dhcp_success = Ok(false);
+
+    // Pass the HBN failure to `record_reconciled_version`, the main loop's HBN/DHCP result check.
+    assert!(!current.record_reconciled_version(
+        &config,
+        Some(&config),
+        None,
+        true,
+        &hbn_failure,
+        &dhcp_success,
+    ));
+    assert!(!current.matches_versions_from(&config, None));
+
+    // Successful HBN and DHCP results for the retry record the still-current response's
+    // versions and fingerprint.
+    assert!(current.record_reconciled_version(
+        &config,
+        Some(&config),
+        None,
+        true,
+        &Ok(true),
+        &dhcp_success,
+    ));
+    assert!(current.matches_versions_from(&config, None));
+}
+
+/// Verifies a DHCP failure after a successful HBN attempt clears `CurrentNetworkVersion` because
+/// HBN may already contain configuration that Core cannot yet acknowledge.
+#[test]
+fn hbn_success_with_dhcp_failure_invalidates_recorded_version() {
+    // Seed `CurrentNetworkVersion` from the service response before supplying another HBN result.
+    let config = comparison_service_network_config();
+    let mut current = CurrentNetworkVersion::default();
+    current.update_from(&config, None);
+    assert!(current.matches_versions_from(&config, None));
+    let dhcp_failure = Err(eyre::eyre!("injected DHCP submission failure"));
+
+    // Supply a successful HBN result together with a DHCP error for the same response.
+    assert!(!current.record_reconciled_version(
+        &config,
+        Some(&config),
+        None,
+        true,
+        &Ok(true),
+        &dhcp_failure,
+    ));
+
+    // The unmatched `CurrentNetworkVersion` prevents a later iteration from skipping HBN.
+    assert!(!current.matches_versions_from(&config, None));
+}
+
+/// An obsolete HBN attempt clears `CurrentNetworkVersion` so a desired response that returns to the
+/// prior value cannot be skipped or acknowledged until HBN accepts it again.
+#[test]
+fn obsolete_hbn_attempt_invalidates_reverted_version_until_reapplied() {
+    // Record complete A, then change only an HBN-rendered deny prefix to produce B.
+    let config_a = comparison_network_config();
+    let mut config_b = config_a.clone();
+    config_b.deny_prefixes.push("198.51.100.0/24".to_string());
+    let mut current = CurrentNetworkVersion::default();
+    current.update_from(&config_a, None);
+    assert!(current.matches_versions_from(&config_a, None));
+    let dhcp_success = Ok(false);
+
+    // A failure before HBN is attempted must retain `CurrentNetworkVersion` for response A.
+    let hbn_not_attempted = Err(eyre::eyre!("injected pre-HBN failure"));
+    assert!(!current.record_reconciled_version(
+        &config_b,
+        Some(&config_b),
+        None,
+        false,
+        &hbn_not_attempted,
+        &dhcp_success,
+    ));
+    assert!(current.matches_versions_from(&config_a, None));
+
+    // Complete attempted B only after the fetched desired response has returned to A.
+    assert!(!current.record_reconciled_version(
+        &config_b,
+        Some(&config_a),
+        None,
+        true,
+        &Ok(true),
+        &dhcp_success,
+    ));
+
+    // The cleared `CurrentNetworkVersion` forces returned A through HBN instead of skipping it.
+    assert!(!current.matches_versions_from(&config_a, None));
+
+    // A failed attempted reapply must leave A unacknowledged and `CurrentNetworkVersion` cleared.
+    let hbn_reapply_failure = Err(eyre::eyre!("injected HBN reapply failure"));
+    assert!(!current.record_reconciled_version(
+        &config_a,
+        Some(&config_a),
+        None,
+        true,
+        &hbn_reapply_failure,
+        &dhcp_success,
+    ));
+    assert!(!current.matches_versions_from(&config_a, None));
+
+    // Record A only after HBN and DHCP accept its still-current reapply.
+    assert!(current.record_reconciled_version(
+        &config_a,
+        Some(&config_a),
+        None,
+        true,
+        &Ok(true),
+        &dhcp_success,
+    ));
+    assert!(current.matches_versions_from(&config_a, None));
+}
+
+/// A successful completion for an older service response cannot acknowledge a newer response
+/// supplied as `latest`, including a MAC-only change that HBN itself does not render.
+#[test]
+fn stale_service_network_completion_cannot_become_current() {
+    // Change `latest.service_interfaces[0].mac_address` before supplying the older apply's results.
+    let applied = comparison_service_network_config();
+    let mut latest = applied.clone();
+    latest.service_interfaces[0].mac_address = "02:00:00:00:00:0a".to_string();
+    let mut current = CurrentNetworkVersion::default();
+
+    // Supply successful HBN and DHCP results for the older response after desired inputs change.
+    assert!(!current.record_reconciled_version(
+        &applied,
+        Some(&latest),
+        None,
+        true,
+        &Ok(true),
+        &Ok(true),
+    ));
+
+    // `CurrentNetworkVersion` matches neither the older applied response nor the supplied `latest` response.
+    assert!(!current.matches_versions_from(&applied, None));
+    assert!(!current.matches_versions_from(&latest, None));
 }
 
 /// FNN L2 rendering derives the SVI's IPv6 VRR address from the authoritative

@@ -515,15 +515,18 @@ pub fn build(conf: NvueConfig) -> eyre::Result<String> {
             RoutingProfile: interface_routing_profile.unwrap_or_default(),
             IsPhy: network.is_phy,
             L2VNI: network.vni.map(|x| x.to_string()).unwrap_or("".to_string()),
-            IPs: std::iter::once(network.gateway_cidr.clone())
+            // Preserve empty scalar gateway omission for legacy `write nvue` inputs.
+            IPs: network
+                .gateway_cidrs
+                .into_iter()
                 .filter(|address| !address.is_empty())
                 .collect(),
             IPsIpv6: network
                 .ipv6_port_config
-                .as_ref()
-                .map(|v6| v6.gateway_cidr.clone())
+                .iter()
+                .flat_map(|v6| &v6.gateway_cidrs)
                 .filter(|address| !address.is_empty())
-                .into_iter()
+                .cloned()
                 .collect(),
             HasIpv6RouterAdvertisement: router_advertisement.is_some(),
             HasAdminIpv6OverlayContainment: has_admin_ipv6_overlay_containment,
@@ -576,7 +579,10 @@ pub fn build(conf: NvueConfig) -> eyre::Result<String> {
                     })
                 })
                 .transpose()?,
-            HasFmdsGateway: !is_dpu_os && (fmds_gateway_vlan == Some(network.vlan)),
+            // FMDS is host-only, so a hidden service port must never claim its gateway role.
+            HasFmdsGateway: !is_dpu_os
+                && !network.is_service
+                && fmds_gateway_vlan == Some(network.vlan),
         };
         if port.HasFmdsGateway {
             fmds_gateway_matched = true;
@@ -588,8 +594,18 @@ pub fn build(conf: NvueConfig) -> eyre::Result<String> {
             .as_deref()
             .is_some_and(|route| !route.is_empty());
 
-        has_any_vpc_vrf_loopback =
-            has_any_vpc_vrf_loopback || network.tenant_vrf_loopback_ip.is_some();
+        // Render the VRF loopback as IPv4 /32 or IPv6 /128, independently of the port's link address family.
+        let vrf_loopback = network
+            .tenant_vrf_loopback_ip
+            .as_deref()
+            .map(|address| {
+                address
+                    .parse::<IpAddr>()
+                    .map(|address| IpNet::from(address).to_string())
+                    .wrap_err_with(|| format!("invalid tenant VRF loopback {address}"))
+            })
+            .transpose()?;
+        has_any_vpc_vrf_loopback = has_any_vpc_vrf_loopback || vrf_loopback.is_some();
 
         vpc_configs
             .entry(l3_vni)
@@ -606,6 +622,14 @@ pub fn build(conf: NvueConfig) -> eyre::Result<String> {
                 if v.RoutingProfile.is_none() {
                     v.RoutingProfile = routing_profile.clone();
                 }
+                // A service-only port can supply the VPC loopback after a host port created the
+                // shared VRF.
+                if !v.HasVrfLoopback
+                    && let Some(loopback) = vrf_loopback.as_ref()
+                {
+                    v.HasVrfLoopback = true;
+                    v.VrfLoopback.clone_from(loopback);
+                }
                 v.HasNeighbors |= port_has_neighbor;
                 v.HasIpv4HostRoutes |= port_has_ipv4_host_route;
                 v.HasIpv6HostRoutes |= port_has_ipv6_host_route;
@@ -614,8 +638,8 @@ pub fn build(conf: NvueConfig) -> eyre::Result<String> {
             .or_insert_with(|| TmplVpc {
                 VrfName: port.VrfName.clone(),
                 L3VNI: l3_vni,
-                HasVrfLoopback: network.tenant_vrf_loopback_ip.is_some(),
-                VrfLoopback: network.tenant_vrf_loopback_ip.unwrap_or_default(),
+                HasVrfLoopback: vrf_loopback.is_some(),
+                VrfLoopback: vrf_loopback.unwrap_or_default(),
                 HasNeighbors: port_has_neighbor,
                 HasIpv4HostRoutes: port_has_ipv4_host_route,
                 HasIpv6HostRoutes: port_has_ipv6_host_route,
@@ -882,28 +906,11 @@ pub fn build(conf: NvueConfig) -> eyre::Result<String> {
     })
 }
 
-/// Prepares a set of network security groups rules for template use.
-/// In the process, it expands the rules and evaluates whether they
-/// exceed predefined limits.
-///
-/// * `rules` - A list of network security group rules
-#[allow(clippy::type_complexity)]
-fn prepare_network_security_group_rules(
-    rules: Vec<NetworkSecurityGroupRule>,
-) -> Result<
-    (
-        Vec<TmplNetworkSecurityGroupRule>,
-        Vec<TmplNetworkSecurityGroupRule>,
-        Vec<TmplNetworkSecurityGroupRule>,
-        Vec<TmplNetworkSecurityGroupRule>,
-    ),
-    eyre::Error,
-> {
-    let mut ingress_ipv4_rules: Vec<&NetworkSecurityGroupRule> = vec![];
-    let mut egress_ipv4_rules: Vec<&NetworkSecurityGroupRule> = vec![];
-    let mut ingress_ipv6_rules: Vec<&NetworkSecurityGroupRule> = vec![];
-    let mut egress_ipv6_rules: Vec<&NetworkSecurityGroupRule> = vec![];
-
+/// Rejects NSGs above the renderer's expanded-rule limit so fetch admission and rendering accept
+/// the same policy size without allocating expanded rules during validation.
+pub(super) fn validate_network_security_group_rule_count(
+    rules: &[NetworkSecurityGroupRule],
+) -> eyre::Result<()> {
     let mut total_rule_count: usize = 0;
 
     for rule in rules.iter() {
@@ -945,7 +952,36 @@ fn prepare_network_security_group_rules(
                 NETWORK_SECURITY_GROUP_RULE_COUNT_MAX
             ));
         }
+    }
 
+    Ok(())
+}
+
+/// Prepares a set of network security groups rules for template use.
+/// In the process, it expands the rules and evaluates whether they
+/// exceed predefined limits.
+///
+/// * `rules` - A list of network security group rules
+#[allow(clippy::type_complexity)]
+fn prepare_network_security_group_rules(
+    rules: Vec<NetworkSecurityGroupRule>,
+) -> Result<
+    (
+        Vec<TmplNetworkSecurityGroupRule>,
+        Vec<TmplNetworkSecurityGroupRule>,
+        Vec<TmplNetworkSecurityGroupRule>,
+        Vec<TmplNetworkSecurityGroupRule>,
+    ),
+    eyre::Error,
+> {
+    validate_network_security_group_rule_count(&rules)?;
+
+    let mut ingress_ipv4_rules: Vec<&NetworkSecurityGroupRule> = vec![];
+    let mut egress_ipv4_rules: Vec<&NetworkSecurityGroupRule> = vec![];
+    let mut ingress_ipv6_rules: Vec<&NetworkSecurityGroupRule> = vec![];
+    let mut egress_ipv6_rules: Vec<&NetworkSecurityGroupRule> = vec![];
+
+    for rule in rules.iter() {
         match (rule.ingress, rule.ipv6) {
             (true, false) => ingress_ipv4_rules.push(rule),
             (false, false) => egress_ipv4_rules.push(rule),
@@ -1482,14 +1518,34 @@ pub struct L3Domain {
     pub services: Vec<String>,
 }
 
+/// Accepts scalar and list gateway CIDRs so `write nvue` can read the former host-port JSON form.
+fn deserialize_gateway_cidrs<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum GatewayCidrs {
+        One(String),
+        Many(Vec<String>),
+    }
+
+    Ok(match GatewayCidrs::deserialize(deserializer)? {
+        GatewayCidrs::One(address) => vec![address],
+        GatewayCidrs::Many(addresses) => addresses,
+    })
+}
+
 /// IPv6 configuration for a port.
 #[derive(Clone, Deserialize, Debug)]
 pub struct Ipv6PortConfig {
-    /// IPv6 value configured on the DPU in CIDR notation. Routed tenants
-    /// derive it from the canonical segment prefix: the first address of a
+    /// IPv6 values configured on the DPU in CIDR notation. Routed host ports
+    /// derive one value from the canonical segment prefix: the first address of a
     /// stateful `/127` linknet (RFC 6164), or the selected `/64` for SLAAC.
+    /// Grouped service ports retain every `/127` HBN peer.
     /// Admin L2 uses its containing segment prefix on the VLAN VRR.
-    pub gateway_cidr: String,
+    #[serde(alias = "gateway_cidr", deserialize_with = "deserialize_gateway_cidrs")]
+    pub gateway_cidrs: Vec<String>,
     /// SVI IP for L2 segments -- the DPU's gateway address on the VLAN.
     pub svi_ip: Option<String>,
     /// Validated FNN router-advertisement behavior. Routed tenant stateful RA
@@ -1530,7 +1586,11 @@ pub struct PortConfig {
     pub host_ipv6_route: Option<String>,
     pub vni: Option<u32>, // In FNN, admin network has both an l2vni and an l3vni
     pub l3_vni: Option<u32>,
-    pub gateway_cidr: String,
+    /// DPU-side IPv4 addresses in CIDR notation. An empty list configures no IPv4 addresses.
+    /// JSON accepts the `gateway_cidr` alias and scalar strings for existing `write nvue` inputs.
+    /// Empty strings are ignored when rendering addresses.
+    #[serde(alias = "gateway_cidr", deserialize_with = "deserialize_gateway_cidrs")]
+    pub gateway_cidrs: Vec<String>,
     /// Optional IPv6 configuration for interfaces that include IPv6.
     pub ipv6_port_config: Option<Ipv6PortConfig>,
     pub vpc_prefixes: Vec<String>,
@@ -1540,9 +1600,13 @@ pub struct PortConfig {
     pub vpc_peer_vnis: Vec<u32>,
     /// SVI IP for L2 segments -- the DPU's gateway address on the VLAN (IPv4).
     pub svi_ip: Option<String>,
+    /// Optional DPU-local VPC VRF loopback as a bare IPv4 or IPv6 address.
     pub tenant_vrf_loopback_ip: Option<String>,
     pub is_l2_segment: bool,
     pub is_phy: bool,
+    /// Hidden service ports must not acquire host-only FMDS behavior.
+    #[serde(default)]
+    pub is_service: bool,
     pub network_security_group_id: Option<String>,
     #[serde(default)]
     pub routing_profile: Option<RoutingProfile>,
@@ -1808,10 +1872,11 @@ struct TmplVpc {
     // VrfLoopback is the tenant loopback IP assigned to each DPU.
     // It was originally expected to be allocated from an interface-specific
     // /30 (as the first IP in the allocation), but it's actually allocated
-    // from a dedicated resource-pool, handed out as un-related /32s, and
-    // interfaces in FNN get /31s.
-    /// The tenant loopback IP assigned to each DPU.
+    // from a dedicated resource-pool as individual host addresses, and
+    // FNN point-to-point interfaces get separate /31 or /127 linknets.
+    /// Whether this DPU's tenant VRF has a loopback.
     HasVrfLoopback: bool,
+    /// DPU-local tenant VRF loopback in /32 or /128 CIDR notation.
     VrfLoopback: String,
 
     HasNeighbors: bool,
@@ -1930,7 +1995,7 @@ mod tests {
     use std::collections::BTreeSet;
 
     use carbide_test_support::Outcome::Yields;
-    use carbide_test_support::{scenarios, value_scenarios};
+    use carbide_test_support::{Check, check_values, scenarios, value_scenarios};
 
     use super::*;
 
@@ -2138,6 +2203,134 @@ mod tests {
         }
     }
 
+    /// Verifies the former scalar gateway fields and omitted service flag deserialize as one
+    /// ordinary host port, avoiding an unnecessary break for existing `write nvue` inputs.
+    #[test]
+    fn write_nvue_accepts_former_scalar_gateway_fields() {
+        // Supply only required host-port fields plus both former scalar gateway representations.
+        let port: PortConfig = serde_json::from_str(
+            r#"{
+                "interface_name": "pf0vf0_if",
+                "vlan": 100,
+                "host_ip": "10.0.1.1",
+                "host_route": "10.0.1.0/31",
+                "gateway_cidr": "10.0.1.0/31",
+                "ipv6_port_config": {
+                    "gateway_cidr": "2001:db8::/127"
+                },
+                "vpc_prefixes": [],
+                "vpc_peer_prefixes": [],
+                "vpc_peer_vnis": [],
+                "is_l2_segment": false,
+                "is_phy": false
+            }"#,
+        )
+        .expect("former write nvue port JSON should deserialize");
+
+        // Scalar addresses become one-element collections and omitted service metadata stays host-only.
+        assert_eq!(port.gateway_cidrs, ["10.0.1.0/31"]);
+        assert_eq!(
+            port.ipv6_port_config
+                .expect("IPv6 port configuration")
+                .gateway_cidrs,
+            ["2001:db8::/127"]
+        );
+        assert!(!port.is_service);
+    }
+
+    /// Verifies empty former scalar gateways omit address keys and canonical arrays retain and
+    /// render every IPv4 and IPv6 address, preserving omitted address families and preventing
+    /// truncated address lists in `write nvue` inputs.
+    #[test]
+    fn write_nvue_renders_scalar_and_list_gateways() {
+        check_values(
+            [
+                // Empty scalar aliases preserve omitted address families in existing command inputs.
+                Check {
+                    scenario: "empty former scalar gateways",
+                    input: ("gateway_cidr", serde_json::json!(""), serde_json::json!("")),
+                    expect: (
+                        vec!["".into()],
+                        vec!["".into()],
+                        Some("vpc_100".into()),
+                        BTreeSet::new(),
+                    ),
+                },
+                // Canonical arrays must retain every address so multiple peers survive deserialization.
+                Check {
+                    scenario: "canonical gateway arrays",
+                    input: (
+                        "gateway_cidrs",
+                        serde_json::json!(["10.0.1.0/31", "10.0.1.2/31"]),
+                        serde_json::json!(["2001:db8::/127", "2001:db8::2/127"]),
+                    ),
+                    expect: (
+                        vec!["10.0.1.0/31".into(), "10.0.1.2/31".into()],
+                        vec!["2001:db8::/127".into(), "2001:db8::2/127".into()],
+                        Some("vpc_100".into()),
+                        address_set(&[
+                            "10.0.1.0/31",
+                            "10.0.1.2/31",
+                            "2001:db8::/127",
+                            "2001:db8::2/127",
+                        ]),
+                    ),
+                },
+            ],
+            |(gateway_field, ipv4_gateways, ipv6_gateways)| {
+                // Gateway field names and values drive each case; the remaining fields provide a routed host port.
+                let port: PortConfig = serde_json::from_value(serde_json::json!({
+                    "interface_name": "pf0vf0_if",
+                    "vlan": 100,
+                    "l3_vni": 100,
+                    "host_ip": "10.0.1.1",
+                    "host_route": "10.0.1.0/31",
+                    (gateway_field): ipv4_gateways, // Exercise the legacy alias or canonical IPv4 list.
+                    "ipv6_port_config": {
+                        (gateway_field): ipv6_gateways // Exercise the same representation for IPv6.
+                    },
+                    "vpc_prefixes": [],
+                    "vpc_peer_prefixes": [],
+                    "vpc_peer_vnis": [],
+                    "is_l2_segment": false,
+                    "is_phy": false
+                }))
+                .expect("write nvue port JSON should deserialize");
+
+                // Retain the deserialized lists separately so rendering cannot hide a dropped address.
+                let retained_ipv4_gateways = port.gateway_cidrs.clone();
+                let retained_ipv6_gateways = port
+                    .ipv6_port_config
+                    .as_ref()
+                    .expect("IPv6 port configuration")
+                    .gateway_cidrs
+                    .clone();
+
+                // Supply FNN routing context so each deserialized port reaches the routed address stanza.
+                let mut conf = minimal_nvue_config();
+                conf.is_fnn = true;
+                conf.vpc_virtualization_type = VpcVirtualizationType::Fnn;
+                conf.ct_routing_profile = Some(minimal_fnn_routing_profile());
+                conf.ct_port_configs = vec![port];
+
+                // Render the deserialized command input through the routed FNN address stanza.
+                let output = build(conf).expect("write nvue gateways should render");
+                let documents: serde_yaml::Value =
+                    serde_yaml::from_str(&output).expect("rendered NVUE should be valid YAML");
+                let port = &documents.as_sequence().expect("NVUE documents")[1]["set"]["interface"]
+                    ["pf0vf0_if"];
+
+                // Return the retained lists and rendered VRF/address keys for the table's exact comparisons.
+                (
+                    retained_ipv4_gateways,
+                    retained_ipv6_gateways,
+                    port["ip"]["vrf"].as_str().map(ToString::to_string),
+                    yaml_mapping_keys(&port["ip"]["address"]),
+                )
+            },
+        );
+    }
+
     #[test]
     fn test_build_renders_ipv6_loopback_only_for_fnn() {
         value_scenarios!(run = |row: LoopbackRenderRow| {
@@ -2257,7 +2450,7 @@ mod tests {
             host_ipv6_route: None,
             vni: Some(1000),
             l3_vni: Some(100),
-            gateway_cidr: "10.0.1.1/24".into(),
+            gateway_cidrs: vec!["10.0.1.1/24".into()],
             vpc_prefixes: vec!["10.0.1.0/24".into(), "2001:db8:1::/48".into()],
             vpc_peer_prefixes: vec!["10.0.2.0/24".into(), "2001:db8:2::/48".into()],
             vpc_peer_vnis: vec![],
@@ -2265,6 +2458,7 @@ mod tests {
             tenant_vrf_loopback_ip: None,
             is_l2_segment: true,
             is_phy: false,
+            is_service: false,
             network_security_group_id: None,
             routing_profile: None,
             interface_routing_profile: None,
@@ -2310,7 +2504,7 @@ mod tests {
             host_ipv6_route: None,
             vni: Some(1000),
             l3_vni: Some(100),
-            gateway_cidr: "10.0.1.1/24".into(),
+            gateway_cidrs: vec!["10.0.1.1/24".into()],
             vpc_prefixes: vec!["10.0.1.0/24".into(), "2001:db8:1::/48".into()],
             vpc_peer_prefixes: vec!["10.0.2.0/24".into(), "2001:db8:2::/48".into()],
             vpc_peer_vnis: vec![],
@@ -2318,6 +2512,7 @@ mod tests {
             tenant_vrf_loopback_ip: Some("10.0.0.2".into()),
             is_l2_segment: false,
             is_phy: false,
+            is_service: false,
             network_security_group_id: None,
             routing_profile: None,
             interface_routing_profile: None,
@@ -2352,7 +2547,7 @@ mod tests {
             host_ipv6_route: None,
             vni: Some(1000),
             l3_vni: Some(100),
-            gateway_cidr: "10.0.1.1/24".into(),
+            gateway_cidrs: vec!["10.0.1.1/24".into()],
             vpc_prefixes: vec!["10.0.1.0/24".into()],
             vpc_peer_prefixes: vec!["10.0.2.0/24".into()],
             vpc_peer_vnis: vec![],
@@ -2360,6 +2555,7 @@ mod tests {
             tenant_vrf_loopback_ip: None,
             is_l2_segment: true,
             is_phy: false,
+            is_service: false,
             network_security_group_id: None,
             routing_profile: None,
             interface_routing_profile: None,
@@ -2397,7 +2593,7 @@ mod tests {
             host_ipv6_route: None,
             vni: Some(1000),
             l3_vni: Some(100),
-            gateway_cidr: "10.0.1.1/24".into(),
+            gateway_cidrs: vec!["10.0.1.1/24".into()],
             vpc_prefixes: vec!["10.0.1.0/24".into()],
             vpc_peer_prefixes: vec![],
             vpc_peer_vnis: vec![],
@@ -2405,6 +2601,7 @@ mod tests {
             tenant_vrf_loopback_ip: None,
             is_l2_segment: true,
             is_phy: false,
+            is_service: false,
             network_security_group_id: None,
             routing_profile: None,
             interface_routing_profile: None,
@@ -2447,9 +2644,9 @@ mod tests {
             host_ipv6_route: Some("2001:db8::1/128".into()),
             vni: Some(1000),
             l3_vni: Some(100),
-            gateway_cidr: "10.0.1.0/31".into(),
+            gateway_cidrs: vec!["10.0.1.0/31".into()],
             ipv6_port_config: Some(Ipv6PortConfig {
-                gateway_cidr: "2001:db8::0/127".into(),
+                gateway_cidrs: vec!["2001:db8::0/127".into()],
                 svi_ip: None,
                 router_advertisement: Some(Ipv6RouterAdvertisementConfig {
                     prefix: "2001:db8::/127".into(),
@@ -2467,6 +2664,7 @@ mod tests {
             tenant_vrf_loopback_ip: Some("10.0.0.2".into()),
             is_l2_segment: false,
             is_phy: false,
+            is_service: false,
             network_security_group_id: None,
             routing_profile: None,
             interface_routing_profile: None,
@@ -2481,6 +2679,21 @@ mod tests {
             }),
         }];
         conf
+    }
+
+    /// Verifies direct NVUE builds reject malformed VRF loopbacks so `write nvue` inputs
+    /// retain address validation without passing through fetched-configuration validation.
+    #[test]
+    fn test_build_rejects_invalid_tenant_vrf_loopback() {
+        // Change only the loopback in an otherwise complete FNN configuration.
+        let mut conf = dual_stack_fnn_config();
+        conf.ct_port_configs[0].tenant_vrf_loopback_ip = Some("not-an-address".into());
+
+        // Build directly, as the manual command does.
+        let error = build(conf).expect_err("malformed tenant VRF loopback must fail");
+
+        // Require the loopback error so an unrelated fixture failure cannot satisfy the test.
+        assert!(error.to_string().contains("invalid tenant VRF loopback"));
     }
 
     /// Verifies FNN isolates every VPC with site-prefix blackholes while peering remains
@@ -2509,7 +2722,7 @@ mod tests {
             host_ipv6_route: None,
             vni: Some(2000),
             l3_vni: Some(200),
-            gateway_cidr: "10.0.2.0/31".into(),
+            gateway_cidrs: vec!["10.0.2.0/31".into()],
             ipv6_port_config: None,
             vpc_prefixes: vec!["10.0.2.0/24".into()],
             vpc_peer_prefixes: vec!["10.0.1.0/24".into()],
@@ -2518,6 +2731,7 @@ mod tests {
             tenant_vrf_loopback_ip: Some("10.0.0.3".into()),
             is_l2_segment: false,
             is_phy: false,
+            is_service: false,
             network_security_group_id: None,
             routing_profile: None,
             interface_routing_profile: None,
@@ -2745,10 +2959,10 @@ type: ipv6
                     host_ipv6_route: Some("2001:db8::3/128".into()),
                     vni: Some(1001),
                     l3_vni: Some(100),
-                    gateway_cidr: String::new(),
+                    gateway_cidrs: vec![],
                     svi_ip: None,
                     ipv6_port_config: Some(Ipv6PortConfig {
-                        gateway_cidr: "2001:db8::/64".into(),
+                        gateway_cidrs: vec!["2001:db8::/64".into()],
                         svi_ip: Some("2001:db8::2/64".into()),
                         router_advertisement: None,
                     }),
@@ -2951,7 +3165,7 @@ type: ipv6
             .expect("fixture should have a port");
         port.host_ip.clear();
         port.host_route.clear();
-        port.gateway_cidr.clear();
+        port.gateway_cidrs.clear();
         port.host_ipv6 = Some(String::new());
         port.host_ipv6_route = None;
         port.svi_ip = None;
@@ -2959,7 +3173,7 @@ type: ipv6
             .ipv6_port_config
             .as_mut()
             .expect("fixture should have an IPv6 port config");
-        ipv6.gateway_cidr = "2001:db8::/64".into();
+        ipv6.gateway_cidrs = vec!["2001:db8::/64".into()];
         let router_advertisement = ipv6
             .router_advertisement
             .as_mut()
@@ -3022,13 +3236,13 @@ type: ipv6
             .first_mut()
             .expect("fixture should have a port");
         port.is_l2_segment = true;
-        port.gateway_cidr = "10.0.1.1/24".into();
+        port.gateway_cidrs = vec!["10.0.1.1/24".into()];
         port.svi_ip = Some("10.0.1.2".into());
         let ipv6 = port
             .ipv6_port_config
             .as_mut()
             .expect("fixture should have IPv6 port config");
-        ipv6.gateway_cidr = "2001:db8::1/64".into();
+        ipv6.gateway_cidrs = vec!["2001:db8::1/64".into()];
         ipv6.svi_ip = Some("2001:db8::2".into());
         // Tenant L2 construction never supplies validated RA desired state.
         ipv6.router_advertisement = None;
@@ -3062,7 +3276,7 @@ type: ipv6
             .ipv6_port_config
             .as_mut()
             .expect("fixture should have IPv6 port config");
-        ipv6.gateway_cidr = "2001:db8:1::/127".to_string();
+        ipv6.gateway_cidrs = vec!["2001:db8:1::/127".to_string()];
         ipv6.router_advertisement
             .as_mut()
             .expect("fixture should have tenant RA")
@@ -3141,7 +3355,7 @@ type: ipv6
                 port.ipv6_port_config
                     .as_mut()
                     .expect("fixture should have IPv6 port config")
-                    .gateway_cidr = "2001:db8::/64".into();
+                    .gateway_cidrs = vec!["2001:db8::/64".into()];
             }
             if !row.include_ipv6 {
                 port.host_ipv6 = None;
@@ -3252,7 +3466,7 @@ type: ipv6
         port.ipv6_port_config
             .as_mut()
             .expect("fixture should have IPv6 port config")
-            .gateway_cidr = "2001:db8::/64".into();
+            .gateway_cidrs = vec!["2001:db8::/64".into()];
 
         let output = build(conf).expect("build should succeed");
         let docs: serde_yaml::Value = serde_yaml::from_str(&output).expect("valid YAML");
@@ -3317,7 +3531,7 @@ type: ipv6
             host_ipv6_route: None,
             vni: Some(1000),
             l3_vni: Some(100),
-            gateway_cidr: "10.0.1.1/24".into(),
+            gateway_cidrs: vec!["10.0.1.1/24".into()],
             vpc_prefixes: vec![],
             vpc_peer_prefixes: vec![],
             vpc_peer_vnis: vec![],
@@ -3325,6 +3539,7 @@ type: ipv6
             tenant_vrf_loopback_ip: None,
             is_l2_segment: true,
             is_phy: true,
+            is_service: false,
             network_security_group_id: None,
             routing_profile: None,
             interface_routing_profile: None,
@@ -3470,6 +3685,53 @@ type: ipv6
                 Some("fd00:76b9::255/127".parse().expect("FMDS peer")) => Yields(()),
             }
         );
+    }
+
+    /// Verifies container-mode NVUE rendering assigns FMDS only to the host SVI when a hidden
+    /// service port uses the same VLAN number, preventing tenant service connectivity to FMDS.
+    #[test]
+    fn test_fmds_gateway_fnn_container_mode_excludes_service_port() {
+        // Use VLAN zero for both ports because fixed service ports always carry that internal value.
+        let mut conf = minimal_nvue_config();
+        conf.is_fnn = true;
+        conf.vpc_virtualization_type = VpcVirtualizationType::Fnn;
+        conf.is_dpu_os = false;
+        conf.fmds_gateway_vlan = Some(0);
+        conf.fmds_ipv6_gateway = Some("fd00:76b9::255/127".parse().expect("FMDS peer"));
+        conf.ct_routing_profile = Some(minimal_fnn_routing_profile());
+        conf.ct_port_configs = vec![
+            phy_port_config(0),
+            PortConfig {
+                interface_name: "iface_svc_0".into(),
+                vlan: 0, // Match the host FMDS VLAN to exercise exclusion.
+                host_ip: String::new(),
+                host_route: String::new(),
+                host_ipv6: None,
+                host_ipv6_route: None,
+                vni: None,
+                l3_vni: Some(200),
+                gateway_cidrs: vec!["192.0.2.10/31".into()],
+                ipv6_port_config: None,
+                vpc_prefixes: vec!["192.0.2.0/24".into()],
+                vpc_peer_prefixes: vec![],
+                vpc_peer_vnis: vec![],
+                svi_ip: None,
+                tenant_vrf_loopback_ip: None,
+                is_l2_segment: false,
+                is_phy: false,
+                is_service: true, // Keep host-only FMDS gateways off this port.
+                network_security_group_id: None,
+                routing_profile: Some(minimal_fnn_routing_profile()),
+                interface_routing_profile: None,
+            },
+        ];
+
+        // Render the same YAML body submitted through the containerized NVUE REST path.
+        let gateway = conf.fmds_ipv6_gateway;
+        let output = build(conf).expect("build should succeed");
+
+        // Both FMDS families remain owned only by the host SVI.
+        assert_fmds_gateway_interface(&output, "vlan0", gateway);
     }
 
     /// FNN on DPU OS must keep both FMDS peers on the ARM attachment rather
