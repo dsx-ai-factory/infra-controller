@@ -67,6 +67,7 @@ const (
 	Forge_FindNetworkSegmentIds_FullMethodName                              = "/forge.Forge/FindNetworkSegmentIds"
 	Forge_FindNetworkSegmentsByIds_FullMethodName                           = "/forge.Forge/FindNetworkSegmentsByIds"
 	Forge_CreateNetworkSegment_FullMethodName                               = "/forge.Forge/CreateNetworkSegment"
+	Forge_AddNetworkSegmentPrefix_FullMethodName                            = "/forge.Forge/AddNetworkSegmentPrefix"
 	Forge_AttachNetworkSegmentToVpc_FullMethodName                          = "/forge.Forge/AttachNetworkSegmentToVpc"
 	Forge_DeleteNetworkSegment_FullMethodName                               = "/forge.Forge/DeleteNetworkSegment"
 	Forge_NetworkSegmentsForVpc_FullMethodName                              = "/forge.Forge/NetworkSegmentsForVpc"
@@ -667,6 +668,20 @@ type ForgeClient interface {
 	FindNetworkSegmentIds(ctx context.Context, in *NetworkSegmentSearchFilter, opts ...grpc.CallOption) (*NetworkSegmentIdList, error)
 	FindNetworkSegmentsByIds(ctx context.Context, in *NetworkSegmentsByIdsRequest, opts ...grpc.CallOption) (*NetworkSegmentList, error)
 	CreateNetworkSegment(ctx context.Context, in *NetworkSegmentCreationRequest, opts ...grpc.CallOption) (*NetworkSegment, error)
+	// Admin-only: append the missing family to a live, Ready, unattached Underlay
+	// segment with one prefix. Matching any stored same-family prefix and settings
+	// returns the current segment without a write; different same-family settings
+	// fail with FAILED_PRECONDITION. Existing prefixes, IDs, addresses, policy and
+	// lifecycle are unchanged; the stored initial network_def is not modified.
+	// Existing SLAAC inference policy also applies to the added prefix.
+	// Invalid input, overlap with any NetworkPrefix or VPC-scoped VpcPrefix, and
+	// reused relay selectors return INVALID_ARGUMENT. A global VpcPrefix parent
+	// may overlap an unattached Underlay, as with initial network creation.
+	// Unknown segment IDs return NOT_FOUND; unsupported targets return
+	// FAILED_PRECONDITION. Success commits the prefix, version and reverse zone
+	// together; a zone is created only for zone-boundary-aligned prefixes.
+	// It does not configure site routing, router advertisements or DHCP relays.
+	AddNetworkSegmentPrefix(ctx context.Context, in *AddNetworkSegmentPrefixRequest, opts ...grpc.CallOption) (*NetworkSegment, error)
 	AttachNetworkSegmentToVpc(ctx context.Context, in *AttachNetworkSegmentToVpcRequest, opts ...grpc.CallOption) (*NetworkSegment, error)
 	DeleteNetworkSegment(ctx context.Context, in *NetworkSegmentDeletionRequest, opts ...grpc.CallOption) (*NetworkSegmentDeletionResult, error)
 	// TODO: This functionality should get integrated into NetworkSegmentSearchFilter
@@ -2186,6 +2201,16 @@ func (c *forgeClient) CreateNetworkSegment(ctx context.Context, in *NetworkSegme
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(NetworkSegment)
 	err := c.cc.Invoke(ctx, Forge_CreateNetworkSegment_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *forgeClient) AddNetworkSegmentPrefix(ctx context.Context, in *AddNetworkSegmentPrefixRequest, opts ...grpc.CallOption) (*NetworkSegment, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(NetworkSegment)
+	err := c.cc.Invoke(ctx, Forge_AddNetworkSegmentPrefix_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -7422,6 +7447,20 @@ type ForgeServer interface {
 	FindNetworkSegmentIds(context.Context, *NetworkSegmentSearchFilter) (*NetworkSegmentIdList, error)
 	FindNetworkSegmentsByIds(context.Context, *NetworkSegmentsByIdsRequest) (*NetworkSegmentList, error)
 	CreateNetworkSegment(context.Context, *NetworkSegmentCreationRequest) (*NetworkSegment, error)
+	// Admin-only: append the missing family to a live, Ready, unattached Underlay
+	// segment with one prefix. Matching any stored same-family prefix and settings
+	// returns the current segment without a write; different same-family settings
+	// fail with FAILED_PRECONDITION. Existing prefixes, IDs, addresses, policy and
+	// lifecycle are unchanged; the stored initial network_def is not modified.
+	// Existing SLAAC inference policy also applies to the added prefix.
+	// Invalid input, overlap with any NetworkPrefix or VPC-scoped VpcPrefix, and
+	// reused relay selectors return INVALID_ARGUMENT. A global VpcPrefix parent
+	// may overlap an unattached Underlay, as with initial network creation.
+	// Unknown segment IDs return NOT_FOUND; unsupported targets return
+	// FAILED_PRECONDITION. Success commits the prefix, version and reverse zone
+	// together; a zone is created only for zone-boundary-aligned prefixes.
+	// It does not configure site routing, router advertisements or DHCP relays.
+	AddNetworkSegmentPrefix(context.Context, *AddNetworkSegmentPrefixRequest) (*NetworkSegment, error)
 	AttachNetworkSegmentToVpc(context.Context, *AttachNetworkSegmentToVpcRequest) (*NetworkSegment, error)
 	DeleteNetworkSegment(context.Context, *NetworkSegmentDeletionRequest) (*NetworkSegmentDeletionResult, error)
 	// TODO: This functionality should get integrated into NetworkSegmentSearchFilter
@@ -8624,6 +8663,9 @@ func (UnimplementedForgeServer) FindNetworkSegmentsByIds(context.Context, *Netwo
 }
 func (UnimplementedForgeServer) CreateNetworkSegment(context.Context, *NetworkSegmentCreationRequest) (*NetworkSegment, error) {
 	return nil, status.Error(codes.Unimplemented, "method CreateNetworkSegment not implemented")
+}
+func (UnimplementedForgeServer) AddNetworkSegmentPrefix(context.Context, *AddNetworkSegmentPrefixRequest) (*NetworkSegment, error) {
+	return nil, status.Error(codes.Unimplemented, "method AddNetworkSegmentPrefix not implemented")
 }
 func (UnimplementedForgeServer) AttachNetworkSegmentToVpc(context.Context, *AttachNetworkSegmentToVpcRequest) (*NetworkSegment, error) {
 	return nil, status.Error(codes.Unimplemented, "method AttachNetworkSegmentToVpc not implemented")
@@ -10968,6 +11010,24 @@ func _Forge_CreateNetworkSegment_Handler(srv interface{}, ctx context.Context, d
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(ForgeServer).CreateNetworkSegment(ctx, req.(*NetworkSegmentCreationRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Forge_AddNetworkSegmentPrefix_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(AddNetworkSegmentPrefixRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ForgeServer).AddNetworkSegmentPrefix(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Forge_AddNetworkSegmentPrefix_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ForgeServer).AddNetworkSegmentPrefix(ctx, req.(*AddNetworkSegmentPrefixRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -20391,6 +20451,10 @@ var Forge_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "CreateNetworkSegment",
 			Handler:    _Forge_CreateNetworkSegment_Handler,
+		},
+		{
+			MethodName: "AddNetworkSegmentPrefix",
+			Handler:    _Forge_AddNetworkSegmentPrefix_Handler,
 		},
 		{
 			MethodName: "AttachNetworkSegmentToVpc",
