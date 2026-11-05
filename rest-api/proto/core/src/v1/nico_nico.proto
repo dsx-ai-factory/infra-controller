@@ -1298,9 +1298,11 @@ service Forge {
   rpc GetComponentPowerDetails(GetComponentPowerDetailsRequest) returns (GetComponentPowerDetailsResponse);
   // Dispatch a reset directly, without scheduling state-controller maintenance.
   // Valid devices proceed even when other targets cannot be resolved or accepted.
-  // Only SDN factory reset is implemented; it disrupts fabric traffic and restores
-  // SDN defaults without reinstalling NVOS. SUCCESS means accepted and tracked,
-  // not completed. A submission error may follow dispatch: do not automatically resubmit.
+  // The RMS backend supports SDN and NVOS factory reset on switches. SDN reset
+  // disrupts fabric traffic and restores SDN defaults without reinstalling NVOS.
+  // NVOS reset erases operating-system configuration and reboots the switch.
+  // SUCCESS means accepted and tracked, not completed. A submission error may
+  // follow dispatch: do not automatically resubmit.
   rpc ComponentReset(ComponentResetRequest) returns (ComponentResetResponse);
   // Observe the latest successfully recorded accepted reset for each device/action.
   // A failed or unknown submission attempt may leave an earlier reference in place.
@@ -11089,15 +11091,17 @@ message ComponentConfigureSwitchCertificateResponse {
   repeated ComponentResult results = 1;
 }
 
-// Reset operations supported by the component interface. Only SDN factory reset
-// is implemented; other valid action/target combinations return Unimplemented.
+// Reset operations supported by the component interface. The RMS backend supports
+// SDN and NVOS factory reset on switches. BMC resets return Unimplemented.
 enum ComponentResetAction {
   COMPONENT_RESET_ACTION_UNSPECIFIED = 0;
   // Reset the management controller on a compute, switch, or power shelf tray.
   COMPONENT_RESET_ACTION_BMC_RESET = 1;
   // Restore management-controller defaults on a compute, switch, or power shelf tray.
   COMPONENT_RESET_ACTION_BMC_FACTORY_RESET = 2;
-  // Restore the switch operating system to factory defaults; switch targets only.
+  // Erase switch operating-system configuration and reboot; switch targets only.
+  // Completion requires SSH access with factory-default credentials. Uses the RMS
+  // configured default NVL certificate domain; domain_name is invalid for this action.
   COMPONENT_RESET_ACTION_NVOS_FACTORY_RESET = 3;
   // Restore switch SDN configuration to factory defaults; switch targets only.
   COMPONENT_RESET_ACTION_SDN_FACTORY_RESET = 4;

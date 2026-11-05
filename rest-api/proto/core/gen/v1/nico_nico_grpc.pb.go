@@ -1677,9 +1677,11 @@ type ForgeClient interface {
 	GetComponentPowerDetails(ctx context.Context, in *GetComponentPowerDetailsRequest, opts ...grpc.CallOption) (*GetComponentPowerDetailsResponse, error)
 	// Dispatch a reset directly, without scheduling state-controller maintenance.
 	// Valid devices proceed even when other targets cannot be resolved or accepted.
-	// Only SDN factory reset is implemented; it disrupts fabric traffic and restores
-	// SDN defaults without reinstalling NVOS. SUCCESS means accepted and tracked,
-	// not completed. A submission error may follow dispatch: do not automatically resubmit.
+	// The RMS backend supports SDN and NVOS factory reset on switches. SDN reset
+	// disrupts fabric traffic and restores SDN defaults without reinstalling NVOS.
+	// NVOS reset erases operating-system configuration and reboots the switch.
+	// SUCCESS means accepted and tracked, not completed. A submission error may
+	// follow dispatch: do not automatically resubmit.
 	ComponentReset(ctx context.Context, in *ComponentResetRequest, opts ...grpc.CallOption) (*ComponentResetResponse, error)
 	// Observe the latest successfully recorded accepted reset for each device/action.
 	// A failed or unknown submission attempt may leave an earlier reference in place.
@@ -8456,9 +8458,11 @@ type ForgeServer interface {
 	GetComponentPowerDetails(context.Context, *GetComponentPowerDetailsRequest) (*GetComponentPowerDetailsResponse, error)
 	// Dispatch a reset directly, without scheduling state-controller maintenance.
 	// Valid devices proceed even when other targets cannot be resolved or accepted.
-	// Only SDN factory reset is implemented; it disrupts fabric traffic and restores
-	// SDN defaults without reinstalling NVOS. SUCCESS means accepted and tracked,
-	// not completed. A submission error may follow dispatch: do not automatically resubmit.
+	// The RMS backend supports SDN and NVOS factory reset on switches. SDN reset
+	// disrupts fabric traffic and restores SDN defaults without reinstalling NVOS.
+	// NVOS reset erases operating-system configuration and reboots the switch.
+	// SUCCESS means accepted and tracked, not completed. A submission error may
+	// follow dispatch: do not automatically resubmit.
 	ComponentReset(context.Context, *ComponentResetRequest) (*ComponentResetResponse, error)
 	// Observe the latest successfully recorded accepted reset for each device/action.
 	// A failed or unknown submission attempt may leave an earlier reference in place.
