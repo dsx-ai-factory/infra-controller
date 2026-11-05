@@ -5388,7 +5388,7 @@ impl DpuMachineStateHandler {
                     }
                 })?;
 
-                let dpf_managed_bf4 = is_dpf_managed_bf4(state, dpu_snapshot)?;
+                let dpf_used_for_ingestion = state.host_snapshot.config.dpf.used_for_ingestion;
 
                 // One access-info lookup serves both the general client
                 // and the credential op below.
@@ -5444,10 +5444,10 @@ impl DpuMachineStateHandler {
                     return Ok(outcome);
                 }
 
-                // DPF owns BF4 platform configuration. NICo still owns the
+                // DPF owns platform configuration for DPUs it ingested. NICo still owns the
                 // UEFI credential change performed below until DPF credential
                 // management is available.
-                if !dpf_managed_bf4 {
+                if !dpf_used_for_ingestion {
                     let boot_interface = None; // libredfish will choose the DPU
                     if self.enable_secure_boot {
                         dpu_redfish_client
@@ -5547,7 +5547,7 @@ impl DpuMachineStateHandler {
                     .await?;
                 }
 
-                let next_state = if dpf_managed_bf4 {
+                let next_state = if dpf_used_for_ingestion {
                     DpuInitState::WaitingForNetworkConfig
                 } else {
                     DpuInitState::PollingBiosSetup
