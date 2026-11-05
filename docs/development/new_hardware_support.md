@@ -198,13 +198,12 @@ Build the package from the workspace root:
 cargo build -p bmc-explorer-cli
 ```
 
-Then, run the CLI against the BMC using the supported nv-redfish exploration path:
+Then, run the CLI against the BMC:
 
 ```bash
 target/debug/bmc-explorer-cli \
   --username <bmc-user> \
   --password <bmc-password> \
-  --mode nv-redfish \
   --boot-mac <host-boot-interface-mac> \
   --bmc-port 443 \
   <bmc-ip>
@@ -214,15 +213,12 @@ target/debug/bmc-explorer-cli \
 
 `--bmc-port` is the (optional) port on which the BMC listens. HTTPS port 443 is the default; use `--bmc-port <port>` for a BMC listening elsewhere.
 
-The CLI itself defaults to `compare-result`, but new Site Explorer support must be tested explicitly with `--mode nv-redfish`, matching the deployed default. `--mode compare-result` is useful only when investigating a difference from the deprecated libredfish exploration path. It runs both implementations and logs report differences.
-
 For repeated timing tests, add `--benchmark <iterations>`. The benchmark runs the same exploration multiple times and suppresses the JSON report:
 
 ```bash
 target/debug/bmc-explorer-cli \
   --username <bmc-user> \
   --password <bmc-password> \
-  --mode nv-redfish \
   --benchmark 10 \
   <bmc-ip>
 ```
