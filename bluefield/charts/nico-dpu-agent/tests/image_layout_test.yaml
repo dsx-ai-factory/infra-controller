@@ -108,6 +108,8 @@ tests:
           path: spec.template.spec.containers[1].args[0]
           value: sidecar-mode
       - notExists:
+          path: spec.template.spec.containers[1].env
+      - notExists:
           path: spec.template.spec.containers[1].command
       - contains:
           path: spec.template.spec.containers[1].volumeMounts
@@ -178,6 +180,20 @@ tests:
           content:
             name: AGENT_PLATFORM_TYPE
             value: containerized
+
+  - it: should set the LLDP sidecar library path only when configured
+    set:
+      image:
+        repository: test
+        tag: test
+      lldpSidecar:
+        ldLibraryPath: /usr/lib/forge-runtime
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[1].env
+          content:
+            name: LD_LIBRARY_PATH
+            value: /usr/lib/forge-runtime
 
   - it: should hostPath-mount the host runtime directory read-only in the sidecar
     set:

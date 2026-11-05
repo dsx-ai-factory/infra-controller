@@ -254,6 +254,11 @@ spec:
           args:
             - sidecar-mode
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- with .Values.lldpSidecar.ldLibraryPath }}
+          env:
+            - name: LD_LIBRARY_PATH
+              value: {{ . | quote }}
+          {{- end }}
           {{- with .Values.lldpSidecar.resources }}
           resources:
             {{- toYaml . | nindent 12 }}
