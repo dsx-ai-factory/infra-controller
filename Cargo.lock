@@ -1512,6 +1512,7 @@ dependencies = [
  "base64",
  "bmc-vendor",
  "carbide-health-report",
+ "carbide-instrument",
  "carbide-ipxe-renderer",
  "carbide-libmlx-model",
  "carbide-macros",

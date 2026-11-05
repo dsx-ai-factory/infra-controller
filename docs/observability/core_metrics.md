@@ -292,6 +292,7 @@ This file contains a list of metrics exported by NVIDIA Infra Controller (NICo).
 <tr><td>carbide_ib_monitor_machines_with_unknown_pkeys_count</td><td>gauge</td><td>Number of machines where at least one port is assigned to a pkey value not associated with any partition ID</td></tr>
 <tr><td>carbide_ib_monitor_partial_failures_total</td><td>counter</td><td>Number of IB fabric monitor partial failures, by failure stage.</td></tr>
 <tr><td>carbide_ib_monitor_ufm_changes_applied_total</td><td>counter</td><td>Number of changes performed at UFM</td></tr>
+<tr><td>carbide_ib_partition_mtu_fallback_total</td><td>counter</td><td>Number of IB partition MTU fallbacks for unrecognized stored integers during row decoding</td></tr>
 <tr><td>carbide_ib_partition_pkey_missing_total</td><td>counter</td><td>Number of IB partitions missing a pkey, by controller state</td></tr>
 <tr><td>carbide_ib_partitions_count</td><td>gauge</td><td>Number of carbide_ib_partitions in the system</td></tr>
 <tr><td>carbide_ib_partitions_enqueuer_iteration_latency_milliseconds</td><td>histogram</td><td>The overall time it took to enqueue state handling tasks for all carbide_ib_partitions in the system</td></tr>
