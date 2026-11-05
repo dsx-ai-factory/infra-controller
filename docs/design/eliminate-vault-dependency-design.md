@@ -633,8 +633,9 @@ The overall effort is complete when a supported site can:
    without recording this validation decision, and no issue tracks it as of
    the section 8 snapshot.
 3. Resolved by [#5957](https://github.com/dsx-ai-factory/infra-controller/issues/5957):
-   `dsx-exchange-consumer` adds no reload mechanism. A file source reloads for
-   OAuth2 at the next token fetch; other sources rotate by restart.
+   `dsx-exchange-consumer` adds no reload mechanism. For OAuth2, a file source
+   or Vault applies a rotated credential at the next token fetch. Environment
+   credentials, and basic-auth credentials from any source, rotate by restart.
 4. What configuration selects each credential, KMS, and PKI provider, and what
    invalid or conflicting combinations fail startup? What upgrade and rollback
    window remains supported? This
