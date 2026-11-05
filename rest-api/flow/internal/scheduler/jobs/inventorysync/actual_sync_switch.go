@@ -6,6 +6,7 @@ package inventorysync
 import (
 	"context"
 	"encoding/json"
+	"slices"
 
 	"github.com/rs/zerolog/log"
 
@@ -20,7 +21,7 @@ import (
 // nvosPortsDescriptionKey holds Core's observed NVOS ports as inventory metadata.
 const nvosPortsDescriptionKey = "nvos_ports"
 
-// nvosIPDescriptionKey is the legacy scalar key removed when NVOS ports are synced.
+// nvosIPDescriptionKey holds the last known primary NVOS address.
 const nvosIPDescriptionKey = "nvos_ip"
 
 // ---------------------------------------------------------------------------
@@ -136,7 +137,8 @@ func syncSwitchStatuses(
 
 // syncSwitchNvosPorts mirrors every reported port, including unresolved ports.
 // Missing status and legacy NVOS info, or a failed fetch, leaves metadata untouched;
-// an empty port list replaces stale ports. Only the NVOS keys change, preserving
+// an empty port list replaces stale ports. The last known primary IP is retained
+// when no primary address is available. Only the NVOS keys change, preserving
 // concurrent updates to other description entries and component fields.
 func syncSwitchNvosPorts(
 	ctx context.Context,
@@ -161,28 +163,25 @@ func syncSwitchNvosPorts(
 		if ports == nil {
 			ports = []nicoapi.SwitchNvosPort{}
 		}
-		data, err := json.Marshal(ports)
+		patch := map[string]any{
+			nvosPortsDescriptionKey: ports,
+		}
+		ip := primarySwitchNvosIP(ports)
+		if ip != "" {
+			patch[nvosIPDescriptionKey] = ip
+		}
+		data, err := json.Marshal(patch)
 		if err != nil {
 			log.Error().Msgf("NVSwitch %s: unable to encode NVOS ports: %v", comp.ID, err)
 			continue
 		}
 		// Merge against the stored JSONB, not the earlier reconciliation snapshot.
-		// Retire the scalar key when a current port snapshot is available.
+		const mergedDescription = "(CASE WHEN jsonb_typeof(description) = 'object' THEN description ELSE '{}'::jsonb END) || ?::jsonb"
 		result, err := pool.DB.NewUpdate().
 			Model((*model.Component)(nil)).
-			Set(
-				"description = jsonb_set((CASE WHEN jsonb_typeof(description) = 'object' THEN description ELSE '{}'::jsonb END) - ?::text, ARRAY[?::text], ?::jsonb, true)",
-				nvosIPDescriptionKey,
-				nvosPortsDescriptionKey,
-				string(data),
-			).
+			Set("description = "+mergedDescription, string(data)).
 			Where("id = ?", comp.ID).
-			Where(
-				"description -> ?::text IS DISTINCT FROM ?::jsonb OR jsonb_exists(description, ?::text)",
-				nvosPortsDescriptionKey,
-				string(data),
-				nvosIPDescriptionKey,
-			).
+			Where("description IS DISTINCT FROM ("+mergedDescription+")", string(data)).
 			Exec(ctx)
 		if err != nil {
 			log.Error().Msgf("NVSwitch %s: unable to persist NVOS ports: %v", comp.ID, err)
@@ -197,4 +196,22 @@ func syncSwitchNvosPorts(
 			log.Info().Msgf("NVSwitch %s: synced %d NVOS ports", comp.ID, len(ports))
 		}
 	}
+}
+
+// primarySwitchNvosIP mirrors Core's legacy_switch_nvos_info selection: use the
+// first primary port, preferring its first IPv4 address over its first address.
+func primarySwitchNvosIP(ports []nicoapi.SwitchNvosPort) string {
+	primary := slices.IndexFunc(ports, func(port nicoapi.SwitchNvosPort) bool {
+		return port.IsPrimary
+	})
+	if primary < 0 || len(ports[primary].Addresses) == 0 {
+		return ""
+	}
+	addresses := ports[primary].Addresses
+	for _, address := range addresses {
+		if address.AddressFamily == corev1.AddressFamily_ADDRESS_FAMILY_V4.String() {
+			return address.Address
+		}
+	}
+	return addresses[0].Address
 }

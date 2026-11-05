@@ -1012,8 +1012,9 @@ func (c *grpcClient) FindSwitchRuntimeStatuses(ctx context.Context, switchIds []
 }
 
 // FindSwitchNvosPorts returns every observed NVOS port from status.nvos_ports.
-// It preserves Core's port and address ordering. Missing status falls back to
-// legacy nvos_info; switches with neither source are omitted.
+// It preserves Core's port and address ordering. An empty port list falls back to
+// legacy nvos_info when available. Without either port source, a present status
+// returns an empty slice; a missing status omits the switch.
 func (c *grpcClient) FindSwitchNvosPorts(ctx context.Context, switchIds []string) (map[string][]SwitchNvosPort, error) {
 	if len(switchIds) == 0 {
 		return nil, nil
@@ -1036,11 +1037,9 @@ func (c *grpcClient) FindSwitchNvosPorts(ctx context.Context, switchIds []string
 			if sid == "" {
 				continue
 			}
-			if sw.GetStatus() == nil {
-				legacy := sw.GetNvosInfo() //nolint:staticcheck // Support Core responses that omit status.
-				if legacy == nil {
-					continue
-				}
+			nvosPorts := sw.GetStatus().GetNvosPorts()
+			legacy := sw.GetNvosInfo() //nolint:staticcheck // Older Core populates status but omits nvos_ports.
+			if len(nvosPorts) == 0 && legacy != nil {
 				port := SwitchNvosPort{
 					MAC:         legacy.Mac,
 					ServicePort: legacy.Port,
@@ -1064,8 +1063,11 @@ func (c *grpcClient) FindSwitchNvosPorts(ctx context.Context, switchIds []string
 				result[sid] = []SwitchNvosPort{port}
 				continue
 			}
-			ports := make([]SwitchNvosPort, 0, len(sw.GetStatus().GetNvosPorts()))
-			for _, port := range sw.GetStatus().GetNvosPorts() {
+			if sw.GetStatus() == nil {
+				continue
+			}
+			ports := make([]SwitchNvosPort, 0, len(nvosPorts))
+			for _, port := range nvosPorts {
 				if port == nil {
 					continue
 				}

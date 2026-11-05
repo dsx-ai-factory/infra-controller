@@ -242,7 +242,7 @@ func (c *recordingForgeClient) FindSwitchesByIds(
 				Id:              &corev1.SwitchId{Id: id},
 				RackId:          &corev1.RackId{Id: "rack-" + id},
 				ControllerState: "state-" + id, //nolint:staticcheck // Exercise the legacy Core response fields still read by batch conversion.
-				NvosInfo:        nvosInfo,      //nolint:staticcheck // Exercise fallback only when Core omits status.
+				NvosInfo:        nvosInfo,      //nolint:staticcheck // Exercise fallback when Core omits status.nvos_ports.
 				BmcInfo:         &corev1.BmcInfo{Mac: &bmcMAC},
 				Status:          switchStatus,
 			})
@@ -658,10 +658,30 @@ func TestGrpcClient_FindSwitchNvosPorts(t *testing.T) {
 			]}`,
 		},
 		{
-			name:     "empty status reports empty ports despite legacy IP",
+			name: "unresolved status ports override legacy IP",
+			ids:  []string{"a"},
+			status: &corev1.SwitchStatus{
+				NvosPorts: []*corev1.SwitchNvosPortInfo{
+					{
+						Mac: &secondaryMAC,
+					},
+				},
+			},
+			legacy:   legacyInfo,
+			wantJSON: `{"a":[{"mac":"00:11:22:33:44:56","servicePort":null,"addresses":[],"isPrimary":false}]}`,
+		},
+		{
+			name:   "status without ports falls back to the legacy IPv4 endpoint",
+			ids:    []string{"a"},
+			status: &corev1.SwitchStatus{},
+			legacy: legacyInfo,
+			wantJSON: `{"a":[{"mac":"00:11:22:33:44:55","servicePort":22,
+				"addresses":[{"addressFamily":"ADDRESS_FAMILY_V4","address":"192.0.2.30"}],"isPrimary":true}]}`,
+		},
+		{
+			name:     "when no status port list or legacy info present, reports empty ports",
 			ids:      []string{"a"},
 			status:   &corev1.SwitchStatus{},
-			legacy:   legacyInfo,
 			wantJSON: `{"a":[]}`,
 		},
 		{

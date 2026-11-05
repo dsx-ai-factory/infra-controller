@@ -67,8 +67,9 @@ type Client interface {
 	FindSwitchRuntimeStatuses(ctx context.Context, switchIds []string) (map[string]ComponentRuntimeStatus, error)
 
 	// FindSwitchNvosPorts returns all status.nvos_ports, keyed by Core SwitchId.
-	// Missing status falls back to legacy nvos_info; switches with neither are omitted.
-	// A present status with no ports returns an empty slice.
+	// An empty port list falls back to legacy nvos_info when available.
+	// Without either port source, a present status returns an empty slice;
+	// a missing status omits the switch.
 	FindSwitchNvosPorts(ctx context.Context, switchIds []string) (map[string][]SwitchNvosPort, error)
 
 	// GetObservedNVLinkDomainMemberships returns valid rack/domain observations

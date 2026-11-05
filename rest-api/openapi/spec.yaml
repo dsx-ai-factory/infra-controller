@@ -14481,6 +14481,7 @@ paths:
                   $ref: '#/components/schemas/Tray'
               examples:
                 example-1:
+                  summary: Compute tray
                   value:
                     - id: fm100ht4v4mce2qstjnl8970nnj3ie6ecek4mtjn27pea4kre5gsa49jg0g
                       type: Compute
@@ -14497,6 +14498,51 @@ paths:
                         slotId: 1
                         trayIdx: 0
                         hostId: 1
+                      rackId: rack-01
+                      nvLinkDomainId: 59202b81-65fb-45ec-b3b8-91ab0ad3f34a
+                      nvosPorts: null
+                      taskStats:
+                        pendingTaskCount: 0
+                        activeTaskCount: 0
+                      health: null
+                nvswitch:
+                  summary: NVSwitch tray
+                  value:
+                    - id: c52f20b1-384d-4b1d-9e2e-42af3eb3e77a
+                      type: NVSwitch
+                      name: rack-01-nvswitch-01
+                      manufacturer: NVIDIA
+                      model: NVL-Switch
+                      serialNumber: MT2541X000123
+                      description: '{"nvos_ip":"192.0.2.20","rack_role":"nvlink-fabric"}'
+                      firmwareVersion: 2.1.0
+                      powerState: 'on'
+                      operationStatus: Ready
+                      leakStatus: NoLeak
+                      leakHandlingStatus: None
+                      position:
+                        slotId: 19
+                        trayIdx: 0
+                        hostId: 0
+                      bmcs:
+                        - type: BmcTypeHost
+                          macAddress: '02:00:00:01:00:10'
+                          ipAddress: 192.0.2.10
+                      nvosPorts:
+                        - mac: '02:00:00:01:00:20'
+                          servicePort: 22
+                          addresses:
+                            - addressFamily: IPv4
+                              address: 192.0.2.20
+                            - addressFamily: IPv6
+                              address: '2001:db8:1::20'
+                          isPrimary: true
+                        - mac: '02:00:00:01:00:21'
+                          servicePort: null
+                          addresses:
+                            - addressFamily: IPv4
+                              address: 198.51.100.21
+                          isPrimary: false
                       rackId: rack-01
                       nvLinkDomainId: 59202b81-65fb-45ec-b3b8-91ab0ad3f34a
                       taskStats:
@@ -16103,10 +16149,60 @@ paths:
                       hostId: 1
                     rackId: rack-01
                     nvLinkDomainId: 59202b81-65fb-45ec-b3b8-91ab0ad3f34a
+                    nvosPorts: null
                     taskStats:
                       pendingTaskCount: 0
                       activeTaskCount: 0
                     health: null
+                nvswitch:
+                  summary: NVSwitch tray
+                  description: Illustrative NVSwitch inventory with separate BMC and NVOS addresses; the primary NVOS port has both IPv4 and IPv6 addresses.
+                  value:
+                    id: c52f20b1-384d-4b1d-9e2e-42af3eb3e77a
+                    type: NVSwitch
+                    name: rack-01-nvswitch-01
+                    manufacturer: NVIDIA
+                    model: NVL-Switch
+                    serialNumber: MT2541X000123
+                    description: '{"nvos_ip":"192.0.2.20","rack_role":"nvlink-fabric"}'
+                    firmwareVersion: 2.1.0
+                    powerState: 'on'
+                    operationStatus: Ready
+                    leakStatus: NoLeak
+                    leakHandlingStatus: None
+                    position:
+                      slotId: 19
+                      trayIdx: 0
+                      hostId: 0
+                    bmcs:
+                      - type: BmcTypeHost
+                        macAddress: '02:00:00:01:00:10'
+                        ipAddress: 192.0.2.10
+                    nvosPorts:
+                      - mac: '02:00:00:01:00:20'
+                        servicePort: 22
+                        addresses:
+                          - addressFamily: IPv4
+                            address: 192.0.2.20
+                          - addressFamily: IPv6
+                            address: '2001:db8:1::20'
+                        isPrimary: true
+                      - mac: '02:00:00:01:00:21'
+                        servicePort: null
+                        addresses:
+                          - addressFamily: IPv4
+                            address: 198.51.100.21
+                        isPrimary: false
+                    rackId: rack-01
+                    nvLinkDomainId: 59202b81-65fb-45ec-b3b8-91ab0ad3f34a
+                    taskStats:
+                      pendingTaskCount: 0
+                      activeTaskCount: 0
+                    health:
+                      source: switch-aggregate-health
+                      observedAt: '2026-11-05T14:30:00Z'
+                      successes: []
+                      alerts: []
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '404':
@@ -27227,10 +27323,14 @@ components:
     Tray:
       title: Tray
       type: object
+      x-go-has-nullable-required-properties: true
+      x-go-nullable-required-properties:
+        - nvosPorts
       description: 'Tray represents a component within a rack (e.g. compute node, NVSwitch, power shelf)'
       required:
         - health
         - nvLinkDomainId
+        - nvosPorts
         - taskStats
       examples:
         - id: fm100ht4v4mce2qstjnl8970nnj3ie6ecek4mtjn27pea4kre5gsa49jg0g
@@ -27254,12 +27354,58 @@ components:
               ipAddress: 192.168.1.100
           rackId: rack-01
           nvLinkDomainId: 59202b81-65fb-45ec-b3b8-91ab0ad3f34a
+          nvosPorts: null
           taskStats:
             pendingTaskCount: 3
             activeTaskCount: 1
           health:
             source: aggregate-host-health
             observedAt: '2026-09-28T12:00:00Z'
+            successes: []
+            alerts: []
+        - id: c52f20b1-384d-4b1d-9e2e-42af3eb3e77a
+          type: NVSwitch
+          name: rack-01-nvswitch-01
+          manufacturer: NVIDIA
+          model: NVL-Switch
+          serialNumber: MT2541X000123
+          description: '{"nvos_ip":"192.0.2.20","rack_role":"nvlink-fabric"}'
+          firmwareVersion: 2.1.0
+          powerState: 'on'
+          operationStatus: Ready
+          leakStatus: NoLeak
+          leakHandlingStatus: None
+          position:
+            slotId: 19
+            trayIdx: 0
+            hostId: 0
+          bmcs:
+            - type: BmcTypeHost
+              macAddress: '02:00:00:01:00:10'
+              ipAddress: 192.0.2.10
+          nvosPorts:
+            - mac: '02:00:00:01:00:20'
+              servicePort: 22
+              addresses:
+                - addressFamily: IPv4
+                  address: 192.0.2.20
+                - addressFamily: IPv6
+                  address: '2001:db8:1::20'
+              isPrimary: true
+            - mac: '02:00:00:01:00:21'
+              servicePort: null
+              addresses:
+                - addressFamily: IPv4
+                  address: 198.51.100.21
+              isPrimary: false
+          rackId: rack-01
+          nvLinkDomainId: 59202b81-65fb-45ec-b3b8-91ab0ad3f34a
+          taskStats:
+            pendingTaskCount: 0
+            activeTaskCount: 0
+          health:
+            source: switch-aggregate-health
+            observedAt: '2026-11-05T14:30:00Z'
             successes: []
             alerts: []
       properties:
@@ -27288,7 +27434,7 @@ components:
           description: Serial number of the tray
         description:
           type: string
-          description: Description of the tray
+          description: Description of the tray.
         firmwareVersion:
           type: string
           description: Firmware version of the tray
@@ -27322,6 +27468,12 @@ components:
           description: BMC (Baseboard Management Controller) entries for the tray
           items:
             $ref: '#/components/schemas/BMCInfo'
+        nvosPorts:
+          x-go-required-nullable: true
+          type: [array, 'null']
+          description: Observed NVOS management ports for NVSwitch trays, including ports without addresses. Empty when no port data is available; null for other tray types.
+          items:
+            $ref: '#/components/schemas/SwitchNvosPortInfo'
         rackId:
           type: string
           description: ID of the Rack this Tray belongs to
@@ -27337,6 +27489,59 @@ components:
             - $ref: '#/components/schemas/AggregateHealth'
             - type: 'null'
           description: Latest Core aggregate health snapshot synchronized by Flow. Null when Core reports no aggregate health, including before the first successful inventory sync.
+    SwitchNvosPortInfo:
+      title: SwitchNvosPortInfo
+      type: object
+      x-go-has-nullable-required-properties: true
+      x-go-nullable-required-properties:
+        - mac
+        - servicePort
+      description: Observed NVOS management port.
+      required: [mac, servicePort, addresses, isPrimary]
+      properties:
+        mac:
+          type: [string, 'null']
+          description: MAC address of the NVOS management port, or null when unavailable.
+        servicePort:
+          type: [integer, 'null']
+          format: int64
+          minimum: 0
+          maximum: 4294967295
+          description: TCP service port for NVOS, or null when unavailable.
+        addresses:
+          type: array
+          description: Observed IP addresses. Empty when the port has no addresses.
+          items:
+            $ref: '#/components/schemas/IPAddress'
+        isPrimary:
+          type: boolean
+          description: Whether this is the operator-declared primary (eth0) NVOS port.
+      examples:
+        - mac: '00:11:22:33:44:55'
+          servicePort: 22
+          addresses:
+            - addressFamily: IPv4
+              address: 192.0.2.20
+          isPrimary: true
+    IPAddress:
+      title: IPAddress
+      type: object
+      description: IP address and its address family.
+      required: [addressFamily, address]
+      properties:
+        addressFamily:
+          type: string
+          enum:
+            - Unspecified
+            - IPv4
+            - IPv6
+          description: Address family reported for this IP address.
+        address:
+          type: string
+          description: IPv4 or IPv6 address.
+      examples:
+        - addressFamily: IPv4
+          address: 192.0.2.20
     TrayPosition:
       title: TrayPosition
       type: object

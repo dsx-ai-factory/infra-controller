@@ -31,6 +31,12 @@ func TestSyncSwitchNvosPorts(t *testing.T) {
 		],"isPrimary":true},
 		{"mac":"00:11:22:33:44:56","servicePort":null,"addresses":[],"isPrimary":false}
 	]`
+	const unresolvedPrimaryJSON = `[
+		{"mac":"00:11:22:33:44:55","servicePort":22,"addresses":[],"isPrimary":true},
+		{"mac":"00:11:22:33:44:56","servicePort":22,"addresses":[
+			{"addressFamily":"ADDRESS_FAMILY_V4","address":"192.0.2.21"}
+		],"isPrimary":false}
+	]`
 	tests := []struct {
 		name            string
 		before          string
@@ -43,20 +49,32 @@ func TestSyncSwitchNvosPorts(t *testing.T) {
 			name:   "initialize description with full ports",
 			before: `null`,
 			ports:  portsJSON,
-			want:   `{"nvos_ports":` + portsJSON + `}`,
+			want:   `{"nvos_ports":` + portsJSON + `,"nvos_ip":"192.0.2.20"}`,
 		},
 		{
-			name:            "migrate legacy key and preserve concurrent metadata",
+			name:            "update primary IP and preserve concurrent metadata",
 			before:          `{"nvos_ip":"192.0.2.1","operator":"keep"}`,
 			ports:           portsJSON,
 			concurrentWrite: true,
-			want:            `{"nvos_ports":` + portsJSON + `,"operator":"updated"}`,
+			want:            `{"nvos_ports":` + portsJSON + `,"nvos_ip":"192.0.2.20","operator":"updated"}`,
 		},
 		{
-			name:   "empty snapshot removes stale ports and scalar IP",
+			name:   "unchanged ports restore missing primary IP",
+			before: `{"nvos_ports":` + portsJSON + `}`,
+			ports:  portsJSON,
+			want:   `{"nvos_ports":` + portsJSON + `,"nvos_ip":"192.0.2.20"}`,
+		},
+		{
+			name:   "empty snapshot clears ports and retains last known primary IP",
 			before: `{"nvos_ip":"192.0.2.1","nvos_ports":` + portsJSON + `,"operator":"keep"}`,
 			ports:  `[]`,
-			want:   `{"nvos_ports":[],"operator":"keep"}`,
+			want:   `{"nvos_ports":[],"nvos_ip":"192.0.2.1","operator":"keep"}`,
+		},
+		{
+			name:   "unresolved primary retains last known IP despite resolved secondary",
+			before: `{"nvos_ip":"192.0.2.1","nvos_ports":` + portsJSON + `,"operator":"keep"}`,
+			ports:  unresolvedPrimaryJSON,
+			want:   `{"nvos_ports":` + unresolvedPrimaryJSON + `,"nvos_ip":"192.0.2.1","operator":"keep"}`,
 		},
 		{
 			name:   "missing NVOS information preserves stored ports",
@@ -123,6 +141,46 @@ func TestSyncSwitchNvosPorts(t *testing.T) {
 			syncSwitchNvosPorts(ctx, pool, client, map[string]*model.Component{switchID: &stored})
 			require.NoError(t, pool.DB.NewSelect().Table("component").ColumnExpr("xmin::text").Where("id = ?", component.ID).Scan(ctx, &afterVersion))
 			assert.Equal(t, beforeVersion, afterVersion, "unchanged inventory must not rewrite the component")
+		})
+	}
+}
+
+func TestPrimarySwitchNvosIP(t *testing.T) {
+	tests := []struct {
+		name  string
+		ports string
+		want  string
+	}{
+		{
+			name: "prefer first IPv4 on primary port over IPv6 and secondary addresses",
+			ports: `[
+				{"isPrimary":false,"addresses":[{"addressFamily":"ADDRESS_FAMILY_V4","address":"192.0.2.1"}]},
+				{"isPrimary":true,"addresses":[
+					{"addressFamily":"ADDRESS_FAMILY_V6","address":"2001:db8::20"},
+					{"addressFamily":"ADDRESS_FAMILY_V4","address":"192.0.2.20"},
+					{"addressFamily":"ADDRESS_FAMILY_V4","address":"192.0.2.21"}
+				]}
+			]`,
+			want: "192.0.2.20",
+		},
+		{
+			name: "fall back to first primary address when no IPv4 exists",
+			ports: `[{"isPrimary":true,"addresses":[
+				{"addressFamily":"ADDRESS_FAMILY_V6","address":"2001:db8::20"},
+				{"addressFamily":"ADDRESS_FAMILY_V6","address":"2001:db8::21"}
+			]}]`,
+			want: "2001:db8::20",
+		},
+		{
+			name:  "do not promote secondary port when primary is missing",
+			ports: `[{"isPrimary":false,"addresses":[{"addressFamily":"ADDRESS_FAMILY_V4","address":"192.0.2.1"}]}]`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var ports []nicoapi.SwitchNvosPort
+			require.NoError(t, json.Unmarshal([]byte(tt.ports), &ports))
+			assert.Equal(t, tt.want, primarySwitchNvosIP(ports))
 		})
 	}
 }
