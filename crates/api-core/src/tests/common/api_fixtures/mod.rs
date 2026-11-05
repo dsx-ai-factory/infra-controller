@@ -65,7 +65,7 @@ use carbide_secrets::credentials::{
 use carbide_secrets::test_support::credentials::TestCredentialManager;
 use carbide_secrets::{ChainedCredentialReader, CredentialSnapshot, UsernamePassword};
 use carbide_site_explorer::SiteExplorer;
-use carbide_site_explorer::config::{SiteExplorerConfig, SiteExplorerExploreMode};
+use carbide_site_explorer::config::SiteExplorerConfig;
 use carbide_site_explorer::test_support::MockEndpointExplorer;
 use carbide_spdm_controller::context::SpdmStateHandlerServices;
 use carbide_spdm_controller::handler::SpdmAttestationStateHandler;
@@ -1896,8 +1896,7 @@ async fn create_test_env_with_overrides_inner(
             rotate_switch_nvos_credentials: Arc::new(false.into()),
             dpu_policy: None,
             deprecated_force_dpu_nic_mode: None,
-            // Tests use MockEndpointExplorer. So this doesn't affect anything.
-            explore_mode: SiteExplorerExploreMode::NvRedfish,
+            deprecated_explore_mode: None,
             explore_drive_firmware: false,
         },
         test_meter.meter(),

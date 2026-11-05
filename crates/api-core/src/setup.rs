@@ -627,7 +627,6 @@ pub async fn start_runtime(runtime_inputs: RuntimeInputs<'_>) -> eyre::Result<So
             .site_explorer
             .rotate_switch_nvos_credentials
             .clone(),
-        carbide_config.site_explorer.explore_mode,
         carbide_config.site_explorer.explore_drive_firmware,
         db_pool.clone(),
     );

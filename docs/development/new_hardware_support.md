@@ -61,15 +61,7 @@ NICo discovers and manages bare-metal hosts through their BMC (Baseboard Managem
 | **[nv-redfish](https://github.com/NVIDIA/nv-redfish)** | Schema-driven, fast: site exploration reports, firmware inventory, sensor collection, health monitoring. | Site Explorer exploration (`crates/site-explorer/`), Hardware Health (`crates/health/src/`) |
 | **[libredfish](https://github.com/NVIDIA/libredfish)** | Stateful BMC interactions: boot config, BIOS setup, power control, account/credential management, lockdown | Site Explorer state controller operations (`crates/site-explorer/`) |
 
-Site Explorer uses `nv-redfish` by default to generate an `EndpointExplorationReport`. _Exploration through_ `libredfish` _is deprecated_; it remains temporarily available for comparison and transition testing through the `explore_mode` configuration setting (`SiteExplorerExploreMode`):
-
-| Mode | Behavior |
-|---|---|
-| `nv-redfish` | Generate the report with nv-redfish (default) |
-| `libredfish` | Generate the report with the deprecated libredfish exploration path |
-| `compare-result` | Run both paths and report differences for transition testing |
-
-Implement new exploration support in the `nv-redfish` path. Do not add new hardware support only to the deprecated libredfish exploration path. Stateful operations such as boot order, BIOS setup, lockdown, and credential rotation still use libredfish, so both libraries may need changes for a complete platform integration.
+Site Explorer generates every `EndpointExplorationReport` with `nv-redfish`, so implement new exploration support there. Stateful operations such as boot order, BIOS setup, lockdown, and credential rotation still use libredfish, so both libraries may need changes for a complete platform integration.
 
 Beyond the Redfish libraries, **NICo itself** has vendor-aware logic that also needs updating - see [Changes in NICo](#changes-in-nico).
 
