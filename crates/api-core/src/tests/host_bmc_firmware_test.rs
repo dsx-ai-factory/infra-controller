@@ -2030,6 +2030,101 @@ async fn test_manual_firmware_upgrade_workflow(pool: sqlx::PgPool) -> CarbideRes
     Ok(())
 }
 
+/// A drive component is upgraded only through Scout. Without a script URL or a
+/// packaged script it stops with an error and never falls back to the Redfish
+/// upload the same entry would take as another component.
+#[crate::sqlx_test]
+async fn test_drive_without_scout_script_errors_instead_of_redfish_upload(
+    pool: sqlx::PgPool,
+) -> CarbideResult<()> {
+    let model = model::firmware::DriveModel::new("KCD8DPUG15T3").unwrap();
+    let drive = FirmwareComponentType::Drive { model };
+    let mut config = get_config();
+    config.host_models = HashMap::from([(
+        "1".to_string(),
+        Firmware {
+            vendor: bmc_vendor::BMCVendor::Dell,
+            model: "PowerEdge R750".to_string(),
+            explicit_start_needed: false,
+            components: HashMap::from([(
+                drive,
+                FirmwareComponent {
+                    current_version_reported_as: Some(Regex::new("^Drive_KCD8DPUG15T3_").unwrap()),
+                    preingest_upgrade_when_below: None,
+                    known_firmware: vec![FirmwareEntry::standard("1XET7107")],
+                },
+            )]),
+            ordering: vec![drive],
+        },
+    )]);
+    let env = create_test_env_with_overrides(pool, TestEnvOverrides::with_config(config)).await;
+    let mh = common::api_fixtures::create_managed_host(&env).await;
+
+    let mut txn = env.pool.begin().await.unwrap();
+    let host = mh.host().db_machine(&mut txn).await;
+    let address = host.status.bmc_info.ip_addr().unwrap();
+    let mut endpoint = db::explored_endpoints::find_by_ips(txn.as_mut(), vec![address])
+        .await
+        .unwrap()
+        .remove(0);
+    endpoint.report.service[0]
+        .inventories
+        .push(model::site_explorer::Inventory {
+            id: "Drive_KCD8DPUG15T3_drive_bay_0".to_string(),
+            version: Some("1XET7106".to_string()),
+            ..Default::default()
+        });
+    assert_eq!(
+        db::explored_endpoints::try_update(
+            address,
+            endpoint.report_version,
+            &endpoint.report,
+            false,
+            &mut txn,
+        )
+        .await
+        .unwrap(),
+        db::ConditionalWrite::Applied(())
+    );
+    let checking = HostReprovisionState::CheckingFirmwareV2 {
+        firmware_type: None,
+        firmware_number: None,
+    };
+    let state = ManagedHostState::HostReprovision {
+        reprovision_state: checking.clone(),
+        retry_count: 0,
+    };
+    db::machine::advance(&host, &mut txn, &state, None)
+        .await
+        .unwrap();
+    txn.commit().await.unwrap();
+
+    env.run_machine_state_controller_iteration().await;
+
+    let mut txn = env.pool.begin().await.unwrap();
+    let host = mh.host().db_machine(&mut txn).await;
+    let ManagedHostState::HostReprovision {
+        reprovision_state, ..
+    } = host.current_state()
+    else {
+        panic!("Not in HostReprovision: {:?}", host.current_state());
+    };
+    assert_eq!(reprovision_state, &checking);
+    let Some(PersistentStateHandlerOutcome::Error { err, .. }) = &host.controller_state_outcome
+    else {
+        panic!(
+            "expected an Error outcome, got {:?}",
+            host.controller_state_outcome
+        );
+    };
+    assert!(
+        err.contains("no scout firmware script for drive model KCD8DPUG15T3"),
+        "{err}"
+    );
+
+    Ok(())
+}
+
 /// Helper: set `host` to WaitingForScoutUpgrade with the given deadline and result.
 async fn put_in_waiting_for_scout_upgrade(
     env: &common::api_fixtures::TestEnv,
