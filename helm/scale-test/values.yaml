@@ -30,10 +30,38 @@ suites:
   probe:
     enabled: false
     weight: 2
+  inventory:
+    enabled: false
+    weight: 3
 
 # Base URL of the probe Service (SCALE_TEST_PROBE_URL) for the probe suite. When
 # unset, the enabled probe fixture fails rather than skipping.
 probeUrl: ""
+
+# The inventory suite reads MAT Pods and Services in a target namespace and
+# makes one verified nico-api Version call. When enabled, `namespace` and
+# `clientSecret` are required and a namespace-scoped read Role/Binding is made
+# there; the expected counts/release come from a precheck (the fixture fails if
+# any is unset). No secret values are set inline.
+inventory:
+  namespace: ""         # the MAT namespace to read and bind reads in
+  selector: "app.kubernetes.io/component=machine-a-tron"
+  clientSecret: ""      # existing Secret (tls.crt, tls.key, ca.crt) in the release namespace
+  spiffe:
+    trustDomain: ""
+    serviceBasePaths: "" # comma-separated
+    machineBasePath: ""
+    serverName: ""
+  # Each count defaults to empty so an omitted one fails the fixture, not passes
+  # as a supplied zero; set an explicit 0 only where a type is genuinely absent.
+  expected:
+    racks: ""
+    hosts: ""
+    switches: ""
+    powerShelves: ""
+    dpus: ""
+    minServices: ""
+    release: ""
 
 # The Job deadline and the go test timeout for each suite, both positive
 # integer seconds (the timeout renders as a Go duration such as 480s).

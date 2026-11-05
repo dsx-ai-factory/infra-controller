@@ -151,7 +151,7 @@ tests:
       suites.bogus.enabled: true
     asserts:
       - failedTemplate:
-          errorMessage: unknown suite "bogus"; the known suites are cluster and probe
+          errorMessage: unknown suite "bogus"; the known suites are cluster, probe and inventory
 
   - it: fails when the image repository is missing
     set:
@@ -225,3 +225,117 @@ tests:
     asserts:
       - failedTemplate:
           errorMessage: testBudget.testTimeoutSeconds must be a positive integer number of seconds (1 to 2147483647)
+
+  - it: renders the inventory suite with its target namespace, prechecks and cert mount
+    set:
+      suites.cluster.enabled: false
+      suites.inventory.enabled: true
+      inventory:
+        namespace: mat-ns
+        clientSecret: nico-cert
+        expected:
+          racks: 0
+          release: v2026.1
+    asserts:
+      - hasDocuments:
+          count: 1
+      - equal:
+          path: spec.template.spec.containers[0].command
+          value: ["/tests/inventory.test"]
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: "-test.run=^TestAcceptance$"
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: SCALE_TEST_NAMESPACE
+            value: mat-ns
+          any: true
+      - contains:  # explicit zero renders "0"; an omitted count renders "" (fails)
+          path: spec.template.spec.containers[0].env
+          content:
+            name: SCALE_TEST_EXPECTED_RACKS
+            value: "0"
+          any: true
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: SCALE_TEST_EXPECTED_HOSTS
+            value: ""
+          any: true
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: SCALE_TEST_EXPECTED_SWITCHES
+            value: ""
+          any: true
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: SCALE_TEST_EXPECTED_POWER_SHELVES
+            value: ""
+          any: true
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: SCALE_TEST_EXPECTED_DPUS
+            value: ""
+          any: true
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: SCALE_TEST_EXPECTED_MIN_SERVICES
+            value: ""
+          any: true
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: SCALE_TEST_RELEASE
+            value: v2026.1
+          any: true
+      - contains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content:
+            name: nico-client-cert
+            mountPath: /var/run/secrets/spiffe.io
+            readOnly: true
+          any: true
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: nico-client-cert
+            secret:
+              secretName: nico-cert
+          any: true
+
+  - it: defaults an omitted racks count to empty, not zero
+    set:
+      suites.cluster.enabled: false
+      suites.inventory.enabled: true
+      inventory.namespace: mat-ns
+      inventory.clientSecret: nico-cert
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: SCALE_TEST_EXPECTED_RACKS
+            value: ""
+          any: true
+
+  - it: fails when the inventory suite lacks its namespace
+    set:
+      suites.cluster.enabled: false
+      suites.inventory.enabled: true
+      inventory.clientSecret: nico-cert
+    asserts:
+      - failedTemplate:
+          errorMessage: inventory.namespace is required when the inventory suite is enabled
+
+  - it: fails when the inventory suite lacks its client Secret
+    set:
+      suites.cluster.enabled: false
+      suites.inventory.enabled: true
+      inventory.namespace: mat-ns
+    asserts:
+      - failedTemplate:
+          errorMessage: inventory.clientSecret is required when the inventory suite is enabled
