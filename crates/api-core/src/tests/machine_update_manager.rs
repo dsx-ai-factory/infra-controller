@@ -37,6 +37,7 @@ use tokio_util::sync::CancellationToken;
 use crate::cfg::file::CarbideConfig;
 use crate::machine_update_manager::MachineUpdateManager;
 use crate::machine_update_manager::machine_update_module::MachineUpdateModule;
+use crate::machine_update_manager::metrics::FirmwareUpdateProgress;
 use crate::tests::common;
 use crate::tests::common::api_fixtures::create_managed_host;
 use crate::{CarbideError, CarbideResult};
@@ -76,7 +77,10 @@ impl MachineUpdateModule for TestUpdateModule {
         Ok(self.updates_started.clone())
     }
 
-    async fn clear_completed_updates(&self, txn: &mut PgConnection) -> CarbideResult<()> {
+    async fn clear_completed_updates(
+        &self,
+        txn: &mut PgConnection,
+    ) -> CarbideResult<Vec<FirmwareUpdateProgress>> {
         if let Some(host_id) = self.cleanup_marker {
             let query = "UPDATE machines SET update_complete = true WHERE id = $1";
             sqlx::query(query)
@@ -89,7 +93,7 @@ impl MachineUpdateModule for TestUpdateModule {
             (*guard) += 1;
         }
 
-        Ok(())
+        Ok(Vec::new())
     }
 
     async fn update_metrics(

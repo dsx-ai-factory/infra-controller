@@ -223,10 +223,14 @@ impl MachineUpdateManager {
 
         let mut txn = update_transaction(&self.database_connection, &work_lock).await?;
 
+        let mut completion_events = Vec::new();
         for update_module in self.update_modules.iter() {
-            update_module.clear_completed_updates(&mut txn).await?;
+            completion_events.extend(update_module.clear_completed_updates(&mut txn).await?);
         }
         txn.commit().await?;
+        for event in completion_events {
+            carbide_instrument::emit(event);
+        }
 
         let mut txn = Transaction::begin(&self.database_connection).await?;
 
