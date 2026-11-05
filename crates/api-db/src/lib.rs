@@ -81,6 +81,9 @@ pub mod network_prefix;
 pub mod network_security_group;
 pub mod network_segment;
 pub mod nic_firmware;
+// Staged Domain API implementation: https://github.com/dsx-ai-factory/infra-controller/issues/7426.
+#[allow(dead_code)]
+mod nvlink_domain;
 pub mod nvl_logical_partition;
 pub mod nvl_partition;
 pub mod nvlink_domain_health_report;
