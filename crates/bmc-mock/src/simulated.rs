@@ -161,7 +161,18 @@ impl ActorCallbacks<Message> for Backend {
     async fn message(&mut self, mailbox: &ActorMailbox<Message>, message: Message) -> ActorResult {
         match message {
             Message::Reset { reset_type, reply } => {
-                reply.send(self.reset(mailbox, reset_type)).ok();
+                let result = self.reset(mailbox, reset_type);
+                // A power cycle completes later, in CycleCompleted.
+                if result.is_ok()
+                    && !matches!(
+                        reset_type,
+                        ResourceResetType::PowerCycle | ResourceResetType::FullPowerCycle
+                    )
+                    && let Some(state) = self.state.upgrade()
+                {
+                    state.record_power_command_completed(reset_type);
+                }
+                reply.send(result).ok();
             }
             Message::ResetBmcToDefaults { update, reply } => {
                 // Publication belongs to the actor even if the HTTP caller has gone away.
@@ -172,6 +183,9 @@ impl ActorCallbacks<Message> for Backend {
                 self.cycling = false;
                 self.publish(PowerState::On);
                 self.publish_boot();
+                if let Some(state) = self.state.upgrade() {
+                    state.record_power_command_completed(ResourceResetType::PowerCycle);
+                }
             }
         }
         ActorResult::Noop
@@ -220,6 +234,92 @@ mod tests {
     use super::*;
     use crate::test_support::host_info;
     use crate::{HardwareType, MachineRouterOptions, machine_router};
+
+    async fn integrated_event_log_messages(router: &axum::Router) -> Vec<String> {
+        let response = router
+            .clone()
+            .oneshot(
+                Request::get("/redfish/v1/Managers/1/LogServices/IEL/Entries")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let entries: serde_json::Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        entries["Members"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|entry| entry["Message"].as_str().unwrap().to_owned())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn hpe_integrated_event_log_records_only_completed_commands() {
+        let stop = CancellationToken::new();
+        let (actor, callbacks) = SimulatedActor::new(stop.clone().drop_guard());
+        let callbacks = Arc::new(callbacks);
+        let (router, state) = machine_router(
+            &host_info(HardwareType::HpeProliantDl380aGen11),
+            callbacks.clone(),
+            "standalone-hpe".into(),
+            false,
+            MachineRouterOptions::default(),
+        );
+        let state = Arc::new(state);
+        let mut tasks = JoinSet::new();
+        actor.run(&state, &mut tasks, stop.clone());
+        let system = state.system_state.primary_system_odata_id().unwrap();
+        let reset = |reset_type: &'static str| {
+            router.clone().oneshot(
+                Request::post(format!("{system}/Actions/ComputerSystem.Reset"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"ResetType": reset_type}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+        };
+
+        assert_eq!(
+            reset("ForceRestart").await.unwrap().status(),
+            StatusCode::OK
+        );
+        assert_eq!(reset("ForceOff").await.unwrap().status(), StatusCode::OK);
+        // Rejected: the host is already off. A refused command is not logged.
+        assert_eq!(
+            reset("ForceOff").await.unwrap().status(),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(reset("On").await.unwrap().status(), StatusCode::OK);
+        assert_eq!(
+            integrated_event_log_messages(&router).await,
+            [
+                "Server reset.",
+                "Server power removed.",
+                "Server power restored."
+            ]
+        );
+
+        // A power cycle is logged when it completes, not when it is accepted.
+        assert_eq!(reset("PowerCycle").await.unwrap().status(), StatusCode::OK);
+        assert_eq!(integrated_event_log_messages(&router).await.len(), 3);
+        tokio::time::timeout(POWER_CYCLE_DELAY * 2, async {
+            while integrated_event_log_messages(&router).await.len() < 4 {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("power cycle did not complete");
+        assert_eq!(
+            integrated_event_log_messages(&router).await.last().unwrap(),
+            "Server reset."
+        );
+        stop.cancel();
+        tasks.shutdown().await;
+    }
 
     #[tokio::test]
     async fn standalone_bfb_installs_complete_through_backend_lifecycle() {
