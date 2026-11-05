@@ -58,6 +58,8 @@ use crate::endpoint::{BmcAddr, BmcCredentials, BmcEndpoint};
 use crate::metrics::CollectorRegistry;
 use crate::sink::{CollectorEvent, DataSink, EventContext};
 
+const INITIAL_RETRY_DELAY: Duration = Duration::from_secs(2);
+
 // gRPC ConnectivityState values for `connection_state`. 0 (UNKNOWN) is the gauge default.
 const IDLE: i64 = 1;
 const CONNECTING: i64 = 2;
@@ -343,6 +345,7 @@ struct GnmiClientProvider {
     switch_connect_host: String,
     port: u16,
     request_timeout: Duration,
+    initial_retry_delay: Duration,
     dangerously_skip_tls_verification: bool,
 
     // Streaming subscriptions build a fresh gNMI client on reconnect, so
@@ -975,6 +978,39 @@ pub(crate) fn spawn_gnmi_collector(
     tls_config: Option<MtlsProfileConfig>,
     retained: &mut GnmiRetainedCache,
 ) -> Result<Collector, HealthError> {
+    spawn_gnmi_collector_with_settings(
+        endpoint,
+        GnmiCollectorSettings {
+            gnmi_config,
+            initial_retry_delay: INITIAL_RETRY_DELAY,
+        },
+        credential_provider,
+        collector_registry,
+        data_sink,
+        tls_config,
+        retained,
+    )
+}
+
+pub(super) struct GnmiCollectorSettings<'a> {
+    pub(super) gnmi_config: &'a NvueGnmiConfig,
+    pub(super) initial_retry_delay: Duration,
+}
+
+pub(super) fn spawn_gnmi_collector_with_settings(
+    endpoint: &BmcEndpoint,
+    settings: GnmiCollectorSettings<'_>,
+    credential_provider: Arc<dyn CredentialProvider>,
+    collector_registry: Arc<CollectorRegistry>,
+    data_sink: Option<Arc<dyn DataSink>>,
+    tls_config: Option<MtlsProfileConfig>,
+    retained: &mut GnmiRetainedCache,
+) -> Result<Collector, HealthError> {
+    let GnmiCollectorSettings {
+        gnmi_config,
+        initial_retry_delay,
+    } = settings;
+
     let switch_id = endpoint.log_identity().into_owned();
 
     let switch_connect_host = endpoint.switch_connect_host_for_uri().into_owned();
@@ -985,6 +1021,7 @@ pub(crate) fn spawn_gnmi_collector(
         switch_connect_host,
         port: gnmi_config.gnmi_port,
         request_timeout: gnmi_config.request_timeout,
+        initial_retry_delay,
         dangerously_skip_tls_verification: gnmi_config.dangerously_skip_tls_verification,
         tls_config,
         credentials: Arc::new(GnmiCredentialCache::new(
@@ -1270,7 +1307,7 @@ async fn run_subscription<S, F, Fut, P>(
     P: FnMut(&proto::SubscribeResponse) -> Result<bool, tonic::Status>,
 {
     let mut backoff = ExponentialBackoff::new(&BackoffConfig {
-        initial: Duration::from_secs(2),
+        initial: client_provider.initial_retry_delay,
         max: Duration::from_secs(60),
     });
 
@@ -1750,6 +1787,7 @@ mod tests {
             switch_connect_host: addr.ip.to_string(),
             port: 9339,
             request_timeout: Duration::from_secs(1),
+            initial_retry_delay: INITIAL_RETRY_DELAY,
             dangerously_skip_tls_verification: false,
             tls_config: None,
             credentials: Arc::new(GnmiCredentialCache::new(provider, addr)),

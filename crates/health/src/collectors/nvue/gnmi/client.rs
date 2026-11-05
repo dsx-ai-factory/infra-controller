@@ -639,7 +639,10 @@ mod tests {
     use crate::collectors::nvue::gnmi::sample_processor::{
         GnmiSampleProcessor, NVUE_GNMI_SAMPLE_STREAM_ID,
     };
-    use crate::collectors::nvue::gnmi::subscriber::{GnmiStreamMetrics, spawn_gnmi_collector};
+    use crate::collectors::nvue::gnmi::subscriber::{
+        GnmiCollectorSettings, GnmiStreamMetrics, spawn_gnmi_collector,
+        spawn_gnmi_collector_with_settings,
+    };
     use crate::config::{
         NvueGnmiConfig, NvueGnmiMetricConfig, NvueGnmiMetricOutput, NvueGnmiResponseKeyLabel,
         NvueGnmiSubscriptionConfig, NvueGnmiSubscriptionMode,
@@ -1426,9 +1429,10 @@ mod tests {
                     tonic::Code::Unavailable
                 };
 
+                // The replacement may open before the server observes this RPC end.
+                // Check the count after receiving the replacement; `fail` still
+                // awaits this RPC's completion.
                 old.fail(code).await;
-
-                assert_eq!(service.active_requests.load(Ordering::SeqCst), 2);
 
                 if stream_index == 1 {
                     streams[0]
@@ -1447,7 +1451,11 @@ mod tests {
                     "reconnect must preserve requested paths and mode"
                 );
 
-                assert_eq!(service.active_requests.load(Ordering::SeqCst), 3);
+                assert_eq!(
+                    service.active_requests.load(Ordering::SeqCst),
+                    3,
+                    "active RPCs after reconnect for stream {stream_index}, retry {retry}"
+                );
 
                 replacement
                     .publish(sink, &format!("recovered-{stream_index}-{retry}"))
@@ -1494,9 +1502,12 @@ mod tests {
         config.paths.platform_general_enabled = false;
         config.paths.leak_sensors_enabled = true;
 
-        let collector = spawn_gnmi_collector(
+        let collector = spawn_gnmi_collector_with_settings(
             &endpoint,
-            &config,
+            GnmiCollectorSettings {
+                gnmi_config: &config,
+                initial_retry_delay: Duration::from_millis(10),
+            },
             credentials.clone(),
             registry,
             Some(sink.clone()),
@@ -1725,9 +1736,12 @@ mod tests {
             })),
         );
 
-        let collector = spawn_gnmi_collector(
+        let collector = spawn_gnmi_collector_with_settings(
             &endpoint,
-            &config,
+            GnmiCollectorSettings {
+                gnmi_config: &config,
+                initial_retry_delay: Duration::from_millis(10),
+            },
             Arc::new(DelayedRefreshProvider::default()),
             registry,
             Some(sink),
