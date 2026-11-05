@@ -1,0 +1,26 @@
+#!/bin/sh
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Checked-in stand-in for vmctl's BMC virsh shim in media boot tests (tests must
+# not generate executable scripts; see libvirt/mod.rs). Called as
+# `virsh --connect test://<control-directory> <command> <domain> [MEDIA_ID]`.
+# The control directory holds the domain state (`power`), the pending selection
+# (`selection`) and a `log` of commands; `<command>-fails` makes that command fail.
+directory=${2#test://}
+printf '%s\n' "$3" >> "$directory/log"
+if [ -e "$directory/$3-fails" ]; then
+  echo "$3 failed" >&2
+  exit 1
+fi
+case "$3" in
+  domblklist) printf 'Type Device Target Source\nfile cdrom sdc vm-media://media-1\n' ;;
+  boot-selection) cat "$directory/selection" ;;
+  domstate) cat "$directory/power" ;;
+  boot-default) printf '{"pending":{"boot_device":"disk"}}' > "$directory/selection" ;;
+  boot-once-media)
+    printf '{"pending":{"boot_device":"media","media_id":"%s"}}' "$5" > "$directory/selection"
+    ;;
+  start|reset) ;;
+  *) exit 1 ;;
+esac
