@@ -19,6 +19,7 @@ pub(crate) mod dpu_nic_firmware_metrics;
 mod host_firmware;
 pub(crate) mod machine_update_module;
 pub(crate) mod metrics;
+mod nic_firmware;
 
 use std::collections::{HashMap, HashSet};
 use std::io;
@@ -32,7 +33,7 @@ use carbide_utils::managed_loop::{self, LoopManager};
 use carbide_utils::periodic_timer::PeriodicTimer;
 use carbide_uuid::machine::HostMachineId;
 use db::Transaction;
-use db::work_lock_manager::{AcquireLockError, WorkLockManagerHandle};
+use db::work_lock_manager::{AcquireLockError, WorkLock, WorkLockManagerHandle};
 use host_firmware::HostFirmwareUpdate;
 use machine_update_module::MachineUpdateModule;
 use model::dpu_machine_update::DpuMachineUpdate;
@@ -114,6 +115,7 @@ impl MachineUpdateManager {
         {
             update_modules.push(Box::new(host_firmware));
         }
+        update_modules.push(Box::new(nic_firmware::NicFirmwareUpdate));
 
         MachineUpdateManager {
             database_connection,
@@ -194,7 +196,7 @@ impl MachineUpdateManager {
     pub(crate) async fn run_single_iteration(&self) -> CarbideResult<()> {
         let mut updates_started_count = 0;
 
-        let _lock = match self
+        let work_lock = match self
             .work_lock_manager_handle
             .try_acquire_lock(Self::ITERATION_WORK_KEY.into())
             .await
@@ -219,11 +221,14 @@ impl MachineUpdateManager {
             "Machine update manager acquired the lock",
         );
 
-        let mut txn = Transaction::begin(&self.database_connection).await?;
+        let mut txn = update_transaction(&self.database_connection, &work_lock).await?;
 
         for update_module in self.update_modules.iter() {
             update_module.clear_completed_updates(&mut txn).await?;
         }
+        txn.commit().await?;
+
+        let mut txn = Transaction::begin(&self.database_connection).await?;
 
         // current host machines in maintenance
         let mut current_updating_machines = HashSet::<HostMachineId>::new();
@@ -256,6 +261,7 @@ impl MachineUpdateManager {
             let updates_started = update_module
                 .start_updates(
                     &self.database_connection,
+                    &work_lock,
                     available_updates,
                     &current_updating_machines,
                     &snapshots,
@@ -318,6 +324,30 @@ impl MachineUpdateManager {
 
         Ok(())
     }
+}
+
+/// Begin a protected update transaction with a five-second per-statement
+/// limit, preserving a shorter operator limit. The cap and ownership fence
+/// remain until commit or rollback; connection acquisition and total transaction
+/// duration are not bounded here. A worker replaced by a takeover is rejected;
+/// nominal lease expiry without takeover still permits the transaction.
+/// Keep filesystem and network work outside this transaction.
+async fn update_transaction<'a>(
+    pool: &'a PgPool,
+    work_lock: &WorkLock,
+) -> CarbideResult<Transaction<'a>> {
+    let mut txn = Transaction::begin(pool).await?;
+    sqlx::query(
+        "SELECT set_config('statement_timeout', \
+            LEAST(NULLIF(setting::bigint, 0), $1::text::bigint)::text, true) \
+         FROM pg_settings WHERE name = 'statement_timeout'",
+    )
+    .bind(Duration::from_secs(5).as_millis().to_string())
+    .execute(txn.as_pgconn())
+    .await
+    .map_err(|error| db::DatabaseError::query("set machine update statement timeout", error))?;
+    work_lock.fence_transaction(txn.as_mut()).await?;
+    Ok(txn)
 }
 
 /// Whether `host_disable_autoupdate` lists the host. The list holds host IDs.

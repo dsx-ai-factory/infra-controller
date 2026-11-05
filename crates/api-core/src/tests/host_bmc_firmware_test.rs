@@ -1320,12 +1320,12 @@ async fn test_instance_upgrading_actual_part_3(
 
     update_manager.run_single_iteration().await.unwrap();
 
-    assert!(host.host_reprovision_requested.is_none()); // Should be cleared
+    let host = mh.host().db_machine(&mut txn).await;
+    assert!(host.host_reprovision_requested.is_none());
     let reqs = db::host_machine_update::find_upgrade_needed(&mut txn, true, false)
         .await
         .unwrap();
     assert!(reqs.is_empty());
-    let host = mh.host().db_machine(&mut txn).await;
 
     // Make sure TenantState agrees
     let instance = tinstance.db_instance(&mut txn).await;
