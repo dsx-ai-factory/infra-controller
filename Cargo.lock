@@ -2463,6 +2463,7 @@ dependencies = [
  "async-trait",
  "carbide-api-db",
  "carbide-api-model",
+ "carbide-health-report",
  "carbide-rack",
  "carbide-secrets",
  "carbide-utils",

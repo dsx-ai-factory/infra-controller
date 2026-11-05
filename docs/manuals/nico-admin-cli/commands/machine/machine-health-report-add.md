@@ -34,6 +34,8 @@ Predefined Template name. Use host-update for DPU Reprovision\
 
 - out-for-repair
 
+- compute-tray-due-for-swap
+
 - degraded
 
 - validation
