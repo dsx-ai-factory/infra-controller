@@ -19,6 +19,7 @@
 pub mod test_support {
     use std::collections::HashSet;
     use std::path::PathBuf;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
 
     use libnmxc::nmxc_model::{
@@ -59,6 +60,9 @@ pub mod test_support {
         _fail_after_n_creates: Option<Arc<Mutex<usize>>>,
         _grpc_pool: Option<NmxcClientPool>,
         _simulator_endpoint: Option<Endpoint>,
+        /// While set, `hello` fails on this client and the clients it created, simulating an
+        /// NMX-C that cannot be reached.
+        _hello_fails: Arc<AtomicBool>,
     }
 
     impl Default for NmxcSimClient {
@@ -69,6 +73,7 @@ pub mod test_support {
                 _fail_after_n_creates: None,
                 _grpc_pool: None,
                 _simulator_endpoint: None,
+                _hello_fails: Arc::new(AtomicBool::new(false)),
             }
         }
     }
@@ -169,6 +174,12 @@ pub mod test_support {
             client
         }
 
+        /// Makes `hello` fail (`true`) or succeed (`false`) for this client and every client
+        /// it has created or will create, so a test can take NMX-C down and bring it back.
+        pub fn set_hello_fails(&self, fails: bool) {
+            self._hello_fails.store(fails, Ordering::SeqCst);
+        }
+
         fn default_gpu_uids() -> Vec<u64> {
             vec![
                 0xdb488cb17978480,
@@ -235,6 +246,9 @@ pub mod test_support {
     #[::async_trait::async_trait]
     impl Nmxc for NmxcSimClient {
         async fn hello(&mut self, _gateway_id: &str) -> Result<nmxc_model::ServerHello, NmxcError> {
+            if self._hello_fails.load(Ordering::SeqCst) {
+                return Err(NmxcError::invalid_response("simulated NMX-C outage"));
+            }
             Ok(nmxc_model::ServerHello {
                 server_header: Some({
                     let mut header = Self::success_server_header();
@@ -534,6 +548,7 @@ pub mod test_support {
                 _fail_after_n_creates: self._fail_after_n_creates.clone(),
                 _grpc_pool: self._grpc_pool.clone(),
                 _simulator_endpoint: self._simulator_endpoint.clone(),
+                _hello_fails: self._hello_fails.clone(),
             }))
         }
     }

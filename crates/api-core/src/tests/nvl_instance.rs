@@ -315,6 +315,153 @@ async fn test_create_instance_with_nvl_config(pool: sqlx::PgPool) {
     assert_eq!(logical_partition_list.partition_ids.len(), 0);
 }
 
+/// Creates a host whose GPUs all join one logical partition. The instance
+/// builder runs the monitor until the group has nothing left to apply.
+async fn create_partitioned_host(env: &TestEnv) -> TestManagedHost {
+    let segment_id = env.create_vpc_and_tenant_segment().await;
+    let NvlLogicalPartitionFixture {
+        id: logical_partition_id,
+        logical_partition: _,
+    } = create_nvl_logical_partition(env, "test_partition".to_string()).await;
+    let mh = create_managed_host_with_hardware_info_template(
+        env,
+        HardwareInfoTemplate::Custom(
+            crate::tests::common::api_fixtures::host::GB200_COMPUTE_TRAY_1_INFO_JSON,
+        ),
+    )
+    .await;
+    let machine = mh.host().rpc_machine().await;
+    let nvl_config = rpc::forge::InstanceNvLinkConfig {
+        gpu_configs: machine
+            .status
+            .as_ref()
+            .unwrap()
+            .discovery_info
+            .as_ref()
+            .unwrap()
+            .gpus
+            .iter()
+            .filter_map(|gpu| {
+                gpu.platform_info.as_ref().map(|platform_info| {
+                    rpc::forge::InstanceNvLinkGpuConfig {
+                        device_instance: platform_info.module_id - 1,
+                        logical_partition_id: Some(logical_partition_id),
+                    }
+                })
+            })
+            .collect(),
+    };
+    let (_tinstance, instance) =
+        create_instance_with_nvlink_config(env, &mh, nvl_config, segment_id).await;
+    assert_eq!(instance.status().tenant(), rpc::TenantState::Ready);
+    mh
+}
+
+/// The partition monitor's merge report on a rack, if it carries one.
+async fn rack_partition_monitor_report(
+    pool: &sqlx::PgPool,
+    rack_id: &RackId,
+) -> Option<health_report::HealthReport> {
+    let reports: Option<sqlx::types::Json<model::health::HealthReportSources>> =
+        sqlx::query_scalar("SELECT health_reports FROM racks WHERE id = $1")
+            .bind(rack_id.as_str())
+            .fetch_one(pool)
+            .await
+            .expect("load rack health reports");
+    reports.and_then(|json| json.0.merges.get("nvlink-partition-monitor").cloned())
+}
+
+/// A rack whose NMX-C stays unusable gets a `NmxcUnreachable` alert from the
+/// monitor only after `partition_monitor_unreachable_alert_after` consecutive
+/// failed passes, the stored alert is not rewritten while the outage lasts,
+/// and the first pass that reaches NMX-C again clears it.
+#[crate::sqlx_test]
+async fn test_partition_monitor_debounces_rack_nmxc_unreachable_alert(pool: sqlx::PgPool) {
+    let mut config = common::api_fixtures::get_config();
+    let nvlink_config = config
+        .nvlink_config
+        .as_mut()
+        .expect("test config has nvlink_config");
+    nvlink_config.enabled = true;
+    nvlink_config.partition_monitor_unreachable_alert_after =
+        std::num::NonZeroU32::new(2).expect("non-zero");
+    let env = common::api_fixtures::create_test_env_with_overrides(
+        pool.clone(),
+        TestEnvOverrides::with_config(config),
+    )
+    .await;
+    let mh = create_partitioned_host(&env).await;
+
+    let rack_id: RackId = "rack_1".parse().expect("rack id");
+    let mut txn = pool.begin().await.expect("begin txn");
+    TestRackDbBuilder::new()
+        .with_rack_id(rack_id.clone())
+        .persist(&mut txn)
+        .await
+        .expect("create rack");
+    sqlx::query("UPDATE machines SET rack_id = $1 WHERE id = $2")
+        .bind(rack_id.as_str())
+        .bind(mh.id)
+        .execute(txn.as_mut())
+        .await
+        .expect("set machine rack_id");
+    txn.commit().await.expect("commit rack");
+    create_rack_switch_for_nmxc_simulator(&env, &rack_id).await;
+
+    env.run_nvl_partition_monitor_iteration().await;
+    assert!(
+        rack_partition_monitor_report(&pool, &rack_id)
+            .await
+            .is_none(),
+        "a reachable rack carries no report"
+    );
+
+    env.nmxc_sim_client.set_hello_fails(true);
+    env.run_nvl_partition_monitor_iteration().await;
+    assert!(
+        rack_partition_monitor_report(&pool, &rack_id)
+            .await
+            .is_none(),
+        "one failed pass is below the threshold"
+    );
+
+    env.run_nvl_partition_monitor_iteration().await;
+    let report = rack_partition_monitor_report(&pool, &rack_id)
+        .await
+        .expect("second consecutive failure raises the alert");
+    let [alert] = report.alerts.as_slice() else {
+        panic!("expected one alert, got {:?}", report.alerts);
+    };
+    assert_eq!(alert.id, health_report::HealthProbeId::nmxc_unreachable());
+    assert!(
+        alert
+            .target
+            .as_deref()
+            .is_some_and(|t| t.starts_with("http")),
+        "target is the rack's NMX-C endpoint URL, got {:?}",
+        alert.target
+    );
+    assert_eq!(
+        alert.classifications,
+        vec![health_report::HealthAlertClassification::hardware()]
+    );
+
+    env.run_nvl_partition_monitor_iteration().await;
+    assert_eq!(
+        rack_partition_monitor_report(&pool, &rack_id).await,
+        Some(report),
+        "a stored alert is not rewritten while the outage continues"
+    );
+
+    env.nmxc_sim_client.set_hello_fails(false);
+    env.run_nvl_partition_monitor_iteration().await;
+    assert!(
+        rack_partition_monitor_report(&pool, &rack_id)
+            .await
+            .is_none(),
+        "the first reachable pass clears the alert"
+    );
+}
 #[crate::sqlx_test]
 async fn test_detach_gpus_from_partition_by_clearing_nvlink_config(pool: sqlx::PgPool) {
     // In our tests so far, we detach a GPU from a partition by setting the logical partition ID in the
