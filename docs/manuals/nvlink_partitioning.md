@@ -119,12 +119,19 @@ Each reconciliation pass does the following:
 
 1. Loads every NVLink Logical Partition and every NVLink Physical Partition
    from the NICo database.
-2. Queries each configured NMX-M and / or NMX-C endpoint for the current
+1. Queries each configured NMX-M and / or NMX-C endpoint for the current
    partition list and GPU membership on that endpoint's chassis or domain.
-3. Compares observed state against desired state.
-4. Issues create / update / remove operations to the fabric-management
+1. Raises or clears the per-rack
+   [`NmxcUnreachable`](../architecture/health/health_probe_ids.md#nmxcunreachable)
+   health report. A rack whose NMX-C could not be used for
+   `nvlink_config.partition_monitor_unreachable_alert_after` consecutive passes
+   (default `3`) gets a `Hardware` alert naming the endpoint and the failing
+   step; the first pass that reaches NMX-C again clears it. The alert does not
+   block allocations.
+1. Compares observed state against desired state.
+1. Issues create / update / remove operations to the fabric-management
    service to converge it onto desired state.
-5. Updates per-machine GPU status observations in the NICo database. The
+1. Updates per-machine GPU status observations in the NICo database. The
    per-instance `configs_synced.nvlink` field is derived from these
    observations and is what gates the instance's `Ready` state.
 
@@ -231,6 +238,9 @@ The TOML toggles live alongside the NMX-M ones under `[nvlink_config]`:
 [nvlink_config]
 enabled = true
 monitor_run_interval = "60s"
+# Consecutive passes a rack's NMX-C must be unusable before its
+# NmxcUnreachable alert is raised; the first reachable pass clears it.
+partition_monitor_unreachable_alert_after = 3
 
 # Optional TLS material for NMX-C. Leave unset to use the system trust
 # store and present no client certificate.

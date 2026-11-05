@@ -21,10 +21,11 @@ mod errors;
 mod metrics;
 pub mod nmx_c_endpoint;
 pub mod nvlink;
+mod rack_alert;
 mod switch_cert_monitor;
 
 use std::io;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use carbide_secrets::credentials::CredentialManager;
@@ -42,6 +43,7 @@ use db::nvl_partition::IdColumn;
 use db::work_lock_manager::WorkLockManagerHandle;
 use db::{self, ObjectColumnFilter, TransactionVending, machine};
 use errors::{NvLinkManagerError, NvLinkManagerResult};
+use health_report::HealthReportApplyMode;
 use libnmxc::nmxc_model::{
     GetComputeNodeInfoListRequest, GetGpuInfoListRequest, GetPartitionInfoListRequest,
     PartitionInfo,
@@ -60,6 +62,7 @@ use model::machine::{HostHealthConfig, LoadSnapshotOptions, ManagedHostStateSnap
 use model::nvl_logical_partition::LogicalPartition;
 use model::nvl_partition::{NvlPartition, NvlPartitionName};
 use model::rack_type::RackProfileConfig;
+use rack_alert::{RackAlertAction, RackUnreachableTracker, nmxc_unreachable_report};
 use sqlx::PgPool;
 #[cfg(feature = "test-support")]
 pub use switch_cert_monitor::{SwitchCertificateMonitor, SwitchCertificateMonitorIterationResult};
@@ -74,6 +77,9 @@ pub const DEFAULT_NMX_M_NAME: &str = "default";
 /// partition per tray and 18 tray default partitions, this is floor(1024 / 18) rounded down
 /// to the nearest multiple of 4.
 const NMX_C_PARTITION_MULTICAST_GROUPS_LIMIT: u32 = 56;
+
+/// Source name of the health reports the partition monitor writes on racks.
+const NVLINK_PARTITION_MONITOR_REPORT_SOURCE: &str = "nvlink-partition-monitor";
 
 fn rack_id_from_chassis_snapshots(
     chassis_snapshots: &[&ManagedHostStateSnapshot],
@@ -967,6 +973,9 @@ pub struct NvlPartitionMonitor {
     host_health: HostHealthConfig,
     metric_holder: Arc<metrics::MetricHolder>,
     work_lock_manager_handle: WorkLockManagerHandle,
+    /// Consecutive passes each rack's NMX-C was unusable, for the rack's
+    /// debounced `NmxcUnreachable` alert.
+    rack_unreachable: Mutex<RackUnreachableTracker>,
 }
 
 pub struct NvLinkManager {
@@ -1085,6 +1094,7 @@ impl NvlPartitionMonitor {
             host_health,
             metric_holder,
             work_lock_manager_handle,
+            rack_unreachable: Mutex::new(RackUnreachableTracker::default()),
         }
     }
 
@@ -1235,7 +1245,31 @@ impl NvlPartitionMonitor {
         let mut total_completed_operations = 0;
         let mut pending_null_nvlink_observations = Vec::new();
 
+        // Every rack with managed hosts, and this pass's NMX-C outcome for each chassis
+        // in a rack, for the rack's debounced `NmxcUnreachable` alert. A chassis counts
+        // as unusable only when the pass stops before reconciling; work that fails after
+        // Hello succeeded is a reachable NMX-C.
+        let mut managed_rack_ids: HashSet<RackId> = HashSet::new();
+        let mut rack_endpoints: HashMap<RackId, String> = HashMap::new();
+        let mut chassis_outcomes: Vec<(RackId, Option<ChassisNmxCUnreachableReason>)> = Vec::new();
+
         for (chassis_serial, chassis_snapshots) in &managed_host_snapshots_by_chassis_serial {
+            let rack_id = rack_id_from_chassis_snapshots(chassis_snapshots);
+            if let Some(rack_id) = &rack_id {
+                managed_rack_ids.insert(rack_id.clone());
+                if let Some(endpoint_url) = chassis_serial_to_resolved_endpoint.get(chassis_serial)
+                {
+                    rack_endpoints
+                        .entry(rack_id.clone())
+                        .or_insert_with(|| endpoint_url.clone());
+                }
+            }
+            let mut record_outcome = |reason: Option<ChassisNmxCUnreachableReason>| {
+                if let Some(rack_id) = &rack_id {
+                    chassis_outcomes.push((rack_id.clone(), reason));
+                }
+            };
+
             let Some(endpoint_url) = chassis_serial_to_resolved_endpoint.get(chassis_serial) else {
                 tracing::warn!(
                     %chassis_serial,
@@ -1247,6 +1281,7 @@ impl NvlPartitionMonitor {
                     chassis_snapshots,
                     ChassisNmxCUnreachableReason::NoEndpoint,
                 );
+                record_outcome(Some(ChassisNmxCUnreachableReason::NoEndpoint));
                 continue;
             };
 
@@ -1265,6 +1300,7 @@ impl NvlPartitionMonitor {
                         chassis_snapshots,
                         ChassisNmxCUnreachableReason::InvalidEndpointUri,
                     );
+                    record_outcome(Some(ChassisNmxCUnreachableReason::InvalidEndpointUri));
                     continue;
                 }
             };
@@ -1284,6 +1320,7 @@ impl NvlPartitionMonitor {
                         chassis_snapshots,
                         ChassisNmxCUnreachableReason::ClientCreateFailed,
                     );
+                    record_outcome(Some(ChassisNmxCUnreachableReason::ClientCreateFailed));
                     continue;
                 }
             };
@@ -1302,6 +1339,7 @@ impl NvlPartitionMonitor {
                         chassis_snapshots,
                         ChassisNmxCUnreachableReason::HelloFailed,
                     );
+                    record_outcome(Some(ChassisNmxCUnreachableReason::HelloFailed));
                     continue;
                 }
             };
@@ -1320,9 +1358,12 @@ impl NvlPartitionMonitor {
                         chassis_snapshots,
                         ChassisNmxCUnreachableReason::DomainUuidParseFailed,
                     );
+                    record_outcome(Some(ChassisNmxCUnreachableReason::DomainUuidParseFailed));
                     continue;
                 }
             };
+
+            record_outcome(None);
 
             // Endpoint + component versions for this chassis, so the metric-read failures below log them.
             metrics.nmxc.endpoint = endpoint_url.clone();
@@ -1411,12 +1452,163 @@ impl NvlPartitionMonitor {
             total_completed_operations += num_completed;
         }
 
+        // A rack is one NMX-C, so it is reachable this pass if any of its chassis
+        // got through, and unusable with the first chassis's reason otherwise.
+        let mut rack_outcomes: Vec<(RackId, Option<ChassisNmxCUnreachableReason>)> = Vec::new();
+        for (rack_id, reason) in chassis_outcomes {
+            match rack_outcomes.iter_mut().find(|(id, _)| *id == rack_id) {
+                Some((_, outcome)) => {
+                    if reason.is_none() {
+                        *outcome = None;
+                    }
+                }
+                None => rack_outcomes.push((rack_id, reason)),
+            }
+        }
+        // Before the fallible observation write: a failure there must not
+        // lose this pass's rack outcomes or leave a recovered rack alerted.
+        self.reconcile_rack_unreachable_alerts(&rack_outcomes, &rack_endpoints, &managed_rack_ids)
+            .await;
+
         self.record_null_nvlink_status_observations(&pending_null_nvlink_observations, metrics)
             .await?;
 
         metrics.num_completed_operations = total_completed_operations;
 
         Ok(total_completed_operations)
+    }
+
+    /// Raises or clears each rack's `NmxcUnreachable` merge report from this pass's outcomes.
+    ///
+    /// The alert is debounced by `partition_monitor_unreachable_alert_after`
+    /// consecutive unusable passes and cleared on the first pass that reaches
+    /// NMX-C. Which racks currently carry the report is read from the database
+    /// so a restart or an operator removal cannot desynchronise the two.
+    /// Racks with no managed hosts left have their reports cleared. Failures
+    /// are logged and never block partition reconciliation.
+    async fn reconcile_rack_unreachable_alerts(
+        &self,
+        outcomes: &[(RackId, Option<ChassisNmxCUnreachableReason>)],
+        endpoints: &HashMap<RackId, String>,
+        managed_rack_ids: &HashSet<RackId>,
+    ) {
+        let stored = match db::rack::find_ids_with_health_report_merge_source(
+            &self.db_pool,
+            NVLINK_PARTITION_MONITOR_REPORT_SOURCE,
+        )
+        .await
+        {
+            Ok(rack_ids) => rack_ids.into_iter().collect::<HashSet<RackId>>(),
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    "Failed to load racks with NmxcUnreachable alerts; rack alerts not updated this pass"
+                );
+                return;
+            }
+        };
+        if outcomes.is_empty() && stored.is_empty() {
+            return;
+        }
+
+        let threshold = self.config.partition_monitor_unreachable_alert_after.get();
+        let mut actions: Vec<(RackId, RackAlertAction)> = {
+            let mut tracker = self
+                .rack_unreachable
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            tracker.retain(|rack_id| managed_rack_ids.contains(rack_id));
+            let mut actions = outcomes
+                .iter()
+                .map(|(rack_id, reason)| {
+                    let action =
+                        tracker.observe(rack_id, *reason, threshold, stored.contains(rack_id));
+                    (rack_id.clone(), action)
+                })
+                .collect::<Vec<_>>();
+            // A rack not checked this pass yields no outcome, so a clear that
+            // failed on an earlier pass is retried here.
+            let checked: HashSet<&RackId> = outcomes.iter().map(|(rack_id, _)| rack_id).collect();
+            actions.extend(
+                tracker
+                    .pending_clears(&stored)
+                    .filter(|rack_id| !checked.contains(rack_id))
+                    .map(|rack_id| (rack_id, RackAlertAction::Clear)),
+            );
+            actions
+        };
+        actions.extend(
+            stored
+                .iter()
+                .filter(|rack_id| !managed_rack_ids.contains(rack_id))
+                .map(|rack_id| (rack_id.clone(), RackAlertAction::Clear)),
+        );
+
+        for (rack_id, action) in actions {
+            if action == RackAlertAction::Keep {
+                continue;
+            }
+            let write = async {
+                let mut conn = self.db_pool.acquire().await.map_err(|e| {
+                    NvLinkManagerError::internal(format!("Failed to acquire connection: {e}"))
+                })?;
+                match action {
+                    RackAlertAction::Keep => Ok(()),
+                    RackAlertAction::Set { reason, since } => {
+                        let endpoint = endpoints.get(&rack_id).map(String::as_str);
+                        tracing::warn!(
+                            %rack_id,
+                            endpoint = endpoint.unwrap_or("<none>"),
+                            ?reason,
+                            consecutive_passes = threshold,
+                            unreachable_since = %since,
+                            "NMX-C unusable for consecutive passes - setting NmxcUnreachable alert on rack"
+                        );
+                        let report = nmxc_unreachable_report(
+                            NVLINK_PARTITION_MONITOR_REPORT_SOURCE,
+                            endpoint,
+                            reason,
+                            since,
+                        );
+                        db::rack::insert_health_report(
+                            &mut conn,
+                            &rack_id,
+                            HealthReportApplyMode::Merge,
+                            &report,
+                        )
+                        .await
+                        .map_err(NvLinkManagerError::from)
+                    }
+                    RackAlertAction::Clear => {
+                        tracing::info!(%rack_id, "NMX-C reachable again - clearing NmxcUnreachable alert on rack");
+                        db::rack::remove_health_report(
+                            &mut conn,
+                            &rack_id,
+                            HealthReportApplyMode::Merge,
+                            NVLINK_PARTITION_MONITOR_REPORT_SOURCE,
+                        )
+                        .await
+                        .map_err(NvLinkManagerError::from)
+                    }
+                }
+            };
+            let written = match write.await {
+                Ok(()) => true,
+                Err(error) => {
+                    tracing::warn!(
+                        %rack_id,
+                        ?action,
+                        %error,
+                        "Failed to update the rack's NmxcUnreachable alert; retried next pass"
+                    );
+                    false
+                }
+            };
+            self.rack_unreachable
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .confirm(&rack_id, action, written);
+        }
     }
 
     /// Fetches partition list from NMX-C, checks for needed create/update/delete operations,

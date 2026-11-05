@@ -295,6 +295,8 @@ pub struct TestEnv {
     pub attestation_enabled: bool,
     pub site_explorer: SiteExplorer,
     pub nmxc_sim: Arc<dyn NmxcPool>,
+    /// The same simulator as `nmxc_sim`, kept concrete so tests can drive its failure modes.
+    pub nmxc_sim_client: Arc<NmxcSimClient>,
     /// True when the test env uses [`NmxcSimClient::simulator_for_nvlink_config`] (gRPC proxy to a local simulator).
     pub nmxc_grpc_simulator: bool,
     pub endpoint_explorer: MockEndpointExplorer,
@@ -1307,19 +1309,18 @@ pub async fn create_test_env_with_overrides(
         .unwrap_or_default();
 
     let nmxc_grpc_simulator = overrides.nmxc_simulator == Some(true);
-    let nmxc_sim: Arc<dyn NmxcPool> = if nmxc_grpc_simulator {
-        Arc::new(NmxcSimClient::simulator_for_nvlink_config(
-            &nvlink_for_nmxc_sim,
-        ))
+    let nmxc_sim_client = Arc::new(if nmxc_grpc_simulator {
+        NmxcSimClient::simulator_for_nvlink_config(&nvlink_for_nmxc_sim)
     } else if let Some(n) = overrides.nmxc_fail_after_n_creates {
-        Arc::new(NmxcSimClient::with_fail_after_n_creates(n))
+        NmxcSimClient::with_fail_after_n_creates(n)
     } else if overrides.nmxc_default_partition == Some(true) {
-        Arc::new(NmxcSimClient::with_default_partition())
+        NmxcSimClient::with_default_partition()
     } else if overrides.nmxc_unknown_partition == Some(true) {
-        Arc::new(NmxcSimClient::with_unknown_partition())
+        NmxcSimClient::with_unknown_partition()
     } else {
-        Arc::new(NmxcSimClient::default())
-    };
+        NmxcSimClient::default()
+    });
+    let nmxc_sim: Arc<dyn NmxcPool> = nmxc_sim_client.clone();
 
     let mut config = overrides.config.unwrap_or(get_config());
     if let Some(threshold) = overrides.dpu_agent_version_staleness_threshold {
@@ -1821,6 +1822,7 @@ pub async fn create_test_env_with_overrides(
         test_meter,
         site_explorer,
         nmxc_sim,
+        nmxc_sim_client,
         nmxc_grpc_simulator,
         endpoint_explorer: fake_endpoint_explorer,
         admin_segments,

@@ -76,6 +76,32 @@ Example:
 power_supply 'PSU0_OutputPower': Critical - reading 1320.00W (power), valid range: 0.0 to 1500.0, caution: 1200.0 to 1300.0, critical: 0.0 to 1310.0
 ```
 
+## NVLink rack health probe identifiers
+
+### `NmxcUnreachable`
+
+Raised on a rack when the NVLink partition monitor could not use the rack's
+NMX-C for `nvlink_config.partition_monitor_unreachable_alert_after` consecutive
+passes (default `3`): no switch yielded an endpoint, the endpoint URL was
+invalid, the client could not be created, `Hello` failed, or `Hello` returned
+no usable domain UUID. The monitor writes a `Merge` report on the rack under the
+source `nvlink-partition-monitor`, with one alert whose `target` is the NMX-C
+endpoint URL the monitor resolved, absent when none resolved, and whose
+`message` names the failing step. The alert carries
+[`Hardware`](health_alert_classifications.md#hardware) only; it does not block
+allocations. A single failed pass is not reported, since a keepalive timeout on
+a loaded site is routine, and the stored alert is not rewritten while the outage
+continues. A rack is reachable on a pass if any of its chassis reached NMX-C.
+The first pass that reaches NMX-C removes the report, as does a rack that no
+longer has managed hosts for the monitor to reconcile. Only passes without a
+stored report count towards the threshold, so removing the report by hand
+during an ongoing outage suppresses it for another
+`partition_monitor_unreachable_alert_after` consecutive failed passes. The
+alert's `in_alert_since` is the first failed pass of the run that raised it, not
+the pass that wrote it. A report write that fails is retried on the next pass.
+Standalone chassis mapped through `nvlink_nmxc_endpoints` have no rack and
+receive no such alert.
+
 ## NVLink isolation health probe identifiers
 
 A host whose aggregate health carries the `IsolateFromNvLinkPartitions`
