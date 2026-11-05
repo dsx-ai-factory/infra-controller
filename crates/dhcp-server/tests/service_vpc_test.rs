@@ -28,8 +28,8 @@ use carbide_dhcp_server::modes::dpu::Dpu;
 use carbide_dhcp_server::{Config, ReplyStatus, packet_handler};
 use carbide_instrument::testing::{MetricsCapture, capture_logs_async};
 use carbide_rpc_utils::dhcp::{
-    HostConfig, InterfaceInfo, ServiceConfig, ServiceInterfaceReservations, ServiceLink,
-    ServiceLinkV4, ServiceLinkV6, ServiceReservation,
+    HostConfig, InterfaceInfo, ServiceConfig, ServiceDhcpInterfaceReservations,
+    ServiceDhcpReservation, ServiceLink, ServiceLinkV4, ServiceLinkV6,
 };
 use common::{base_dhcp_config, machine_cache};
 use dhcproto::v4::{Decodable, Decoder, DhcpOption, Message, MessageType, OptionCode};
@@ -42,10 +42,10 @@ use tokio_util::sync::CancellationToken;
 
 /// Builds one valid IPv4 service reservation with caller-selected MAC, address, and fixture
 /// identity so packet tests can isolate lookup and addressing behavior.
-fn reservation(mac_address: &str, address: &str, internal_uuid: &str) -> ServiceReservation {
+fn reservation(mac_address: &str, address: &str, internal_uuid: &str) -> ServiceDhcpReservation {
     let address: Ipv4Addr = address.parse().unwrap();
     let gateway = Ipv4Addr::from(u32::from(address) - 1);
-    ServiceReservation {
+    ServiceDhcpReservation {
         attachment_id: internal_uuid.parse().unwrap(),
         interface_ordinal: 0,
         internal_uuid: internal_uuid.parse().unwrap(),
@@ -60,7 +60,7 @@ fn reservation(mac_address: &str, address: &str, internal_uuid: &str) -> Service
 
 /// Builds immutable DPU configuration without host data so service replies prove reservations are
 /// independently operational.
-fn service_config(groups: Vec<ServiceInterfaceReservations>) -> Config {
+fn service_config(groups: Vec<ServiceDhcpInterfaceReservations>) -> Config {
     Config::new(
         base_dhcp_config(None),
         None,
@@ -72,7 +72,7 @@ fn service_config(groups: Vec<ServiceInterfaceReservations>) -> Config {
 
 /// Builds immutable DPU configuration with valid host fallback so fail-closed tests detect
 /// accidental tenant-host routing.
-fn service_config_with_host_fallback(groups: Vec<ServiceInterfaceReservations>) -> Config {
+fn service_config_with_host_fallback(groups: Vec<ServiceDhcpInterfaceReservations>) -> Config {
     // Mirror every service interface into host configuration so erroneous fallback would produce an observable host response.
     let host_ip_addresses = groups
         .iter()
@@ -196,7 +196,7 @@ async fn service_clients_receive_exact_minimal_responses() {
         "192.0.2.13",
         "33333333-3333-3333-3333-333333333333",
     );
-    let config = service_config(vec![ServiceInterfaceReservations {
+    let config = service_config(vec![ServiceDhcpInterfaceReservations {
         receiving_interface: "pf0sf1".to_string(),
         reservations: vec![first, second],
     }]);
@@ -312,7 +312,7 @@ async fn sent_service_response_records_transport_success() {
         "192.0.2.11",
         "22222222-2222-2222-2222-222222222222",
     );
-    let config = service_config(vec![ServiceInterfaceReservations {
+    let config = service_config(vec![ServiceDhcpInterfaceReservations {
         receiving_interface: "pf0sf1".to_string(),
         reservations: vec![service.clone()],
     }]);
@@ -367,7 +367,7 @@ async fn sent_service_response_records_transport_success() {
 async fn service_slots_reject_unknown_or_cross_slot_clients() {
     // Pair one populated slot with one explicit empty slot while valid host fallback exists on both interfaces.
     let config = service_config_with_host_fallback(vec![
-        ServiceInterfaceReservations {
+        ServiceDhcpInterfaceReservations {
             receiving_interface: "pf0sf1".to_string(),
             reservations: vec![reservation(
                 "02:00:00:00:00:01",
@@ -375,7 +375,7 @@ async fn service_slots_reject_unknown_or_cross_slot_clients() {
                 "22222222-2222-2222-2222-222222222222",
             )],
         },
-        ServiceInterfaceReservations {
+        ServiceDhcpInterfaceReservations {
             receiving_interface: "pf0sf2".to_string(),
             reservations: vec![],
         },
@@ -425,7 +425,7 @@ async fn service_request_address_precedence_controls_ack_and_nak() {
         "192.0.2.11",
         "22222222-2222-2222-2222-222222222222",
     );
-    let config = service_config(vec![ServiceInterfaceReservations {
+    let config = service_config(vec![ServiceDhcpInterfaceReservations {
         receiving_interface: "pf0sf1".to_string(),
         reservations: vec![service.clone()],
     }]);
@@ -535,7 +535,7 @@ async fn service_request_address_precedence_controls_ack_and_nak() {
 #[tokio::test]
 async fn ipv4_rejects_ipv6_service_reservation_without_host_fallback() {
     // Select one valid IPv6 reservation by its exact interface and chaddr key.
-    let reservation = ServiceReservation {
+    let reservation = ServiceDhcpReservation {
         attachment_id: "11111111-1111-1111-1111-111111111111".parse().unwrap(),
         interface_ordinal: 0,
         internal_uuid: "22222222-2222-2222-2222-222222222222".parse().unwrap(),
@@ -546,7 +546,7 @@ async fn ipv4_rejects_ipv6_service_reservation_without_host_fallback() {
             hbn_peer: "2001:db8::10".parse().unwrap(),
         }),
     };
-    let config = service_config(vec![ServiceInterfaceReservations {
+    let config = service_config(vec![ServiceDhcpInterfaceReservations {
         receiving_interface: "pf0sf1".to_string(),
         reservations: vec![reservation.clone()],
     }]);
@@ -589,11 +589,11 @@ async fn service_replacement_and_lifecycle_are_stateless() {
         "192.0.2.13",
         "33333333-3333-3333-3333-333333333333",
     );
-    let original = service_config(vec![ServiceInterfaceReservations {
+    let original = service_config(vec![ServiceDhcpInterfaceReservations {
         receiving_interface: "pf0sf1".to_string(),
         reservations: vec![first.clone(), survivor.clone()],
     }]);
-    let replacement = service_config(vec![ServiceInterfaceReservations {
+    let replacement = service_config(vec![ServiceDhcpInterfaceReservations {
         receiving_interface: "pf0sf1".to_string(),
         reservations: vec![survivor.clone()],
     }]);
@@ -714,7 +714,7 @@ async fn service_replacement_and_lifecycle_are_stateless() {
         "192.0.2.15",
         "55555555-5555-5555-5555-555555555555",
     );
-    let rebound_config = service_config(vec![ServiceInterfaceReservations {
+    let rebound_config = service_config(vec![ServiceDhcpInterfaceReservations {
         receiving_interface: "pf0sf1".to_string(),
         reservations: vec![rebound.clone()],
     }]);
@@ -839,7 +839,7 @@ async fn service_replacement_and_lifecycle_are_stateless() {
 async fn retired_service_response_is_suppressed_at_send() {
     // Tie one exact service reservation to a controllable listener-generation token.
     let cancellation = CancellationToken::new();
-    let config = service_config(vec![ServiceInterfaceReservations {
+    let config = service_config(vec![ServiceDhcpInterfaceReservations {
         receiving_interface: "pf0sf1".to_string(),
         reservations: vec![reservation(
             "02:00:00:00:00:01",
@@ -897,7 +897,7 @@ async fn retired_service_response_is_suppressed_at_send() {
 
 /// Extracts the IPv4 address from a validated fixture so lifecycle assertions remain explicit about
 /// the selected family.
-fn service_address(reservation: &ServiceReservation) -> Ipv4Addr {
+fn service_address(reservation: &ServiceDhcpReservation) -> Ipv4Addr {
     match &reservation.link {
         ServiceLink::Ipv4(link) => link.address,
         ServiceLink::Ipv6(_) => panic!("test fixture must be IPv4"),

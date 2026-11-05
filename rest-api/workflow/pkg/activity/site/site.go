@@ -28,7 +28,7 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/ipam"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
 	cdbp "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
-	csm "github.com/NVIDIA/infra-controller/rest-api/site-manager/pkg/sitemgr"
+	csm "github.com/NVIDIA/infra-controller/rest-api/site-manager/pkg/sites"
 
 	"github.com/NVIDIA/infra-controller/rest-api/workflow/internal/config"
 	cwm "github.com/NVIDIA/infra-controller/rest-api/workflow/internal/metrics"
@@ -839,8 +839,8 @@ func (mst ManageSite) CheckOTPExpirationAndRenewForAllSites(ctx context.Context)
 
 	logger.Info().Msg("starting activity")
 
-	siteMgrURL := mst.cfg.GetSiteManagerEndpoint()
-	if siteMgrURL == "" {
+	siteManagerURL := mst.cfg.GetSiteManagerEndpoint()
+	if siteManagerURL == "" {
 		logger.Error().Msg("Site Manager endpoint is not configured, cannot rotate OTPs")
 		return temporal.NewNonRetryableApplicationError("Site Manager endpoint is not configured", "SiteManagerEndpointNotConfigured", nil)
 	}
@@ -873,14 +873,14 @@ func (mst ManageSite) CheckOTPExpirationAndRenewForAllSites(ctx context.Context)
 			dueSiteCount++
 			logger.Info().Str("siteUUID", site.ID.String()).Msg("Certificates are close to expiry, rotating OTPs")
 
-			err = csm.RollSite(ctx, logger, site.ID.String(), site.Name, siteMgrURL)
+			err = csm.RollSite(ctx, logger, site.ID.String(), site.Name, siteManagerURL)
 			if err != nil {
 				logger.Error().Err(err).Str("siteUUID", site.ID.String()).Msg("Failed to rotate OTPs")
 				failedSiteIDs = append(failedSiteIDs, site.ID.String())
 				continue
 			}
 
-			newOTP, _, err := csm.GetSiteOTP(ctx, logger, site.ID.String(), siteMgrURL)
+			newOTP, _, err := csm.GetSiteOTP(ctx, logger, site.ID.String(), siteManagerURL)
 			if err != nil {
 				logger.Error().Err(err).Str("siteUUID", site.ID.String()).Msg("Failed to retrieve new OTP after rotation")
 				failedSiteIDs = append(failedSiteIDs, site.ID.String())

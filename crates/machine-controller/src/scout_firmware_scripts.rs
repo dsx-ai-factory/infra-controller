@@ -166,15 +166,15 @@ fn find_scout_script_in(
 struct ScoutFirmwareScriptSelector {
     vendor: String,
     model: String,
-    component_type: &'static str,
+    component_type: String,
 }
 
 impl ScoutFirmwareScriptSelector {
     /// Builds a normalized filesystem selector for the requested script.
     ///
-    /// Unknown vendors/components and unsafe path segments return `None` so a
-    /// malformed inventory value cannot escape the script root or accidentally
-    /// select an `unknown` script.
+    /// Unknown vendors/components and blank values return `None` so a
+    /// malformed inventory value cannot accidentally select an `unknown`
+    /// script; [`safe_lookup_key`] keeps every value inside the script root.
     fn new(
         vendor: bmc_vendor::BMCVendor,
         model: &str,
@@ -199,7 +199,7 @@ impl ScoutFirmwareScriptSelector {
     fn component_dir(&self, root: &Path) -> PathBuf {
         root.join(&self.vendor)
             .join(&self.model)
-            .join(self.component_type)
+            .join(&self.component_type)
     }
 
     /// Returns the URL path fragment for the script served by PXE.
@@ -217,46 +217,47 @@ impl ScoutFirmwareScriptSelector {
 /// Normalizes a lookup value into a safe single path segment.
 ///
 /// This keeps vendor/model strings case-insensitive while preventing path
-/// traversal or accidental nested directories from host inventory data.
+/// traversal or accidental nested directories from host inventory data:
+/// whitespace runs become `_`, and every other byte outside `[a-z0-9_-]`
+/// becomes `~` plus its two lowercase hex digits. The escape keeps distinct
+/// values in distinct directories and is safe in both paths and URLs.
+///
+/// "DGXH100" -> "dgxh100"
+/// "PowerEdge R760" -> "poweredge_r760"
+/// "1.92TB" -> "1~2e92tb"
+/// "../dgxh100" -> "~2e~2e~2fdgxh100"
 fn safe_lookup_key(value: &str) -> Option<String> {
     let value = value
-        .trim()
-        .to_ascii_lowercase()
         .split_ascii_whitespace()
         .collect::<Vec<_>>()
-        .join("_");
-
-    if is_safe_path_segment(&value) {
-        Some(value)
-    } else {
-        None
+        .join("_")
+        .to_ascii_lowercase();
+    let mut key = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        if byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'_' | b'-') {
+            key.push(char::from(byte));
+        } else {
+            key.push_str(&format!("~{byte:02x}"));
+        }
     }
-}
 
-/// Checks whether a value is safe to use as one filesystem path segment.
-///
-/// "dgxh100" -> allowed
-/// "poweredge_r760" -> allowed
-/// "../dgxh100" -> rejected
-fn is_safe_path_segment(value: &str) -> bool {
-    !value.is_empty()
-        && value
-            .chars()
-            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '-' | '_'))
+    (!key.is_empty()).then_some(key)
 }
 
 /// Converts the typed firmware component into the canonical directory name.
 ///
 /// The filesystem layout is intentionally tied to NICo's component enum so a
 /// Scout script can only be selected for a component NICo already understands.
-fn firmware_component_directory_name(
-    component_type: FirmwareComponentType,
-) -> Option<&'static str> {
+/// A drive component gets one directory per drive model, `drive-<model>`,
+/// with the model normalized like the vendor and model directories:
+/// `SAMSUNG MZTL63T8HFLT-00AW7` -> `drive-samsung_mztl63t8hflt-00aw7`.
+fn firmware_component_directory_name(component_type: FirmwareComponentType) -> Option<String> {
     match component_type {
-        // Each drive model needs its own script directory, which this
-        // resolver does not provide; drive components resolve no script.
-        FirmwareComponentType::Unknown | FirmwareComponentType::Drive { .. } => None,
-        other => Some(other.slug()),
+        FirmwareComponentType::Unknown => None,
+        FirmwareComponentType::Drive { model } => {
+            Some(format!("drive-{}", safe_lookup_key(model.as_str())?))
+        }
+        other => Some(other.slug().to_string()),
     }
 }
 
@@ -414,6 +415,79 @@ mod tests {
         assert_eq!(script.sha256, hex::encode(Sha256::digest(b"echo ok\n")));
         assert_eq!(script.execution_timeout_seconds, 10);
         assert_eq!(script.artifact_download_timeout_seconds, 20);
+    }
+
+    /// Resolves the script for a drive model under a tree holding only the
+    /// Samsung GB200 SSD's directory, returning the script URL.
+    fn drive_script_url(drive_model: &str) -> Option<String> {
+        let tempdir = tempfile::tempdir().unwrap();
+        let component_dir = tempdir
+            .path()
+            .join("nvidia/gb200_nvl/drive-samsung_mztl63t8hflt-00aw7");
+        fs::create_dir_all(&component_dir).unwrap();
+        fs::write(component_dir.join(SCOUT_FIRMWARE_SCRIPT_FILE), "echo ok\n").unwrap();
+        fs::write(
+            component_dir.join(SCOUT_FIRMWARE_METADATA_FILE),
+            "execution_timeout_seconds = 10\nartifact_download_timeout_seconds = 20\n",
+        )
+        .unwrap();
+
+        let model = model::firmware::DriveModel::new(drive_model).unwrap();
+        find_scout_script_in(
+            tempdir.path(),
+            TEST_PXE_PUBLIC_BASE_URL,
+            bmc_vendor::BMCVendor::Nvidia,
+            "GB200 NVL",
+            FirmwareComponentType::Drive { model },
+        )
+        .unwrap()
+        .map(|script| script.url)
+    }
+
+    #[test]
+    fn drive_component_resolves_its_model_directory() {
+        value_scenarios!(run = drive_script_url;
+            "model with a script directory" {
+                "SAMSUNG MZTL63T8HFLT-00AW7" => Some(
+                    "http://carbide-pxe.forge:8080/public/scout-firmware-scripts/nvidia/gb200_nvl/drive-samsung_mztl63t8hflt-00aw7/upgrade.sh".to_string()
+                ),
+            }
+
+            "another model of the same family" {
+                "SAMSUNG MZTL63T8HFLT-00AW8" => None,
+            }
+        );
+    }
+
+    #[test]
+    fn lookup_key_is_one_lowercase_path_segment() {
+        value_scenarios!(run = |value: &str| safe_lookup_key(value);
+            "kept" {
+                "DGXH100" => Some("dgxh100".to_string()),
+                "MZTL63T8HFLT-00AW7" => Some("mztl63t8hflt-00aw7".to_string()),
+            }
+
+            "whitespace runs join with one underscore" {
+                " PowerEdge  R760 " => Some("poweredge_r760".to_string()),
+            }
+
+            "other bytes are escaped" {
+                "Dell Ent NVMe CM6 RI 1.92TB" => Some("dell_ent_nvme_cm6_ri_1~2e92tb".to_string()),
+                "../dgxh100" => Some("~2e~2e~2fdgxh100".to_string()),
+                "a/b\\c" => Some("a~2fb~5cc".to_string()),
+                "é" => Some("~c3~a9".to_string()),
+            }
+
+            "escapes stay distinct from literal values" {
+                "1_92TB" => Some("1_92tb".to_string()),
+                "~2e" => Some("~7e2e".to_string()),
+            }
+
+            "blank" {
+                "" => None,
+                "   " => None,
+            }
+        );
     }
 
     #[test]

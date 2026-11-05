@@ -42,7 +42,7 @@ impl NvidiaSwitchN5700Ld<'_> {
             vendor: redfish::oem::BmcVendor::Nvidia(redfish::oem::NvidiaNamestyle::Uppercase),
             product: Some("P3809"),
             redfish_version: "1.17.0",
-            exposes_computer_systems: true,
+            advertises_computer_systems: true,
         }
     }
 
@@ -106,7 +106,7 @@ impl NvidiaSwitchN5700Ld<'_> {
         callbacks: Arc<C>,
     ) -> redfish::computer_system::Config<C> {
         redfish::computer_system::Config {
-            systems: vec![redfish::computer_system::SingleSystemConfig {
+            systems: Some(vec![redfish::computer_system::SingleSystemConfig {
                 id: Cow::Borrowed("System_0"),
                 manufacturer: Some("NVIDIA".into()),
                 model: Some(SWITCH_MODEL.into()),
@@ -126,7 +126,7 @@ impl NvidiaSwitchN5700Ld<'_> {
                 base_bios: None,
                 serial_console: None,
                 secure_boot_available: false,
-            }],
+            }]),
         }
     }
 

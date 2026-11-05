@@ -20,7 +20,7 @@ use model::resource_pool::{
 };
 use sqlx::PgPool;
 use tokio::net::TcpListener;
-use tokio::sync::Notify;
+use tokio::sync::{Barrier, Notify};
 use tokio::task::JoinSet;
 use tokio_stream::wrappers::TcpListenerStream;
 use tokio_util::sync::CancellationToken;
@@ -43,9 +43,9 @@ pub(in crate::tests) const SECOND_REMOTE_POOL: &str = "test-remote-manual";
 const AUTHORITY: &str = "test-fabric";
 const PROVIDER_POOL: &str = "test-integers";
 
-/// `RemotePool` binds one logical pool to the provider. Its seed range holds
-/// `start` and `start + 1` (the end is exclusive), all in its automatic or
-/// manual partition. Pick a `start` the fixture's provider serves.
+/// `RemotePool` binds one logical pool to the provider. Integer fixtures seed
+/// `start` and `start + 1`; the IPv4 fixture seeds three consecutive addresses.
+/// All values use the configured automatic or manual partition.
 pub(in crate::tests) struct RemotePool {
     pub(in crate::tests) name: &'static str,
     pub(in crate::tests) start: i64,
@@ -115,12 +115,55 @@ impl RemotePoolFixture {
         values: &[i64],
         route_target_policy: Option<v1::RouteTargetPolicy>,
     ) -> eyre::Result<Self> {
-        let alias = pools.first().expect("at least one remote pool").name;
-        let mut env = create_test_env_with_overrides(
+        Self::start_with_typed_values(
             database,
-            TestEnvOverrides::no_network_segments().with_fnn_config(None),
+            pools,
+            values.iter().copied().map(Into::into).collect(),
+            v1::ValueDomain::Integer,
+            route_target_policy,
         )
-        .await;
+        .await
+    }
+
+    /// `start_ipv4` moves the DPU loopback pool to a real IPv4 provider.
+    pub(in crate::tests) async fn start_ipv4(database: PgPool) -> eyre::Result<Self> {
+        let first = std::net::Ipv4Addr::new(198, 51, 100, 10);
+        Self::start_with_typed_values(
+            database,
+            &[RemotePool {
+                name: model::resource_pool::common::LOOPBACK_IP,
+                start: u32::from(first).into(),
+                auto_assign: true,
+            }],
+            vec![
+                first.into(),
+                std::net::Ipv4Addr::new(198, 51, 100, 11).into(),
+                std::net::Ipv4Addr::new(198, 51, 100, 12).into(),
+            ],
+            v1::ValueDomain::IpAddress,
+            None,
+        )
+        .await
+    }
+
+    /// `start_with_typed_values` runs one provider with the requested value
+    /// domain and inventory, then binds the fixture's selected pools to it.
+    async fn start_with_typed_values(
+        database: PgPool,
+        pools: &[RemotePool],
+        values: Vec<v1::Value>,
+        value_domain: v1::ValueDomain,
+        route_target_policy: Option<v1::RouteTargetPolicy>,
+    ) -> eyre::Result<Self> {
+        let alias = pools.first().expect("at least one remote pool").name;
+        let ipv4 = value_domain == v1::ValueDomain::IpAddress;
+        let overrides = if ipv4 {
+            TestEnvOverrides::default()
+        } else {
+            TestEnvOverrides::no_network_segments()
+        };
+        let mut env =
+            create_test_env_with_overrides(database, overrides.with_fnn_config(None)).await;
         let provider = ObservedProvider {
             local: LocalProvider::new(
                 v1::PoolBinding {
@@ -129,12 +172,15 @@ impl RemotePoolFixture {
                     binding_id: Uuid::new_v4().to_string(),
                     logical_pool: alias.into(),
                 },
-                v1::ValueDomain::Integer,
-                values.iter().copied().map(Into::into).collect(),
+                value_domain,
+                values,
                 route_target_policy,
             )?,
             allocations: Arc::default(),
+            reject_allocate_call: Arc::default(),
+            lose_allocate_reply: Arc::default(),
             allocate_pause: Arc::default(),
+            allocate_barrier: Arc::default(),
             releases: Arc::default(),
             describes: Arc::default(),
             defines: Arc::default(),
@@ -198,10 +244,22 @@ impl RemotePoolFixture {
             definitions.insert(
                 pool.name.into(),
                 ResourcePoolDef {
-                    pool_type: ResourcePoolType::Integer,
+                    pool_type: if ipv4 {
+                        ResourcePoolType::Ipv4
+                    } else {
+                        ResourcePoolType::Integer
+                    },
                     ranges: vec![Range {
-                        start: pool.start.to_string(),
-                        end: (pool.start + 2).to_string(),
+                        start: if ipv4 {
+                            std::net::Ipv4Addr::from(u32::try_from(pool.start)?).to_string()
+                        } else {
+                            pool.start.to_string()
+                        },
+                        end: if ipv4 {
+                            std::net::Ipv4Addr::from(u32::try_from(pool.start + 3)?).to_string()
+                        } else {
+                            (pool.start + 2).to_string()
+                        },
                         auto_assign: pool.auto_assign,
                     }],
                     prefix: None,
@@ -217,7 +275,11 @@ impl RemotePoolFixture {
                     pool.name.into(),
                     ResourcePoolSelection {
                         pool_name: pool.name.into(),
-                        value_domain: ResourcePoolValueDomain::Integer,
+                        value_domain: if ipv4 {
+                            ResourcePoolValueDomain::IpAddress
+                        } else {
+                            ResourcePoolValueDomain::Integer
+                        },
                         backend_name: Some("fabric".into()),
                         backend_kind: ResourcePoolBackendKind::Grpc,
                         authority_id: AUTHORITY.into(),
@@ -247,6 +309,7 @@ impl RemotePoolFixture {
     }
 
     /// `initialize` rebuilds the API over the same database and provider.
+    /// Preserve TestEnv's mock endpoint reports when rebuilding its API.
     /// The returned logs let tests check the seed reconciler's drift diagnostics.
     /// Recovery stays stopped so tests can inspect queued release requests
     /// before starting the worker that contacts the provider.
@@ -291,6 +354,7 @@ impl RemotePoolFixture {
                 self.env.api.work_lock_manager_handle.clone(),
             )
             .with_resource_pool_registry(registry)
+            .with_endpoint_explorer(self.env.endpoint_explorer.clone())
             .with_runtime_config(self.env.config.clone())
             .build(),
         );
@@ -329,8 +393,14 @@ impl RemotePoolFixture {
 pub(in crate::tests) struct ObservedProvider {
     pub(in crate::tests) local: LocalProvider,
     pub(in crate::tests) allocations: Arc<AtomicUsize>,
+    /// Rejects this one-based Allocate call before reserving; zero disables it.
+    pub(in crate::tests) reject_allocate_call: Arc<AtomicUsize>,
+    /// Loses one successful Allocate reply after the provider saves its value.
+    pub(in crate::tests) lose_allocate_reply: Arc<AtomicBool>,
     /// Pauses after the local provider allocates, before Core receives the reply.
     pub(in crate::tests) allocate_pause: Arc<PausedCall>,
+    /// Holds Allocate calls until every participant reaches the barrier.
+    pub(in crate::tests) allocate_barrier: Arc<Mutex<Option<Arc<Barrier>>>>,
     pub(in crate::tests) releases: Arc<AtomicUsize>,
     pub(in crate::tests) describes: Arc<AtomicUsize>,
     pub(in crate::tests) defines: Arc<AtomicUsize>,
@@ -421,9 +491,23 @@ impl ResourcePool for ObservedProvider {
         &self,
         request: Request<v1::AllocateRequest>,
     ) -> Result<Response<v1::AllocateResponse>, Status> {
-        self.allocations.fetch_add(1, Ordering::SeqCst);
+        let call = self.allocations.fetch_add(1, Ordering::SeqCst) + 1;
+        let barrier = self
+            .allocate_barrier
+            .lock()
+            .expect("Allocate barrier")
+            .clone();
+        if let Some(barrier) = barrier {
+            barrier.wait().await;
+        }
+        if self.reject_allocate_call.load(Ordering::SeqCst) == call {
+            return Err(Status::permission_denied("injected allocation rejection"));
+        }
         let response = self.local.allocate(request).await?;
         self.allocate_pause.wait().await;
+        if self.lose_allocate_reply.swap(false, Ordering::SeqCst) {
+            return Err(Status::unavailable("injected loss of allocation reply"));
+        }
         Ok(response)
     }
 

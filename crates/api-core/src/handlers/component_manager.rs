@@ -64,6 +64,11 @@ use crate::handlers::firmware::load_desired_firmware_version_entries;
 
 #[cfg(test)]
 mod credentials_tests;
+#[allow(
+    dead_code,
+    reason = "Staged for the passive handler in https://github.com/dsx-ai-factory/infra-controller/issues/8633"
+)]
+mod firmware_details;
 pub(crate) mod power_details;
 
 const MACHINE_POWER_OVERRIDE_SOURCE: &str = "component_power_control";

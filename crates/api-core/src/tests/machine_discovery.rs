@@ -46,6 +46,7 @@ use model::network_segment::NetworkSegmentType;
 use model::resource_pool::{ResourcePoolDef, ResourcePoolType};
 use model::test_support::ManagedHostConfig;
 use rpc::forge::forge_server::Forge;
+use rpc::{DiscoveryData, DiscoveryInfo, MachineDiscoveryInfo};
 use tonic::{Code, Request};
 
 use crate::test_support::builder::TestApiBuilder;
@@ -1318,6 +1319,17 @@ async fn test_dpu_rediscovery_locks_the_host_link_row_before_the_machines_rows(
     let host_machine_id = MachineId::from(mh.id);
     let dpu_interface = dpu_oob_interface(&env, dpu, dpu_machine_id).await?;
     let host_link = dpu_host_link(&env, dpu, mh.dpu_ids[0]).await?;
+    let original_loopback = dpu_machine(&env.pool, &dpu_machine_id)
+        .await?
+        .network_config
+        .loopback_ip
+        .expect("the ingested DPU has an Integrated loopback");
+    let used_before =
+        db::resource_pool::stats(&env.pool, model::resource_pool::common::LOOPBACK_IP)
+            .await?
+            .used;
+    // Remove only the published address. The reservation remains owned by
+    // this DPU, so rediscovery must repair the field without consuming another.
     clear_dpu_loopback_ip(&env.pool, &dpu_machine_id).await?;
     let version_before = dpu_machine(&env.pool, &dpu_machine_id)
         .await?
@@ -1352,10 +1364,22 @@ async fn test_dpu_rediscovery_locks_the_host_link_row_before_the_machines_rows(
         );
     }
 
+    // Release the interface gate, then reload configuration and capacity to
+    // distinguish reuse from a second successful allocation.
     blocker.rollback().await?;
     assert_eq!(rediscovery.await, dpu_machine_id);
     let dpu_machine = dpu_machine(&env.pool, &dpu_machine_id).await?;
-    assert!(dpu_machine.network_config.loopback_ip.is_some());
+    assert_eq!(
+        dpu_machine.network_config.loopback_ip,
+        Some(original_loopback)
+    );
+    assert_eq!(
+        db::resource_pool::stats(&env.pool, model::resource_pool::common::LOOPBACK_IP)
+            .await?
+            .used,
+        used_before,
+        "rediscovery must reuse the DPU's existing Integrated reservation",
+    );
     assert_eq!(
         dpu_machine.network_config.version.version_nr(),
         version_before.version_nr() + 1
@@ -1364,12 +1388,10 @@ async fn test_dpu_rediscovery_locks_the_host_link_row_before_the_machines_rows(
     Ok(())
 }
 
-/// A DPU rediscovery that fills a loopback address and the admin address
-/// repair of its host both take the host link row before the host machines
-/// row, so the one parked on the machines row holds the link row and the
-/// other waits behind it instead of deadlocking with it.
+/// A busy host makes loopback attachment roll back instead of waiting with a
+/// DPU lock. Admin repair and a later rediscovery must still finish together.
 #[crate::sqlx_test]
-async fn test_dpu_rediscovery_and_admin_address_repair_wait_instead_of_deadlocking(
+async fn test_dpu_rediscovery_retries_after_busy_group_without_blocking_admin_repair(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let env = create_test_env(pool).await;
@@ -1382,14 +1404,17 @@ async fn test_dpu_rediscovery_and_admin_address_repair_wait_instead_of_deadlocki
     let host_link = dpu_host_link(&env, dpu, mh.dpu_ids[0]).await?;
     assert!(host_link.primary_interface);
 
-    // Leave the host needing an admin address repair and the DPU a loopback
-    // fill, so both flows write the host machines row.
+    // Both callers need a write, but the DPU still owns its original loopback.
+    // Rejected attachment must return that value and leave the field empty.
     sqlx::query("DELETE FROM machine_interface_addresses WHERE interface_id = $1")
         .bind(host_link.id)
         .execute(&env.pool)
         .await?;
     clear_dpu_loopback_ip(&env.pool, &dpu_machine_id).await?;
-
+    let used_before =
+        db::resource_pool::stats(&env.pool, model::resource_pool::common::LOOPBACK_IP)
+            .await?
+            .used;
     let mut blocker = env.pool.begin().await?;
     let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
         .fetch_one(&mut *blocker)
@@ -1399,44 +1424,61 @@ async fn test_dpu_rediscovery_and_admin_address_repair_wait_instead_of_deadlocki
         .fetch_one(&mut *blocker)
         .await?;
 
-    // The rediscovery holds the host link row while it waits on the host
-    // machines row.
-    let rediscovery = dpu_discover_machine(&env, dpu, dpu_interface.id);
-    tokio::pin!(rediscovery);
-    let rediscovery_pid = tokio::select! {
-        result = &mut rediscovery => {
-            panic!("the rediscovery finished while the host machines row was held: {result:?}")
-        }
-        blocked = wait_for_blocked_query(&env.pool, blocker_pid, "machine_group_member_ids") => {
-            blocked
-        }
-    };
+    let error = tokio::time::timeout(
+        Duration::from_secs(5),
+        env.api.discover_machine(Request::new(MachineDiscoveryInfo {
+            machine_interface_id: Some(dpu_interface.id),
+            discovery_data: Some(DiscoveryData::Info(DiscoveryInfo::try_from(
+                HardwareInfo::from(dpu),
+            )?)),
+            create_machine: true,
+            ..Default::default()
+        })),
+    )
+    .await?
+    .expect_err("a busy group rejects this attachment");
+    assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+    assert!(error.message().contains("changed or is busy"));
+    assert!(
+        dpu_machine(&env.pool, &dpu_machine_id)
+            .await?
+            .network_config
+            .loopback_ip
+            .is_none()
+    );
+    assert_eq!(
+        db::resource_pool::stats(&env.pool, model::resource_pool::common::LOOPBACK_IP,)
+            .await?
+            .used,
+        used_before
+    );
+    let mut probe = env.pool.begin().await?;
+    assert!(
+        db::machine::try_lock_by_id_for_update(&mut probe, &dpu_machine_id).await?,
+        "failed attachment must release its partial DPU lock"
+    );
+    probe.rollback().await?;
 
-    // The repair queues on the host link row behind the rediscovery.
+    // Admin repair can now hold the interface and queue on the host; the
+    // failed discovery must not retain a DPU lock that would block its fanout.
     let repair =
         db::machine_interface::reconcile_admin_addresses_after_commit(&env.pool, &host_machine_id);
     tokio::pin!(repair);
     tokio::select! {
-        result = &mut rediscovery => {
-            panic!("the rediscovery finished while the host machines row was held: {result:?}")
-        }
-        result = &mut repair => {
-            panic!("the repair finished while the rediscovery held the host link row: {result:?}")
-        }
-        _ = wait_for_blocked_query(&env.pool, rediscovery_pid, "FOR UPDATE OF mi") => {}
+        result = &mut repair => panic!("repair bypassed the held host: {result:?}"),
+        _ = wait_for_blocked_query(&env.pool, blocker_pid, "UPDATE machines") => {},
     }
-
     let metrics = MetricsCapture::start();
     blocker.rollback().await?;
     let (rediscovered_machine_id, repaired) =
         tokio::time::timeout(Duration::from_secs(30), async {
-            tokio::join!(rediscovery, repair)
+            tokio::join!(
+                dpu_discover_machine(&env, dpu, dpu_interface.id),
+                &mut repair
+            )
         })
-        .await
-        .expect("both must finish once the host machines row is free");
+        .await?;
     assert_eq!(rediscovered_machine_id, dpu_machine_id);
-    // Either the queued repair or the rediscovery's own reconcile makes the
-    // repair, so only its success is asserted.
     repaired?;
     assert_eq!(
         metrics.counter_delta(
@@ -1454,7 +1496,6 @@ async fn test_dpu_rediscovery_and_admin_address_repair_wait_instead_of_deadlocki
             .loopback_ip
             .is_some()
     );
-
     Ok(())
 }
 

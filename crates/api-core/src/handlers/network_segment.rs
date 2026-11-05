@@ -14,6 +14,8 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+use std::net::{IpAddr, Ipv6Addr};
+
 use ::rpc::forge as rpc;
 use carbide_authn::middleware::Principal;
 use carbide_network::virtualization::VpcVirtualizationType;
@@ -22,6 +24,7 @@ use config_version::ConfigVersion;
 use db::resource_pool::ResourcePoolDatabaseError;
 use db::{AnnotatedSqlxError, DatabaseError, ObjectColumnFilter, network_segment};
 use ipnetwork::IpNetwork;
+use model::network_prefix::NewNetworkPrefix;
 use model::network_segment::{
     NetworkSegment, NetworkSegmentControllerState, NetworkSegmentSearchConfig, NetworkSegmentType,
     NewNetworkSegment,
@@ -213,6 +216,214 @@ pub(crate) async fn create(
     txn.commit().await?;
 
     Ok(Response::new(network_segment.into()))
+}
+
+/// Checks CIDR syntax, reservation and gateway/relay fields before opening a
+/// transaction. Stored-family, eligibility and overlap checks use `lock_checks`.
+fn parse_added_prefix(
+    request: &rpc::AddNetworkSegmentPrefixRequest,
+) -> CarbideResult<NewNetworkPrefix> {
+    if !request
+        .prefix
+        .split_once('/')
+        .is_some_and(|(_, length)| length.parse::<u8>().is_ok())
+    {
+        return Err(CarbideError::InvalidArgument(
+            "prefix CIDR requires an explicit numeric prefix length".to_string(),
+        ));
+    }
+    let prefix: IpNetwork = request.prefix.parse().map_err(|_| {
+        CarbideError::InvalidArgument(format!("invalid prefix CIDR: {}", request.prefix))
+    })?;
+    if prefix.ip() != prefix.network() {
+        return Err(CarbideError::InvalidArgument(
+            "prefix must not have host bits set".to_string(),
+        ));
+    }
+    // PostgreSQL requires strict gateway containment; a /32 equals its gateway.
+    if prefix.is_ipv4() && prefix.prefix() == 32 {
+        return Err(CarbideError::InvalidArgument(
+            "an IPv4 prefix must be shorter than /32 to contain its gateway".to_string(),
+        ));
+    }
+    if request.reserve_first < 0 {
+        return Err(CarbideError::InvalidArgument(
+            "reserve_first must be non-negative".to_string(),
+        ));
+    }
+    let gateway: Option<IpAddr> = request
+        .gateway
+        .as_deref()
+        .map(str::parse)
+        .transpose()
+        .map_err(|_| CarbideError::InvalidArgument("invalid gateway address".to_string()))?;
+    match (prefix.is_ipv4(), gateway) {
+        (true, Some(address)) if address.is_ipv4() && prefix.contains(address) => {}
+        (true, _) => {
+            return Err(CarbideError::InvalidArgument(
+                "an IPv4 prefix requires an IPv4 gateway within the prefix".to_string(),
+            ));
+        }
+        (false, Some(_)) => {
+            return Err(CarbideError::InvalidArgument(
+                "gateway is not accepted for an IPv6 prefix".to_string(),
+            ));
+        }
+        (false, None) => {}
+    }
+    // DHCP advertises this as the client router. /31 point-to-point links use
+    // both endpoints, but ordinary IPv4 networks cannot use either as a gateway.
+    if prefix.is_ipv4()
+        && prefix.prefix() < 31
+        && gateway
+            .is_some_and(|address| address == prefix.network() || address == prefix.broadcast())
+    {
+        return Err(CarbideError::InvalidArgument(
+            "an IPv4 gateway must not be the network or broadcast address".to_string(),
+        ));
+    }
+    let dhcpv6_link_address = request
+        .dhcpv6_link_address
+        .as_deref()
+        .map(|address| address.parse::<Ipv6Addr>())
+        .transpose()
+        .map_err(|_| {
+            CarbideError::InvalidArgument("dhcpv6_link_address must be an IPv6 address".to_string())
+        })?
+        .map(IpAddr::V6);
+    if prefix.is_ipv4() && dhcpv6_link_address.is_some() {
+        return Err(CarbideError::InvalidArgument(
+            "dhcpv6_link_address requires an IPv6 prefix".to_string(),
+        ));
+    }
+    Ok(NewNetworkPrefix {
+        prefix,
+        gateway,
+        dhcpv6_link_address,
+        num_reserved: request.reserve_first,
+    })
+}
+
+/// Adds one missing family without recreating an occupied underlay. Prefix,
+/// version and reverse DNS share the final commit; exact retries do not write.
+pub(crate) async fn add_prefix(
+    api: &Api,
+    request: Request<rpc::AddNetworkSegmentPrefixRequest>,
+) -> Result<Response<rpc::NetworkSegment>, Status> {
+    log_request_data(&request);
+    let request = request.into_inner();
+    let segment_id = request
+        .network_segment_id
+        .ok_or(CarbideError::MissingArgument("network_segment_id"))?;
+    let prefix = parse_added_prefix(&request)?;
+    let mut txn = api.txn_begin().await?;
+    // Read only after `lock_checks`: another prefix writer must not commit an
+    // overlap between the probe and insert, or leave this request a stale family.
+    db::tenant_prefix_overlap::lock_checks(txn.as_mut()).await?;
+    let segment = db::network_segment::find_by(
+        &mut txn,
+        ObjectColumnFilter::One(network_segment::IdColumn, &segment_id),
+        NetworkSegmentSearchConfig::default(),
+    )
+    .await?
+    .pop()
+    .ok_or_else(|| CarbideError::NotFoundError {
+        kind: "network segment",
+        id: segment_id.to_string(),
+    })?;
+    // A known, deleted target is an unsupported mutation, not an unknown ID.
+    if segment.is_marked_as_deleted() {
+        return Err(CarbideError::FailedPrecondition(format!(
+            "network segment {segment_id} is deleted; a live segment is required"
+        ))
+        .into());
+    }
+    if segment.config.segment_type != NetworkSegmentType::Underlay {
+        return Err(CarbideError::FailedPrecondition(format!(
+            "network segment {segment_id} has type {:?}; underlay is required",
+            segment.config.segment_type
+        ))
+        .into());
+    }
+    if let Some(vpc_id) = segment.config.vpc_id {
+        return Err(CarbideError::FailedPrecondition(format!(
+            "network segment {segment_id} is attached to VPC {vpc_id}; an unattached segment is required"
+        ))
+        .into());
+    }
+    if segment.status.controller_state.value != NetworkSegmentControllerState::Ready {
+        return Err(CarbideError::FailedPrecondition(format!(
+            "network segment {segment_id} has state {:?}; ready is required",
+            segment.status.controller_state.value
+        ))
+        .into());
+    }
+    if let Some(existing) = segment
+        .prefixes
+        .iter()
+        .find(|existing| existing.prefix.is_ipv4() == prefix.prefix.is_ipv4())
+    {
+        if existing.prefix == prefix.prefix
+            && existing.gateway == prefix.gateway
+            && existing.num_reserved == prefix.num_reserved
+            && existing.dhcpv6_link_address == prefix.dhcpv6_link_address
+        {
+            // A lost successful reply must be safe to retry without another
+            // version increment or a second prefix.
+            txn.commit().await?;
+            return Ok(Response::new(segment.into()));
+        }
+        return Err(CarbideError::FailedPrecondition(
+            "network segment already has a different prefix or settings for this family"
+                .to_string(),
+        )
+        .into());
+    }
+    if segment.prefixes.len() != 1 {
+        return Err(CarbideError::FailedPrecondition(
+            "adding a prefix requires exactly one existing opposite-family prefix".to_string(),
+        )
+        .into());
+    }
+    if !db::network_prefix::containing_prefix(&mut txn, &prefix.prefix.to_string())
+        .await?
+        .is_empty()
+    {
+        return Err(CarbideError::InvalidArgument(
+            "prefix overlaps with an existing one".to_string(),
+        )
+        .into());
+    }
+    reject_vpc_prefix_overlaps(txn.as_mut(), &[prefix.prefix], None).await?;
+    let segment = db::network_segment::add_prefix(&segment, &prefix, txn.as_mut())
+        .await
+        .map_err(|error| {
+            // Keep backstop constraints diagnostic even for writers outside the
+            // overlap guard. The normal range/family probes reject first.
+            let constraint = match &error {
+                DatabaseError::Sqlx(AnnotatedSqlxError {
+                    source: sqlx::Error::Database(error),
+                    ..
+                }) => error.constraint(),
+                _ => None,
+            };
+            if db::network_prefix::is_overlap_constraint(constraint) {
+                CarbideError::InvalidArgument("prefix overlaps with an existing one".to_string())
+            } else if db::network_prefix::is_family_constraint(constraint) {
+                CarbideError::FailedPrecondition(
+                    "network segment already has a prefix for this family".to_string(),
+                )
+            } else if db::network_prefix::is_dhcpv6_link_address_constraint(constraint) {
+                CarbideError::InvalidArgument(
+                    "DHCPv6 link-address conflicts with an existing prefix".to_string(),
+                )
+            } else {
+                CarbideError::from(error)
+            }
+        })?;
+    db::dns::ensure_reverse_zones(&[prefix.prefix], &mut txn).await?;
+    txn.commit().await?;
+    Ok(Response::new(segment.into()))
 }
 
 pub(crate) async fn attach_to_vpc(
@@ -476,11 +687,13 @@ pub(crate) async fn delete(
 ) -> Result<Response<rpc::NetworkSegmentDeletionResult>, Status> {
     crate::api::log_request_data(&request);
 
-    let mut txn = api.txn_begin().await?;
-
     let rpc::NetworkSegmentDeletionRequest { id, .. } = request.into_inner();
-
-    let segment_id = id.ok_or_else(|| CarbideError::MissingArgument("id"))?;
+    let segment_id = id.ok_or(CarbideError::MissingArgument("id"))?;
+    let mut txn = api.txn_begin().await?;
+    // Read the prefix list after any append commits, so deletion removes every
+    // reverse zone rather than acting on a pre-append snapshot. Reuse the
+    // existing overlap lock/order; deletes also wait for its site-wide readers.
+    db::tenant_prefix_overlap::lock_checks(txn.as_mut()).await?;
 
     let mut segments = db::network_segment::find_by(
         &mut txn,
@@ -774,5 +987,185 @@ async fn allocate_vlan_id(
             );
             Err(err.into())
         }
+    }
+}
+
+#[cfg(test)]
+mod add_prefix_validation_tests {
+    use super::*;
+
+    /// Invalid caller data must fail before a database transaction. Each row
+    /// protects a different syntax or cross-field validation boundary.
+    #[test]
+    fn rejects_invalid_added_prefix_settings() {
+        let cases = [
+            // A malformed CIDR is not a storage or lifecycle failure.
+            (
+                "malformed network",
+                "not-a-cidr/64",
+                None,
+                0,
+                None,
+                "invalid prefix CIDR: not-a-cidr/64",
+            ),
+            // ipnetwork otherwise treats a bare address as a /128 host network.
+            (
+                "explicit CIDR length",
+                "2001:db8::",
+                None,
+                0,
+                None,
+                "prefix CIDR requires an explicit numeric prefix length",
+            ),
+            // PostgreSQL CIDR rejects host bits; diagnose them at the RPC boundary.
+            (
+                "IPv6 host bits",
+                "2001:db8::1/64",
+                None,
+                0,
+                None,
+                "prefix must not have host bits set",
+            ),
+            // A negative stored count makes allocation fail internally; reject it here.
+            (
+                "negative reservation",
+                "2001:db8::/64",
+                None,
+                -1,
+                None,
+                "reserve_first must be non-negative",
+            ),
+            // IPv4 routing metadata cannot be omitted.
+            (
+                "missing IPv4 gateway",
+                "192.0.2.0/24",
+                None,
+                0,
+                None,
+                "an IPv4 prefix requires an IPv4 gateway within the prefix",
+            ),
+            // A syntactically invalid gateway must not become an INTERNAL error.
+            (
+                "malformed gateway",
+                "192.0.2.0/24",
+                Some("invalid"),
+                0,
+                None,
+                "invalid gateway address",
+            ),
+            // Address family and containment are independent of CIDR syntax.
+            (
+                "wrong-family gateway",
+                "192.0.2.0/24",
+                Some("2001:db8::1"),
+                0,
+                None,
+                "an IPv4 prefix requires an IPv4 gateway within the prefix",
+            ),
+            // A same-family gateway must also be in the supplied network.
+            (
+                "out-of-prefix gateway",
+                "192.0.2.0/24",
+                Some("192.0.3.1"),
+                0,
+                None,
+                "an IPv4 prefix requires an IPv4 gateway within the prefix",
+            ),
+            // Ordinary IPv4 network endpoints cannot be advertised as routers.
+            (
+                "network address gateway",
+                "192.0.2.0/24",
+                Some("192.0.2.0"),
+                0,
+                None,
+                "an IPv4 gateway must not be the network or broadcast address",
+            ),
+            // Containment alone also admits the directed broadcast address.
+            (
+                "broadcast address gateway",
+                "192.0.2.0/24",
+                Some("192.0.2.255"),
+                0,
+                None,
+                "an IPv4 gateway must not be the network or broadcast address",
+            ),
+            // IPv6 uses relay selection, not the IPv4 gateway field.
+            (
+                "gateway on IPv6",
+                "2001:db8::/64",
+                Some("2001:db8::1"),
+                0,
+                None,
+                "gateway is not accepted for an IPv6 prefix",
+            ),
+            // Relay selectors must be IPv6, rather than silently ignored input.
+            (
+                "wrong-family relay",
+                "2001:db8::/64",
+                None,
+                0,
+                Some("192.0.2.1"),
+                "dhcpv6_link_address must be an IPv6 address",
+            ),
+            // Relay metadata is stored only on the appended IPv6 prefix.
+            (
+                "relay on IPv4",
+                "192.0.2.0/24",
+                Some("192.0.2.1"),
+                0,
+                Some("2001:db8::1"),
+                "dhcpv6_link_address requires an IPv6 prefix",
+            ),
+        ]
+        .map(
+            |(scenario, prefix, gateway, reserve_first, relay, diagnostic)| {
+                carbide_test_support::Case {
+                    scenario,
+                    input: rpc::AddNetworkSegmentPrefixRequest {
+                        prefix: prefix.to_string(),
+                        gateway: gateway.map(str::to_string),
+                        reserve_first,
+                        dhcpv6_link_address: relay.map(str::to_string),
+                        ..Default::default()
+                    },
+                    expect: carbide_test_support::Outcome::FailsWith((
+                        tonic::Code::InvalidArgument,
+                        diagnostic.to_string(),
+                    )),
+                }
+            },
+        );
+        carbide_test_support::check_cases(cases, |request| {
+            parse_added_prefix(&request).map(|_| ()).map_err(|error| {
+                let error: Status = error.into();
+                (error.code(), error.message().to_string())
+            })
+        });
+    }
+
+    /// A /31 uses both endpoint addresses on a point-to-point link, so the
+    /// ordinary network/broadcast guard must not reject either gateway.
+    #[test]
+    fn accepts_point_to_point_gateway_endpoints() {
+        let cases = [
+            // The low endpoint is usable despite equaling the network address.
+            ("low /31 endpoint", "192.0.2.0"),
+            // The high endpoint is usable despite equaling broadcast().
+            ("high /31 endpoint", "192.0.2.1"),
+        ]
+        .map(|(scenario, gateway)| carbide_test_support::Case {
+            scenario,
+            input: gateway,
+            expect: carbide_test_support::Outcome::Yields(()),
+        });
+        carbide_test_support::check_cases(cases, |gateway| {
+            parse_added_prefix(&rpc::AddNetworkSegmentPrefixRequest {
+                prefix: "192.0.2.0/31".to_string(),
+                gateway: Some(gateway.to_string()),
+                ..Default::default()
+            })
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+        });
     }
 }

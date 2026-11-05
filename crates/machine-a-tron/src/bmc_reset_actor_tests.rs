@@ -535,12 +535,12 @@ async fn bmc_reset_actor_recovery_preserves_devices_and_survives_pause_and_repea
         }
         dhcp.wait_for_rejections(&baseline, 1).await;
         if cycle == 1 {
-            for device in &devices {
+            for device in &devices[1..] {
                 device.pause().unwrap();
             }
             // This reply acknowledges the host pause and the sends to its DPUs.
             // The absence of UDP retries below witnesses the child actors too.
-            host.api_state().await.unwrap();
+            host.pause_and_wait(Duration::from_secs(5)).await.unwrap();
             // Establish that the next pending deadline is the first 4s +/- 1s
             // retry, rather than a later exponentially backed-off attempt.
             dhcp.assert_rejections(&baseline, 1);

@@ -34,6 +34,39 @@ pub(super) fn manager_collection(manager_id: &str) -> redfish::Collection<'stati
     }
 }
 
+/// A manager-scoped log service, such as HPE iLO's Integrated Event Log.
+pub(super) fn manager_resource<'a>(
+    manager_id: &str,
+    service_id: &'a str,
+    name: &'a str,
+) -> redfish::Resource<'a> {
+    let odata_id = format!("/redfish/v1/Managers/{manager_id}/LogServices/{service_id}");
+    redfish::Resource {
+        odata_id: Cow::Owned(odata_id),
+        odata_type: Cow::Borrowed(redfish::schema::log_service::LogService::ODATA_TYPE),
+        name: Cow::Borrowed(name),
+        id: Cow::Borrowed(service_id),
+    }
+}
+
+pub(super) fn manager_clear_log_target(manager_id: &str, service_id: &str) -> String {
+    format!(
+        "/redfish/v1/Managers/{manager_id}/LogServices/{service_id}/Actions/LogService.ClearLog"
+    )
+}
+
+pub(super) fn manager_entries_collection<'a>(
+    manager_id: &str,
+    service_id: &'a str,
+) -> redfish::Collection<'a> {
+    let odata_id = format!("/redfish/v1/Managers/{manager_id}/LogServices/{service_id}/Entries");
+    redfish::Collection {
+        odata_id: Cow::Owned(odata_id),
+        odata_type: Cow::Borrowed("#LogEntryCollection.LogEntryCollection"),
+        name: Cow::Borrowed("Log Entries"),
+    }
+}
+
 pub(super) fn system_collection(system_id: &str) -> redfish::Collection<'static> {
     let odata_id = format!("/redfish/v1/Systems/{system_id}/LogServices");
     redfish::Collection {
@@ -152,6 +185,37 @@ impl LogEntryDraft {
             severity: Severity::Ok,
             origin: system.to_owned(),
         }
+    }
+
+    /// A backend power command completed, worded as HPE iLO words it in its
+    /// Integrated Event Log. NICo reads "Server reset." and "Server power
+    /// restored." there as proof that a host restarted. Commands that do not
+    /// change host power state (NMI, the power button) log nothing.
+    pub(crate) fn power_command_completed(
+        system: &str,
+        reset_type: ResourceResetType,
+    ) -> Option<Self> {
+        use ResourceResetType::*;
+        let (message_id, message) = match reset_type {
+            GracefulRestart | ForceRestart | PowerCycle | FullPowerCycle => {
+                ("ResourceEvent.1.3.ResourceStateChanged", "Server reset.")
+            }
+            On | ForceOn => (
+                "ResourceEvent.1.3.ResourcePoweredOn",
+                "Server power restored.",
+            ),
+            GracefulShutdown | ForceOff => (
+                "ResourceEvent.1.3.ResourcePoweredOff",
+                "Server power removed.",
+            ),
+            _ => return None,
+        };
+        Some(Self {
+            message_id,
+            message: message.to_owned(),
+            severity: Severity::Ok,
+            origin: system.to_owned(),
+        })
     }
 
     /// The embedder observed the host power on.

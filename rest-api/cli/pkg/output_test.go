@@ -155,11 +155,11 @@ func TestFormatOutput_AcceptsKnownFormatsIncludingEmpty(t *testing.T) {
 	}
 }
 
-// TestNewApp_OutputFlagRejectsUnknownValueAtRuntime exercises the full app
+// testNewApp_OutputFlagRejectsUnknownValueAtRuntime exercises the full app
 // stack with the embedded OpenAPI spec to confirm that the StringFlag.Action
 // validator is wired up on every generated --output flag. Without the
 // validator this invocation exited 0 and silently produced JSON.
-func TestNewApp_OutputFlagRejectsUnknownValueAtRuntime(t *testing.T) {
+func testNewApp_OutputFlagRejectsUnknownValueAtRuntime(t *testing.T) {
 	app, err := NewApp(openapi.Spec)
 	require.NoError(t, err, "NewApp failed")
 

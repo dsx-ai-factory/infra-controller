@@ -38,7 +38,7 @@ impl DgxVrNvl<'_> {
             vendor: redfish::oem::BmcVendor::Nvidia(redfish::oem::NvidiaNamestyle::Uppercase),
             product: Some("VR NVL72"),
             redfish_version: "1.17.0",
-            exposes_computer_systems: true,
+            advertises_computer_systems: true,
         }
     }
 
@@ -110,7 +110,7 @@ impl DgxVrNvl<'_> {
         .collect::<Vec<_>>();
 
         redfish::computer_system::Config {
-            systems: vec![
+            systems: Some(vec![
                 redfish::computer_system::SingleSystemConfig {
                     base_bios: None,
                     bios_mode: redfish::computer_system::BiosMode::Generic,
@@ -167,7 +167,7 @@ impl DgxVrNvl<'_> {
                     processors: None,
                     memory: None,
                 },
-            ],
+            ]),
         }
     }
 

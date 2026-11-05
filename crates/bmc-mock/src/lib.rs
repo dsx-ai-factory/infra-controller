@@ -253,6 +253,29 @@ impl HardwareType {
             Self::GenericSupermicro => None,
         }
     }
+
+    /// Whether the BMC answers 403 outside AccountService while the
+    /// credentials used are still the factory default, as BMCs that force a
+    /// password change on first use do. HPE iLO and the power shelves serve
+    /// every resource with their factory credentials. The other profiles keep
+    /// the stricter behavior.
+    pub(crate) fn bmc_requires_factory_password_change(&self) -> bool {
+        match self {
+            Self::HpeProliantDl380aGen11 | Self::LiteOnPowerShelf | Self::DeltaPowerShelf => false,
+            Self::DellPowerEdgeR750
+            | Self::DellPowerEdgeR760Bf4
+            | Self::WiwynnGB200Nvl
+            | Self::LenovoGB300Nvl
+            | Self::NvidiaDgxGb300
+            | Self::SupermicroGb300Nvl
+            | Self::NvidiaDgxVr
+            | Self::NvidiaSwitchNd5200Ld
+            | Self::NvidiaSwitchN5700Ld
+            | Self::NvidiaDgxH100
+            | Self::GenericAmi
+            | Self::GenericSupermicro => true,
+        }
+    }
 }
 
 #[derive(Debug, thiserror::Error)]

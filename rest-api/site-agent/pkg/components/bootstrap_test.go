@@ -15,7 +15,7 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/components/managers/bootstrap"
 	computils "github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/components/utils"
 	bootstraptypes "github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/datatypes/managertypes/bootstrap"
-	sitemgr "github.com/NVIDIA/infra-controller/rest-api/site-manager/pkg/sitemgr"
+	"github.com/NVIDIA/infra-controller/rest-api/site-manager/pkg/sites"
 	log "github.com/rs/zerolog/log"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -91,7 +91,7 @@ func Test_Bootstrap(t *testing.T) {
 				log.Info().Msg("Test Bootstrap noop End")
 			case "get":
 				log.Info().Msg("Test Bootstrap get Start")
-				s, err := sitemgr.TestManagerCreateSite()
+				s, err := sites.TestManagerCreateSite()
 				assert.Nil(t, err)
 				assert.NotNil(t, s)
 
@@ -100,7 +100,7 @@ func Test_Bootstrap(t *testing.T) {
 				bCfg := bootstrapManager.GetConfig()
 				bCfg.OTP = s.UUID1OTP
 				bCfg.CredsURL = s.MgrURL + "/v1/sitecreds"
-				bCfg.UUID = sitemgr.Testuuid1
+				bCfg.UUID = sites.Testuuid1
 				bootstrapManager.ReplaceConfig(bCfg)
 
 				t.Logf("CredsURL: %s", bCfg.CredsURL)

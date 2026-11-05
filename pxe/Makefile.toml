@@ -139,8 +139,14 @@ dependencies = [
   "mkosi-clean-qcow-imager-aarch64",
 ]
 
+[tasks.test-scout-loader-storage]
+description = "Tests Scout rootfs image storage setup and failure handling"
+command = "python3"
+args = ["-B", "${REPO_ROOT}/pxe/tests/test_scout_loader_storage.py"]
+
 [tasks.stage-scout-loader-rclocal]
 description = "Copies the Scout loader helpers to the scout loader profile directories"
+dependencies = ["test-scout-loader-storage"]
 script = '''
   set -e
 

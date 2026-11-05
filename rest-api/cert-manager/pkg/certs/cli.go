@@ -48,11 +48,13 @@ func NewCommand() *cli.Command {
 				Value: caBaseDNSDefault,
 				Usage: "Base dns appended to common names",
 			},
+			// Accepted so existing invocations keep working. Cert Manager
+			// doesn't report to Sentry.
 			&cli.StringFlag{
 				Name:    "sentry-dsn",
 				Value:   "",
 				EnvVars: []string{"SENTRY_DSN"},
-				Usage:   "DSN for sentry/glitchtip",
+				Usage:   "Deprecated and ignored",
 			},
 			&cli.StringFlag{
 				Name:    "ca-common-name",
@@ -101,12 +103,15 @@ func NewCommand() *cli.Command {
 			ctx := c.Context
 			log := core.GetLogger(ctx)
 
+			if c.String("sentry-dsn") != "" {
+				log.Warn("--sentry-dsn / SENTRY_DSN is deprecated and ignored")
+			}
+
 			o := Options{
 				Addr:         ":" + c.String("tls-port"),
 				InsecureAddr: ":" + c.String("insecure-port"),
 				DNSNames:     c.StringSlice("dns-name"),
 				CABaseDNS:    c.String("ca-base-dns"),
-				sentryDSN:    c.String("sentry-dsn"),
 			}
 
 			// Use native Go PKI for certificate generation

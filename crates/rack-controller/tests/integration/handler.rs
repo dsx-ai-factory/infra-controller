@@ -18,6 +18,7 @@
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
+use carbide_instrument::testing::{CapturedLog, capture_logs_async};
 use carbide_rack_controller::config::ScaleUpFabricManagerApiVersion;
 use carbide_rack_controller::context::RackStateHandlerContextObjects;
 use carbide_rack_controller::firmware_object::FirmwareObjectFetcher;
@@ -1346,12 +1347,19 @@ async fn test_discovering_empty_rack_transitions_to_maintenance(
     Ok(())
 }
 
-/// test_error_state_does_nothing verifies that the Error state logs and does nothing.
+/// A rack whose maintenance failed waits in Error without re-logging the failure.
 #[sqlx_test]
 async fn test_error_state_does_nothing(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let env = create_test_env_with_overrides(pool.clone(), TestEnvOverrides::default()).await;
+    let env = create_test_env_with_overrides(
+        pool.clone(),
+        TestEnvOverrides {
+            config: Some(config_with_rack_profiles()),
+            ..Default::default()
+        },
+    )
+    .await;
 
     let rack_id = new_rack_id();
     let mut txn = pool.acquire().await?;
@@ -1381,14 +1389,20 @@ async fn test_error_state_does_nothing(
         cause: "test error".to_string(),
         recovery_policy: RackErrorRecoveryPolicy::MaintenanceRequestRequired,
     };
-    let outcome = handler
-        .handle_object_state(&rack_id, &mut rack, &error_state, &mut ctx)
-        .await?;
+    let (outcome, logs) = capture_logs_async(handler.handle_object_state(
+        &rack_id,
+        &mut rack,
+        &error_state,
+        &mut ctx,
+    ))
+    .await;
+    let outcome = outcome?;
 
     assert!(
         matches!(outcome, StateHandlerOutcome::Wait { .. }),
         "Error state should wait"
     );
+    assert_no_warn_or_error_logs(&logs);
 
     Ok(())
 }
@@ -3090,9 +3104,10 @@ async fn test_firmware_upgrade_wait_for_complete_recovers_power_blocked_machine(
         },
     };
 
-    let mut outcome = handler
-        .handle_object_state(&rack_id, &mut rack, &fw_state, &mut ctx)
-        .await?;
+    let (outcome, logs) =
+        capture_logs_async(handler.handle_object_state(&rack_id, &mut rack, &fw_state, &mut ctx))
+            .await;
+    let mut outcome = outcome?;
 
     let StateHandlerOutcome::Transition {
         next_state: RackState::Error { cause, .. },
@@ -3101,6 +3116,7 @@ async fn test_firmware_upgrade_wait_for_complete_recovers_power_blocked_machine(
     else {
         panic!("power-blocked rack firmware job should transition to Error");
     };
+    assert_logged_error_transition(&logs, cause);
     assert!(cause.contains(&blocked_host.host_snapshot.id.to_string()));
     assert!(!cause.contains(&active_host.host_snapshot.id.to_string()));
 
@@ -3186,7 +3202,8 @@ async fn test_rack_maintenance_termination_unwinds_all_scoped_device_state_body(
         },
     )
     .await;
-    let (rack_id, ready_host, active_host) = create_two_compute_rack(&env, &pool).await?;
+    // Keep the two-host fixture future off libtest's default thread stack.
+    let (rack_id, ready_host, active_host) = Box::pin(create_two_compute_rack(&env, &pool)).await?;
     let switch_id = attach_switch_with_nvos_credentials(&env, &rack_id).await?;
     let initiator = format!("rack-{rack_id}");
     let now = chrono::Utc::now();
@@ -3674,16 +3691,18 @@ async fn test_firmware_upgrade_wait_for_complete_transitions_to_error_on_job_fai
             rack_firmware_upgrade: FirmwareUpgradeState::WaitForComplete,
         },
     };
-    let mut outcome = handler_instance
-        .handle_object_state(&rack_id, &mut rack, &fw_state, &mut ctx)
-        .await?;
+    let (outcome, logs) = capture_logs_async(
+        handler_instance.handle_object_state(&rack_id, &mut rack, &fw_state, &mut ctx),
+    )
+    .await;
+    let mut outcome = outcome?;
     match &outcome {
+        StateHandlerOutcome::Transition {
+            next_state: RackState::Error { cause, .. },
+            ..
+        } => assert_logged_error_transition(&logs, cause),
         StateHandlerOutcome::Transition { next_state, .. } => {
-            assert!(
-                matches!(next_state, RackState::Error { .. }),
-                "Expected rack to transition to Error, got {:?}",
-                next_state
-            );
+            panic!("Expected rack to transition to Error, got {next_state:?}")
         }
         other => panic!(
             "Expected Transition to Error, got {:?}",
@@ -7701,7 +7720,14 @@ async fn test_error_recovers_to_ready_when_all_components_ready(
 async fn test_error_stays_in_error_when_components_not_all_ready(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let env = create_test_env_with_overrides(pool.clone(), TestEnvOverrides::default()).await;
+    let env = create_test_env_with_overrides(
+        pool.clone(),
+        TestEnvOverrides {
+            config: Some(config_with_rack_profiles()),
+            ..Default::default()
+        },
+    )
+    .await;
     let (rack_id, switch_id) = create_ready_rack_with_switch(&env, &pool).await?;
 
     set_switch_state(
@@ -7736,17 +7762,46 @@ async fn test_error_stays_in_error_when_components_not_all_ready(
         pending_db_writes: &mut db_writes,
     };
 
-    let outcome = handler
-        .handle_object_state(&rack_id, &mut rack, &error_state, &mut ctx)
-        .await?;
+    let (outcome, logs) = capture_logs_async(handler.handle_object_state(
+        &rack_id,
+        &mut rack,
+        &error_state,
+        &mut ctx,
+    ))
+    .await;
+    let outcome = outcome?;
 
     assert!(
         matches!(outcome, StateHandlerOutcome::Wait { .. }),
         "Error with non-Ready components must not auto-recover, got {:?}",
         std::mem::discriminant(&outcome)
     );
+    assert_no_warn_or_error_logs(&logs);
 
     Ok(())
+}
+
+/// Asserts a steady-state iteration emitted nothing at WARN or ERROR from the
+/// rack controller, so a persisted failure is not re-reported every controller
+/// iteration. Other targets are ignored, such as SQLx's slow-statement WARN.
+fn assert_no_warn_or_error_logs(logs: &[CapturedLog]) {
+    let loud: Vec<_> = logs
+        .iter()
+        .filter(|log| log.target.split("::").next() == Some("carbide_rack_controller"))
+        .filter(|log| matches!(log.level, tracing::Level::WARN | tracing::Level::ERROR))
+        .collect();
+    assert!(loud.is_empty(), "unexpected WARN/ERROR logs: {loud:?}");
+}
+
+/// Asserts the transition into Error logged its cause exactly once at WARN.
+fn assert_logged_error_transition(logs: &[CapturedLog], cause: &str) {
+    let transitions: Vec<_> = logs
+        .iter()
+        .filter(|log| log.message == "Rack maintenance failed, transitioning to Error")
+        .collect();
+    assert_eq!(transitions.len(), 1, "{logs:?}");
+    assert_eq!(transitions[0].level, tracing::Level::WARN);
+    assert_eq!(transitions[0].field("cause"), Some(cause));
 }
 
 async fn get_db_rack<DB>(conn: &mut DB, rack_id: &RackId) -> Rack

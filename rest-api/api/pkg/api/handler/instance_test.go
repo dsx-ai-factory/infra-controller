@@ -1530,6 +1530,18 @@ func TestCreateInstanceHandler_Handle(t *testing.T) {
 		check                    func(t *testing.T)
 		checkResponse            func(t *testing.T, response *model.APIInstance)
 	}
+
+	// Baseline intent belongs to the registration and must block instance-scoped deployments.
+	baselineService, baselineErr := cdbm.NewDpuExtensionServiceDAO(dbSession).Create(context.Background(), nil, cdbm.DpuExtensionServiceCreateInput{
+		Name:           "baseline-attachment-test",
+		ServiceType:    cdbm.DpuExtensionServiceServiceTypeDpfHelmChart,
+		DeploymentType: cdbm.DpuExtensionServiceDeploymentTypeBaseline,
+		TenantID:       tn1.ID, SiteID: st1.ID, CreatedBy: tnu1.ID,
+		Status:         cdbm.DpuExtensionServiceStatusReady,
+		ActiveVersions: []string{"V1-T1761856992374052", "2.0.0"},
+	})
+	require.NoError(t, baselineErr)
+
 	tests := []testCase{
 		{
 			name: "test Instance create API endpoint rejects power profile when DPS power management is disabled",
@@ -2730,6 +2742,42 @@ func TestCreateInstanceHandler_Handle(t *testing.T) {
 				reqUser:     tnu1,
 				respCode:    http.StatusBadRequest,
 				respMessage: "DPU Extension Service:",
+			},
+			wantErr: false,
+		},
+		// Baseline placement cannot be activated through instance attachment.
+		{
+			name: "rejects baseline service attachment on create",
+			fields: fields{
+				dbSession: dbSession,
+				tc:        tc,
+				cfg:       cfg,
+			},
+			args: args{
+				reqData: &model.APIInstanceCreateRequest{
+					Name:       "Test Instance with DPU Extension Service specified for deployment belongs to a different Site",
+					TenantID:   tn1.ID.String(),
+					MachineID:  cutil.GetPtr(mcassigned.ID),
+					VpcID:      vpc1.ID.String(),
+					UserData:   cutil.GetPtr(""),
+					IpxeScript: cutil.GetPtr(common.DefaultIpxeScript),
+					Interfaces: []model.APIInterfaceCreateOrUpdateRequest{
+						{
+							SubnetID: cutil.GetPtr(subnet1.ID.String()),
+						},
+					},
+					DpuExtensionServiceDeployments: []model.APIDpuExtensionServiceDeploymentRequest{
+						{
+							DpuExtensionServiceID: baselineService.ID.String(),
+							Version:               "V1-T1761856992374052",
+						},
+					},
+					PhoneHomeEnabled: cutil.GetPtr(false),
+				},
+				reqOrg:      tnOrg,
+				reqUser:     tnu1,
+				respCode:    http.StatusBadRequest,
+				respMessage: "Baseline DPU Extension Services cannot be attached",
 			},
 			wantErr: false,
 		},
@@ -5728,6 +5776,17 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 		respSecondaryVpcIDs []string
 	}
 
+	// Baseline intent belongs to the registration and must block instance-scoped deployments.
+	baselineService, baselineErr := cdbm.NewDpuExtensionServiceDAO(dbSession).Create(context.Background(), nil, cdbm.DpuExtensionServiceCreateInput{
+		Name:           "baseline-attachment-test",
+		ServiceType:    cdbm.DpuExtensionServiceServiceTypeDpfHelmChart,
+		DeploymentType: cdbm.DpuExtensionServiceDeploymentTypeBaseline,
+		TenantID:       tn1.ID, SiteID: st1.ID, CreatedBy: tnu1.ID,
+		Status:         cdbm.DpuExtensionServiceStatusReady,
+		ActiveVersions: []string{"V1-T1761856992374052", "2.0.0"},
+	})
+	require.NoError(t, baselineErr)
+
 	tests := []struct {
 		name                        string
 		fields                      fields
@@ -6505,6 +6564,35 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 			},
 			wantErr:                     false,
 			verifySiteControllerRequest: true,
+			verifyChildSpanner:          true,
+		},
+		// Baseline placement cannot be activated through instance attachment.
+		{
+			name: "rejects baseline service attachment on update",
+			fields: fields{
+				dbSession: dbSession,
+				tc:        tc,
+				scp:       scp,
+				cfg:       cfg,
+			},
+			args: args{
+				reqData: &model.APIInstanceUpdateRequest{
+					Name:        cutil.GetPtr("test-instance-des-update"),
+					Description: cutil.GetPtr("Test Instance updated description"),
+					IpxeScript:  os2.IpxeScript,
+					DpuExtensionServiceDeployments: []model.APIDpuExtensionServiceDeploymentRequest{{
+						DpuExtensionServiceID: baselineService.ID.String(), Version: "2.0.0",
+					}},
+				},
+				reqInstance:           inst15.ID.String(),
+				cleanInstanceToStatus: inst15.Status,
+				reqOrg:                tnOrg1,
+				reqUser:               tnu1,
+				respCode:              http.StatusBadRequest,
+				respMessage:           cutil.GetPtr("Baseline DPU Extension Services cannot be attached"),
+			},
+			wantErr:                     false,
+			verifySiteControllerRequest: false,
 			verifyChildSpanner:          true,
 		},
 		{

@@ -11716,6 +11716,17 @@ impl HostUpgradeState {
                     ));
                 }
 
+                // Drive firmware goes in-band through Scout only: a Redfish
+                // upload would hand the image to the BMC, and no Core script
+                // knows the drives.
+                if let FirmwareComponentType::Drive { model } = firmware_type {
+                    return Err(StateHandlerError::GenericError(eyre!(
+                        "no scout firmware script for drive model {model} on vendor={}, model={}; set a script URL on the firmware version or package a drive-<model> script",
+                        fw_info.vendor,
+                        fw_info.model,
+                    )));
+                }
+
                 if to_install.script.is_some() {
                     return self
                         .by_script(to_install, state, explored_endpoint, scenario)

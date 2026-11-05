@@ -221,6 +221,7 @@ async fn create_test_env_inner(pool: PgPool, overrides: TestEnvOverrides) -> Tes
             test_harness.test_meter.meter(),
             exploration_service,
             endpoint_explorer.clone(),
+            Default::default(),
             api.common_pools().clone(),
             api.work_lock_manager_handle(),
             profiles,

@@ -26,6 +26,7 @@ use futures::StreamExt;
 use ipnetwork::IpNetwork;
 use model::address_selection_strategy::AddressSelectionStrategy;
 use model::controller_outcome::PersistentStateHandlerOutcome;
+use model::network_prefix::NewNetworkPrefix;
 use model::network_segment::{
     NetworkDefinition, NetworkSegment, NetworkSegmentControllerState, NetworkSegmentSearchConfig,
     NetworkSegmentType, NewNetworkSegment,
@@ -880,6 +881,54 @@ pub async fn lock_for_attach(txn: &mut PgConnection, id: NetworkSegmentId) -> Da
         });
     }
     Ok(())
+}
+
+/// Appends a validated prefix and advances its segment's config version and
+/// `updated` timestamp. A stale version or deleted row returns
+/// `ConcurrentModificationError`; the version-checked update locks the live row
+/// against deletion. The savepoint keeps that update and insertion together on
+/// failure. The caller holds `lock_checks` and commits reverse DNS in its outer
+/// transaction; controller state and the initial network definition are unchanged.
+pub async fn add_prefix(
+    value: &NetworkSegment,
+    prefix: &NewNetworkPrefix,
+    txn: &mut PgConnection,
+) -> Result<NetworkSegment, DatabaseError> {
+    let mut txn = crate::Transaction::begin_inner(txn).await?;
+    let query = "UPDATE network_segments SET version=$1, updated=NOW()
+                 WHERE id=$2 AND version=$3 AND deleted IS NULL RETURNING id";
+    let updated_id: NetworkSegmentId = sqlx::query_as(query)
+        .bind(value.version.increment())
+        .bind(value.id)
+        .bind(value.version)
+        .fetch_optional(txn.as_pgconn())
+        .await
+        .map_err(|error| DatabaseError::query(query, error))?
+        .ok_or_else(|| {
+            DatabaseError::ConcurrentModificationError("network_segment", value.version.to_string())
+        })?;
+    crate::network_prefix::create_for(
+        txn.as_mut(),
+        &updated_id,
+        std::slice::from_ref(prefix),
+        None,
+    )
+    .await?;
+    let segment = find_by(
+        &mut txn,
+        ObjectColumnFilter::One(IdColumn, &updated_id),
+        NetworkSegmentSearchConfig::default(),
+    )
+    .await?
+    .pop()
+    .ok_or_else(|| {
+        DatabaseError::new(
+            "finding network segment after adding prefix",
+            sqlx::Error::RowNotFound,
+        )
+    })?;
+    txn.commit().await?;
+    Ok(segment)
 }
 
 pub async fn attach_to_vpc(

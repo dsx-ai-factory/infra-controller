@@ -830,7 +830,6 @@ impl SwitchHandle {
             machine_id: None,
             hardware_type: Some(self.0.host_info.hw_type),
             mat_state: Some(state.state.to_string()),
-            api_state: "Unknown".to_string(),
             power_state: state.power_state,
             machine_ip: None,
             nvos_ip: state.nvos_ip.map(|ip| ip.to_string()),

@@ -316,6 +316,8 @@ pub struct TestBmcHandle<C: Callbacks = TestCallbacks> {
     /// The client behind `service_root`, for collectors that take the BMC
     /// directly rather than a service root.
     pub bmc: Arc<TestBmc>,
+    /// The router client behind `bmc`, which records every request.
+    pub http_client: AxumRouterHttpClient,
     pub state: BmcState<C>,
 }
 
@@ -324,6 +326,7 @@ impl<C: Callbacks> Clone for TestBmcHandle<C> {
         Self {
             service_root: self.service_root.clone(),
             bmc: self.bmc.clone(),
+            http_client: self.http_client.clone(),
             state: self.state.clone(),
         }
     }
@@ -334,7 +337,7 @@ async fn test_bmc<C: Callbacks>((router, state): (axum::Router, BmcState<C>)) ->
     let endpoint = Url::parse("https://bmc-mock.local").expect("valid URL");
     let credentials = BmcCredentials::new("root".to_string(), "password".to_string());
     let bmc = Arc::new(HttpBmc::new(
-        client,
+        client.clone(),
         endpoint,
         credentials,
         CacheSettings::with_capacity(32),
@@ -345,6 +348,7 @@ async fn test_bmc<C: Callbacks>((router, state): (axum::Router, BmcState<C>)) ->
             .unwrap()
             .into(),
         bmc,
+        http_client: client,
         state,
     }
 }
@@ -527,6 +531,7 @@ pub fn liteon_powershelf_router_with_auth() -> (Router, BmcState<TestCallbacks>)
     )
 }
 
+/// Lite-On power shelf with an undeclared but available Systems collection.
 pub async fn liteon_powershelf_bmc() -> TestBmcHandle {
     test_bmc(create_test_bmc(
         &host_info(HardwareType::LiteOnPowerShelf),
@@ -1409,16 +1414,16 @@ mod test {
     async fn unroutable_request_returns_404_from_transport() {
         let client = AxumRouterHttpClient::new(Router::new());
         let url = Url::parse("https://bmc-mock.local/redfish/v1").unwrap();
-        let err = client
-            .get::<serde_json::Value>(
+        let result: Result<serde_json::Value, _> = client
+            .get(
                 url,
                 &BmcCredentials::new("root".to_string(), "password".to_string()),
                 None,
                 &axum::http::HeaderMap::new(),
                 &NoRepair,
             )
-            .await
-            .expect_err("empty router should return transport error");
+            .await;
+        let err = result.expect_err("empty router should return transport error");
 
         match err {
             Error::InvalidResponse { status, .. } => {
