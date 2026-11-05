@@ -18863,7 +18863,7 @@ paths:
         '500':
           description: Internal failure.
         '502':
-          description: Flow returned no task references.
+          description: Flow returned missing or invalid task references.
         '504':
           description: Submission outcome is unknown; do not automatically resubmit.
   '/v2/org/{org}/nico/domain/nvlink/{id}/reset':
@@ -18919,7 +18919,7 @@ paths:
         '500':
           description: Internal failure.
         '502':
-          description: Flow returned no task references.
+          description: Flow returned missing or invalid task references.
         '504':
           description: Submission outcome is unknown; do not automatically resubmit.
 
