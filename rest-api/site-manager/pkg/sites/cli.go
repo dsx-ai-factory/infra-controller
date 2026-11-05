@@ -1,24 +1,18 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-package sitemgr
+package sites
 
 import (
 	"time"
 
-	"github.com/sirupsen/logrus"
+	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/log"
 	cli "github.com/urfave/cli/v2"
-
-	"github.com/NVIDIA/infra-controller/rest-api/cert-manager/pkg/core"
 )
 
 const (
-	vaultSecretsRootPathDefault = "/vault/secrets"
-	defOTPDuration              = 24
-)
-
-var (
-	otpDuration = defOTPDuration * time.Hour
+	defOTPDuration = 24
 )
 
 // NewCommand creates a new cli command
@@ -74,22 +68,37 @@ func NewCommand() *cli.Command {
 				Value: defOTPDuration,
 				Usage: "OTP duration in hours",
 			},
+			// Accepted so existing invocations keep working. Site Manager
+			// doesn't report to Sentry.
 			&cli.StringFlag{
 				Name:    "sentry-dsn",
 				Value:   "",
 				EnvVars: []string{"SENTRY_DSN"},
-				Usage:   "DSN for sentry/glitchtip",
+				Usage:   "Deprecated and ignored",
 			},
 		},
+		// TODO: cmd/site-manager builds its cli.App without this Before, so --debug
+		// has no effect. Wiring it would turn on debug logging in every
+		// default deployment, because the Helm chart and the kustomize base
+		// pass --debug.
 		Before: func(c *cli.Context) error {
 			if c.Bool("debug") {
-				core.GetLogger(c.Context).Logger.SetLevel(logrus.DebugLevel)
+				zerolog.SetGlobalLevel(zerolog.DebugLevel)
 			}
 			return nil
 		},
 		Action: func(c *cli.Context) error {
 			ctx := c.Context
-			log := core.GetLogger(ctx)
+
+			sentryDSN := c.String("sentry-dsn")
+			if sentryDSN != "" {
+				log.Warn().Msg("--sentry-dsn / SENTRY_DSN is deprecated and ignored")
+			}
+
+			otpHrs := c.Int("otp-duration")
+			if otpHrs != defOTPDuration {
+				log.Warn().Int("otp_duration_hours", otpHrs).Msg("OTP duration overridden")
+			}
 
 			o := Options{
 				credsMgrURL:    c.String("creds-manager-url"),
@@ -99,28 +108,26 @@ func NewCommand() *cli.Command {
 				tlsKeyPath:     c.String("tls-key-path"),
 				tlsCertPath:    c.String("tls-cert-path"),
 				namespace:      c.String("namespace"),
-				sentryDSN:      c.String("sentry-dsn"),
+				otpDuration:    time.Duration(otpHrs) * time.Hour,
 			}
-
-			otpHrs := c.Int("otp-duration")
-			if otpHrs != defOTPDuration {
-				log.Warnf("OTP duration overridden to %v hours", otpHrs)
-			}
-			otpDuration = time.Duration(otpHrs) * time.Hour
-			log.Info("Configuring site manager server")
-			s, err := NewSiteManager(ctx, o)
+			log.Info().Msg("configuring Site Manager server")
+			crdClient, err := newCRDClient()
 			if err != nil {
 				return err
 			}
-			log.Info("Starting site manager server")
+			s, err := NewSiteManager(ctx, o, crdClient)
+			if err != nil {
+				return err
+			}
+			log.Info().Msg("starting Site Manager server")
 			s.Start(ctx)
 
 			<-ctx.Done()
 
 			gracePeriod := 5 * time.Second
-			log.Infof("Shut down requested, wait for %v grace period ...", gracePeriod)
+			log.Info().Dur("grace_period", gracePeriod).Msg("shutdown requested, waiting for the grace period")
 			time.Sleep(gracePeriod)
-			log.Infof("Server terminated.")
+			log.Info().Msg("server terminated")
 			return nil
 		},
 	}
