@@ -1062,17 +1062,23 @@ pub(crate) async fn copy_bfb_to_dpu_rshim(
     log_request_data(&request);
     let req = request.into_inner();
 
-    let ip_str = match &req.ssh_request {
-        Some(ssh_req) => match &ssh_req.endpoint_request {
-            Some(bmc_request) => bmc_request.ip_address.clone(),
-            None => return Err(CarbideError::MissingArgument("bmc_endpoint_request").into()),
-        },
-        None => return Err(CarbideError::MissingArgument("ssh_request").into()),
-    };
-
+    let bmc_request = req
+        .ssh_request
+        .as_ref()
+        .ok_or(CarbideError::MissingArgument("ssh_request"))?
+        .endpoint_request
+        .as_ref()
+        .ok_or(CarbideError::MissingArgument("bmc_endpoint_request"))?;
+    let ip_str = &bmc_request.ip_address;
     let dpu_ip: std::net::IpAddr = ip_str
         .parse()
         .map_err(|_| CarbideError::InvalidArgument(format!("invalid DPU IP: {ip_str}")))?;
+    let requested_mac = bmc_request
+        .mac_address
+        .as_deref()
+        .map(str::parse::<MacAddress>)
+        .transpose()
+        .map_err(|_| CarbideError::InvalidArgument("invalid DPU BMC MAC address".to_string()))?;
 
     if req.host_bmc_ip.is_empty() {
         return Err(CarbideError::MissingArgument("host_bmc_ip").into());
@@ -1157,11 +1163,28 @@ pub(crate) async fn copy_bfb_to_dpu_rshim(
     api.database_connection
         .with_txn(|txn| {
             Box::pin(async move {
+                // Addresses are unique across interfaces. Bind recovery to the
+                // resolved identity even when the caller omits the MAC constraint.
+                let interface = find_by_ip(&mut **txn, dpu_ip).await?.ok_or_else(|| {
+                    CarbideError::InvalidArgument(format!(
+                        "cannot trigger BFB recovery: no machine interface for DPU {dpu_ip}"
+                    ))
+                })?;
+                if let Some(mac) = requested_mac
+                    && mac != interface.mac_address
+                {
+                    return Err(CarbideError::InvalidArgument(format!(
+                        "DPU BMC MAC {mac} does not match {} assigned to {dpu_ip}",
+                        interface.mac_address,
+                    )));
+                }
+
                 db::explored_endpoints::set_preingestion_bfb_recovery_needed(
                     dpu_ip,
                     "Triggered via CLI".to_string(),
                     host_bmc_ip,
                     pre_copy_powercycle,
+                    Some(interface.mac_address),
                     txn,
                 )
                 .await?;
@@ -1170,12 +1193,11 @@ pub(crate) async fn copy_bfb_to_dpu_rshim(
                 // issue BMC resets during the power-cycle phases.
                 db::explored_endpoints::set_pause_remediation(host_bmc_ip, true, txn).await?;
 
-                Ok::<(), db::DatabaseError>(())
+                Ok::<(), CarbideError>(())
             })
         })
         .await
-        .map_err(|e| CarbideError::internal(e.to_string()))?
-        .map_err(|e| CarbideError::internal(e.to_string()))?;
+        .map_err(|e| CarbideError::internal(e.to_string()))??;
 
     Ok(Response::new(()))
 }
