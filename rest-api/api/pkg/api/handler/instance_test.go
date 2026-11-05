@@ -6260,6 +6260,58 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 			verifyChildSpanner:          true,
 		},
 		{
+			name: "test Instance update API endpoint success with explicit empty InfiniBandInterfaces list clears all interfaces",
+			fields: fields{
+				dbSession: dbSession,
+				tc:        tc,
+				scp:       scp,
+				cfg:       cfg,
+			},
+			args: args{
+				reqData: &model.APIInstanceUpdateRequest{
+					Name:                 cutil.GetPtr("Test Instance IB clear"),
+					IpxeScript:           os2.IpxeScript,
+					InfiniBandInterfaces: []model.APIInfiniBandInterfaceCreateOrUpdateRequest{},
+				},
+				reqInstance:         inst1.ID.String(),
+				cleanInstanceToStatus: inst1.Status,
+				reqOrg:              tnOrg1,
+				reqUser:             tnu1,
+				respCode:            http.StatusOK,
+				ibInterfaceToDelete: []cdbm.InfiniBandInterface{*ibi1},
+			},
+			wantErr:                     false,
+			verifySiteControllerRequest: true,
+			verifyChildSpanner:          true,
+		},
+		{
+			name: "test Instance update API endpoint success with omitted InfiniBandInterfaces preserves existing READY interfaces",
+			fields: fields{
+				dbSession: dbSession,
+				tc:        tc,
+				scp:       scp,
+				cfg:       cfg,
+			},
+			args: args{
+				reqData: &model.APIInstanceUpdateRequest{
+					Name:        cutil.GetPtr("Test Instance IB omit"),
+					IpxeScript:  os2.IpxeScript,
+					Labels: map[string]string{
+						"new_key": "new_value",
+					},
+				},
+				reqInstance:                           inst1.ID.String(),
+				cleanInstanceToStatus:                 inst1.Status,
+				reqOrg:                                tnOrg1,
+				reqUser:                               tnu1,
+				respCode:                              http.StatusOK,
+				expectInfiniBandInterfacesRemainReady: []uuid.UUID{ibi1.ID},
+			},
+			wantErr:                     false,
+			verifySiteControllerRequest: true,
+			verifyChildSpanner:          true,
+		},
+		{
 			name: "test Instance update API endpoint success with InfiniBand Interface when partition differs on same device instance (not a no-op; keyed by partition+device+instance)",
 			fields: fields{
 				dbSession: dbSession,
