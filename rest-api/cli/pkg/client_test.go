@@ -41,6 +41,7 @@ type observedRequest struct {
 	method        string
 	authorization string
 	pageSize      string
+	statuses      []string
 }
 
 func newHTTP2ResetServer(t *testing.T) (*httptest.Server, *http.Transport, <-chan observedRequest) {
@@ -53,6 +54,7 @@ func newHTTP2ResetServer(t *testing.T) (*httptest.Server, *http.Transport, <-cha
 			method:        req.Method,
 			authorization: req.Header.Get("Authorization"),
 			pageSize:      req.URL.Query().Get("pageSize"),
+			statuses:      req.URL.Query()["status"],
 		}
 
 		if req.ProtoMajor == 2 {
@@ -81,30 +83,6 @@ func TestClient_Do(t *testing.T) {
 		name string
 		run  func(*testing.T)
 	}{
-		// Multi-value requests must preserve every value at the HTTP boundary.
-		{
-			name: "preserves repeated query values",
-			run: func(t *testing.T) {
-				var observed url.Values
-				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-					observed = req.URL.Query()
-					w.WriteHeader(http.StatusNoContent)
-				}))
-				t.Cleanup(server.Close)
-
-				client := NewClient(server.URL, "test-org", "test-token", nil, false)
-				_, _, err := client.doWithQueryValues(
-					http.MethodGet,
-					"/v2/org/{org}/nico/vpc-peering",
-					nil,
-					url.Values{"status": {"Ready", "Error"}},
-					nil,
-				)
-
-				require.NoError(t, err)
-				assert.Equal(t, []string{"Ready", "Error"}, observed["status"])
-			},
-		},
 		{
 			name: "retries an HTTP/2 INTERNAL_ERROR once over HTTP/1.1",
 			run: func(t *testing.T) {
@@ -124,8 +102,8 @@ func TestClient_Do(t *testing.T) {
 
 				require.NoError(t, err)
 				require.JSONEq(t, `[{"id":"instance-1"}]`, string(body))
-				require.Equal(t, observedRequest{2, http.MethodGet, "Bearer test-token", "100"}, <-requests)
-				require.Equal(t, observedRequest{1, http.MethodGet, "Bearer test-token", "100"}, <-requests)
+				require.Equal(t, observedRequest{protocol: 2, method: http.MethodGet, authorization: "Bearer test-token", pageSize: "100"}, <-requests)
+				require.Equal(t, observedRequest{protocol: 1, method: http.MethodGet, authorization: "Bearer test-token", pageSize: "100"}, <-requests)
 				require.Empty(t, requests)
 			},
 		},
@@ -146,7 +124,7 @@ func TestClient_Do(t *testing.T) {
 				)
 
 				require.ErrorContains(t, err, "INTERNAL_ERROR")
-				require.Equal(t, observedRequest{2, http.MethodPost, "Bearer test-token", ""}, <-requests)
+				require.Equal(t, observedRequest{protocol: 2, method: http.MethodPost, authorization: "Bearer test-token"}, <-requests)
 				require.Empty(t, requests)
 			},
 		},
@@ -185,6 +163,116 @@ func TestClient_Do(t *testing.T) {
 		{name: "returns empty token error without retrying", run: testClientDoReturnsEmptyTokenErrorWithoutRetrying},
 		{name: "returns unauthorized without refresh function", run: testClientDoReturnsUnauthorizedWhenNoRefreshFunc},
 		{name: "does not refresh on forbidden", run: testClientDoDoesNotRefreshOnForbidden},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, tt.run)
+	}
+}
+
+func TestClient_doWithQueryValues(t *testing.T) {
+	tests := []struct {
+		name string
+		run  func(*testing.T)
+	}{
+		// Multi-value requests must preserve every value at the HTTP boundary.
+		{
+			name: "preserves repeated query values",
+			run: func(t *testing.T) {
+				var observed url.Values
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+					observed = req.URL.Query()
+					w.WriteHeader(http.StatusNoContent)
+				}))
+				t.Cleanup(server.Close)
+
+				client := NewClient(server.URL, "test-org", "test-token", nil, false)
+				_, _, err := client.doWithQueryValues(
+					http.MethodGet,
+					"/v2/org/{org}/nico/vpc-peering",
+					nil,
+					url.Values{"status": {"Ready", "Error"}},
+					nil,
+				)
+
+				require.NoError(t, err)
+				assert.Equal(t, []string{"Ready", "Error"}, observed["status"])
+			},
+		},
+		// The HTTP/1.1 fallback must replay the complete multi-value query.
+		{
+			name: "preserves repeated values across HTTP/2 retry",
+			run: func(t *testing.T) {
+				server, transport, requests := newHTTP2ResetServer(t)
+
+				client := NewClient(server.URL, "test-org", "test-token", nil, false)
+				client.HTTPClient.Transport = transport
+				client.HTTPClient.Timeout = time.Second
+
+				body, _, err := client.doWithQueryValues(
+					http.MethodGet,
+					"/v2/org/{org}/nico/vpc-peering",
+					nil,
+					url.Values{"status": {"Ready", "Error"}},
+					nil,
+				)
+
+				require.NoError(t, err)
+				require.JSONEq(t, `[{"id":"instance-1"}]`, string(body))
+				require.Equal(t, observedRequest{
+					protocol:      2,
+					method:        http.MethodGet,
+					authorization: "Bearer test-token",
+					statuses:      []string{"Ready", "Error"},
+				}, <-requests)
+				require.Equal(t, observedRequest{
+					protocol:      1,
+					method:        http.MethodGet,
+					authorization: "Bearer test-token",
+					statuses:      []string{"Ready", "Error"},
+				}, <-requests)
+				require.Empty(t, requests)
+			},
+		},
+		// Authorization refresh must retry with the same complete multi-value query.
+		{
+			name: "preserves repeated values across authorization retry",
+			run: func(t *testing.T) {
+				var requests []observedRequest
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+					requests = append(requests, observedRequest{
+						method:        req.Method,
+						authorization: req.Header.Get("Authorization"),
+						statuses:      req.URL.Query()["status"],
+					})
+					if len(requests) == 1 {
+						http.Error(w, `{"message":"expired"}`, http.StatusUnauthorized)
+						return
+					}
+					w.WriteHeader(http.StatusNoContent)
+				}))
+				t.Cleanup(server.Close)
+
+				client := NewClient(server.URL, "test-org", "stale-token", nil, false)
+				client.TokenRefresh = func() (string, error) {
+					return "refreshed-token", nil
+				}
+
+				_, _, err := client.doWithQueryValues(
+					http.MethodGet,
+					"/v2/org/{org}/nico/vpc-peering",
+					nil,
+					url.Values{"status": {"Ready", "Error"}},
+					nil,
+				)
+
+				require.NoError(t, err)
+				require.Equal(t, []observedRequest{
+					{method: http.MethodGet, authorization: "Bearer stale-token", statuses: []string{"Ready", "Error"}},
+					{method: http.MethodGet, authorization: "Bearer refreshed-token", statuses: []string{"Ready", "Error"}},
+				}, requests)
+			},
+		},
 	}
 
 	for _, tt := range tests {

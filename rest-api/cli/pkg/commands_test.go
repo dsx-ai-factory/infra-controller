@@ -577,6 +577,18 @@ func TestGeneratedCommandInfos(t *testing.T) {
 					{name: "OpenAPI array", operationID: "get-all-ipxe-template", parameter: "siteId", repeatable: true},
 					// Relation handlers consume every repeated includeRelation value across endpoint families.
 					{name: "relation", operationID: "get-vpc-prefix", parameter: "includeRelation", repeatable: true},
+					// Operation-scoped metadata covers legacy scalar schemas whose handlers consume every value.
+					{name: "allocation tenant IDs", operationID: "get-all-allocation", parameter: "tenantId", repeatable: true},
+					{name: "operating system types", operationID: "get-all-operating-system", parameter: "type", repeatable: true},
+					{name: "machine hardware SKU device types", operationID: "get-all-machine", parameter: "hwSkuDeviceType", repeatable: true},
+					{name: "rack names", operationID: "get-all-rack", parameter: "name", repeatable: true},
+					{name: "rack manufacturers", operationID: "get-all-rack", parameter: "manufacturer", repeatable: true},
+					{name: "rack validation names", operationID: "validate-racks", parameter: "name", repeatable: true},
+					{name: "rack validation manufacturers", operationID: "validate-racks", parameter: "manufacturer", repeatable: true},
+					{name: "tray validation names", operationID: "validate-trays", parameter: "name", repeatable: true},
+					{name: "tray validation manufacturers", operationID: "validate-trays", parameter: "manufacturer", repeatable: true},
+					// Generic parameter names remain scalar outside reviewed operation/parameter pairs.
+					{name: "generic type remains scalar", operationID: "validate-trays", parameter: "type", repeatable: false},
 					// Pagination remains scalar even next to repeatable filters.
 					{name: "scalar pagination", operationID: "get-all-vpc-peering", parameter: "pageSize", repeatable: false},
 				}
@@ -606,29 +618,42 @@ func TestGeneratedCommandInfos(t *testing.T) {
 // TestRunGeneratedCommand groups request behavior for alternate interfaces
 // that execute the generated command tree with an existing client.
 func TestRunGeneratedCommand(t *testing.T) {
-	t.Run("repeated strings preserve exact values", func(t *testing.T) {
-		spec, err := ParseSpec(openapi.Spec)
-		require.NoError(t, err)
+	tests := []struct {
+		name string
+		run  func(*testing.T)
+	}{
+		// The alternate command entry point must preserve every exact flag value.
+		{
+			name: "repeated strings preserve exact values",
+			run: func(t *testing.T) {
+				spec, err := ParseSpec(openapi.Spec)
+				require.NoError(t, err)
 
-		var observed url.Values
-		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
-			observed = request.URL.Query()
-			w.WriteHeader(http.StatusNoContent)
-		}))
-		t.Cleanup(server.Close)
-		client := NewClient(server.URL, "test-org", "test-token", nil, false)
+				var observed url.Values
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+					observed = request.URL.Query()
+					w.WriteHeader(http.StatusNoContent)
+				}))
+				t.Cleanup(server.Close)
+				client := NewClient(server.URL, "test-org", "test-token", nil, false)
 
-		// Repeated flags remain separate while each occurrence preserves its
-		// comma and surrounding spaces through the alternate execution path.
-		err = RunGeneratedCommand(
-			spec,
-			client,
-			"vpc-peering list",
-			[]string{"--status", " Ready,Error ", "--status", "Pending"},
-		)
-		require.NoError(t, err)
-		assert.Equal(t, []string{" Ready,Error ", "Pending"}, observed["status"])
-	})
+				// Repeated flags remain separate while each occurrence preserves its
+				// comma and surrounding spaces through the alternate execution path.
+				err = RunGeneratedCommand(
+					spec,
+					client,
+					"vpc-peering list",
+					[]string{"--status", " Ready,Error ", "--status", "Pending"},
+				)
+				require.NoError(t, err)
+				assert.Equal(t, []string{" Ready,Error ", "Pending"}, observed["status"])
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, tt.run)
+	}
 }
 
 func testNewApp_VpcRoutingProfileCommands(t *testing.T) {
@@ -807,62 +832,75 @@ func testNewApp_VpcPrefixCreateSelectorValidation(t *testing.T) {
 // TestBuildActionCommandWithOptions groups flag, metadata, and execution
 // scenarios owned by the generated action-command builder.
 func TestBuildActionCommandWithOptions(t *testing.T) {
-	t.Run("repeatable parameter without schema", func(t *testing.T) {
-		parameter := Parameter{
-			Name:        "filter",
-			In:          "query",
-			Description: "Can be specified multiple times.",
-		}
-		operation := resolvedOp{
-			tag:    "Test",
-			action: "list",
-			method: http.MethodGet,
-			path:   "/items",
-			op: &Operation{
-				OperationID: "get-all-items",
-				Parameters:  []Parameter{parameter},
-			},
-		}
+	tests := []struct {
+		name string
+		run  func(*testing.T)
+	}{
+		// A schema-less repeatable parameter must use matching metadata, flag, and HTTP behavior.
+		{
+			name: "repeatable parameter without schema",
+			run: func(t *testing.T) {
+				parameter := Parameter{
+					Name:        "filter",
+					In:          "query",
+					Description: "Can be specified multiple times.",
+				}
+				operation := resolvedOp{
+					tag:    "Test",
+					action: "list",
+					method: http.MethodGet,
+					path:   "/items",
+					op: &Operation{
+						OperationID: "get-all-items",
+						Parameters:  []Parameter{parameter},
+					},
+				}
 
-		var info GeneratedCommandInfo
-		var observed url.Values
-		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
-			observed = request.URL.Query()
-			w.WriteHeader(http.StatusNoContent)
-		}))
-		t.Cleanup(server.Close)
-		client := NewClient(server.URL, "test-org", "test-token", nil, false)
+				var info GeneratedCommandInfo
+				var observed url.Values
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+					observed = request.URL.Query()
+					w.WriteHeader(http.StatusNoContent)
+				}))
+				t.Cleanup(server.Close)
+				client := NewClient(server.URL, "test-org", "test-token", nil, false)
 
-		// Build once so the generated flag and metadata describe the same contract.
-		command := buildActionCommandWithOptions(&Spec{}, operation, "", commandBuildOptions{
-			clientFactory: func(*cli.Context) (*Client, error) {
-				return client, nil
-			},
-			record: func(generated GeneratedCommandInfo) {
-				info = generated
-			},
-		})
-		var filterFlag cli.Flag
-		for _, candidate := range command.Flags {
-			if candidate.Names()[0] == "filter" {
-				filterFlag = candidate
-				break
-			}
-		}
-		require.IsType(t, &cli.StringSliceFlag{}, filterFlag)
-		require.Len(t, info.QueryParameters, 1)
-		assert.True(t, info.QueryParameters[0].Repeatable)
+				// Build once so the generated flag and metadata describe the same contract.
+				command := buildActionCommandWithOptions(&Spec{}, operation, "", commandBuildOptions{
+					clientFactory: func(*cli.Context) (*Client, error) {
+						return client, nil
+					},
+					record: func(generated GeneratedCommandInfo) {
+						info = generated
+					},
+				})
+				var filterFlag cli.Flag
+				for _, candidate := range command.Flags {
+					if candidate.Names()[0] == "filter" {
+						filterFlag = candidate
+						break
+					}
+				}
+				require.IsType(t, &cli.StringSliceFlag{}, filterFlag)
+				require.Len(t, info.QueryParameters, 1)
+				assert.True(t, info.QueryParameters[0].Repeatable)
 
-		// Execute both occurrences through readFlagValues and request encoding.
-		app := &cli.App{
-			Name:                      "test",
-			Commands:                  []*cli.Command{command},
-			DisableSliceFlagSeparator: true,
-		}
-		err := app.Run([]string{"test", "list", "--filter", " first,value ", "--filter", "second"})
-		require.NoError(t, err)
-		assert.Equal(t, []string{" first,value ", "second"}, observed["filter"])
-	})
+				// Execute both occurrences through readFlagValues and request encoding.
+				app := &cli.App{
+					Name:                      "test",
+					Commands:                  []*cli.Command{command},
+					DisableSliceFlagSeparator: true,
+				}
+				err := app.Run([]string{"test", "list", "--filter", " first,value ", "--filter", "second"})
+				require.NoError(t, err)
+				assert.Equal(t, []string{" first,value ", "second"}, observed["filter"])
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, tt.run)
+	}
 }
 
 // TestBuildActionCommand_BodyPropertyFlags verifies body-property flag naming
@@ -1693,21 +1731,21 @@ func testNewAppPreservesRepeatedQueryFlags(t *testing.T) {
 		// Status is a scalar schema whose description promises repeatable filtering.
 		{
 			name:      "documented statuses",
-			command:   []string{"vpc-peering", "list", "--status", "Ready", "--status", "Error"},
+			command:   []string{"vpc-peering", "list", "--status", "Ready", "--status", "Error", "--output", "json"},
 			wantPath:  "/v2/org/test-org/nico/vpc-peering",
 			wantQuery: url.Values{"status": {"Ready", "Error"}},
 		},
 		// One occurrence remains one exact value even when it contains spaces and a comma.
 		{
 			name:      "repeatable string contents",
-			command:   []string{"vpc-peering", "list", "--status", " Ready,Error "},
+			command:   []string{"vpc-peering", "list", "--status", " Ready,Error ", "--output", "json"},
 			wantPath:  "/v2/org/test-org/nico/vpc-peering",
 			wantQuery: url.Values{"status": {" Ready,Error "}},
 		},
 		// UUID filters use the same documented scalar-repeat contract as status.
 		{
 			name:      "documented IDs",
-			command:   []string{"vpc-peering", "list", "--vpc-id", firstID, "--vpc-id", secondID},
+			command:   []string{"vpc-peering", "list", "--vpc-id", firstID, "--vpc-id", secondID, "--output", "json"},
 			wantPath:  "/v2/org/test-org/nico/vpc-peering",
 			wantQuery: url.Values{"vpcId": {firstID, secondID}},
 		},
@@ -1722,6 +1760,12 @@ func testNewAppPreservesRepeatedQueryFlags(t *testing.T) {
 			command:   []string{"allocation", "list", "--constraint-value", "1", "--constraint-value", "not-an-integer"},
 			wantError: "not-an-integer",
 		},
+		// A comma inside one integer occurrence is not an alternate list syntax.
+		{
+			name:      "invalid comma-separated repeated integers",
+			command:   []string{"allocation", "list", "--constraint-value", "1,2"},
+			wantError: "1,2",
+		},
 		// Repeated inactive-device indices preserve their caller-supplied order.
 		{
 			name:      "inactive devices in order",
@@ -1732,7 +1776,7 @@ func testNewAppPreservesRepeatedQueryFlags(t *testing.T) {
 		// Relation expansion is repeatable in the shared handler contract.
 		{
 			name:      "relations",
-			command:   []string{"vpc-prefix", "get", "--include-relation", "Vpc", "--include-relation", "Site", firstID},
+			command:   []string{"vpc-prefix", "get", "--include-relation", "Vpc", "--include-relation", "Site", "--output", "json", firstID},
 			wantPath:  "/v2/org/test-org/nico/vpc-prefix/" + firstID,
 			wantQuery: url.Values{"includeRelation": {"Vpc", "Site"}},
 		},
@@ -1743,12 +1787,67 @@ func testNewAppPreservesRepeatedQueryFlags(t *testing.T) {
 			wantPath:  "/v2/org/test-org/nico/ipxe-template",
 			wantQuery: url.Values{"siteId": {firstID, secondID}},
 		},
+		// Reviewed operation metadata preserves repeated filters omitted from legacy OpenAPI prose.
+		{
+			name:      "allocation tenant IDs",
+			command:   []string{"allocation", "list", "--tenant-id", firstID, "--tenant-id", secondID},
+			wantPath:  "/v2/org/test-org/nico/allocation",
+			wantQuery: url.Values{"tenantId": {firstID, secondID}},
+		},
+		{
+			name:      "operating system types",
+			command:   []string{"operating-system", "list", "--type", "Image", "--type", "iPXE"},
+			wantPath:  "/v2/org/test-org/nico/operating-system",
+			wantQuery: url.Values{"type": {"Image", "iPXE"}},
+		},
+		{
+			name:      "machine hardware SKU device types",
+			command:   []string{"machine", "list", "--hw-sku-device-type", "gpu", "--hw-sku-device-type", "storage"},
+			wantPath:  "/v2/org/test-org/nico/machine",
+			wantQuery: url.Values{"hwSkuDeviceType": {"gpu", "storage"}},
+		},
+		{
+			name:      "rack names and manufacturers",
+			command:   []string{"rack", "list", "--site-id", firstID, "--name", "rack-a", "--name", "rack-b", "--manufacturer", "vendor-a", "--manufacturer", "vendor-b"},
+			wantPath:  "/v2/org/test-org/nico/rack",
+			wantQuery: url.Values{"siteId": {firstID}, "name": {"rack-a", "rack-b"}, "manufacturer": {"vendor-a", "vendor-b"}},
+		},
+		{
+			name:      "rack validation names and manufacturers",
+			command:   []string{"rack", "validate-all", "--site-id", firstID, "--name", "rack-a", "--name", "rack-b", "--manufacturer", "vendor-a", "--manufacturer", "vendor-b"},
+			wantPath:  "/v2/org/test-org/nico/rack/validation",
+			wantQuery: url.Values{"siteId": {firstID}, "name": {"rack-a", "rack-b"}, "manufacturer": {"vendor-a", "vendor-b"}},
+		},
+		{
+			name:      "tray validation names and manufacturers",
+			command:   []string{"tray", "validate-all", "--site-id", firstID, "--name", "tray-a", "--name", "tray-b", "--manufacturer", "vendor-a", "--manufacturer", "vendor-b"},
+			wantPath:  "/v2/org/test-org/nico/tray/validation",
+			wantQuery: url.Values{"siteId": {firstID}, "name": {"tray-a", "tray-b"}, "manufacturer": {"vendor-a", "vendor-b"}},
+		},
 		// Scalar values and omitted OpenAPI defaults retain their existing request shape.
 		{
 			name:      "scalar regression",
-			command:   []string{"vpc-peering", "list", "--site-id", firstID, "--page-size", "25"},
+			command:   []string{"vpc-peering", "list", "--site-id", firstID, "--page-size", "25", "--output", "json"},
 			wantPath:  "/v2/org/test-org/nico/vpc-peering",
 			wantQuery: url.Values{"siteId": {firstID}, "pageSize": {"25"}},
+		},
+		{
+			name:      "scalar false",
+			command:   []string{"vpc-peering", "list", "--is-multi-tenant=false", "--output", "json"},
+			wantPath:  "/v2/org/test-org/nico/vpc-peering",
+			wantQuery: url.Values{"isMultiTenant": {"false"}},
+		},
+		{
+			name:      "scalar zero",
+			command:   []string{"tray", "validate-all", "--site-id", firstID, "--rack-id", secondID, "--slot-id", "0"},
+			wantPath:  "/v2/org/test-org/nico/tray/validation",
+			wantQuery: url.Values{"siteId": {firstID}, "rackId": {secondID}, "slotId": {"0"}},
+		},
+		{
+			name:      "omitted query parameters",
+			command:   []string{"vpc-peering", "list", "--output", "json"},
+			wantPath:  "/v2/org/test-org/nico/vpc-peering",
+			wantQuery: url.Values{},
 		},
 	}
 
