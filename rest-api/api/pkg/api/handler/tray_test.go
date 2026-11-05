@@ -1380,6 +1380,7 @@ func TestUpdateTrayPowerStateHandler_Handle(t *testing.T) {
 		user              *cdbm.User
 		trayID            string
 		expectedTrayID    string
+		expectedRawPath   bool
 		malformedEncoding bool
 		body              string
 		mockTaskIDs       []*flowv1.UUID
@@ -1406,14 +1407,15 @@ func TestUpdateTrayPowerStateHandler_Handle(t *testing.T) {
 			expectedStatus: http.StatusOK,
 		},
 		{
-			name:           "encoded MAC",
-			reqOrg:         org,
-			user:           providerUser,
-			trayID:         "d8%3Aab%3Acd%3Aef%3A00%3A01",
-			expectedTrayID: "d8:ab:cd:ef:00:01",
-			mockTaskIDs:    []*flowv1.UUID{{Id: uuid.NewString()}},
-			body:           fmt.Sprintf(`{"siteId":"%s","state":"on"}`, site.ID.String()),
-			expectedStatus: http.StatusOK,
+			name:            "encoded MAC",
+			reqOrg:          org,
+			user:            providerUser,
+			trayID:          "d8%3Aab%3Acd%3Aef%3A00%3A01",
+			expectedTrayID:  "d8:ab:cd:ef:00:01",
+			expectedRawPath: true,
+			mockTaskIDs:     []*flowv1.UUID{{Id: uuid.NewString()}},
+			body:            fmt.Sprintf(`{"siteId":"%s","state":"on"}`, site.ID.String()),
+			expectedStatus:  http.StatusOK,
 		},
 		{
 			name:           "decoded once",
@@ -1426,14 +1428,15 @@ func TestUpdateTrayPowerStateHandler_Handle(t *testing.T) {
 			expectedStatus: http.StatusOK,
 		},
 		{
-			name:           "decoded once with RawPath",
-			reqOrg:         org,
-			user:           providerUser,
-			trayID:         "unit%3Along%252Flabel",
-			expectedTrayID: "unit:long%2Flabel",
-			mockTaskIDs:    []*flowv1.UUID{{Id: uuid.NewString()}},
-			body:           fmt.Sprintf(`{"siteId":"%s","state":"on"}`, site.ID.String()),
-			expectedStatus: http.StatusOK,
+			name:            "decoded once with RawPath",
+			reqOrg:          org,
+			user:            providerUser,
+			trayID:          "unit%3Along%252Flabel",
+			expectedTrayID:  "unit:long%2Flabel",
+			expectedRawPath: true,
+			mockTaskIDs:     []*flowv1.UUID{{Id: uuid.NewString()}},
+			body:            fmt.Sprintf(`{"siteId":"%s","state":"on"}`, site.ID.String()),
+			expectedStatus:  http.StatusOK,
 		},
 		{
 			name:              "malformed encoding",
@@ -1441,6 +1444,7 @@ func TestUpdateTrayPowerStateHandler_Handle(t *testing.T) {
 			user:              providerUser,
 			trayID:            "d8%ZZ",
 			malformedEncoding: true,
+			expectedRawPath:   true,
 			body:              fmt.Sprintf(`{"siteId":"%s","state":"on"}`, site.ID.String()),
 			expectedStatus:    http.StatusBadRequest,
 		},
@@ -1528,6 +1532,7 @@ func TestUpdateTrayPowerStateHandler_Handle(t *testing.T) {
 			if tt.malformedEncoding {
 				req.URL.RawPath = fmt.Sprintf("/v2/org/%s/nico/tray/%s/power", tt.reqOrg, tt.trayID)
 			}
+			require.Equal(t, tt.expectedRawPath, req.URL.RawPath != "", "request RawPath presence")
 			req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
 			rec := httptest.NewRecorder()
 
