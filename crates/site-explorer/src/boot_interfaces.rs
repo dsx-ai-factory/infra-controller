@@ -167,6 +167,9 @@ impl NicBootInterfaces {
 /// unrelated machine updates on every exploration. The mutation helpers lock
 /// and recheck the two allowed transitions: unset to initialized, and a
 /// `MacOnly` target to a `Pair` for the same MAC.
+/// Before either mutation, try the group after the caller's interface work.
+/// A busy member aborts the transaction rather than waiting while holding
+/// rows another network writer may need. Site Explorer retries in a later run.
 pub(super) async fn reconcile_desired_boot_interface(
     txn: &mut PgConnection,
     machine_id: &HostMachineId,
@@ -196,6 +199,12 @@ pub(super) async fn reconcile_desired_boot_interface(
 
     match (desired.as_ref().map(|desired| &desired.value), update) {
         (None, Some(target)) => {
+            if !db::machine::try_lock_group_for_update(txn, machine_id.as_machine_id()).await? {
+                return Err(db::DatabaseError::FailedPrecondition(format!(
+                    "machine group for {machine_id} changed or is busy; retry",
+                ))
+                .into());
+            }
             let selection_source =
                 initial_selection_source(&target, primary_interface_selection, declared_primary);
             db::machine_desired_boot_interface::initialize_if_unset(
@@ -211,6 +220,12 @@ pub(super) async fn reconcile_desired_boot_interface(
             Some(MachineBootInterfaceTarget::Pair(target)),
         ) => {
             debug_assert_eq!(*mac_address, target.mac_address);
+            if !db::machine::try_lock_group_for_update(txn, machine_id.as_machine_id()).await? {
+                return Err(db::DatabaseError::FailedPrecondition(format!(
+                    "machine group for {machine_id} changed or is busy; retry",
+                ))
+                .into());
+            }
             db::machine_desired_boot_interface::enrich_interface_id(
                 txn,
                 machine_id,

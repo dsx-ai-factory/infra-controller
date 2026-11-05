@@ -21,15 +21,16 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use carbide_instrument::emit;
+use carbide_resource_pool::{ResourcePoolBackendError, ResourcePoolRegistry};
 use carbide_utils::none_if_empty::NoneIfEmpty;
 use carbide_uuid::machine::{
     HostMachineId, MachineId, MachineIdSubtype, PredictedHostMachineId, StableHostMachineId,
 };
 use carbide_uuid::rack::RackId;
 use component_manager::MachineInfoProvider;
-use db::machine::MachineNetworkConfigNotCurrent;
-use db::{ConditionalWrite, Transaction};
+use db::Transaction;
 use futures_util::StreamExt;
+use futures_util::future::join_all;
 use futures_util::stream::FuturesUnordered;
 use itertools::Itertools;
 use mac_address::MacAddress;
@@ -51,10 +52,12 @@ use model::site_explorer::{
     EndpointExplorationReport, ExploredDpu, ExploredManagedHost, HostPrimaryInterfaceSelection,
 };
 use sqlx::{PgConnection, PgPool};
+use tokio_util::sync::CancellationToken;
 
 use super::Config;
 use crate::IdentifiedManagedHost;
 use crate::boot_interfaces::reconcile_desired_boot_interface;
+use crate::dpu_loopback::PreparedDpuLoopback;
 use crate::errors::{SiteExplorerError, SiteExplorerResult};
 use crate::explored_endpoint_index::ExploredEndpointIndex;
 use crate::managed_host::ManagedHost;
@@ -66,6 +69,10 @@ use crate::metrics::{
 mod host_identification;
 pub(crate) use host_identification::ConfiguredIngestionCandidate;
 
+// Leave the foreground reservation's remaining lifetime for SQL attachment.
+// This bounds admission only; the transaction retains its statement limits.
+const DPU_ADMISSION_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// Creates machines from site-explorer managed-host reports.
 pub struct MachineCreator {
     database_connection: PgPool,
@@ -73,6 +80,8 @@ pub struct MachineCreator {
     /// In-flight creations per `create_machines` call: the configured value,
     /// clamped below the admin-lock admission permits.
     creation_concurrency: usize,
+    resource_pool_registry: ResourcePoolRegistry,
+    pub(super) preparation_cancel_token: CancellationToken,
     common_pools: Arc<CommonPools>,
     rack_profiles: Arc<RackProfileConfig>,
     machine_info_provider: Option<Arc<dyn MachineInfoProvider>>,
@@ -81,9 +90,13 @@ pub struct MachineCreator {
 
 impl MachineCreator {
     /// Creates a machine creator with an optional machine-information provider.
+    /// The registry selects DPU IPv4 backends for preparation outside entity
+    /// transactions. Direct calls have an uncancelled owner token; Site Explorer
+    /// installs its shutdown token before starting production creation work.
     pub fn new(
         database_connection: PgPool,
         config: Config,
+        resource_pool_registry: ResourcePoolRegistry,
         common_pools: Arc<CommonPools>,
         rack_profiles: Arc<RackProfileConfig>,
         machine_info_provider: Option<Arc<dyn MachineInfoProvider>>,
@@ -97,6 +110,8 @@ impl MachineCreator {
             database_connection,
             config,
             creation_concurrency,
+            resource_pool_registry,
+            preparation_cancel_token: CancellationToken::new(),
             common_pools,
             rack_profiles,
             machine_info_provider,
@@ -291,6 +306,10 @@ impl MachineCreator {
     ///
     /// Returns `true` only when new machines have been created.
     ///
+    /// Prepares missing DPU IPv4 loopbacks through the configured backend before
+    /// the machine transaction, then attaches them with the network config.
+    /// Existing loopback ownership is reused during repair.
+    ///
     /// Both creation and reconciliation require a matching `expected_machine` entry.
     pub async fn create_managed_host(
         &self,
@@ -311,9 +330,9 @@ impl MachineCreator {
     /// The source is recorded only when its selected MAC becomes the durable
     /// target; target resolution may legitimately choose another interface.
     ///
-    /// Records one stage observation for the admission wait, one for the
-    /// creation transaction on every exit including errors, and one for the
-    /// after-commit repair when a host machine was committed.
+    /// Records an observation for each attempted stage: admission, the creation
+    /// transaction, and after-commit repair when a host was committed. Rejected
+    /// preparation reaches none of those stages.
     async fn create_managed_host_with_selection(
         &self,
         explored_host: &ExploredManagedHost,
@@ -330,32 +349,97 @@ impl MachineCreator {
             return Ok(ManagedHostCreation::SkippedUnexpected);
         };
 
-        // Admission permit BEFORE the transaction: waiters on the admin-segment
-        // advisory locks (the allocation locks taken below for a new host, and
-        // the reconcile transaction that follows the commit) must queue in
-        // memory, not on open pool connections.
-        let admission_start = Instant::now();
-        let _admin_admission = db::machine_interface::admin_lock_admission().await;
-        record_creation_stage(
-            ManagedHostCreationStage::AdmissionWait,
-            admission_start.elapsed(),
-        );
-
-        let transaction_start = Instant::now();
-        let creation = self
-            .create_managed_host_in_transaction(
+        let dpu_ids = explored_host
+            .dpus
+            .iter()
+            .map(|dpu| dpu.machine_id_if_valid_report())
+            .collect::<Result<Vec<_>, _>>()?;
+        // Resolve siblings together so later provider calls cannot age the
+        // first reservation past its attachment deadline. `join_all` drains every
+        // result and retains report order for Integrated assignment below.
+        let preparations = join_all(dpu_ids.into_iter().map(|machine_id| {
+            PreparedDpuLoopback::prepare(
                 pool,
-                explored_host,
-                report,
-                expected_machine,
-                primary_interface_selection,
+                &self.resource_pool_registry,
+                &self.common_pools,
+                machine_id.into(),
+                &self.preparation_cancel_token,
             )
-            .await;
-        record_creation_stage(
-            ManagedHostCreationStage::Transaction,
-            transaction_start.elapsed(),
-        );
-        let creation = creation?;
+        }))
+        .await;
+        let mut loopbacks = Vec::with_capacity(preparations.len());
+        let mut preparation_error = None;
+        for preparation in preparations {
+            match preparation {
+                Ok(prepared) => loopbacks.push(prepared),
+                Err(error) if preparation_error.is_none() => preparation_error = Some(error),
+                Err(_) => {}
+            }
+        }
+
+        let creation = async {
+            if let Some(error) = preparation_error {
+                return Err(error.into());
+            }
+            // Bound admission only while a provider reservation is waiting.
+            // Integrated allocation and repair retain their existing wait.
+            let admission_start = Instant::now();
+            let admission: SiteExplorerResult<_> = if !loopbacks
+                .iter()
+                .any(PreparedDpuLoopback::has_provider_reservation)
+            {
+                Ok(db::machine_interface::admin_lock_admission().await)
+            } else {
+                match self
+                    .preparation_cancel_token
+                    .run_until_cancelled(tokio::time::timeout(
+                        DPU_ADMISSION_TIMEOUT,
+                        db::machine_interface::admin_lock_admission(),
+                    ))
+                    .await
+                {
+                    Some(Ok(admission)) => Ok(admission),
+                    None => Err(ResourcePoolBackendError::Cancelled {
+                        operation: "DPU admin lock admission",
+                    }
+                    .into()),
+                    Some(Err(_)) => Err(ResourcePoolBackendError::DeadlineExceeded {
+                        operation: "DPU admin lock admission",
+                    }
+                    .into()),
+                }
+            };
+            record_creation_stage(
+                ManagedHostCreationStage::AdmissionWait,
+                admission_start.elapsed(),
+            );
+            let admission = admission?;
+            let transaction_start = Instant::now();
+            let creation = self
+                .create_managed_host_in_transaction(
+                    pool,
+                    explored_host,
+                    report,
+                    expected_machine,
+                    primary_interface_selection,
+                    &loopbacks,
+                )
+                .await;
+            record_creation_stage(
+                ManagedHostCreationStage::Transaction,
+                transaction_start.elapsed(),
+            );
+            Ok::<_, SiteExplorerError>((creation?, admission))
+        }
+        .await;
+        // Attached requests ignore cancellation. This also abandons a
+        // preparation a concurrent writer made unnecessary before commit.
+        for prepared in &loopbacks {
+            if let Err(error) = prepared.cancel(pool).await {
+                tracing::error!(machine_id = %prepared.machine_id(), %error, "Could not save DPU loopback cancellation");
+            }
+        }
+        let (creation, _admin_admission) = creation?;
 
         if let Some(host_machine_id) = creation.committed_host_machine_id() {
             // Normalize host admin address ownership now that every DPU-backed
@@ -382,10 +466,14 @@ impl MachineCreator {
         report: &mut EndpointExplorationReport,
         expected_machine: &ExpectedMachine,
         primary_interface_selection: Option<HostPrimaryInterfaceSelection>,
+        loopbacks: &[PreparedDpuLoopback<'_>],
     ) -> SiteExplorerResult<ManagedHostCreation> {
         let machine_data = Some(&expected_machine.data);
         let mut managed_host = ManagedHost::init(explored_host);
         let mut txn = Transaction::begin(pool).await?;
+        for prepared in loopbacks {
+            prepared.check_identity(&mut txn).await?;
+        }
 
         // Zero-dpu case: If the explored host had no DPUs, we can create the machine now
         if managed_host.explored_host.dpus.is_empty() {
@@ -430,6 +518,10 @@ impl MachineCreator {
             // path with `needs_managed_host_transaction` so an ingested fleet does not re-run
             // it for every host on every iteration.
 
+            for prepared in loopbacks {
+                prepared.check_identity(&mut txn).await?;
+            }
+
             Self::reconcile_existing_dpu_host(
                 &mut txn,
                 &host_machine_id,
@@ -437,6 +529,9 @@ impl MachineCreator {
             )
             .await?;
 
+            for prepared in loopbacks {
+                prepared.attach(&mut txn, false).await?;
+            }
             txn.commit().await?;
             return Ok(ManagedHostCreation::Repaired {
                 host_machine_id: Some(host_machine_id),
@@ -450,12 +545,18 @@ impl MachineCreator {
         // lock after a row lock.
         if !managed_host.explored_host.dpus.is_empty() {
             db::machine_interface::lock_all_admin_segments_for_allocation(txn.as_pgconn()).await?;
+            // IPv4 allocation uses shared segment locks; force cleanup needs
+            // them exclusively. Recheck after that fence and hold it through
+            // creation, so an intervening create/delete cannot become absence.
+            for prepared in loopbacks {
+                prepared.check_identity(&mut txn).await?;
+            }
         }
 
         for (dpu_report, dpu_machine_id) in
             managed_host.explored_host.dpus.iter().zip(dpu_ids.iter())
         {
-            let dpu_machine = self
+            self
                 .create_dpu(&mut txn, dpu_report)
                 .await?
                 .ok_or_else(|| {
@@ -469,13 +570,11 @@ impl MachineCreator {
                 .attach_dpu_to_host(&mut txn, &managed_host, dpu_report, machine_data)
                 .await?;
             managed_host.machine_id = Some(host_machine_id);
+        }
 
-            // Now that the host link exists in machine_interfaces, the
-            // machine group syncing in try_update_network_config keeps this
-            // DPU verison bump in sync with the host-level version (and any
-            // sibling DPUs already linked) network_config_version.
-            self.update_dpu_network_config(&mut txn, &dpu_machine)
-                .await?;
+        // Every host link exists before the machine-group configuration updates.
+        for prepared in loopbacks {
+            prepared.attach(&mut txn, true).await?;
         }
 
         // Now since all DPUs are created, update host and DPUs state correctly.
@@ -1144,47 +1243,6 @@ impl MachineCreator {
             &mut bmc_info,
         )
         .await?;
-
-        Ok(())
-    }
-
-    async fn update_dpu_network_config(
-        &self,
-        txn: &mut PgConnection,
-        dpu_machine: &AnyMachine,
-    ) -> SiteExplorerResult<()> {
-        let (mut network_config, version) = dpu_machine.network_config.clone().take();
-        if network_config.loopback_ip.is_none() {
-            let loopback_ip = db::machine::allocate_loopback_ip(
-                &self.common_pools,
-                txn,
-                &dpu_machine.id.to_string(),
-            )
-            .await?;
-            network_config.loopback_ip = Some(loopback_ip);
-        }
-
-        if network_config.loopback_ip_v6.is_none() {
-            network_config.loopback_ip_v6 = db::machine::allocate_loopback_ip_v6(
-                &self.common_pools,
-                txn,
-                &dpu_machine.id.to_string(),
-            )
-            .await?;
-        }
-
-        // Missing and changed targets share this rejection. Fail the whole
-        // transaction so any addresses allocated above return to their pools.
-        if let ConditionalWrite::NotApplied(MachineNetworkConfigNotCurrent) =
-            db::machine::try_update_network_config(txn, &dpu_machine.id, version, &network_config)
-                .await?
-        {
-            return Err(db::DatabaseError::ConcurrentModificationError(
-                "machine",
-                version.to_string(),
-            )
-            .into());
-        }
 
         Ok(())
     }

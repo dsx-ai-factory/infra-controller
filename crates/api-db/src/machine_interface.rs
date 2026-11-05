@@ -791,6 +791,25 @@ where
     .into_group_map())
 }
 
+/// `lock_for_machine_cleanup` locks every interface currently owned by, or
+/// attached to a DPU in, `machine_ids`, including BMC interfaces, in interface
+/// ID order. Take the required segment and exploration locks first, then call
+/// this before locking machine rows for cleanup.
+pub async fn lock_for_machine_cleanup(
+    txn: &mut PgConnection,
+    machine_ids: &[MachineId],
+) -> DatabaseResult<()> {
+    let query = "SELECT id FROM machine_interfaces
+        WHERE machine_id = ANY($1) OR attached_dpu_machine_id = ANY($1)
+        ORDER BY id FOR UPDATE";
+    sqlx::query(query)
+        .bind(machine_ids)
+        .fetch_all(txn)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))?;
+    Ok(())
+}
+
 /// `find_by_machine_id_for_update` locks one machine's non-BMC interface rows in
 /// ID order and returns their current snapshots.
 ///

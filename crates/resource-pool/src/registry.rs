@@ -35,6 +35,7 @@ static INTEGRATED_BACKEND: ResourcePoolBackend =
     ResourcePoolBackend::Integrated(IntegratedResourcePoolBackend);
 
 /// `ResolvedResourcePool` pairs a pool's saved binding with its allocation backend.
+#[derive(Clone)]
 pub struct ResolvedResourcePool {
     /// The pool's saved backend selection and stable binding UUID.
     pub binding: ResourcePoolBinding,
@@ -46,7 +47,7 @@ pub struct ResolvedResourcePool {
 ///
 /// Every pool has its own binding. Named Integrated aliases use the same local
 /// database, and removing a pool from configuration does not remove its saved binding.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct ResourcePoolRegistry {
     pools: HashMap<String, ResolvedResourcePool>,
 }

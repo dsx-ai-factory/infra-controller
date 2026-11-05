@@ -1903,6 +1903,7 @@ async fn create_test_env_with_overrides_inner(
         test_meter.meter(),
         api.endpoint_exploration_service.clone(),
         api.bmc_client.clone(),
+        api.resource_pool_registry.clone(),
         common_pools.clone(),
         api.work_lock_manager_handle.clone(),
         site_explorer_rack_profiles,
