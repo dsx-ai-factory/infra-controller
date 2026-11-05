@@ -11515,7 +11515,8 @@ message ComponentConfigureSwitchCertificateResponse {
   repeated ComponentResult results = 1;
 }
 
-// Reset operations supported by the component manager.
+// Reset operations supported by the component manager. Only SDN factory reset
+// and NVOS factory reset are implemented.
 enum ComponentResetAction {
   COMPONENT_RESET_ACTION_UNSPECIFIED = 0;
   // Reset the management controller on a compute, switch, or power shelf tray.

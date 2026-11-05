@@ -5346,8 +5346,8 @@ func (ComponentPowerActionOperation) EnumDescriptor() ([]byte, []int) {
 	return file_nico_nico_proto_rawDescGZIP(), []int{94}
 }
 
-// Reset operations supported by the component interface. The RMS backend supports
-// SDN and NVOS factory reset on switches. BMC resets return Unimplemented.
+// Reset operations supported by the component manager. Only SDN factory reset
+// and NVOS factory reset are implemented.
 type ComponentResetAction int32
 
 const (
@@ -5356,9 +5356,7 @@ const (
 	ComponentResetAction_COMPONENT_RESET_ACTION_BMC_RESET ComponentResetAction = 1
 	// Restore management-controller defaults on a compute, switch, or power shelf tray.
 	ComponentResetAction_COMPONENT_RESET_ACTION_BMC_FACTORY_RESET ComponentResetAction = 2
-	// Erase switch operating-system configuration and reboot; switch targets only.
-	// Completion requires SSH access with factory-default credentials. Uses the RMS
-	// configured default NVL certificate domain; domain_name is invalid for this action.
+	// Initiate NVOS factory reset and reboot the switch; switch targets only.
 	ComponentResetAction_COMPONENT_RESET_ACTION_NVOS_FACTORY_RESET ComponentResetAction = 3
 	// Restore switch SDN configuration to factory defaults; switch targets only.
 	ComponentResetAction_COMPONENT_RESET_ACTION_SDN_FACTORY_RESET ComponentResetAction = 4
