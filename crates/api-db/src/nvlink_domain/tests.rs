@@ -13,12 +13,21 @@ const SWITCH_ID: &str = "sw100nsner0op5osl6n85t7772j010jmhafm934n7oej4mlome3okrn
 const OTHER_SWITCH_ID: &str = "sw100ntjtiaehv1n5vh67tbmqq4eabcjdng40f7jupsadbedhruh6rag1l0";
 
 #[crate::sqlx_test]
-async fn additive_migration_preserves_legacy_declarations(pool: sqlx::PgPool) {
+async fn rename_migration_preserves_legacy_declarations_and_writers(pool: sqlx::PgPool) {
     let config = inventory(&pool).await;
-    sqlx::raw_sql("DROP TABLE nvlink_domain_members; DROP TABLE nvlink_domains")
-        .execute(&pool)
-        .await
-        .unwrap();
+    sqlx::raw_sql(
+        "DROP VIEW expected_nvlink_domain_members; DROP VIEW expected_nvlink_domains;
+        DROP TABLE nvlink_domain_members; DROP TABLE nvlink_domains",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::raw_sql(include_str!(
+        "../../migrations/20261014011133_expected_nvlink_domains.sql"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
     let declaration = model::expected_nvlink_domain::ExpectedNvLinkDomain {
         id: Uuid::new_v4(),
         rack_group_id: config.rack_group_id,
@@ -29,9 +38,18 @@ async fn additive_migration_preserves_legacy_declarations(pool: sqlx::PgPool) {
         ],
     };
     let mut txn = pool.begin().await.unwrap();
-    crate::expected_nvlink_domain::create(&mut txn, &declaration)
-        .await
-        .unwrap();
+    sqlx::query(
+        "INSERT INTO expected_nvlink_domains (id, rack_group_id, name) VALUES ($1, $2, $3)",
+    )
+    .bind(declaration.id)
+    .bind(&declaration.rack_group_id)
+    .bind(&declaration.name)
+    .execute(&mut *txn)
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO expected_nvlink_domain_members (domain_id, bmc_mac_address) SELECT $1, unnest($2::macaddr[])")
+        .bind(declaration.id).bind(&declaration.member_bmc_mac_addresses)
+        .execute(&mut *txn).await.unwrap();
     txn.commit().await.unwrap();
     let mut txn = pool.begin().await.unwrap();
     sqlx::raw_sql(include_str!(
@@ -45,9 +63,64 @@ async fn additive_migration_preserves_legacy_declarations(pool: sqlx::PgPool) {
         crate::expected_nvlink_domain::find_by_ids(&pool, &[declaration.id])
             .await
             .unwrap(),
-        vec![declaration],
+        vec![declaration.clone()],
     );
-    assert!(find_ids(&pool, None).await.unwrap().is_empty());
+    assert_eq!(find_ids(&pool, None).await.unwrap(), vec![declaration.id]);
+    let retained = find_by_ids(&pool, &[declaration.id])
+        .await
+        .unwrap()
+        .remove(0);
+    assert_eq!(retained.metadata.name, "existing-domain");
+    assert_eq!(
+        retained.legacy_member_bmc_mac_addresses,
+        declaration.member_bmc_mac_addresses
+    );
+    assert!(retained.config.members.is_empty());
+    assert!(retained.config.domain_profile_id.is_none());
+    assert!(retained.controller_state.is_none());
+    assert!(retained.version.is_none());
+    assert!(retained.created.is_none());
+    assert!(matches!(
+        resolve_members(&pool, declaration.id).await,
+        Err(DatabaseError::FailedPrecondition(_))
+    ));
+
+    // Exercise predecessor SQL after the rename, including cascading deletion.
+    sqlx::query("DELETE FROM expected_nvlink_domains WHERE id = $1")
+        .bind(declaration.id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO expected_nvlink_domains (id, rack_group_id, name) VALUES ($1, $2, NULL)",
+    )
+    .bind(declaration.id)
+    .bind(&declaration.rack_group_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO expected_nvlink_domain_members (domain_id, bmc_mac_address) SELECT $1, unnest($2::macaddr[])")
+        .bind(declaration.id).bind(&declaration.member_bmc_mac_addresses).execute(&pool).await.unwrap();
+    let reread = crate::expected_nvlink_domain::find_by_ids(&pool, &[declaration.id])
+        .await
+        .unwrap()
+        .remove(0);
+    assert_eq!(reread.name, None);
+    assert_eq!(
+        reread.member_bmc_mac_addresses,
+        declaration.member_bmc_mac_addresses
+    );
+    sqlx::query("UPDATE expected_nvlink_domains SET name = 'old-writer' WHERE id = $1")
+        .bind(declaration.id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        find_by_ids(&pool, &[declaration.id]).await.unwrap()[0]
+            .metadata
+            .name,
+        "old-writer"
+    );
 }
 
 #[crate::sqlx_test]
@@ -138,7 +211,7 @@ async fn inventory(pool: &sqlx::PgPool) -> NvLinkDomainConfig {
     .unwrap();
     NvLinkDomainConfig {
         rack_group_id: RackGroupId::new("group"),
-        domain_profile_id: "test-fabric".into(),
+        domain_profile_id: Some("test-fabric".into()),
         members: vec![
             NvLinkDomainMember {
                 component_type: NvLinkDomainComponentType::Compute,
@@ -170,8 +243,23 @@ async fn deletion_retains_members_and_fences_old_controller(pool: sqlx::PgPool) 
     let id = insert(&pool, &config).await;
     let original = find_by_ids(&pool, &[id]).await.unwrap().remove(0);
     assert_eq!(original.config, config);
-    assert_eq!(*original.controller_state, NvLinkDomainState::Discovering);
+    assert_eq!(
+        **original.controller_state.as_ref().unwrap(),
+        NvLinkDomainState::Discovering
+    );
     assert_eq!(original.nmxc_domain_id, None);
+    let mut txn = pool.begin().await.unwrap();
+    assert!(matches!(
+        crate::expected_nvlink_domain::delete(&mut txn, id).await,
+        Err(DatabaseError::NotFoundError { .. })
+    ));
+    let removed = sqlx::query("DELETE FROM expected_nvlink_domains WHERE id = $1")
+        .bind(id)
+        .execute(&mut *txn)
+        .await
+        .unwrap();
+    assert_eq!(removed.rows_affected(), 0);
+    txn.commit().await.unwrap();
 
     let mut txn = pool.begin().await.unwrap();
     request_deletion(&mut txn, id).await.unwrap();
@@ -198,7 +286,10 @@ async fn deletion_retains_members_and_fences_old_controller(pool: sqlx::PgPool) 
     let retried = find_by_ids(&pool, &[id]).await.unwrap().remove(0);
     assert_eq!(retried.deleted, deleting.deleted);
     assert_eq!(retried.version, deleting.version);
-    assert_eq!(*retried.controller_state, NvLinkDomainState::Discovering);
+    assert_eq!(
+        **retried.controller_state.as_ref().unwrap(),
+        NvLinkDomainState::Discovering
+    );
 
     let mut txn = pool.begin().await.unwrap();
     assert!(matches!(
@@ -241,10 +332,13 @@ async fn controller_state_compare_and_swap(pool: sqlx::PgPool) {
     );
     txn.commit().await.unwrap();
     let persisted = find_by_ids(&pool, &[id]).await.unwrap().remove(0);
-    assert_eq!(*persisted.controller_state, NvLinkDomainState::Ready);
+    assert_eq!(
+        **persisted.controller_state.as_ref().unwrap(),
+        NvLinkDomainState::Ready
+    );
     assert_ne!(
-        persisted.controller_state.version,
-        original.controller_state.version
+        persisted.controller_state.as_ref().unwrap().version,
+        original.controller_state.as_ref().unwrap().version
     );
     assert_eq!(persisted.version, original.version);
     assert_eq!(persisted.controller_state_outcome, Some(outcome));
@@ -267,7 +361,7 @@ async fn invalid_membership_does_not_leave_partial_domains(pool: sqlx::PgPool) {
         ("rack outside group", |config| {
             config.members[0].rack_id = RackId::new("other")
         }),
-        ("empty profile", |config| config.domain_profile_id.clear()),
+        ("empty profile", |config| config.domain_profile_id = None),
         ("unknown group", |config| {
             config.rack_group_id = RackGroupId::new("unknown")
         }),
@@ -303,7 +397,10 @@ async fn positions_can_be_declared_before_hardware_is_known(pool: sqlx::PgPool) 
     let id = insert(&pool, &config).await;
     let domain = find_by_ids(&pool, &[id]).await.unwrap().remove(0);
     assert_eq!(domain.config.members, config.members);
-    assert_eq!(*domain.controller_state, NvLinkDomainState::Discovering);
+    assert_eq!(
+        **domain.controller_state.as_ref().unwrap(),
+        NvLinkDomainState::Discovering
+    );
     assert!(
         resolve_members(&pool, id)
             .await

@@ -45,7 +45,7 @@ async fn lifecycle_and_group_dependencies(pool: sqlx::PgPool) {
     );
 
     // Dependency errors must be classified independently of the constraint name.
-    sqlx::query("ALTER TABLE expected_nvlink_domains RENAME CONSTRAINT expected_nvlink_domains_rack_group_id_fkey TO test_domain_parent_reference")
+    sqlx::query("ALTER TABLE nvlink_domains RENAME CONSTRAINT expected_nvlink_domains_rack_group_id_fkey TO test_domain_parent_reference")
         .execute(&pool)
         .await
         .unwrap();
@@ -228,13 +228,22 @@ async fn concurrent_claims_are_atomic(pool: sqlx::PgPool) {
 #[crate::sqlx_test]
 async fn migration_preserves_existing_inventory(pool: sqlx::PgPool) {
     let domain = inventory(&pool).await;
-    sqlx::raw_sql("DROP TABLE expected_nvlink_domain_members; DROP TABLE expected_nvlink_domains;")
-        .execute(&pool)
-        .await
-        .unwrap();
+    sqlx::raw_sql(
+        "DROP VIEW expected_nvlink_domain_members; DROP VIEW expected_nvlink_domains;
+        DROP TABLE nvlink_domain_members; DROP TABLE nvlink_domains;",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
     let mut txn = pool.begin().await.unwrap();
     sqlx::raw_sql(include_str!(
         "../../migrations/20261014011133_expected_nvlink_domains.sql"
+    ))
+    .execute(&mut *txn)
+    .await
+    .unwrap();
+    sqlx::raw_sql(include_str!(
+        "../../migrations/20261105175433_nvlink_domains.sql"
     ))
     .execute(&mut *txn)
     .await

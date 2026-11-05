@@ -10,6 +10,7 @@ use carbide_uuid::rack::{RackGroupId, RackId};
 use carbide_uuid::switch::SwitchId;
 use chrono::{DateTime, Utc};
 use config_version::{ConfigVersion, Versioned};
+use mac_address::MacAddress;
 use serde::{Deserialize, Serialize};
 use sqlx::postgres::PgRow;
 use sqlx::{FromRow, Row};
@@ -62,8 +63,8 @@ pub struct NvLinkDomainMember {
 pub struct NvLinkDomainConfig {
     /// Physical RackGroup containing all selected trays.
     pub rack_group_id: RackGroupId,
-    /// Site-configured fabric profile, independent of the physical Rack profile.
-    pub domain_profile_id: String,
+    /// Site-configured fabric profile; absent on declarations awaiting adoption.
+    pub domain_profile_id: Option<String>,
     /// Explicit compute and switch membership, independent of discovery order.
     pub members: Vec<NvLinkDomainMember>,
 }
@@ -89,20 +90,22 @@ pub struct NvLinkDomain {
     pub config: NvLinkDomainConfig,
     /// Operator-visible name, description, and labels.
     pub metadata: Metadata,
-    /// Optimistic concurrency token for configuration changes.
-    pub version: ConfigVersion,
-    /// Independently versioned controller progress.
-    pub controller_state: Versioned<NvLinkDomainState>,
+    /// Unconverted MAC claims retained until location adoption.
+    pub legacy_member_bmc_mac_addresses: Vec<MacAddress>,
+    /// Optimistic concurrency token; absent before lifecycle adoption.
+    pub version: Option<ConfigVersion>,
+    /// Independently versioned progress; absent before lifecycle adoption.
+    pub controller_state: Option<Versioned<NvLinkDomainState>>,
     /// Last controller iteration outcome, absent before the first iteration.
     pub controller_state_outcome: Option<PersistentStateHandlerOutcome>,
     /// Observed fabric UUID, absent until NMX-C reports it.
     pub nmxc_domain_id: Option<Uuid>,
     /// Whether RackGroup automation owns the declaration.
     pub managed: bool,
-    /// Creation time.
-    pub created: DateTime<Utc>,
-    /// Last persisted change time.
-    pub updated: DateTime<Utc>,
+    /// Creation time, unknown for pre-migration declarations.
+    pub created: Option<DateTime<Utc>>,
+    /// Last persisted change time, unknown for pre-migration declarations.
+    pub updated: Option<DateTime<Utc>>,
     /// Deletion request time; members remain claimed until teardown completes.
     pub deleted: Option<DateTime<Utc>>,
 }
@@ -111,7 +114,16 @@ impl<'r> FromRow<'r, PgRow> for NvLinkDomain {
     fn from_row(row: &'r PgRow) -> Result<Self, sqlx::Error> {
         let members: sqlx::types::Json<Vec<NvLinkDomainMember>> = row.try_get("members")?;
         let labels: sqlx::types::Json<_> = row.try_get("metadata_labels")?;
-        let state: sqlx::types::Json<NvLinkDomainState> = row.try_get("controller_state")?;
+        let state: Option<sqlx::types::Json<NvLinkDomainState>> =
+            row.try_get("controller_state")?;
+        let state = state
+            .map(|state| {
+                Ok::<_, sqlx::Error>(Versioned::new(
+                    state.0,
+                    row.try_get("controller_state_version")?,
+                ))
+            })
+            .transpose()?;
         let outcome: Option<sqlx::types::Json<PersistentStateHandlerOutcome>> =
             row.try_get("controller_state_outcome")?;
         Ok(Self {
@@ -122,12 +134,15 @@ impl<'r> FromRow<'r, PgRow> for NvLinkDomain {
                 members: members.0,
             },
             metadata: Metadata {
-                name: row.try_get("metadata_name")?,
+                name: row
+                    .try_get::<Option<String>, _>("name")?
+                    .unwrap_or_default(),
                 description: row.try_get("metadata_description")?,
                 labels: labels.0,
             },
             version: row.try_get("version")?,
-            controller_state: Versioned::new(state.0, row.try_get("controller_state_version")?),
+            legacy_member_bmc_mac_addresses: row.try_get("legacy_member_bmc_mac_addresses")?,
+            controller_state: state,
             controller_state_outcome: outcome.map(|value| value.0),
             nmxc_domain_id: row.try_get("nmxc_domain_id")?,
             managed: row.try_get("managed")?,

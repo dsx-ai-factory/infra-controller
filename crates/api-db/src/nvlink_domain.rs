@@ -32,7 +32,11 @@ async fn create(
     metadata
         .validate(false)
         .map_err(|error| DatabaseError::InvalidArgument(error.to_string()))?;
-    if config.domain_profile_id.trim().is_empty() {
+    if config
+        .domain_profile_id
+        .as_ref()
+        .is_none_or(|profile| profile.trim().is_empty())
+    {
         return Err(DatabaseError::InvalidArgument(
             "domain profile ID must not be empty".into(),
         ));
@@ -85,9 +89,9 @@ async fn create(
 
     let version = ConfigVersion::initial();
     let query = "INSERT INTO nvlink_domains (
-        id, rack_group_id, domain_profile_id, metadata_name, metadata_description,
-        metadata_labels, version, controller_state, controller_state_version, managed
-    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $7, $9)";
+        id, rack_group_id, domain_profile_id, name, metadata_description,
+        metadata_labels, version, controller_state, controller_state_version, managed, created, updated
+    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $7, $9, now(), now())";
     sqlx::query(query)
         .bind(id)
         .bind(&config.rack_group_id)
@@ -113,10 +117,9 @@ async fn create(
         .execute(txn)
         .await
         .map_err(|error| {
-            if error
-                .as_database_error()
-                .is_some_and(|error| error.constraint() == Some("nvlink_domain_members_pkey"))
-            {
+            if error.as_database_error().is_some_and(|error| {
+                error.constraint() == Some("nvlink_domain_members_location_key")
+            }) {
                 DatabaseError::AlreadyFoundError {
                     kind: "NVLink domain member",
                     id: "one or more trays are already claimed".into(),
@@ -148,7 +151,10 @@ async fn find_by_ids(reader: impl DbReader<'_>, ids: &[Uuid]) -> DatabaseResult<
         COALESCE((SELECT jsonb_agg(jsonb_build_object(
             'component_type', m.component_type, 'rack_id', m.rack_id, 'tray_index', m.tray_index)
             ORDER BY m.rack_id, m.component_type, m.tray_index)
-            FROM nvlink_domain_members m WHERE m.domain_id = d.id), '[]'::jsonb) AS members
+            FROM nvlink_domain_members m WHERE m.domain_id = d.id AND m.bmc_mac_address IS NULL), '[]'::jsonb) AS members,
+        ARRAY(SELECT m.bmc_mac_address FROM nvlink_domain_members m
+            WHERE m.domain_id = d.id AND m.bmc_mac_address IS NOT NULL ORDER BY m.bmc_mac_address)
+            AS legacy_member_bmc_mac_addresses
         FROM nvlink_domains d WHERE d.id = ANY($1) ORDER BY d.id";
     sqlx::query_as(query)
         .bind(ids)
@@ -161,7 +167,7 @@ async fn find_by_ids(reader: impl DbReader<'_>, ids: &[Uuid]) -> DatabaseResult<
 /// Repeated requests preserve the original deletion time and controller progress.
 async fn request_deletion(txn: &mut PgConnection, id: Uuid) -> DatabaseResult<()> {
     let query = "SELECT version FROM nvlink_domains WHERE id = $1 FOR UPDATE";
-    let version: Option<ConfigVersion> = sqlx::query_scalar(query)
+    let version: Option<Option<ConfigVersion>> = sqlx::query_scalar(query)
         .bind(id)
         .fetch_optional(&mut *txn)
         .await
@@ -169,6 +175,11 @@ async fn request_deletion(txn: &mut PgConnection, id: Uuid) -> DatabaseResult<()
     let version = version.ok_or_else(|| DatabaseError::NotFoundError {
         kind: "nvlink_domain",
         id: id.to_string(),
+    })?;
+    let version = version.ok_or_else(|| {
+        DatabaseError::FailedPrecondition(
+            "domain requires lifecycle adoption before asynchronous deletion".into(),
+        )
     })?;
     let query = "UPDATE nvlink_domains SET deleted = now(), updated = now(), version = $2
         WHERE id = $1 AND deleted IS NULL";
@@ -189,14 +200,17 @@ async fn try_update_controller_state(
     state: &NvLinkDomainState,
     outcome: &PersistentStateHandlerOutcome,
 ) -> DatabaseResult<ConditionalWrite<ConfigVersion, ControllerStateNotCurrent>> {
-    let next_version = domain.controller_state.version.increment();
+    let Some(current_state) = domain.controller_state.as_ref() else {
+        return Ok(ConditionalWrite::NotApplied(ControllerStateNotCurrent));
+    };
+    let next_version = current_state.version.increment();
     let query = "UPDATE nvlink_domains SET controller_state = $4,
         controller_state_version = $5, controller_state_outcome = $6, updated = now()
         WHERE id = $1 AND version = $2 AND controller_state_version = $3";
     let result = sqlx::query(query)
         .bind(domain.id)
         .bind(domain.version)
-        .bind(domain.controller_state.version)
+        .bind(current_state.version)
         .bind(sqlx::types::Json(state))
         .bind(next_version)
         .bind(sqlx::types::Json(outcome))
@@ -215,7 +229,7 @@ mod tests;
 
 #[derive(sqlx::FromRow)]
 struct MemberCandidate {
-    member: sqlx::types::Json<model::nvlink_domain::NvLinkDomainMember>,
+    member: Option<sqlx::types::Json<model::nvlink_domain::NvLinkDomainMember>>,
     compute_id: Option<carbide_uuid::machine::MachineId>,
     switch_id: Option<carbide_uuid::switch::SwitchId>,
     racks: sqlx::types::Json<Vec<model::expected_rack_group::ExpectedRackGroupRack>>,
@@ -230,7 +244,7 @@ async fn resolve_members(
 ) -> DatabaseResult<Vec<model::nvlink_domain::NvLinkDomainMemberResolution>> {
     use model::nvlink_domain::{NvLinkDomainMemberResolution, NvLinkDomainTray};
 
-    let query = "SELECT to_jsonb(member) AS member, candidate.compute_id,
+    let query = "SELECT CASE WHEN member.bmc_mac_address IS NULL THEN to_jsonb(member) END AS member, candidate.compute_id,
         candidate.switch_id, g.racks
         FROM nvlink_domain_members member
         JOIN nvlink_domains d ON d.id = member.domain_id
@@ -259,7 +273,15 @@ async fn resolve_members(
     candidates
         .into_iter()
         .map(|candidate| {
-            if !seen.insert(candidate.member.0.clone()) {
+            let member = candidate
+                .member
+                .ok_or_else(|| {
+                    DatabaseError::FailedPrecondition(
+                        "domain MAC membership requires location adoption".into(),
+                    )
+                })?
+                .0;
+            if !seen.insert(member.clone()) {
                 return Err(DatabaseError::FailedPrecondition(format!(
                     "domain {id} has an ambiguous member mapping"
                 )));
@@ -280,16 +302,13 @@ async fn resolve_members(
                 .racks
                 .0
                 .iter()
-                .any(|rack| rack.rack_id == candidate.member.0.rack_id)
+                .any(|rack| rack.rack_id == member.rack_id)
             {
                 return Err(DatabaseError::FailedPrecondition(format!(
                     "domain {id} member position is outside its rack group"
                 )));
             }
-            Ok(NvLinkDomainMemberResolution {
-                member: candidate.member.0,
-                tray,
-            })
+            Ok(NvLinkDomainMemberResolution { member, tray })
         })
         .collect()
 }
