@@ -2315,9 +2315,10 @@ fn handoff_replaces_native_ddns_ownership_after_persistence() -> Result<(), eyre
         Ok(serde_json::from_slice(&bytes[2..count])?)
     }
     for (hostname, fail_first) in [
-        ("firmware.example.test.", false),
-        ("os.example.test.", false),
-        ("os.example.test.", true),
+        (Some("firmware.example.test."), false),
+        (Some("os.example.test."), false),
+        (Some("os.example.test."), true),
+        (None, false),
     ] {
         let d2 = UdpSocket::bind("127.0.0.1:0")?;
         d2.set_read_timeout(Some(Duration::from_secs(2)))?;
@@ -2338,10 +2339,12 @@ fn handoff_replaces_native_ddns_ownership_after_persistence() -> Result<(), eyre
         let old = receive_ncr(&d2)?;
         assert_eq!(old["change-type"], 0);
         let os_duid = DHCPv6Factory::duid_uuid(idx);
-        let os_request = DHCPv6Factory::with_fqdn(
-            &DHCPv6Factory::request_with_duid(idx, server_id, address, os_duid.clone(), true),
-            hostname,
-        );
+        let os_request =
+            DHCPv6Factory::request_with_duid(idx, server_id, address, os_duid.clone(), true);
+        let os_request = match hostname {
+            Some(hostname) => DHCPv6Factory::with_fqdn(&os_request, hostname),
+            None => os_request,
+        };
         if fail_first {
             h.kea.lease_io.arm(address, &os_duid, false)?;
             let reply = send_and_recv_v6(&h.socket, os_request.clone())?;
@@ -2360,15 +2363,27 @@ fn handoff_replaces_native_ddns_ownership_after_persistence() -> Result<(), eyre
         send_and_recv_v6(&h.socket, os_request)?.expect("OS handoff");
         h.wait_for_active_lease(address, &DHCPv6Factory::duid_hex(&os_duid))?;
         let removal = receive_ncr(&d2)?;
-        let addition = receive_ncr(&d2)?;
         assert_eq!(removal["change-type"], 1);
         assert_eq!(removal["dhcid"], old["dhcid"]);
         assert_eq!(removal["fqdn"], old["fqdn"]);
-        assert_eq!(addition["change-type"], 0);
-        assert_eq!(addition["fqdn"], hostname);
-        assert_ne!(addition["dhcid"], old["dhcid"]);
         assert_eq!(removal["ip-address"], address.to_string());
-        assert_eq!(addition["ip-address"], address.to_string());
+        if let Some(hostname) = hostname {
+            // Kea 3 chains the ADD in the REMOVE datagram so UDP cannot
+            // reorder the ownership changes or deliver only the ADD.
+            let addition = &removal["next-ncr"];
+            assert_eq!(addition["change-type"], 0);
+            assert_eq!(addition["fqdn"], hostname);
+            assert_ne!(addition["dhcid"], old["dhcid"]);
+            assert_eq!(addition["ip-address"], address.to_string());
+        } else {
+            assert!(removal["next-ncr"].is_null());
+        }
+        let mut bytes = [0; 4096];
+        assert!(
+            matches!(d2.recv(&mut bytes), Err(error) if matches!(error.kind(),
+            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut)),
+            "replacement cleanup must not emit a separate or duplicate request"
+        );
     }
     Ok(())
 }
