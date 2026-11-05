@@ -269,10 +269,18 @@
  
  using namespace isc::asiolink;
  using namespace isc::data;
-@@ -70,11 +72,34 @@
+@@ -70,11 +72,42 @@
          row.writeAtEscaped(getColumnIndex("user_context"), lease.getContext()->str());
      }
      row.writeAt(getColumnIndex("pool_id"), lease.pool_id_);
++    // Check the stream before the rollback handler: a closed failed stream
++    // must not be reopened by catching its next append's precondition error.
++    try {
++        flush();
++    } catch (const std::exception& error) {
++        ++write_errs_;
++        isc_throw(CSVFileFatalError, "IPv6 lease stream is unavailable: " << error.what());
++    }
 +    // Memfile serializes appends and rotation. Remember the last committed
 +    // offset before writing: a failed fstream flush can retain output and
 +    // replay it on a later append or close, despite the failed transaction.
@@ -292,11 +300,11 @@
 +        // cannot silently build on an uncertain row.
 +        close();
 +        if (::truncate(getFilename().c_str(), before.st_size) != 0) {
-+            isc_throw(CSVFileFatalError, "cannot roll back failed IPv6 lease append; "
++            isc_throw(CSVLeaseFile6RollbackError, "cannot roll back failed IPv6 lease append; "
 +                      "repair lease file before restarting: " << strerror(errno));
 +        }
 +        try {
-+            VersionedCSVFile::open(true);
++            CSVFile::openExisting(true);
 +        } catch (const std::exception& error) {
 +            isc_throw(CSVFileFatalError, "cannot reopen IPv6 lease file after rollback: "
 +                      << error.what());
@@ -304,6 +312,22 @@
          throw;
      }
  
+--- a/src/lib/dhcpsrv/csv_lease_file6.h
++++ b/src/lib/dhcpsrv/csv_lease_file6.h
+@@ -21,6 +21,13 @@
+ 
+ namespace isc {
+ namespace dhcp {
++
++/// @brief Failed rollback leaves persistent state uncertain and requires shutdown.
++class CSVLeaseFile6RollbackError : public isc::util::CSVFileFatalError {
++public:
++    CSVLeaseFile6RollbackError(const char* file, size_t line, const char* what)
++        : isc::util::CSVFileFatalError(file, line, what) {}
++};
+ 
+ /// @brief Provides methods to access CSV file with DHCPv6 leases.
+ ///
 --- a/src/lib/dhcpsrv/memfile_lease_mgr.cc
 +++ b/src/lib/dhcpsrv/memfile_lease_mgr.cc
 @@ -938,8 +938,8 @@
@@ -317,3 +341,223 @@
              }
  
              // Bump the appropriate accumulator
+@@ -1090,11 +1090,21 @@
+ 
+ void
+ Memfile_LeaseMgr::handleDbLost() {
++    handleDbLost(false);
++}
++
++void
++Memfile_LeaseMgr::handleDbLost(bool force_stop) {
++    auto control = conn_.reconnectCtl();
++    if (force_stop) {
++        control.reset(new ReconnectCtl(control->backendType(), control->timerName(),
++                                       0, 0, OnFailAction::STOP_RETRY_EXIT, control->id()));
++    }
+     // Invoke application layer callback on the main IOService.
+     auto ios = conn_.getIOService();
+     if (ios) {
+         ios->post(std::bind(DatabaseConnection::invokeDbLostCallback,
+-                            conn_.reconnectCtl()));
++                            control));
+     }
+ }
+ 
+@@ -1160,6 +1170,9 @@
+     if (persistLeases(V6)) {
+         try {
+             lease_file6_->append(*lease);
++        } catch (const CSVLeaseFile6RollbackError&) {
++            handleDbLost(true);
++            throw;
+         } catch (const CSVFileFatalError&) {
+             handleDbLost();
+             throw;
+@@ -1983,6 +1996,9 @@
+     if (persist) {
+         try {
+             lease_file6_->append(*lease);
++        } catch (const CSVLeaseFile6RollbackError&) {
++            handleDbLost(true);
++            throw;
+         } catch (const CSVFileFatalError&) {
+             handleDbLost();
+             throw;
+@@ -2114,6 +2130,9 @@
+             lease_copy.preferred_lft_ = 0;
+             try {
+                 lease_file6_->append(lease_copy);
++            } catch (const CSVLeaseFile6RollbackError&) {
++                handleDbLost(true);
++                throw;
+             } catch (const CSVFileFatalError&) {
+                 handleDbLost();
+                 throw;
+@@ -2248,6 +2267,9 @@
+                 lease_copy.valid_lft_ = 0;
+                 try {
+                     lease_file->append(lease_copy);
++                } catch (const CSVLeaseFile6RollbackError&) {
++                    handleDbLost(true);
++                    throw;
+                 } catch (const CSVFileFatalError&) {
+                     handleDbLost();
+                     throw;
+--- a/src/lib/dhcpsrv/memfile_lease_mgr.h
++++ b/src/lib/dhcpsrv/memfile_lease_mgr.h
+@@ -1572,6 +1572,9 @@
+     /// (i.e. inside *Internal functions).
+     void handleDbLost();
+ 
++    /// @brief Override continue policy when rollback leaves uncertain disk state.
++    void handleDbLost(bool force_stop);
++
+ public:
+     /// @brief Factory class method.
+     ///
+--- a/src/lib/util/csv_file.cc
++++ b/src/lib/util/csv_file.cc
+@@ -315,69 +315,72 @@
+ 
+ void
+ CSVFile::open(const bool seek_to_end) {
+-    // If file doesn't exist or is empty, we have to create our own file.
+     if (size() == static_cast<std::streampos>(0)) {
+         recreate();
+-
+     } else {
+-        // Try to open existing file, holding some data.
+-        fs_.reset(new std::fstream(filename_.c_str()));
+-
+-        // Catch exceptions so as we can close the file if error occurs.
+-        try {
+-            // The file may fail to open. For example, because of insufficient
+-            // permissions. Although the file is not open we should call close
+-            // to reset our internal pointer.
+-            if (!fs_->is_open()) {
+-                isc_throw(CSVFileError, "unable to open '" << filename_ << "'");
++        openExisting(seek_to_end);
++    }
++}
++
++void
++CSVFile::openExisting(const bool seek_to_end) {
++    // Try to open existing file, holding some data.
++    fs_.reset(new std::fstream(filename_.c_str()));
++
++    // Catch exceptions so as we can close the file if error occurs.
++    try {
++        // The file may fail to open. For example, because of insufficient
++        // permissions. Although the file is not open we should call close
++        // to reset our internal pointer.
++        if (!fs_->is_open()) {
++            isc_throw(CSVFileError, "unable to open '" << filename_ << "'");
++        }
++        // Make sure we are on the beginning of the file, so as we
++        // can parse the header.
++        fs_->seekg(0);
++        if (!fs_->good()) {
++            isc_throw(CSVFileError, "unable to set read pointer in the file '"
++                      << filename_ << "'");
++        }
++
++        // Read the header.
++        CSVRow header;
++        if (!next(header, true)) {
++            isc_throw(CSVFileError, "failed to read and parse header of the"
++                      " CSV file '" << filename_ << "': "
++                      << getReadMsg());
++        }
++
++        // Check the header against the columns specified for the CSV file.
++        if (!validateHeader(header)) {
++            isc_throw(CSVFileError, "invalid header '" << header
++                      << "' in CSV file '" << filename_ << "': "
++                      << getReadMsg());
++        }
++
++        // Everything is good, so if we haven't added any columns yet,
++        // add them.
++        if (getColumnCount() == 0) {
++            for (size_t i = 0; i < header.getValuesCount(); ++i) {
++                addColumnInternal(header.readAt(i));
+             }
+-            // Make sure we are on the beginning of the file, so as we
+-            // can parse the header.
+-            fs_->seekg(0);
++        }
++
++        // If caller requested that the pointer is set at the end of file,
++        // move both read and write pointer.
++        if (seek_to_end) {
++            fs_->seekp(0, std::ios_base::end);
++            fs_->seekg(0, std::ios_base::end);
+             if (!fs_->good()) {
+-                isc_throw(CSVFileError, "unable to set read pointer in the file '"
+-                          << filename_ << "'");
++                isc_throw(CSVFileError, "unable to move to the end of"
++                          " CSV file '" << filename_ << "'");
+             }
+-
+-            // Read the header.
+-            CSVRow header;
+-            if (!next(header, true)) {
+-                isc_throw(CSVFileError, "failed to read and parse header of the"
+-                          " CSV file '" << filename_ << "': "
+-                          << getReadMsg());
+-            }
+-
+-            // Check the header against the columns specified for the CSV file.
+-            if (!validateHeader(header)) {
+-                isc_throw(CSVFileError, "invalid header '" << header
+-                          << "' in CSV file '" << filename_ << "': "
+-                          << getReadMsg());
+-            }
+-
+-            // Everything is good, so if we haven't added any columns yet,
+-            // add them.
+-            if (getColumnCount() == 0) {
+-                for (size_t i = 0; i < header.getValuesCount(); ++i) {
+-                    addColumnInternal(header.readAt(i));
+-                }
+-            }
+-
+-            // If caller requested that the pointer is set at the end of file,
+-            // move both read and write pointer.
+-            if (seek_to_end) {
+-                fs_->seekp(0, std::ios_base::end);
+-                fs_->seekg(0, std::ios_base::end);
+-                if (!fs_->good()) {
+-                    isc_throw(CSVFileError, "unable to move to the end of"
+-                              " CSV file '" << filename_ << "'");
+-                }
+-                fs_->clear();
+-            }
+-
+-        } catch (const std::exception&) {
+-            close();
+-            throw;
+-        }
++            fs_->clear();
++        }
++
++    } catch (const std::exception&) {
++        close();
++        throw;
+     }
+ }
+ 
+--- a/src/lib/util/csv_file.h
++++ b/src/lib/util/csv_file.h
+@@ -474,6 +474,10 @@
+ 
+     virtual void open(const bool seek_to_end = false);
+ 
++    /// @brief Open an existing file without creating or truncating it on error.
++    /// Used by append recovery, where an unreadable file must retain its data.
++    void openExisting(const bool seek_to_end = false);
++
+     /// @brief Creates a new CSV file.
+     ///
+     /// The file creation will fail if there are no columns specified.

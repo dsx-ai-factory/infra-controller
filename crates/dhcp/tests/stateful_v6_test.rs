@@ -2040,6 +2040,81 @@ fn handoff_recovers_from_native_persistence_failure() -> Result<(), eyre::Report
     Ok(())
 }
 
+// A failed rollback must stop Kea even with serve-retry-continue, so retries
+// and background file rotation cannot reopen uncertain persistent state.
+#[cfg(target_os = "linux")]
+#[test]
+fn rollback_failure_requires_explicit_memfile_recovery() -> Result<(), eyre::Report> {
+    let idx = 0xc7;
+    let mut h = Harness::new_with_config(Kea6Config {
+        continue_after_store_failure: true,
+        ..Kea6Config::default()
+    });
+    let (server_id, address) = h.establish_lease(idx)?;
+    let original = h.read_leases()?;
+    let duid = DHCPv6Factory::duid_uuid(idx);
+    let request = DHCPv6Factory::request_with_duid(idx, server_id, address, duid.clone(), true);
+    h.kea.lease_io.arm_rollback_failure(address, &duid)?;
+    let refused = send_and_recv_v6(&h.socket, request.clone())?;
+    assert!(refused.as_ref().and_then(DHCPv6Factory::ia_addr).is_none());
+    assert!(
+        h.kea
+            .wait_for_log("cannot roll back failed IPv6 lease append", MEMFILE_TIMEOUT)
+    );
+    h.kea.wait_for_failure()?;
+    h.kea.lease_io.release()?;
+    assert_eq!(h.read_leases()?, original);
+    assert!(h.api_server.expired_leases().is_empty());
+    // The injected failure wrote no bytes: the retained file is already valid.
+    // A real rollback failure requires operator inspection/repair before restart.
+    h.kea.restart()?;
+    let recovered = send_and_recv_v6(&h.socket, request)?.expect("operator recovery retry");
+    assert_eq!(DHCPv6Factory::ia_addr(&recovered), Some(address));
+    h.wait_for_active_lease(address, &DHCPv6Factory::duid_hex(&duid))?;
+    assert_assigned_leases(&h.kea.statistics()?, 1, 1);
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn failed_memfile_reopen_preserves_file_and_fatal_policy() -> Result<(), eyre::Report> {
+    for fail_existing_open in [false, true] {
+        let idx = 0xc8;
+        let mut h = Harness::new();
+        let (server_id, address) = h.establish_lease(idx)?;
+        let original = h.read_leases()?;
+        let duid = DHCPv6Factory::duid_uuid(idx);
+        let request = DHCPv6Factory::request_with_duid(idx, server_id, address, duid.clone(), true);
+        h.kea
+            .lease_io
+            .arm_reopen_failure(address, &duid, fail_existing_open)?;
+        let refused = send_and_recv_v6(&h.socket, request.clone())?;
+        assert!(refused.as_ref().and_then(DHCPv6Factory::ia_addr).is_none());
+        h.kea.lease_io.wait_for_hit(1)?;
+        h.kea.wait_for_failure()?;
+        assert_eq!(
+            h.read_leases()?,
+            original,
+            "recovery must never recreate the lease file"
+        );
+        if fail_existing_open {
+            assert!(h.kea.wait_for_log(
+                "cannot reopen IPv6 lease file after rollback",
+                MEMFILE_TIMEOUT
+            ));
+        }
+        h.kea.lease_io.release()?;
+        h.kea.restart()?;
+        assert_eq!(h.read_leases()?, original);
+        assert_assigned_leases(&h.kea.statistics()?, 1, 1);
+        let recovered = send_and_recv_v6(&h.socket, request)?.expect("storage recovery retry");
+        assert_eq!(DHCPv6Factory::ia_addr(&recovered), Some(address));
+        h.wait_for_active_lease(address, &DHCPv6Factory::duid_hex(&duid))?;
+        assert!(h.api_server.expired_leases().is_empty());
+    }
+    Ok(())
+}
+
 // Different MACs share no MAC guard. Pause after SELECT at native persistence
 // and prove the selected-address guard alone rejects a competing packet.
 #[cfg(target_os = "linux")]
@@ -2467,22 +2542,45 @@ fn handoff_replaces_native_ddns_ownership_after_persistence() -> Result<(), eyre
         );
         Ok(serde_json::from_slice(&bytes[2..count])?)
     }
-    for (hostname, registered_name, fail_first) in [
+    for (hostname, registered_name, fail_first, replace_name) in [
         (
             Some("firmware.example.test."),
             Some("firmware.example.test."),
             false,
+            false,
         ),
-        (Some("os.example.test."), Some("os.example.test."), false),
-        (Some("os.example.test."), Some("os.example.test."), true),
-        (None, None, false),
-        (Some("___"), None, false),
-        (Some(""), Some("myhost-2001-db8--c4.example.test."), false),
+        (
+            Some("os.example.test."),
+            Some("os.example.test."),
+            false,
+            false,
+        ),
+        (
+            Some("os.example.test."),
+            Some("os.example.test."),
+            true,
+            false,
+        ),
+        (None, None, false, false),
+        (Some("___"), None, false, false),
+        (
+            Some(""),
+            Some("myhost-2001-db8--c4.example.test."),
+            false,
+            false,
+        ),
+        (
+            Some("os.example.test."),
+            Some("myhost-2001-db8--c4.example.test."),
+            false,
+            true,
+        ),
     ] {
         let d2 = UdpSocket::bind("127.0.0.1:0")?;
         d2.set_read_timeout(Some(Duration::from_secs(2)))?;
         let mut h = Harness::new_with_config(Kea6Config {
             ddns_port: Some(d2.local_addr()?.port()),
+            ddns_replace_name: replace_name,
             ..Kea6Config::default()
         });
         let idx = 0xc4;
