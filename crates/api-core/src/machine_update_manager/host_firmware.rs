@@ -24,6 +24,7 @@ use std::time::SystemTime;
 use async_trait::async_trait;
 use carbide_firmware::FirmwareConfig;
 use carbide_uuid::machine::HostMachineId;
+use db::work_lock_manager::WorkLock;
 use db::{self, desired_firmware, host_firmware_config};
 use model::machine::ManagedHostStateSnapshot;
 use model::machine_update_module::HOST_FW_UPDATE_HEALTH_REPORT_SOURCE;
@@ -36,6 +37,9 @@ use super::machine_update_module::MachineUpdateModule;
 use super::metrics::{FirmwareUpdatePhase, FirmwareUpdateProgress, FirmwareUpdateTarget};
 use crate::CarbideResult;
 use crate::cfg::file::CarbideConfig;
+
+#[cfg(test)]
+mod tests;
 
 pub(super) struct HostFirmwareUpdate {
     pub(super) metrics: HostFirmwareUpdateMetrics,
@@ -64,23 +68,40 @@ impl MachineUpdateModule for HostFirmwareUpdate {
     async fn start_updates(
         &self,
         pool: &sqlx::Pool<sqlx::Postgres>,
+        work_lock: &WorkLock,
         available_updates: i32,
         updating_host_machines: &HashSet<HostMachineId>,
         _snapshots: &HashMap<HostMachineId, ManagedHostStateSnapshot>,
     ) -> CarbideResult<HashSet<HostMachineId>> {
-        let mut txn = db::Transaction::begin(pool).await?;
-        if let Ok(mut firmware_catalog_last_read) = self.firmware_catalog_last_read.try_lock() {
-            let catalog_marker = self.firmware_catalog_marker(&mut txn).await?;
-            if firmware_catalog_last_read.as_ref() != Some(&catalog_marker) {
+        let firmware_catalog_last_read = self.firmware_catalog_last_read.try_lock().ok();
+        // Loading metadata can block on the filesystem. Finish that work before
+        // taking the database fence; runtime overrides are read inside it.
+        let disk_catalog = firmware_catalog_last_read.as_ref().map(|_| {
+            (
+                self.firmware_config.config_update_time(),
+                self.firmware_config.create_snapshot(),
+            )
+        });
+        let mut txn = super::update_transaction(pool, work_lock).await?;
+        let mut published_catalog_marker = None;
+        if let (Some(last_read), Some((firmware_dir_mod_time, disk_snapshot))) =
+            (firmware_catalog_last_read.as_ref(), disk_catalog)
+        {
+            let catalog_marker = FirmwareCatalogMarker {
+                firmware_dir_mod_time,
+                host_firmware_config_summary: host_firmware_config::summary(&mut txn).await?,
+            };
+            if last_read.as_ref() != Some(&catalog_marker) {
                 // Save the firmware config in an SQL table so that we can filter for hosts with non-matching firmware there.
-                let fw_config_snapshot = self.effective_firmware_config_snapshot(&mut txn).await?;
+                let overrides = host_firmware_config::list_configs(&mut txn).await?;
+                let fw_config_snapshot = disk_snapshot.with_overrides(overrides);
                 tracing::info!(
                     firmware_config_snapshot = ?fw_config_snapshot,
                     "Firmware config now",
                 );
                 let models = fw_config_snapshot.into_values().collect::<Vec<_>>();
                 desired_firmware::snapshot_desired_firmware(&mut txn, &models).await?;
-                *firmware_catalog_last_read = Some(catalog_marker);
+                published_catalog_marker = Some(catalog_marker);
             }
         }
 
@@ -102,9 +123,6 @@ impl MachineUpdateModule for HostFirmwareUpdate {
             )
             .await?;
 
-            // Counted after the trigger succeeds; the commit below spans the
-            // whole batch, so a later DB error can re-count machines on the
-            // next pass -- the same repeat-on-retry the old log line had.
             carbide_instrument::emit(FirmwareUpdateProgress {
                 target: FirmwareUpdateTarget::Host,
                 phase: FirmwareUpdatePhase::Started,
@@ -115,6 +133,11 @@ impl MachineUpdateModule for HostFirmwareUpdate {
         }
 
         txn.commit().await?;
+        if let (Some(mut last_read), Some(catalog_marker)) =
+            (firmware_catalog_last_read, published_catalog_marker)
+        {
+            *last_read = Some(catalog_marker);
+        }
         Ok(updates_started)
     }
 
@@ -198,26 +221,6 @@ impl HostFirmwareUpdate {
             metrics,
             firmware_catalog_last_read: Arc::new(Mutex::new(None)),
         })
-    }
-
-    async fn firmware_catalog_marker(
-        &self,
-        txn: &mut PgConnection,
-    ) -> CarbideResult<FirmwareCatalogMarker> {
-        Ok(FirmwareCatalogMarker {
-            firmware_dir_mod_time: self.firmware_config.config_update_time(),
-            host_firmware_config_summary: host_firmware_config::summary(txn).await?,
-        })
-    }
-
-    async fn effective_firmware_config_snapshot(
-        &self,
-        txn: &mut PgConnection,
-    ) -> CarbideResult<carbide_firmware::FirmwareConfigSnapshot> {
-        let host_firmware_configs = host_firmware_config::list_configs(txn).await?;
-        Ok(self
-            .firmware_config
-            .create_snapshot_with_overrides(host_firmware_configs))
     }
 
     pub(super) async fn check_for_updates(
