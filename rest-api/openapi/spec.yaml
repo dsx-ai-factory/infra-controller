@@ -34470,12 +34470,13 @@ components:
     DpuExtensionService:
       title: DpuExtensionService
       type: object
-      description: DPU Extension Service allows user defined services to run on DPUs of their Instances
+      description: DPU Extension Service runs user-defined services on DPUs through instance attachment or baseline deployment
       examples:
         - id: 497f6eca-6276-4993-bfeb-53cbbbba6f08
           name: busybox
           description: 'Single, multi-call executable that contains stripped-down versions of common Unix utilities'
           serviceType: KubernetesPod
+          deploymentType: DemandDriven
           siteId: 60189e9c-7d12-438c-b9ca-6998d9c364b1
           tenantId: f97df110-f4de-492e-8849-4a6af68026b0
           version: V1-T1761856992374052
@@ -34525,9 +34526,11 @@ components:
           enum:
             - KubernetesPod
             - DpfHelmChart
+        deploymentType:
+          $ref: '#/components/schemas/DpuExtensionServiceDeploymentType'
         dpuTarget:
           $ref: '#/components/schemas/DpuExtensionServiceDpuTarget'
-          description: Immutable DPU placement policy for DpfHelmChart services; null for KubernetesPod services
+          description: Immutable host-scoped placement for `DemandDriven` Helm services; null for `Baseline` Helm and KubernetesPod services
         siteId:
           type: string
           format: uuid
@@ -34577,6 +34580,23 @@ components:
         - Error
         - Updating
         - Deleting
+    DpuExtensionServiceDeploymentType:
+      title: DpuExtensionServiceDeploymentType
+      type: string
+      description: |-
+        Immutable deployment policy. Omitted or null on create defaults to `DemandDriven`,
+        which deploys through instance attachment. `Baseline` is supported only for
+        DpfHelmChart services and requests deployment to all DPUs managed by DPF at
+        creation, without a DPU target. Baseline services cannot be attached to instances.
+        Empty and unknown values are rejected. Responses always include the stored policy.
+        This field cannot be changed through updates.
+      default: DemandDriven
+      enum:
+        - DemandDriven
+        - Baseline
+      examples:
+        - DemandDriven
+        - Baseline
     DpuExtensionServiceDpuTarget:
       title: DpuExtensionServiceDpuTarget
       type:
@@ -34590,11 +34610,12 @@ components:
     DpuExtensionServiceSummary:
       title: DpuExtensionServiceSummary
       type: object
-      description: DPU Extension Service allows user defined services to run on DPUs of their Instances
+      description: DPU Extension Service runs user-defined services on DPUs through instance attachment or baseline deployment
       examples:
         - id: 497f6eca-6276-4993-bfeb-53cbbbba6f08
           name: busybox
           serviceType: KubernetesPod
+          deploymentType: DemandDriven
           latestVersion: V1-T1761856992374052
           status: Ready
       properties:
@@ -34612,9 +34633,11 @@ components:
           enum:
             - KubernetesPod
             - DpfHelmChart
+        deploymentType:
+          $ref: '#/components/schemas/DpuExtensionServiceDeploymentType'
         dpuTarget:
           $ref: '#/components/schemas/DpuExtensionServiceDpuTarget'
-          description: Immutable DPU placement policy for DpfHelmChart services; null for KubernetesPod services
+          description: Immutable host-scoped placement for `DemandDriven` Helm services; null for `Baseline` Helm and KubernetesPod services
         latestVersion:
           type:
             - string
@@ -34786,6 +34809,7 @@ components:
         - name: busybox
           description: 'Single, multi-call executable that contains stripped-down versions of common Unix utilities'
           serviceType: KubernetesPod
+          deploymentType: DemandDriven
           siteId: 60189e9c-7d12-438c-b9ca-6998d9c364b1
           data: 'apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: busybox-deployment\n  labels:\n    app: busybox\nspec:\n  replicas: 1 # You can adjust the number of desired replicas here\n  selector:\n    matchLabels:\n      app: busybox\n  template:\n    metadata:\n      labels:\n        app: busybox\n    spec:\n      containers:\n      - name: busybox-container\n        image: busybox:latest # You can specify a different BusyBox image tag\n        command: ["sh", "-c", "echo \''BusyBox container running\'' && sleep 3600"]'
           credentials:
@@ -34801,6 +34825,7 @@ components:
         - name: storage-client
           description: DPF-managed storage client
           serviceType: DpfHelmChart
+          deploymentType: DemandDriven
           dpuTarget: AllActive
           siteId: 60189e9c-7d12-438c-b9ca-6998d9c364b1
           data: '{"repoURL":"https://helm-registry.example/dpf","chartName":"storage-client","chartVersion":"2.0.0","serviceID":"storage-client-v2","deployInCluster":false,"security":{"privileged":true,"spiffe":{}},"serviceDaemonSet":{"labels":{"app.kubernetes.io/name":"storage-client"},"annotations":{},"resources":{"nvidia.com/bf_sf":"1"},"updateStrategy":{"type":"RollingUpdate","rollingUpdate":{"maxUnavailable":1}}}}'
@@ -34819,9 +34844,13 @@ components:
           enum:
             - KubernetesPod
             - DpfHelmChart
+        deploymentType:
+          oneOf:
+            - $ref: '#/components/schemas/DpuExtensionServiceDeploymentType'
+            - type: 'null'
         dpuTarget:
           $ref: '#/components/schemas/DpuExtensionServiceDpuTarget'
-          description: Required for DpfHelmChart services and unsupported for KubernetesPod services
+          description: Required for `DemandDriven` DpfHelmChart services; omitted or null for `Baseline` Helm and KubernetesPod services
         siteId:
           type: string
           format: uuid

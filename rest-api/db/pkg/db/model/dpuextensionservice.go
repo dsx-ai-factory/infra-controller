@@ -71,6 +71,10 @@ var (
 	DpuExtensionServiceServiceTypeKubernetesPod = "KubernetesPod"
 	// DpuExtensionServiceServiceTypeDpfHelmChart indicates an extension service managed as a DPF Helm chart
 	DpuExtensionServiceServiceTypeDpfHelmChart = "DpfHelmChart"
+	// DpuExtensionServiceDeploymentTypeDemandDriven deploys through instance attachment.
+	DpuExtensionServiceDeploymentTypeDemandDriven = "DemandDriven"
+	// DpuExtensionServiceDeploymentTypeBaseline deploys Helm services to all DPUs managed by DPF.
+	DpuExtensionServiceDeploymentTypeBaseline = "Baseline"
 	// DpuExtensionServiceDpuTargetPrimary targets the host's primary attached DPU
 	DpuExtensionServiceDpuTargetPrimary = "Primary"
 	// DpuExtensionServiceDpuTargetAllActive targets DPUs used by the instance network configuration
@@ -87,6 +91,19 @@ var (
 
 // dpuExtensionServiceLifecycleStatePrefix is the proto enum value prefix that Core omits from the lifecycle envelope
 const dpuExtensionServiceLifecycleStatePrefix = "DPU_EXTENSION_SERVICE_LIFECYCLE_STATE_"
+
+// DpuExtensionServiceDeploymentTypeFromProto maps Core placement intent without
+// treating an unknown policy as safe attachment-based deployment.
+func DpuExtensionServiceDeploymentTypeFromProto(deploymentType corev1.DpuExtensionServiceDeploymentType) (string, error) {
+	switch deploymentType {
+	case corev1.DpuExtensionServiceDeploymentType_DPU_EXTENSION_SERVICE_DEPLOYMENT_TYPE_DEMAND_DRIVEN:
+		return DpuExtensionServiceDeploymentTypeDemandDriven, nil
+	case corev1.DpuExtensionServiceDeploymentType_DPU_EXTENSION_SERVICE_DEPLOYMENT_TYPE_BASELINE:
+		return DpuExtensionServiceDeploymentTypeBaseline, nil
+	default:
+		return "", fmt.Errorf("unrecognized deployment type %d", deploymentType)
+	}
+}
 
 // DpuExtensionServiceDpuTargetFromProto maps Core's DPU target enum to its REST representation.
 func DpuExtensionServiceDpuTargetFromProto(target *corev1.DpuExtensionServiceDpuTarget) (*string, error) {
@@ -221,6 +238,7 @@ type DpuExtensionService struct {
 	Name            string                          `bun:"name,notnull"`
 	Description     *string                         `bun:"description"`
 	ServiceType     string                          `bun:"service_type,notnull"`
+	DeploymentType  string                          `bun:"deployment_type,notnull,default:'DemandDriven'"`
 	DpuTarget       *string                         `bun:"dpu_target"`
 	SiteID          uuid.UUID                       `bun:"site_id,type:uuid,notnull,pk"`
 	Site            *Site                           `bun:"rel:belongs-to,join:site_id=id"`
@@ -285,6 +303,7 @@ type DpuExtensionServiceCreateInput struct {
 	Name                  string
 	Description           *string
 	ServiceType           string
+	DeploymentType        string
 	DpuTarget             *string
 	SiteID                uuid.UUID
 	TenantID              uuid.UUID
@@ -368,8 +387,14 @@ func (dessd DpuExtensionServiceSQLDAO) Create(ctx context.Context, tx *db.Tx, in
 		id = uuid.New()
 	}
 
+	deploymentType := input.DeploymentType
+	if deploymentType == "" {
+		deploymentType = DpuExtensionServiceDeploymentTypeDemandDriven
+	}
+
 	des := &DpuExtensionService{
 		ID:             id,
+		DeploymentType: deploymentType,
 		Name:           input.Name,
 		Description:    input.Description,
 		ServiceType:    input.ServiceType,
