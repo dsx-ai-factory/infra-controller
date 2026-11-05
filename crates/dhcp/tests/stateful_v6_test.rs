@@ -2477,6 +2477,7 @@ fn handoff_replaces_native_ddns_ownership_after_persistence() -> Result<(), eyre
         (Some("os.example.test."), Some("os.example.test."), true),
         (None, None, false),
         (Some("___"), None, false),
+        (Some(""), Some("myhost-2001-db8--c4.example.test."), false),
     ] {
         let d2 = UdpSocket::bind("127.0.0.1:0")?;
         d2.set_read_timeout(Some(Duration::from_secs(2)))?;
