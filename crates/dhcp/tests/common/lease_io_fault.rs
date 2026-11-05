@@ -49,6 +49,28 @@ impl LeaseIoFault {
         self.file.write_all_at(&3u64.to_ne_bytes(), 528)
     }
 
+    pub(crate) fn arm_rollback_failure(
+        &self,
+        address: Ipv6Addr,
+        duid: &[u8],
+    ) -> std::io::Result<()> {
+        self.arm(address, duid, false)?;
+        self.file.write_all_at(&3u64.to_ne_bytes(), 0)
+    }
+
+    pub(crate) fn arm_reopen_failure(
+        &self,
+        address: Ipv6Addr,
+        duid: &[u8],
+        fail_existing_open: bool,
+    ) -> std::io::Result<()> {
+        self.arm(address, duid, false)?;
+        self.file.write_all_at(
+            &(if fail_existing_open { 5u64 } else { 4 }).to_ne_bytes(),
+            0,
+        )
+    }
+
     pub(crate) fn arm_select_exception(&self) -> std::io::Result<()> {
         self.file.write_all_at(&0u64.to_ne_bytes(), 8)?;
         self.file.write_all_at(&3u64.to_ne_bytes(), 0)

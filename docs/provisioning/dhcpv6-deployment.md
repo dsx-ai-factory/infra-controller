@@ -10,7 +10,7 @@ Use the NICo hook and patched Kea runtime built from the same repository
 revision. The build and runtime images use the ISC Kea 3.0 LTS packages pinned in
 [`kea.version`](https://github.com/dsx-ai-factory/infra-controller/blob/main/dev/docker/kea.version).
 [`build-kea.sh`](https://github.com/dsx-ai-factory/infra-controller/blob/main/dev/docker/build-kea.sh)
-verifies the release source checksum and rebuilds the allocation library with
+verifies the release source checksum and rebuilds the allocation and CSV utility libraries with
 [`kea-lease6-replacement.patch`](https://github.com/dsx-ai-factory/infra-controller/blob/main/dev/docker/kea-lease6-replacement.patch).
 It preserves the other ISC package libraries and files. The patch provides safe
 lease replacement, existing-lease validation, reclamation refusal, and correct
@@ -20,7 +20,7 @@ null-result backport is unnecessary in Kea 3.
 The DHCPv6 hook checks `nico_kea_lease6_handoff_contract` at startup. Stock Kea
 and an older NICo patch lack that contract and fail with
 `NICo DHCPv6 requires patched Kea`. The package version alone does not establish
-compatibility. Reinstalling the stock allocation library prevents DHCPv6 startup;
+compatibility. Reinstalling the stock libraries prevents DHCPv6 startup;
 rebuild and redeploy the matching NICo image. DHCPv4 does not require this DHCPv6
 contract. No chart value or lease-file schema change is required by the handoff.
 
@@ -144,8 +144,9 @@ can return an IA-scoped failure. Inspect the `reason` label on
 
 The IPv6 memfile writer closes and truncates a failed append to its previous
 offset before reopening it. Refused buffered rows cannot be replayed by a later
-append or graceful shutdown. If truncation fails, the stream stays closed and
-the error requires lease-file repair before restart. This is not a power-loss
+append or graceful shutdown. Recovery reopens the existing file without a create/truncate fallback.
+If truncation fails, Kea stops even with `serve-retry-continue`; inspect and
+repair the lease file before restart. Reopen failures retain fatal-error handling. This is not a power-loss
 or cross-process transaction guarantee.
 
 The chart does not enable native D2 updates. If a custom configuration enables
@@ -156,6 +157,8 @@ does not request DNS updates or its hostname is scrubbed to empty, replacement
 queues only the old owner's removal.
 Failed persistence queues no replacement cleanup. D2 delivery and DNS-server
 acceptance remain subject to Kea's configured queue, transport, and DNS policy.
+For native reuse of an expired or released lease, reclamation sends its removal
+separately from the subsequent addition, following Kea's normal D2 behavior.
 With D2 enabled, the hook rejects differing shared-network, subnet, or pool
 overrides of `ddns-send-updates`, `ddns-override-no-update`,
 `ddns-override-client-update`, `ddns-replace-client-name`, `ddns-generated-prefix`,

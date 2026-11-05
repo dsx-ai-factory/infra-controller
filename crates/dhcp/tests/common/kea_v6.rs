@@ -67,6 +67,7 @@ pub(crate) struct Kea6Config {
     pub(crate) dns_servers_ipv6: &'static [&'static str],
     pub(crate) prefix_pool: bool,
     pub(crate) ddns_port: Option<u16>,
+    pub(crate) ddns_replace_name: bool,
     pub(crate) pool_ddns_updates: Option<bool>,
     pub(crate) subnet_ddns_updates: Option<bool>,
     pub(crate) continue_after_store_failure: bool,
@@ -90,6 +91,7 @@ impl Default for Kea6Config {
             dns_servers_ipv6: &HOOK_DNS_SERVERS_IPV6,
             prefix_pool: false,
             ddns_port: None,
+            ddns_replace_name: false,
             pool_ddns_updates: None,
             subnet_ddns_updates: None,
             continue_after_store_failure: false,
@@ -786,6 +788,9 @@ impl Kea6 {
         }
         if let Some(updates) = config.pool_ddns_updates {
             dhcp6["subnet6"][0]["pools"][0]["ddns-send-updates"] = json!(updates);
+        }
+        if config.ddns_replace_name {
+            dhcp6["ddns-replace-client-name"] = json!("always");
         }
         if let Some(updates) = config.subnet_ddns_updates {
             dhcp6["subnet6"][0]["ddns-send-updates"] = json!(updates);

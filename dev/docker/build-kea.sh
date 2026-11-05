@@ -3,8 +3,8 @@
 # SPDX-License-Identifier: Apache-2.0
 set -eu
 
-# Rebuild the allocation library from the exact ISC release used by the binary
-# packages. Keep the ISC package's other libraries, service files and ABI intact.
+# Rebuild the allocation and CSV utility libraries from the exact ISC release.
+# Keep the ISC package's other libraries, service files and ABI intact.
 kea_version="$1"
 test "${kea_version%%-*}" = '3.0.5'
 script_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
@@ -32,28 +32,31 @@ multiarch=$(dpkg-architecture -qDEB_HOST_MULTIARCH)
     --libexecdir=lib/kea --sysconfdir=/etc/kea --localstatedir=/var \
     --sharedstatedir=/var/lib/kea --buildtype=release -Dcpp_std=c++17 \
     -Dnetconf=disabled -Dtests=disabled -Dmysql=enabled -Dpostgresql=enabled -Dkrb5=enabled
-library=libkea-dhcpsrv.so.133.0.0
-ninja -C build -j "${KEA_BUILD_JOBS:-4}" "src/lib/dhcpsrv/$library"
-# An uninstalled Meson library refers to its build tree. Runtime must use only
-# the matching ISC package dependencies, including in the compiler image.
-patchelf --remove-rpath "build/src/lib/dhcpsrv/$library"
-
-# Fail the build if rebuilding removed an exported strong symbol. The
-# handoff contract adds symbols; it removes none from the pinned ISC library.
-nm -D --defined-only "/usr/lib/$multiarch/$library" | awk '$2 ~ /^[TDBR]$/ {print $3}' | LC_ALL=C sort > "$build_dir/stock.symbols"
-nm -D --defined-only "build/src/lib/dhcpsrv/$library" | awk '$2 ~ /^[TDBR]$/ {print $3}' | LC_ALL=C sort > "$build_dir/patched.symbols"
-LC_ALL=C comm -23 "$build_dir/stock.symbols" "$build_dir/patched.symbols" > "$build_dir/missing.symbols"
-test ! -s "$build_dir/missing.symbols" || { cat "$build_dir/missing.symbols" >&2; exit 1; }
+libraries='dhcpsrv/libkea-dhcpsrv.so.133.0.0 util/libkea-util.so.104.0.0'
+ninja -C build -j "${KEA_BUILD_JOBS:-4}" src/lib/dhcpsrv/libkea-dhcpsrv.so.133.0.0
+for entry in $libraries; do
+    library=${entry##*/}
+    # Runtime must use the matching ISC dependencies, not the Meson build tree.
+    patchelf --remove-rpath "build/src/lib/$entry"
+    # Keep every exported strong symbol from both pinned ISC libraries.
+    nm -D --defined-only "/usr/lib/$multiarch/$library" | awk '$2 ~ /^[TDBR]$/ {print $3}' | LC_ALL=C sort > "$build_dir/stock.symbols"
+    nm -D --defined-only "build/src/lib/$entry" | awk '$2 ~ /^[TDBR]$/ {print $3}' | LC_ALL=C sort > "$build_dir/patched.symbols"
+    LC_ALL=C comm -23 "$build_dir/stock.symbols" "$build_dir/patched.symbols" > "$build_dir/missing.symbols"
+    test ! -s "$build_dir/missing.symbols" || { cat "$build_dir/missing.symbols" >&2; exit 1; }
+done
 
 cd "$build_dir"
 apt-get download "isc-kea-common=$kea_version"
 dpkg-deb --raw-extract ./isc-kea-common_*.deb package
-cp "kea-3.0.5/build/src/lib/dhcpsrv/$library" "package/usr/lib/$multiarch/$library"
+for entry in $libraries; do
+    library=${entry##*/}
+    cp "kea-3.0.5/build/src/lib/$entry" "package/usr/lib/$multiarch/$library"
+    sed -i "\|usr/lib/$multiarch/$library$|d" package/DEBIAN/md5sums
+    (cd package && md5sum "usr/lib/$multiarch/$library" >> DEBIAN/md5sums)
+done
 # Preserve the package version: all ISC components depend on this exact build.
 # The hook checks the native capability, not the version string, at startup.
 mkdir -p package/usr/share/doc/isc-kea-common
 sha256sum "$script_dir/kea-lease6-replacement.patch" > package/usr/share/doc/isc-kea-common/nico-handoff-patch.sha256
-sed -i "\|usr/lib/$multiarch/$library$|d" package/DEBIAN/md5sums
-(cd package && md5sum "usr/lib/$multiarch/$library" \
-    usr/share/doc/isc-kea-common/nico-handoff-patch.sha256 >> DEBIAN/md5sums)
+(cd package && md5sum usr/share/doc/isc-kea-common/nico-handoff-patch.sha256 >> DEBIAN/md5sums)
 dpkg-deb --build --root-owner-group package "$package_dir/isc-kea-common.deb"

@@ -15,16 +15,74 @@
 
 // Test-child-only interposition: fail or pause a complete CSV row BEFORE any
 // bytes are written, while allowing earlier reclamation/tombstone writes.
-// Control layout (native u64): mode (0=pass, 1=EIO, 2=pause), hits, followed by
+// Control layout (native u64): mode (0=pass, 1=EIO, 2=pause, 3=write+rollback EIO), hits, followed by
 // a 512-byte CSV address/DUID prefix, then optional state+1 (0=any).
 // Rust writes mode last when arming.
 static ssize_t (*native_write)(int, const void *, size_t);
+static int (*native_truncate)(const char *, off_t);
+static FILE *(*native_fopen)(const char *, const char *);
+static FILE *(*native_fopen64)(const char *, const char *);
 static pthread_once_t once = PTHREAD_ONCE_INIT;
 static pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
 
 static void initialize(void) {
     native_write = dlsym(RTLD_NEXT, "write");
-    if (!native_write) _exit(125);
+    native_truncate = dlsym(RTLD_NEXT, "truncate");
+    native_fopen = dlsym(RTLD_NEXT, "fopen");
+    native_fopen64 = dlsym(RTLD_NEXT, "fopen64");
+    if (!native_write || !native_truncate || !native_fopen || !native_fopen64) _exit(125);
+}
+
+static int fail_reopen(const char *path, const char *access) {
+    const char *target = getenv("NICO_TEST_LEASE_FILE");
+    const char *control = getenv("NICO_TEST_LEASE_IO_CONTROL");
+    if (!target || !control || strcmp(path, target)) return 0;
+    int ctl = open(control, O_RDONLY | O_CLOEXEC);
+    uint64_t mode = 0;
+    if (ctl >= 0) {
+        pread(ctl, &mode, sizeof(mode), 0);
+        close(ctl);
+    }
+    // Mode 4 faults the read-only size probe but permits a destructive
+    // create fallback. Mode 5 refuses every reopen of the retained file.
+    if (mode == 5 || (mode == 4 && access[0] == 'r' && !strchr(access, '+'))) {
+        errno = EIO;
+        return 1;
+    }
+    return 0;
+}
+
+FILE *fopen(const char *path, const char *access) {
+    pthread_once(&once, initialize);
+    return fail_reopen(path, access) ? NULL : native_fopen(path, access);
+}
+
+FILE *fopen64(const char *path, const char *access) {
+    pthread_once(&once, initialize);
+    return fail_reopen(path, access) ? NULL : native_fopen64(path, access);
+}
+
+int truncate(const char *path, off_t length) {
+    pthread_once(&once, initialize);
+    const char *target = getenv("NICO_TEST_LEASE_FILE");
+    const char *control = getenv("NICO_TEST_LEASE_IO_CONTROL");
+    if (target && control && !strcmp(path, target)) {
+        int ctl = open(control, O_RDONLY | O_CLOEXEC);
+        uint64_t mode = 0;
+        if (ctl >= 0) {
+            pread(ctl, &mode, sizeof(mode), 0);
+            close(ctl);
+        }
+        if (mode == 3) {
+            errno = EIO;
+            return -1;
+        }
+    }
+    return native_truncate(path, length);
+}
+
+int truncate64(const char *path, off64_t length) {
+    return truncate(path, length);
 }
 
 ssize_t write(int fd, const void *buffer, size_t length) {
