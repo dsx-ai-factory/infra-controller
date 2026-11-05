@@ -4013,12 +4013,12 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 		// An explicit InfiniBandInterfaces list (including empty []) replaces the instance's IB interfaces.
 		// Omitting the field (nil) preserves existing interfaces.
 		// Bucket existing InfiniBand rows by (partition ID, device name, device instance) so we can align with the incoming request.
-		existingIbIfcMap := make(map[string][]cdbm.InfiniBandInterface)
+		existingIbIfcMap := make(map[string][]int)
 
 		// There can be multiple historical rows per key; Ordering existingIbIfcs by Created ascending makes the slice per key chronological.
 		for i := range existingIbIfcs {
 			key := fmt.Sprintf("%s:%s:%d", existingIbIfcs[i].InfiniBandPartitionID.String(), existingIbIfcs[i].Device, existingIbIfcs[i].DeviceInstance)
-			existingIbIfcMap[key] = append(existingIbIfcMap[key], existingIbIfcs[i])
+			existingIbIfcMap[key] = append(existingIbIfcMap[key], i)
 		}
 
 		retainedIbIfcIDs := map[uuid.UUID]bool{}
@@ -4028,16 +4028,13 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 		// is not torn down and rebuilt.
 		for _, apiIbIfc := range apiRequest.InfiniBandInterfaces {
 			key := fmt.Sprintf("%s:%s:%d", apiIbIfc.InfiniBandPartitionID, apiIbIfc.Device, apiIbIfc.DeviceInstance)
-			existingIbIfcsForKey := existingIbIfcMap[key]
+			existingIndices := existingIbIfcMap[key]
 
 			var reused *cdbm.InfiniBandInterface
-			if len(existingIbIfcsForKey) > 0 {
-				// Find the most recent non-Deleting row for this key
-				for i := len(existingIbIfcsForKey) - 1; i >= 0; i-- {
-					if existingIbIfcsForKey[i].Status != cdbm.InfiniBandInterfaceStatusDeleting {
-						reused = &existingIbIfcsForKey[i]
-						break
-					}
+			for _, idx := range slices.Backward(existingIndices) {
+				if existingIbIfcs[idx].Status != cdbm.InfiniBandInterfaceStatusDeleting && !retainedIbIfcIDs[existingIbIfcs[idx].ID] {
+					reused = &existingIbIfcs[idx]
+					break
 				}
 			}
 
@@ -4124,6 +4121,17 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 				newIbIfcs = append(newIbIfcs, *dbibifc)
 			}
 		}
+
+		// Drop retained rows from existingIbIfcs so they are not appended again when building the final config.
+		// Keep rows that were not retained, or are already Deleting (they will be filtered out by the config builder).
+		unmatchedIbIfcs := make([]cdbm.InfiniBandInterface, 0, len(existingIbIfcs))
+		for i := range existingIbIfcs {
+			if retainedIbIfcIDs[existingIbIfcs[i].ID] && existingIbIfcs[i].Status != cdbm.InfiniBandInterfaceStatusDeleting {
+				continue
+			}
+			unmatchedIbIfcs = append(unmatchedIbIfcs, existingIbIfcs[i])
+		}
+		existingIbIfcs = unmatchedIbIfcs
 
 		// Mark any existing non-Deleting interface that was not retained as Deleting.
 		// This handles both explicit empty list (clear all) and subset removal cases.
