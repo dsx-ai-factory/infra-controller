@@ -19,6 +19,7 @@ use carbide_uuid::machine::MachineId;
 use db::resource_pool::remote;
 use model::expected_machine::ExpectedMachine;
 use model::hardware_info::HardwareInfo;
+use model::machine::machine_id::host_id_from_dpu_hardware_info;
 use model::machine::machine_search_config::MachineSearchConfig;
 use model::machine::{CURRENT_STATE_MODEL_VERSION, ManagedHostState};
 use model::resource_pool::OwnerType;
@@ -497,6 +498,87 @@ async fn remote_dpu_deletion_during_preparation_preserves_replacement(
         assert_eq!(receipt(&fixture, inputs.machine_id).await?, replacement);
         assert_eq!(db::machine::get_network_config(&fixture.env.pool, &inputs.machine_id).await?.take(), replacement_config.take());
         assert_eq!(fixture.provider.local.provisioned_count(), 1);
+        drop(discovery);
+        fixture.stop().await
+    }).await
+}
+
+/// Host-link ownership can change while discovery waits for its provider.
+/// Reattachment must take segment locks before writing any machine or interface.
+#[crate::sqlx_test]
+async fn remote_dpu_discovery_rechecks_host_link_after_preparation(
+    database: PgPool,
+) -> eyre::Result<()> {
+    Box::pin(async move {
+        let (fixture, inputs) = fixture(database).await?;
+        assert!(!fixture.env.config.site_explorer.create_machines.load(Ordering::Relaxed));
+        let Some(rpc::DiscoveryData::Info(info)) = &inputs.request.discovery_data else {
+            panic!("DPU hardware report");
+        };
+        let hardware_info = HardwareInfo::try_from(info.clone())?;
+        let host_mac = hardware_info.factory_mac_address()?;
+        let host_id = host_id_from_dpu_hardware_info(&hardware_info)?;
+
+        // An already-owned host NIC initially permits discovery to skip segment
+        // locks. No DPU exists yet, so preparation still calls the provider.
+        let host_interface_id = dpu_discover_dhcp(&fixture.env, &host_mac.to_string()).await;
+        let mut txn = fixture.env.pool.begin().await?;
+        let host_interface = db::machine_interface::find_one(&mut *txn, host_interface_id).await?;
+        db::machine::get_or_create(
+            &mut txn, Some(&fixture.env.common_pools), &host_id, &host_interface,
+        ).await?;
+        txn.commit().await?;
+        assert!(db::machine_interface::mac_address_has_machine(&fixture.env.pool, host_mac).await?);
+        fixture.provider.allocate_pause.pause_next.store(true, Ordering::SeqCst);
+        let api = fixture.env.api.clone();
+        let mut discovery = api.discover_machine(Request::new(inputs.request.clone()));
+        tokio::select! {
+            result = &mut discovery => panic!("discovery finished before provider gate: {result:?}"),
+            result = wait_for_preparation(&fixture.provider.allocate_pause) => result?,
+        }
+        let pending = receipt(&fixture, inputs.machine_id).await?;
+
+        // Real force deletion uses admission and clears the host association
+        // while discovery has released its permit for provider preparation.
+        assert!(fixture.env.api.admin_force_delete_machine(Request::new(forge::AdminForceDeleteMachineRequest {
+            host_query: host_id.to_string(), ..Default::default()
+        })).await?.into_inner().all_done);
+        let detached = db::machine_interface::find_one(&fixture.env.pool, host_interface_id).await?;
+        assert!(detached.machine_id.is_none());
+
+        // Hold segment locks after that committed change. Discovery must wait
+        // at this gate before writing any machine or interface rows.
+        let mut gate = fixture.env.pool.begin().await?;
+        db::machine_interface::lock_all_admin_segments(&mut gate).await?;
+        let gate_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()").fetch_one(&mut *gate).await?;
+        fixture.provider.allocate_pause.resume.notify_one();
+        let discovery_pid = tokio::select! {
+            result = &mut discovery => panic!("discovery bypassed the segment gate: {result:?}"),
+            result = wait_for_cleanup_waiter(&fixture.env.pool, gate_pid, None) => result?,
+        };
+        let mode: String = sqlx::query_scalar(
+            "SELECT mode FROM pg_locks WHERE pid = $1 AND locktype = 'advisory' AND NOT granted",
+        ).bind(discovery_pid).fetch_one(&fixture.env.pool).await?;
+        assert_eq!(mode, "ExclusiveLock");
+        let has_written_nothing: bool = sqlx::query_scalar(
+            "SELECT backend_xid IS NULL FROM pg_stat_activity WHERE pid = $1",
+        ).bind(discovery_pid).fetch_one(&fixture.env.pool).await?;
+        assert!(has_written_nothing, "segment admission must precede row writes");
+        assert!(db::machine::find_one(&fixture.env.pool, &inputs.machine_id, MachineSearchConfig::default()).await?.is_none());
+        assert_eq!(receipt(&fixture, inputs.machine_id).await?.state, AllocationState::Pending);
+
+        // Once the writer finishes, the same reservation attaches and the host
+        // link is restored. Reload both records rather than relying on RPC success.
+        gate.commit().await?;
+        let result = tokio::time::timeout(Duration::from_secs(10), &mut discovery).await??;
+        assert_eq!(result.into_inner().machine_id, Some(inputs.machine_id));
+        let attached = receipt(&fixture, inputs.machine_id).await?;
+        assert_eq!(attached.allocation_id, pending.allocation_id);
+        assert_eq!(attached.state, AllocationState::Attached);
+        let host_link = db::machine_interface::find_one(&fixture.env.pool, host_interface_id).await?;
+        assert_eq!(host_link.machine_id, Some(host_id));
+        assert_eq!(host_link.attached_dpu_machine_id.map(MachineId::from), Some(inputs.machine_id));
+        assert_eq!(fixture.provider.allocations.load(Ordering::SeqCst), 1);
         drop(discovery);
         fixture.stop().await
     }).await

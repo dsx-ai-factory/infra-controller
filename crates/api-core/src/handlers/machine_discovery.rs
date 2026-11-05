@@ -172,10 +172,8 @@ pub(crate) async fn discover_machine(
         .create_machines
         .load(Ordering::Relaxed);
 
-    // Decide from unlocked reads which locks the transaction takes first. The
-    // caller interface's current machine id tells a host's first discovery (a
-    // rename) from a repeat one; a DPU's host link row tells an allocation
-    // from a reattach.
+    // The caller interface's current machine id distinguishes a host's first
+    // discovery (a rename) from a repeat one.
     let caller_machine_id = match &direct_interface {
         Some(interface) => interface.machine_id,
         None => match machine_discovery_info.machine_interface_id {
@@ -191,13 +189,6 @@ pub(crate) async fn discover_machine(
             None => None,
         },
     };
-    let admin_segment_locks = admin_segment_locks_for_discovery(
-        api,
-        &hardware_info,
-        caller_machine_id,
-        site_explorer_creates_machines,
-    )
-    .await?;
     // A host's first discovery renames the caller interface's predicted
     // machine id, and the rename cascades into every interface row of the
     // host. The transaction locks those rows and the machines row before any
@@ -283,6 +274,15 @@ pub(crate) async fn discover_machine(
                     operation: "DPU admin lock admission",
                 })?,
         };
+        // Provider preparation releases admission. Read current host-link
+        // ownership now because another writer may have detached it meanwhile.
+        let admin_segment_locks = admin_segment_locks_for_discovery(
+            api,
+            &hardware_info,
+            caller_machine_id,
+            site_explorer_creates_machines,
+        )
+        .await?;
         let mut txn = api.txn_begin().await?;
 
         // Segment advisory locks come before any interface row lock, so the ones
