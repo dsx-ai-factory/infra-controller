@@ -170,8 +170,13 @@ pub(crate) async fn waive_attestation(
         .map_err(|e| CarbideError::InvalidArgument(e.to_string()))?;
 
     let mut txn = api.txn_begin().await?;
-    // Waivers share the cancellation marker used to retire obsolete controller jobs.
-    db::attestation::spdm::cancel_attestation_job(&mut txn, &job_id).await?;
+    // Record waiver intent while the SPDM controller cleans up evidence collection.
+    db::attestation::spdm::request_attestation_cancellation(
+        &mut txn,
+        &job_id,
+        model_spdm::SpdmCancellationTarget::Waive,
+    )
+    .await?;
     txn.commit().await?;
 
     Ok(Response::new(()))
@@ -185,26 +190,16 @@ pub(crate) async fn fail_attestation(
     let job_id: Uuid = Uuid::try_from(request.into_inner())
         .map_err(|error| CarbideError::InvalidArgument(error.to_string()))?;
 
-    // Persist the request and invalidate old worker snapshots together.
+    // Terminal status reads apply this target directly; unfinished devices still need cleanup.
     let mut txn = api.txn_begin().await?;
-    db::attestation::spdm::stop_attestation_job(txn.as_mut(), &job_id).await?;
+    db::attestation::spdm::request_attestation_cancellation(
+        &mut txn,
+        &job_id,
+        model_spdm::SpdmCancellationTarget::Fail,
+    )
+    .await?;
     txn.commit().await?;
     Ok(Response::new(()))
-}
-
-fn convert_model_status_to_rpc_status(
-    model_status: model_spdm::SpdmAttestationStatus,
-) -> rpc::SpdmAttestationStatus {
-    match model_status {
-        model_spdm::SpdmAttestationStatus::InProgress => {
-            rpc::SpdmAttestationStatus::SpdmAttInProgress
-        }
-        model_spdm::SpdmAttestationStatus::Cancelled => {
-            rpc::SpdmAttestationStatus::SpdmAttCancelled
-        }
-        model_spdm::SpdmAttestationStatus::Passed => rpc::SpdmAttestationStatus::SpdmAttPassed,
-        model_spdm::SpdmAttestationStatus::Failed => rpc::SpdmAttestationStatus::SpdmAttFailed,
-    }
 }
 
 pub(crate) async fn list_attestation(
@@ -223,8 +218,8 @@ pub(crate) async fn list_attestation(
         rpc::SpdmListAttestationRequestSelector::SpdmListInProgress => {
             model_spdm::SpdmAttestationStatus::InProgress
         }
-        rpc::SpdmListAttestationRequestSelector::SpdmListCancelled => {
-            model_spdm::SpdmAttestationStatus::Cancelled
+        rpc::SpdmListAttestationRequestSelector::SpdmListWaived => {
+            model_spdm::SpdmAttestationStatus::Waived
         }
         rpc::SpdmListAttestationRequestSelector::SpdmListFailed => {
             model_spdm::SpdmAttestationStatus::Failed
@@ -245,7 +240,7 @@ pub(crate) async fn list_attestation(
                             job_id: Some(::rpc::common::Uuid {
                                 value: job_id.to_string(),
                             }),
-                            attestation_status: convert_model_status_to_rpc_status(status).into(),
+                            attestation_status: rpc::SpdmAttestationStatus::from(status).into(),
                             machine_ids,
                         },
                     )
@@ -470,7 +465,7 @@ async fn assess_single_machine(
             machine_id: Some(machine_id),
             attestation_status: assessment
                 .attestation_status
-                .map(|status| convert_model_status_to_rpc_status(status).into()),
+                .map(|status| rpc::SpdmAttestationStatus::from(status).into()),
             attester_selection_status: Some(attester_selection_status.into()),
         }],
         next_page_token: String::new(),
@@ -490,8 +485,8 @@ async fn list_machine_predictions(
                     rpc::SpdmAttestationStatus::SpdmAttInProgress => {
                         model_spdm::SpdmAttestationStatus::InProgress
                     }
-                    rpc::SpdmAttestationStatus::SpdmAttCancelled => {
-                        model_spdm::SpdmAttestationStatus::Cancelled
+                    rpc::SpdmAttestationStatus::SpdmAttWaived => {
+                        model_spdm::SpdmAttestationStatus::Waived
                     }
                     rpc::SpdmAttestationStatus::SpdmAttPassed => {
                         model_spdm::SpdmAttestationStatus::Passed
@@ -564,7 +559,7 @@ async fn list_machine_predictions(
                 attester_selection_status: None,
                 attestation_status: summary
                     .attestation_status
-                    .map(|status| convert_model_status_to_rpc_status(status).into()),
+                    .map(|status| rpc::SpdmAttestationStatus::from(status).into()),
             })
             .collect(),
         next_page_token,

@@ -181,8 +181,8 @@ struct AttestationScheduled {
     machine_id: MachineId,
     #[context]
     hardware_class: String,
-    /// The only durable record of which revision decided: nothing persists it
-    /// on the work rows, and a later trigger replaces them.
+    /// The profile revision used to select the job's devices. Work rows retain
+    /// their results, but do not store the profile revision.
     #[context]
     profile_version: Option<String>,
     #[context]
@@ -391,8 +391,9 @@ fn from_component_integrity(
         evidence_collection_locked: false,
         job_id: *job_id,
         started_at: *time_now,
-        cancelled_at: None,
-        fail_requested_at: None,
+        cancellation_requested_at: None,
+        cancellation_target: None,
+        cancellation_cleanup_started_at: None,
         completed_at: None,
     }
 }
@@ -430,6 +431,13 @@ pub(crate) async fn handle_spdm_attestation_failed_recovery(
     };
 
     let mut txn = ctx.services.db_pool.begin().await?;
+    // Keep a terminal override stable until the recovery transition commits.
+    db::attestation::spdm::lock_machine_attestations(
+        &mut txn,
+        host_machine_id,
+        &selected_device_ids,
+    )
+    .await?;
     // Cancellation waives attestation; a pass satisfies it. Neither needs a new job.
     // Disabled attestation and an empty selection follow scheduling's skip path.
     let should_advance = selected_device_ids.is_empty()
@@ -440,7 +448,7 @@ pub(crate) async fn handle_spdm_attestation_failed_recovery(
                 Some(&selected_device_ids),
             )
             .await?,
-            SpdmAttestationStatus::Passed | SpdmAttestationStatus::Cancelled
+            SpdmAttestationStatus::Passed | SpdmAttestationStatus::Waived
         );
     if !should_advance {
         return Ok(StateHandlerOutcome::do_nothing());
@@ -565,16 +573,18 @@ pub(crate) async fn handle_spdm_poll_state(
         .collect::<HashSet<_>>();
 
     // Additions, removals, and an empty selection all invalidate the job's membership.
-    // Commit cancellation with the transition so the next iteration can create the replacement job.
+    // Restart for the new membership without changing the old job or its operator intent.
     if selected_devices != job_devices {
-        db::attestation::spdm::cancel_attestation_job(&mut txn, job_id).await?;
         tracing::info!(
             machine_id = %host_machine_id,
             %job_id,
-            "SPDM attester selection changed; cancelling job and restarting attestation"
+            "SPDM attester selection changed; retiring job and restarting attestation"
         );
         return Ok(StateHandlerOutcome::transition(restart_state).with_txn(txn));
     }
+    // Serialise cancellation updates with accepting these results into the lifecycle.
+    db::attestation::spdm::lock_machine_attestations(&mut txn, host_machine_id, &job_device_ids)
+        .await?;
     // A finished job alone does not settle newer attestations for its devices.
     let attestation_status = db::attestation::spdm::list_single_machine_attestation_status(
         &mut txn,
@@ -584,7 +594,7 @@ pub(crate) async fn handle_spdm_poll_state(
     .await?;
 
     match attestation_status {
-        SpdmAttestationStatus::Passed | SpdmAttestationStatus::Cancelled => {
+        SpdmAttestationStatus::Passed | SpdmAttestationStatus::Waived => {
             Ok(StateHandlerOutcome::transition(next_skip_state).with_txn(txn))
         }
         SpdmAttestationStatus::Failed => {
@@ -601,15 +611,12 @@ pub(crate) async fn handle_spdm_poll_state(
                     cause: FailureCause::SpdmAttestationFailed {
                         err: attestation_states
                             .iter()
-                            .filter(|elem| matches!(elem.state, SpdmAttestationState::Failed(_)))
-                            .fold(
-                                String::new(),
-                                |mut accum, x: &SpdmDeviceAttestationDetails| {
-                                    accum.push_str(&x.get_failure_cause().unwrap_or_default());
-                                    accum.push_str(". ");
-                                    accum
-                                },
-                            ),
+                            .filter_map(SpdmDeviceAttestationDetails::get_failure_cause)
+                            .fold(String::new(), |mut accum, cause| {
+                                accum.push_str(&cause);
+                                accum.push_str(". ");
+                                accum
+                            }),
                     },
                     failed_at: Utc::now(),
                     source: failure_source,

@@ -741,19 +741,24 @@ TOML section: `[spdm_state_controller]`. Changes require an API restart.
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `controller` | `StateControllerConfig` | *(default)* | Common state controller timing (see [StateControllerConfig](#statecontrollerconfig)). |
-| `cancellation_timeout` | `Duration` | `2m` | Optional positive duration up to `5m`, such as `30s` or `5m`. Measured from the persisted start of cancellation cleanup across retries and restarts. Operator failure, waiver, and obsolete-job cancellation requests use persisted request timestamps and cannot extend automatic cleanup already in progress. While the evidence collection lock is held, the controller attempts BMC task cancellation and polls for completion; without a task ID it waits for this timeout. BMC confirmation releases the lock early. At or after the timeout, the next controller iteration releases the lock without BMC confirmation and finishes as `Cancelled` for waivers and obsolete-job cancellation or `Failed` for operator failure and automatic recovery. This grace period spans iterations and is independent of the per-iteration `max_object_handling_time` budget. Zero, negative, malformed, and greater-than-five-minute values fail configuration loading. Omission uses `2m`, including when the section is absent. |
+| `cancellation_timeout` | `Duration` | `2m` | Optional positive duration up to `5m`, such as `30s` or `5m`. Measured from the persisted start of cancellation cleanup across retries and restarts. Operator requests retain their first cleanup start independently of their latest request timestamp. Repeating or switching the target cannot extend cleanup already in progress. While the evidence collection lock is held, the controller attempts BMC task cancellation and polls for completion; without a task ID it waits for this timeout. BMC confirmation releases the lock early. At or after the timeout, the next controller iteration releases the lock without BMC confirmation and finishes as `Waived` for waivers or `Failed` for operator failure and automatic recovery. This grace period spans iterations and is independent of the per-iteration `max_object_handling_time` budget. Zero, negative, malformed, and greater-than-five-minute values fail configuration loading. Omission uses `2m`, including when the section is absent. |
 
-Automatic cleanup requests BMC cancellation when an unexpected nonterminal task
-response arrives after a fixed two-minute grace measured from entry into
-`PollEvidenceCollection`. If cancellation is still pending, unsupported, or returns
-an error, the controller enters `WaitForTaskCancellation`, which only polls. This
-polling grace is separate from `cancellation_timeout` and does not bound `New`,
-`Starting`, or `Running` responses. An HTTP 404 or 410 while polling also enters
-`WaitForTaskCancellation`, preserving the task ID, retry count, and evidence
-collection claim. A task that stops before the cleanup deadline
-permits another collection attempt while the existing collection retry budget
-remains. Operator waiver and failure requests take precedence over automatic retrying or failing, but still
-waits for termination or the cleanup deadline.
+Automatic cleanup requests BMC cancellation when a task is still nonterminal
+after a fixed two-minute grace measured from entry into `PollEvidenceCollection`.
+This includes `New`, `Starting`, `Running`, and unexpected nonterminal states.
+The polling grace is separate from `cancellation_timeout`. If cancellation is
+pending, unsupported, or returns an error, the controller enters
+`WaitForTaskCancellation`, which only polls. An HTTP 404 or 410 while polling also
+enters `WaitForTaskCancellation`, preserving the task ID, retry count, and evidence
+collection claim. A task that stops before the cleanup deadline permits another
+collection attempt while the existing collection retry budget remains. Operator
+waiver and failure requests take precedence over automatic retries or failures,
+but still wait for termination or the cleanup deadline.
+
+The two-minute polling check requires a successful task response. Client creation
+errors, task lookup errors other than HTTP 404 or 410, and evidence fetch errors
+retry the existing state without entering automatic cleanup. An operator waiver
+or failure request starts bounded cleanup for such a stuck job.
 
 ### `SwitchStateControllerConfig`
 

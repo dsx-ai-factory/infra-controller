@@ -30,6 +30,8 @@ pub(super) async fn waive(args: Args, api_client: &ApiClient) -> CarbideCliResul
         })
         .await
         .context("waive the SPDM attestation job")?;
-    println!("Waiver requested; device attestations will become Cancelled after BMC cleanup");
+    println!(
+        "Waiver requested; terminal results count as Waived and unfinished work will resolve after BMC cleanup"
+    );
     Ok(())
 }

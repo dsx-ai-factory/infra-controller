@@ -4,8 +4,8 @@
 
 ## NAME
 
-nico-admin-cli-attestation-spdm-job-fail - Fail unfinished device
-attestations after BMC cleanup
+nico-admin-cli-attestation-spdm-job-fail - Request failure for an
+attestation job
 
 ## SYNOPSIS
 
@@ -16,7 +16,14 @@ nico-admin-cli attestation spdm job fail [--sort-by]
 
 ## DESCRIPTION
 
-Fail unfinished device attestations after BMC cleanup
+Fail an attestation job, including completed results. Unfinished devices
+finish BMC evidence collection cleanup before failure takes effect.
+Terminal results immediately count as Failed. Later waive or fail
+requests replace the previous target and refresh the request time.
+Changing the request does not restart ongoing cleanup. Stored
+attestation results and completion times stay available as history. This
+request does not undo a machine lifecycle transition that has already
+completed.
 
 ## OPTIONS
 

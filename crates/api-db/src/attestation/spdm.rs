@@ -19,8 +19,8 @@ use carbide_uuid::machine::MachineId;
 use config_version::ConfigVersion;
 use itertools::Itertools;
 use model::attestation::spdm::{
-    CaCertificate, Evidence, SpdmAttestationState, SpdmAttestationStatus, SpdmDeviceAttestation,
-    SpdmDeviceAttestationDetails, SpdmMachineDeviceMetadata, SpdmObjectId,
+    CaCertificate, Evidence, SpdmAttestationState, SpdmAttestationStatus, SpdmCancellationTarget,
+    SpdmDeviceAttestation, SpdmDeviceAttestationDetails, SpdmMachineDeviceMetadata, SpdmObjectId,
 };
 use model::controller_outcome::PersistentStateHandlerOutcome;
 use sqlx::{PgConnection, Row};
@@ -29,6 +29,19 @@ use crate::{ConditionalWrite, ControllerStateNotCurrent, DatabaseError, Database
 
 #[cfg(test)]
 mod test_explicit_columns;
+
+// All public status views use the same override policy. An active claim or unfinished
+// state remains in progress until cleanup completes; terminal evidence stays intact.
+const DEVICE_STATUS_SQL: &str = r#"CASE
+    WHEN a.evidence_collection_locked OR
+        (a.state NOT IN ('"Passed"'::jsonb, '"Cancelled"'::jsonb, '"Waived"'::jsonb) AND NOT (a.state ? 'Failed'))
+        THEN 'in_progress'
+    WHEN a.cancelled_at IS NOT NULL THEN
+        CASE COALESCE(a.cancellation_target, 'waive') WHEN 'fail' THEN 'failed' ELSE 'waived' END
+    WHEN a.state ? 'Failed' THEN 'failed'
+    WHEN a.state = '"Passed"'::jsonb THEN 'passed'
+    ELSE 'waived'
+END"#;
 
 /// Inserts a job's device attestations with one shared trigger origin.
 /// `triggered_by_mh_controller` is true only for managed-host controller triggers;
@@ -81,106 +94,80 @@ pub async fn insert_device_attestations(
     Ok(res.rows_affected())
 }
 
-/// Requests cancellation while preserving the deadline of any earlier request.
-/// Returns `NotFoundError` if the job has no device rows.
-pub async fn cancel_attestation_job(
+/// Records the latest operator cancellation request for every device in a job.
+/// Either target may replace the other, including after completion. Stored results,
+/// completion timestamps and versions are preserved; status reads apply terminal overrides.
+/// Returns `NotFoundError` when the job has no retained devices.
+pub async fn request_attestation_cancellation(
     txn: &mut PgConnection,
     job_id: &uuid::Uuid,
+    target: SpdmCancellationTarget,
 ) -> DatabaseResult<()> {
-    let current_time = chrono::Utc::now();
-    let query = r#"UPDATE spdm_machine_devices_attestation
-        SET cancelled_at = COALESCE(cancelled_at, $2)
-        WHERE job_id = $1
-        "#;
+    // Lock in the same order as lifecycle decisions, then replace intent atomically.
+    // Keep cancelled_at for an existing main-branch writer during rollout.
+    let query = "WITH devices AS (
+            SELECT machine_id, device_id, job_id FROM spdm_machine_devices_attestation
+            WHERE job_id = $1 ORDER BY machine_id, device_id, job_id FOR UPDATE
+        )
+        UPDATE spdm_machine_devices_attestation a
+        SET cancelled_at = $2, cancellation_target = $3,
+            cancellation_cleanup_started_at = COALESCE(cancellation_cleanup_started_at,
+                CASE WHEN completed_at IS NULL THEN COALESCE(cancelled_at, $2) END)
+        FROM devices
+        WHERE a.machine_id = devices.machine_id AND a.device_id = devices.device_id
+            AND a.job_id = devices.job_id";
     let result = sqlx::query(query)
         .bind(job_id)
-        .bind(current_time)
+        .bind(chrono::Utc::now())
+        .bind(target)
         .execute(txn)
         .await
-        .map_err(|e| DatabaseError::query(query, e))?;
-
-    // A job exists only through its device rows.
+        .map_err(|error| DatabaseError::query(query, error))?;
     if result.rows_affected() == 0 {
         return Err(DatabaseError::NotFoundError {
             kind: "SPDM Attestation Job",
             id: job_id.to_string(),
         });
     }
-
     Ok(())
 }
 
-/// Requests cleanup and failure of unfinished devices without changing terminal results.
-/// Repeated requests preserve the deadline; jobs without device rows return `NotFoundError`.
-pub async fn stop_attestation_job(
-    txn: &mut sqlx::PgTransaction<'_>,
-    job_id: &uuid::Uuid,
+/// Locks selected device records until the caller commits its lifecycle decision.
+/// This serialises recovery or polling with cancellation changes on retained results.
+pub async fn lock_machine_attestations(
+    txn: &mut PgConnection,
+    machine_id: &MachineId,
+    device_ids: &[String],
 ) -> DatabaseResult<()> {
-    #[derive(sqlx::FromRow)]
-    struct Device {
-        machine_id: MachineId,
-        device_id: String,
-        state: sqlx::types::Json<SpdmAttestationState>,
-        state_version: ConfigVersion,
-        fail_requested_at: Option<chrono::DateTime<chrono::Utc>>,
-        completed_at: Option<chrono::DateTime<chrono::Utc>>,
-    }
-    // Lock the rows before advancing their versions so concurrent worker writes
-    // either finish first or roll back against the new version.
-    let query =
-        "SELECT machine_id, device_id, state, state_version, fail_requested_at, completed_at
-        FROM spdm_machine_devices_attestation WHERE job_id = $1
-        ORDER BY machine_id, device_id FOR UPDATE";
-    let rows = sqlx::query_as::<_, Device>(query)
-        .bind(job_id)
-        .fetch_all(&mut **txn)
+    // Acquire locks in device/job order before evaluating the latest effective results.
+    let query = "SELECT device_id FROM spdm_machine_devices_attestation
+        WHERE machine_id = $1 AND device_id = ANY($2)
+        ORDER BY device_id, job_id FOR UPDATE";
+    sqlx::query(query)
+        .bind(machine_id)
+        .bind(device_ids)
+        .fetch_all(txn)
         .await
         .map_err(|error| DatabaseError::query(query, error))?;
-    if rows.is_empty() {
-        return Err(DatabaseError::NotFoundError {
-            kind: "SPDM Attestation Job",
-            id: job_id.to_string(),
-        });
-    }
-
-    let requested_at = chrono::Utc::now();
-    for row in rows {
-        if row.fail_requested_at.is_some()
-            || row.completed_at.is_some()
-            || matches!(
-                row.state.0,
-                SpdmAttestationState::Passed
-                    | SpdmAttestationState::Failed(_)
-                    | SpdmAttestationState::Cancelled
-            )
-        {
-            continue;
-        }
-
-        // Keep the evidence lock until cleanup finishes. Invalidating the snapshot
-        // also prevents an in-flight iteration from accepting evidence after stop.
-        // Preserve automatic cleanup's start before advancing its state version.
-        let cleanup_started_at = matches!(
-            row.state.0,
-            SpdmAttestationState::WaitForTaskCancellation { .. }
-        )
-        .then_some(row.state_version.timestamp());
-        let query = "UPDATE spdm_machine_devices_attestation
-            SET fail_requested_at = $1, state_version = $2,
-                cancelled_at = LEAST(cancelled_at, $6)
-            WHERE machine_id = $3 AND device_id = $4 AND job_id = $5";
-        sqlx::query(query)
-            .bind(requested_at)
-            .bind(row.state_version.increment())
-            .bind(row.machine_id)
-            .bind(row.device_id)
-            .bind(job_id)
-            .bind(cleanup_started_at)
-            .execute(&mut **txn)
-            .await
-            .map_err(|error| DatabaseError::query(query, error))?;
-    }
     Ok(())
+}
+
+/// Reads the latest request under the lock used to finalise a device's cleanup.
+pub async fn lock_cancellation_target(
+    txn: &mut PgConnection,
+    object_id: &SpdmObjectId,
+) -> DatabaseResult<SpdmCancellationTarget> {
+    // A concurrent request either commits before this read or follows finalisation.
+    let query = "SELECT COALESCE(cancellation_target, 'waive')
+        FROM spdm_machine_devices_attestation
+        WHERE machine_id = $1 AND device_id = $2 AND job_id = $3 FOR UPDATE";
+    sqlx::query_scalar(query)
+        .bind(object_id.0)
+        .bind(&object_id.1)
+        .bind(object_id.2)
+        .fetch_one(txn)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))
 }
 
 /// Claims the shared evidence endpoint for an unclaimed, current attestation.
@@ -199,7 +186,7 @@ pub async fn try_acquire_evidence_collection_lock(
         SET evidence_collection_locked = TRUE
         WHERE machine_id = $1 AND device_id = $2 AND job_id = $3
             AND state_version = $4 AND NOT evidence_collection_locked
-            AND cancelled_at IS NULL AND fail_requested_at IS NULL AND completed_at IS NULL
+            AND cancelled_at IS NULL AND completed_at IS NULL
     "#;
     let mut savepoint = crate::Transaction::begin_inner(txn).await?;
     let result = sqlx::query(query)
@@ -254,15 +241,18 @@ pub async fn release_evidence_collection_lock(
     Ok(())
 }
 
+/// Records the first completion time, preserving it across repeated or concurrent calls.
+/// A missing attestation is a no-op.
 pub async fn set_completed_at(
     txn: &mut PgConnection,
     machine_id: &MachineId,
     device_id: &str,
     job_id: &uuid::Uuid,
 ) -> DatabaseResult<()> {
+    // Repeated or late terminal iterations must preserve the original completion time.
     let current_time = chrono::Utc::now();
     let query = r#"UPDATE spdm_machine_devices_attestation
-        SET completed_at = $4
+        SET completed_at = COALESCE(completed_at, $4)
         WHERE machine_id = $1 and device_id = $2 and job_id = $3
         "#;
     sqlx::query(query)
@@ -368,125 +358,51 @@ pub async fn find_machine_ids_for_attestation(
 }
 
 /// Lists jobs matching the aggregate device status selected by `selector`.
-/// Unfinished devices take precedence, followed by failure, cancellation, and all-passed.
+/// Unfinished devices take precedence, followed by failure, waiver, and all-passed.
 /// Each summary includes distinct machine IDs from retained device attestations, sorted by ID.
+// Waived retains the legacy "Cancelled" JSON encoding for existing API readers.
 pub async fn list_all_attestation_statuses(
     txn: &mut PgConnection,
     selector: SpdmAttestationStatus,
 ) -> Result<Vec<(uuid::Uuid, SpdmAttestationStatus, Vec<MachineId>)>, DatabaseError> {
     // Aggregate membership over the same complete job as its status, before filtering jobs.
-    let query = match selector {
-        SpdmAttestationStatus::InProgress => {
-            r#"
-        WITH machine_attestation_statuses AS (
-            SELECT
-                job_id,
-                array_agg(DISTINCT machine_id ORDER BY machine_id) AS machine_ids,
-                CASE
-                    WHEN bool_or(state NOT IN ('"Passed"'::jsonb, '"Cancelled"'::jsonb) AND NOT (state ? 'Failed'))
-                        THEN 'in_progress'
-                    WHEN bool_or(state ? 'Failed')
-                        THEN 'failed'
-                    WHEN bool_or(state = '"Cancelled"'::jsonb)
-                        THEN 'cancelled'
-                    WHEN bool_and(state = '"Passed"'::jsonb)
-                        THEN 'passed'
-                END AS attestation_status
-            FROM spdm_machine_devices_attestation
-            GROUP BY job_id
-        )
-        SELECT
-            job_id,
-            attestation_status,
-            machine_ids
-        FROM machine_attestation_statuses
-        WHERE attestation_status = 'in_progress';
-            "#
-        }
-        SpdmAttestationStatus::Failed => {
-            r#"
-        WITH machine_attestation_statuses AS (
-            SELECT
-                job_id,
-                array_agg(DISTINCT machine_id ORDER BY machine_id) AS machine_ids,
-                CASE
-                    WHEN bool_or(state NOT IN ('"Passed"'::jsonb, '"Cancelled"'::jsonb) AND NOT (state ? 'Failed'))
-                        THEN 'in_progress'
-                    WHEN bool_or(state ? 'Failed')
-                        THEN 'failed'
-                    WHEN bool_or(state = '"Cancelled"'::jsonb)
-                        THEN 'cancelled'
-                    WHEN bool_and(state = '"Passed"'::jsonb)
-                        THEN 'passed'
-                END AS attestation_status
-            FROM spdm_machine_devices_attestation
-            GROUP BY job_id
-        )
-        SELECT
-            job_id,
-            attestation_status,
-            machine_ids
-        FROM machine_attestation_statuses
-        WHERE attestation_status = 'failed';
-        "#
-        }
-        SpdmAttestationStatus::Cancelled => {
-            r#"
-        WITH machine_attestation_statuses AS (
-            SELECT
-                job_id,
-                array_agg(DISTINCT machine_id ORDER BY machine_id) AS machine_ids,
-                CASE
-                    WHEN bool_or(state NOT IN ('"Passed"'::jsonb, '"Cancelled"'::jsonb) AND NOT (state ? 'Failed'))
-                        THEN 'in_progress'
-                    WHEN bool_or(state ? 'Failed')
-                        THEN 'failed'
-                    WHEN bool_or(state = '"Cancelled"'::jsonb)
-                        THEN 'cancelled'
-                    WHEN bool_and(state = '"Passed"'::jsonb)
-                        THEN 'passed'
-                END AS attestation_status
-            FROM spdm_machine_devices_attestation
-            GROUP BY job_id
-        )
-        SELECT
-            job_id,
-            attestation_status,
-            machine_ids
-        FROM machine_attestation_statuses
-        WHERE attestation_status = 'cancelled';
-            "#
-        }
-        SpdmAttestationStatus::Passed => {
-            r#"
-        WITH machine_attestation_statuses AS (
-            SELECT
-                job_id,
-                array_agg(DISTINCT machine_id ORDER BY machine_id) AS machine_ids,
-                CASE
-                    WHEN bool_or(state NOT IN ('"Passed"'::jsonb, '"Cancelled"'::jsonb) AND NOT (state ? 'Failed'))
-                        THEN 'in_progress'
-                    WHEN bool_or(state ? 'Failed')
-                        THEN 'failed'
-                    WHEN bool_or(state = '"Cancelled"'::jsonb)
-                        THEN 'cancelled'
-                    WHEN bool_and(state = '"Passed"'::jsonb)
-                        THEN 'passed'
-                END AS attestation_status
-            FROM spdm_machine_devices_attestation
-            GROUP BY job_id
-        )
-        SELECT
-            job_id,
-            attestation_status,
-            machine_ids
-        FROM machine_attestation_statuses
-        WHERE attestation_status = 'passed';
-            "#
-        }
+    let status = match selector {
+        SpdmAttestationStatus::InProgress => "in_progress",
+        SpdmAttestationStatus::Failed => "failed",
+        SpdmAttestationStatus::Waived => "waived",
+        SpdmAttestationStatus::Passed => "passed",
     };
+    let query = const_format::formatcp!(
+        r#"
+        WITH device_statuses AS (
+            SELECT a.job_id, a.machine_id, {0} AS device_status
+            FROM spdm_machine_devices_attestation a
+        ), machine_attestation_statuses AS (
+            SELECT
+                job_id,
+                array_agg(DISTINCT machine_id ORDER BY machine_id) AS machine_ids,
+                CASE
+                    WHEN bool_or(device_status = 'in_progress')
+                        THEN 'in_progress'
+                    WHEN bool_or(device_status = 'failed')
+                        THEN 'failed'
+                    WHEN bool_or(device_status = 'waived')
+                        THEN 'waived'
+                    WHEN bool_and(device_status = 'passed')
+                        THEN 'passed'
+                END AS attestation_status
+            FROM device_statuses
+            GROUP BY job_id
+        )
+        SELECT job_id, attestation_status, machine_ids
+        FROM machine_attestation_statuses
+        WHERE attestation_status = $1
+    "#,
+        DEVICE_STATUS_SQL
+    );
 
     let attestation_status_rows = sqlx::query(query)
+        .bind(status)
         .fetch_all(txn)
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
@@ -545,13 +461,14 @@ pub async fn find_machine_attestation_statuses(
     let status = status.map(|status| match status {
         SpdmAttestationStatus::InProgress => "in_progress",
         SpdmAttestationStatus::Failed => "failed",
-        SpdmAttestationStatus::Cancelled => "cancelled",
+        SpdmAttestationStatus::Waived => "waived",
         SpdmAttestationStatus::Passed => "passed",
     });
     // Resolve the complete source job before aggregating, so obsolete devices
     // from earlier jobs cannot keep a machine failed. Aggregate within each machine
     // lookup so an ordered scan can stop once the page and lookahead are filled.
-    let query = r#"
+    let query = const_format::formatcp!(
+        r#"
         SELECT m.id AS machine_id, prediction.attestation_status
         FROM machines m
         LEFT JOIN LATERAL (
@@ -563,20 +480,25 @@ pub async fn find_machine_attestation_statuses(
         ) latest ON true
         LEFT JOIN LATERAL (
             SELECT CASE
-                WHEN bool_or(a.state NOT IN ('"Passed"'::jsonb, '"Cancelled"'::jsonb) AND NOT (a.state ? 'Failed'))
+                WHEN bool_or(device_status = 'in_progress')
                     THEN 'in_progress'
-                WHEN bool_or(a.state ? 'Failed') THEN 'failed'
-                WHEN bool_or(a.state = '"Cancelled"'::jsonb) THEN 'cancelled'
-                WHEN bool_and(a.state = '"Passed"'::jsonb) THEN 'passed'
+                WHEN bool_or(device_status = 'failed') THEN 'failed'
+                WHEN bool_or(device_status = 'waived') THEN 'waived'
+                WHEN bool_and(device_status = 'passed') THEN 'passed'
             END AS attestation_status
-            FROM spdm_machine_devices_attestation a
-            WHERE a.machine_id = m.id AND a.job_id = latest.job_id
+            FROM (
+                SELECT {0} AS device_status
+                FROM spdm_machine_devices_attestation a
+                WHERE a.machine_id = m.id AND a.job_id = latest.job_id
+            ) device_statuses
         ) prediction ON true
         WHERE ($1::varchar IS NULL OR m.id > $1)
             AND ($2::text IS NULL OR prediction.attestation_status = $2)
         ORDER BY m.id
         LIMIT $3
-    "#;
+    "#,
+        DEVICE_STATUS_SQL
+    );
     let rows: Vec<(MachineId, Option<String>)> = sqlx::query_as(query)
         .bind(after_machine_id)
         .bind(status)
@@ -598,7 +520,7 @@ pub async fn find_machine_attestation_statuses(
 }
 
 /// Aggregates the latest attestation for each device on a machine.
-/// Unfinished devices take precedence, followed by failure, cancellation, and all-passed.
+/// Unfinished devices take precedence, followed by failure, waiver, and all-passed.
 /// `device_ids` limits the aggregate to the selected devices; `None` includes all stored devices.
 /// Any selected device without a stored result makes the status `InProgress`.
 /// Repeated device IDs are treated as one selection. Returns not found for an empty
@@ -609,13 +531,14 @@ pub async fn list_single_machine_attestation_status(
     device_ids: Option<&[String]>,
 ) -> Result<SpdmAttestationStatus, DatabaseError> {
     // Check missing requested devices before terminal outcomes, just like unfinished work.
-    let query = r#"
+    let query = const_format::formatcp!(
+        r#"
         WITH latest_device_attestations AS (
             SELECT DISTINCT ON (machine_id, device_id)
                 machine_id,
                 device_id,
-                state
-            FROM spdm_machine_devices_attestation
+                {0} AS device_status
+            FROM spdm_machine_devices_attestation a
             WHERE machine_id = $1
                 AND ($2::text[] IS NULL OR device_id = ANY($2))
             ORDER BY machine_id, device_id, started_at DESC, job_id DESC
@@ -629,18 +552,20 @@ pub async fn list_single_machine_attestation_status(
                         WHERE latest.device_id = selected.device_id
                     )
                 ) THEN 'in_progress'
-                WHEN bool_or(state NOT IN ('"Passed"'::jsonb, '"Cancelled"'::jsonb) AND NOT (state ? 'Failed'))
+                WHEN bool_or(device_status = 'in_progress')
                     THEN 'in_progress'
-                WHEN bool_or(state ? 'Failed')
+                WHEN bool_or(device_status = 'failed')
                     THEN 'failed'
-                WHEN bool_or(state = '"Cancelled"'::jsonb)
-                    THEN 'cancelled'
-                WHEN bool_and(state = '"Passed"'::jsonb)
+                WHEN bool_or(device_status = 'waived')
+                    THEN 'waived'
+                WHEN bool_and(device_status = 'passed')
                     THEN 'passed'
             END AS attestation_status
         FROM latest_device_attestations
         HAVING count(*) > 0 OR cardinality($2::text[]) > 0
-    "#;
+    "#,
+        DEVICE_STATUS_SQL
+    );
 
     let status = sqlx::query_scalar::<_, String>(query)
         .bind(machine_id)
@@ -660,27 +585,32 @@ pub async fn list_single_machine_attestation_status(
 }
 
 /// Aggregates the device states for a job, returning not found if it has no devices.
-/// Unfinished devices take precedence, followed by failure, cancellation, and all-passed.
+/// Unfinished devices take precedence, followed by failure, waiver, and all-passed.
 pub async fn get_attestation_job_status(
     txn: &mut PgConnection,
     job_id: &uuid::Uuid,
 ) -> Result<SpdmAttestationStatus, DatabaseError> {
-    let query = r#"
+    let query = const_format::formatcp!(
+        r#"
         SELECT
             CASE
-                WHEN bool_or(state NOT IN ('"Passed"'::jsonb, '"Cancelled"'::jsonb) AND NOT (state ? 'Failed'))
+                WHEN bool_or(device_status = 'in_progress')
                     THEN 'in_progress'
-                WHEN bool_or(state ? 'Failed')
+                WHEN bool_or(device_status = 'failed')
                     THEN 'failed'
-                WHEN bool_or(state = '"Cancelled"'::jsonb)
-                    THEN 'cancelled'
-                WHEN bool_and(state = '"Passed"'::jsonb)
+                WHEN bool_or(device_status = 'waived')
+                    THEN 'waived'
+                WHEN bool_and(device_status = 'passed')
                     THEN 'passed'
             END AS attestation_status
-        FROM spdm_machine_devices_attestation
-        WHERE job_id = $1
+        FROM (
+            SELECT {0} AS device_status
+            FROM spdm_machine_devices_attestation a WHERE job_id = $1
+        ) device_statuses
         HAVING count(*) > 0
-    "#;
+    "#,
+        DEVICE_STATUS_SQL
+    );
 
     let status = sqlx::query_scalar::<_, String>(query)
         .bind(job_id)
@@ -704,7 +634,7 @@ fn convert_status_str_to_model_status(
     match status {
         "in_progress" => Ok(SpdmAttestationStatus::InProgress),
         "failed" => Ok(SpdmAttestationStatus::Failed),
-        "cancelled" => Ok(SpdmAttestationStatus::Cancelled),
+        "waived" => Ok(SpdmAttestationStatus::Waived),
         "passed" => Ok(SpdmAttestationStatus::Passed),
         other => Err(DatabaseError::Internal {
             message: format!("Unexpected SPDM attestation status from DB: {other}"),
@@ -724,7 +654,9 @@ pub async fn get_latest_attestations_for_machine_id(
     // Match the status aggregate so historical failures cannot appear as current failures.
     let query = r#"
         SELECT DISTINCT ON (machine_id, device_id)
-            machine_id, device_id, ca_certificate, state, metadata, evidence, started_at, cancelled_at, completed_at
+            machine_id, device_id, ca_certificate, state, metadata, evidence, started_at,
+            cancelled_at AS cancellation_requested_at,
+            CASE WHEN cancelled_at IS NOT NULL THEN COALESCE(cancellation_target, 'waive') END AS cancellation_target, completed_at
         FROM spdm_machine_devices_attestation
         WHERE machine_id = $1 AND device_id = ANY($2)
         ORDER BY machine_id, device_id, started_at DESC, job_id DESC
@@ -744,7 +676,9 @@ pub async fn get_attestations_for_job_id(
     job_id: &uuid::Uuid,
 ) -> Result<Vec<SpdmDeviceAttestationDetails>, DatabaseError> {
     let query = r#"
-        SELECT machine_id, device_id, ca_certificate, state, metadata, evidence, started_at, cancelled_at, completed_at
+        SELECT machine_id, device_id, ca_certificate, state, metadata, evidence, started_at,
+            cancelled_at AS cancellation_requested_at,
+            CASE WHEN cancelled_at IS NOT NULL THEN COALESCE(cancellation_target, 'waive') END AS cancellation_target, completed_at
         FROM spdm_machine_devices_attestation
         WHERE job_id = $1
     "#;
@@ -785,8 +719,10 @@ pub async fn load_snapshot_for_machine_and_device_id(
             mda.machine_id, mda.device_id, mda.nonce, mda.state,
             mda.metadata, mda.ca_certificate_link, mda.ca_certificate,
             mda.evidence_target, mda.evidence, mda.state_version,
-            mda.state_outcome, mda.completed_at, mda.started_at, mda.cancelled_at,
-            mda.job_id, mda.evidence_collection_locked, mda.fail_requested_at,
+            mda.state_outcome, mda.completed_at, mda.started_at,
+            mda.cancelled_at AS cancellation_requested_at,
+            mda.job_id, mda.evidence_collection_locked, mda.cancellation_cleanup_started_at,
+            CASE WHEN mda.cancelled_at IS NOT NULL THEN COALESCE(mda.cancellation_target, 'waive') END AS cancellation_target,
             CASE WHEN mi.id IS NULL THEN
                 COALESCE(mt.topology->'bmc_info', '{}'::jsonb) - 'ip' - 'mac'
             ELSE
@@ -826,24 +762,6 @@ pub async fn load_snapshot_for_machine_and_device_id(
         .bind(device_id)
         .bind(job_id)
         .fetch_one(txn)
-        .await
-        .map_err(|e| DatabaseError::query(query, e))?;
-
-    Ok(res)
-}
-
-pub async fn list_machine_ids(txn: &mut PgConnection) -> Result<Vec<MachineId>, DatabaseError> {
-    let query = r#"
-        SELECT DISTINCT
-            machine_id
-        FROM 
-            spdm_machine_devices_attestation
-        WHERE
-            completed_at is NULL
-    "#;
-
-    let res: Vec<MachineId> = sqlx::query_as(query)
-        .fetch_all(txn)
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
 
@@ -943,24 +861,16 @@ mod tests {
     use super::*;
 
     #[crate::sqlx_test]
-    async fn operator_requests_require_device_rows_and_stop_preserves_results(
+    async fn operator_requests_replace_intent_including_after_completion(
         pool: sqlx::PgPool,
     ) -> eyre::Result<()> {
         let mut txn = pool.begin().await?;
         let job_id = uuid::Uuid::new_v4();
-
-        // A missing job must identify the resource that could not be cancelled.
         assert!(matches!(
-            cancel_attestation_job(&mut txn, &job_id).await,
-            Err(DatabaseError::NotFoundError { kind: "SPDM Attestation Job", id })
-                if id == job_id.to_string()
+            request_attestation_cancellation(&mut txn, &job_id, SpdmCancellationTarget::Waive)
+                .await,
+            Err(DatabaseError::NotFoundError { .. })
         ));
-        assert!(matches!(
-            stop_attestation_job(&mut txn, &job_id).await,
-            Err(DatabaseError::NotFoundError { kind: "SPDM Attestation Job", id })
-                if id == job_id.to_string()
-        ));
-
         let machine_id = MachineId::new(
             MachineIdSource::ProductBoardChassisSerial,
             [0x73; 32],
@@ -970,149 +880,192 @@ mod tests {
             .bind(machine_id)
             .execute(&mut *txn)
             .await?;
-        // Multiple device rows still represent one successfully cancelled job.
-        sqlx::query(
-            "INSERT INTO spdm_machine_devices_attestation
-             (machine_id, device_id, nonce, state, job_id, started_at)
-             SELECT $1, device_id, gen_random_uuid(), $2, $3, now()
-             FROM unnest(ARRAY['GPU_0', 'GPU_1']) AS devices(device_id)",
-        )
-        .bind(machine_id)
-        .bind(sqlx::types::Json(SpdmAttestationState::FetchMetadata))
-        .bind(job_id)
-        .execute(&mut *txn)
-        .await?;
-
-        cancel_attestation_job(&mut txn, &job_id).await?;
-        let cancelled_devices: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM spdm_machine_devices_attestation
-             WHERE job_id = $1 AND cancelled_at IS NOT NULL",
-        )
-        .bind(job_id)
-        .fetch_one(&mut *txn)
-        .await?;
-        assert_eq!(cancelled_devices, 2);
-        // Start a fresh stop request after verifying the existing cancellation API.
-        sqlx::query(
-            "UPDATE spdm_machine_devices_attestation SET cancelled_at = NULL WHERE job_id = $1",
-        )
-        .bind(job_id)
-        .execute(&mut *txn)
-        .await?;
-
-        // Terminal results and another job on the same device must survive stop.
-        let other_job = uuid::Uuid::new_v4();
-        for (device_id, state, target_job) in [
-            ("GPU_2", SpdmAttestationState::Passed, job_id),
+        // One unfinished claim and both terminal results exercise metadata-only updates.
+        for (device_id, state, completed, locked) in [
+            ("GPU_0", SpdmAttestationState::FetchMetadata, false, true),
+            ("GPU_1", SpdmAttestationState::Passed, true, false),
             (
-                "GPU_3",
+                "GPU_2",
                 SpdmAttestationState::Failed("verification failed".into()),
-                job_id,
+                true,
+                false,
             ),
-            ("GPU_4", SpdmAttestationState::Cancelled, job_id),
-            ("GPU_0", SpdmAttestationState::FetchMetadata, other_job),
         ] {
-            sqlx::query(
-                "INSERT INTO spdm_machine_devices_attestation
-                (machine_id, device_id, nonce, state, job_id, started_at)
-                VALUES ($1, $2, gen_random_uuid(), $3, $4, now())",
-            )
-            .bind(machine_id)
-            .bind(device_id)
-            .bind(sqlx::types::Json(state))
-            .bind(target_job)
-            .execute(&mut *txn)
-            .await?;
+            sqlx::query("INSERT INTO spdm_machine_devices_attestation
+                (machine_id, device_id, nonce, state, job_id, started_at, completed_at, evidence_collection_locked)
+                VALUES ($1, $2, gen_random_uuid(), $3, $4, now(), CASE WHEN $5 THEN now() END, $6)")
+                .bind(machine_id).bind(device_id).bind(sqlx::types::Json(state)).bind(job_id)
+                .bind(completed).bind(locked).execute(&mut *txn).await?;
         }
-        let object_id = SpdmObjectId(machine_id, "GPU_0".to_string(), job_id);
-        let old_version: ConfigVersion = sqlx::query_scalar("SELECT state_version FROM spdm_machine_devices_attestation WHERE job_id = $1 AND device_id = 'GPU_0'")
-            .bind(job_id).fetch_one(&mut *txn).await?;
-        assert!(try_acquire_evidence_collection_lock(&mut txn, &object_id, old_version).await?);
-
-        stop_attestation_job(&mut txn, &job_id).await?;
-        let stopped_rows = sqlx::query("SELECT device_id, state, state_version, fail_requested_at, completed_at, evidence_collection_locked
-            FROM spdm_machine_devices_attestation WHERE job_id = $1 ORDER BY device_id")
-            .bind(job_id).fetch_all(&mut *txn).await?;
-        for row in &stopped_rows {
-            let device_id: String = row.try_get("device_id")?;
-            let state: sqlx::types::Json<SpdmAttestationState> = row.try_get("state")?;
-            let requested_at: Option<chrono::DateTime<chrono::Utc>> =
-                row.try_get("fail_requested_at")?;
-            let version: ConfigVersion = row.try_get("state_version")?;
-            if matches!(device_id.as_str(), "GPU_0" | "GPU_1") {
-                assert!(requested_at.is_some(), "{device_id}");
-                assert_eq!(state.0, SpdmAttestationState::FetchMetadata);
-                assert_eq!(version.version_nr(), old_version.version_nr() + 1);
-                assert!(
-                    row.try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("completed_at")?
-                        .is_none()
-                );
-            } else {
-                assert!(requested_at.is_none(), "{device_id}: {:?}", state.0);
-                let expected = match device_id.as_str() {
-                    "GPU_2" => SpdmAttestationState::Passed,
-                    "GPU_3" => SpdmAttestationState::Failed("verification failed".into()),
-                    "GPU_4" => SpdmAttestationState::Cancelled,
-                    _ => unreachable!("the fixture has five devices"),
-                };
-                assert_eq!(state.0, expected);
-                assert_eq!(version, old_version);
-            }
+        let unchanged_query = "SELECT jsonb_agg(to_jsonb(a) - 'cancelled_at' - 'cancellation_target' - 'cancellation_cleanup_started_at' ORDER BY device_id)
+            FROM spdm_machine_devices_attestation a WHERE job_id = $1";
+        let before: serde_json::Value = sqlx::query_scalar(unchanged_query)
+            .bind(job_id)
+            .fetch_one(&mut *txn)
+            .await?;
+        let mut first_cleanup = None;
+        // Both direction changes and a repeated target remain valid, including terminal rows.
+        for target in [
+            SpdmCancellationTarget::Waive,
+            SpdmCancellationTarget::Fail,
+            SpdmCancellationTarget::Waive,
+            SpdmCancellationTarget::Waive,
+        ] {
+            sqlx::query("UPDATE spdm_machine_devices_attestation SET cancelled_at = now() - INTERVAL '1 minute' WHERE job_id = $1")
+                .bind(job_id).execute(&mut *txn).await?;
+            request_attestation_cancellation(&mut txn, &job_id, target).await?;
+            let rows: Vec<(
+                chrono::DateTime<chrono::Utc>,
+                SpdmCancellationTarget,
+                Option<chrono::DateTime<chrono::Utc>>,
+            )> = sqlx::query_as(
+                "SELECT cancelled_at, cancellation_target, cancellation_cleanup_started_at
+                 FROM spdm_machine_devices_attestation WHERE job_id = $1 ORDER BY device_id",
+            )
+            .bind(job_id)
+            .fetch_all(&mut *txn)
+            .await?;
+            first_cleanup = first_cleanup.or(rows[0].2);
             assert_eq!(
-                row.try_get::<bool, _>("evidence_collection_locked")?,
-                device_id == "GPU_0"
+                rows[0].2, first_cleanup,
+                "target changes cannot postpone cleanup"
+            );
+            for (index, (requested_at, actual_target, cleanup)) in rows.iter().enumerate() {
+                assert!(*requested_at > chrono::Utc::now() - chrono::Duration::seconds(10));
+                assert_eq!(*actual_target, target);
+                assert_eq!(cleanup.is_some(), index == 0);
+            }
+            let after: serde_json::Value = sqlx::query_scalar(unchanged_query)
+                .bind(job_id)
+                .fetch_one(&mut *txn)
+                .await?;
+            assert_eq!(
+                before, after,
+                "requests preserve stored results, evidence, versions and completion times"
+            );
+            assert_eq!(
+                lock_cancellation_target(
+                    &mut txn,
+                    &SpdmObjectId(machine_id, "GPU_0".into(), job_id)
+                )
+                .await?,
+                target
             );
         }
-        // An iteration holding the old snapshot cannot publish a successful result.
-        assert!(matches!(
-            persist_controller_state(
-                &mut txn,
-                &object_id,
-                old_version,
-                old_version.increment(),
-                &SpdmAttestationState::Passed
-            )
-            .await?,
-            ConditionalWrite::NotApplied(ControllerStateNotCurrent)
-        ));
-        let new_version: ConfigVersion = stopped_rows[1].try_get("state_version")?;
+        assert_eq!(
+            get_attestation_job_status(&mut txn, &job_id).await?,
+            SpdmAttestationStatus::InProgress
+        );
         assert!(
             !try_acquire_evidence_collection_lock(
                 &mut txn,
-                &SpdmObjectId(machine_id, "GPU_1".into(), job_id),
-                new_version
+                &SpdmObjectId(machine_id, "GPU_0".into(), job_id),
+                ConfigVersion::initial()
             )
             .await?
         );
-
-        // Repeating stop must neither advance versions nor reset cleanup deadlines.
-        stop_attestation_job(&mut txn, &job_id).await?;
-        for row in &stopped_rows {
-            let device_id: String = row.try_get("device_id")?;
-            let actual: (sqlx::types::Json<SpdmAttestationState>, ConfigVersion, Option<chrono::DateTime<chrono::Utc>>) = sqlx::query_as(
-                "SELECT state, state_version, fail_requested_at FROM spdm_machine_devices_attestation
-                 WHERE job_id = $1 AND device_id = $2")
-                .bind(job_id).bind(device_id).fetch_one(&mut *txn).await?;
-            assert_eq!(
-                actual,
-                (
-                    row.try_get("state")?,
-                    row.try_get("state_version")?,
-                    row.try_get("fail_requested_at")?
-                )
-            );
-        }
-        let other_stop: Option<chrono::DateTime<chrono::Utc>> = sqlx::query_scalar(
-            "SELECT fail_requested_at FROM spdm_machine_devices_attestation WHERE job_id = $1",
-        )
-        .bind(other_job)
-        .fetch_one(&mut *txn)
-        .await?;
-        assert!(other_stop.is_none());
         Ok(())
     }
 
-    /// A requested device without evidence must not disappear from the machine's status.
+    #[crate::sqlx_test]
+    async fn cancellation_requests_wait_for_recovery_decisions(
+        pool: sqlx::PgPool,
+    ) -> eyre::Result<()> {
+        let machine_id = MachineId::new(
+            MachineIdSource::ProductBoardChassisSerial,
+            [0x74; 32],
+            MachineType::Host,
+        );
+        let job_id = uuid::Uuid::new_v4();
+        let mut txn = pool.begin().await?;
+        sqlx::query("INSERT INTO machines (id, dpf) VALUES ($1, '{}'::jsonb)")
+            .bind(machine_id)
+            .execute(&mut *txn)
+            .await?;
+        sqlx::query(
+            "INSERT INTO spdm_machine_devices_attestation
+            (machine_id, device_id, nonce, state, job_id, started_at, completed_at)
+            VALUES ($1, 'GPU_0', gen_random_uuid(), $2, $3, now(), now())",
+        )
+        .bind(machine_id)
+        .bind(sqlx::types::Json(SpdmAttestationState::Failed(
+            "verification failed".into(),
+        )))
+        .bind(job_id)
+        .execute(&mut *txn)
+        .await?;
+        request_attestation_cancellation(&mut txn, &job_id, SpdmCancellationTarget::Waive).await?;
+        txn.commit().await?;
+        let selected = vec!["GPU_0".to_string()];
+        let mut recovery = pool.begin().await?;
+        lock_machine_attestations(&mut recovery, &machine_id, &selected).await?;
+        assert_eq!(
+            list_single_machine_attestation_status(&mut recovery, &machine_id, Some(&selected))
+                .await?,
+            SpdmAttestationStatus::Waived
+        );
+        // A real PostgreSQL lock timeout proves an opposite request cannot overtake recovery.
+        let mut opposite = pool.begin().await?;
+        sqlx::query("SET LOCAL lock_timeout = '50ms'")
+            .execute(&mut *opposite)
+            .await?;
+        let error =
+            request_attestation_cancellation(&mut opposite, &job_id, SpdmCancellationTarget::Fail)
+                .await
+                .unwrap_err();
+        assert!(
+            matches!(error, DatabaseError::Sqlx(ref annotated) if annotated.source.as_database_error().and_then(|error| error.code()).as_deref() == Some("55P03"))
+        );
+        opposite.rollback().await?;
+        recovery.commit().await?;
+        let mut opposite = pool.begin().await?;
+        request_attestation_cancellation(&mut opposite, &job_id, SpdmCancellationTarget::Fail)
+            .await?;
+        assert_eq!(
+            get_attestation_job_status(&mut opposite, &job_id).await?,
+            SpdmAttestationStatus::Failed
+        );
+        Ok(())
+    }
+
+    #[crate::sqlx_test]
+    async fn cancellation_migration_preserves_legacy_waivers(
+        pool: sqlx::PgPool,
+    ) -> eyre::Result<()> {
+        let mut txn = pool.begin().await?;
+        // Recreate the populated predecessor under pg_temp, leaving migrated fixture tables alone.
+        sqlx::query(
+            "CREATE TEMP TABLE spdm_machine_devices_attestation (cancelled_at TIMESTAMPTZ)",
+        )
+        .execute(&mut *txn)
+        .await?;
+        sqlx::query(
+            "INSERT INTO spdm_machine_devices_attestation VALUES (NULL), ('2026-09-01T12:00:00Z')",
+        )
+        .execute(&mut *txn)
+        .await?;
+        sqlx::raw_sql(include_str!(
+            "../../migrations/20261103135543_spdm_fail_requested_at.sql"
+        ))
+        .execute(&mut *txn)
+        .await?;
+        let rows: Vec<(Option<String>, Option<chrono::DateTime<chrono::Utc>>)> = sqlx::query_as(
+            "SELECT cancellation_target, cancellation_cleanup_started_at FROM spdm_machine_devices_attestation ORDER BY cancelled_at NULLS FIRST")
+            .fetch_all(&mut *txn).await?;
+        assert_eq!(
+            rows,
+            vec![
+                (None, None),
+                (Some("waive".into()), Some("2026-09-01T12:00:00Z".parse()?))
+            ]
+        );
+        // A main-branch writer can still record a waiver without knowing the new columns.
+        sqlx::query("INSERT INTO spdm_machine_devices_attestation (cancelled_at) VALUES (now())")
+            .execute(&mut *txn)
+            .await?;
+        Ok(())
+    }
+
     #[crate::sqlx_test]
     async fn selected_devices_without_results_are_in_progress(
         pool: sqlx::PgPool,
@@ -1209,11 +1162,12 @@ mod tests {
     }
 
     #[crate::sqlx_test]
-    async fn mixed_cancelled_attestation_statuses(pool: sqlx::PgPool) {
+    async fn mixed_waived_attestation_statuses(pool: sqlx::PgPool) {
         struct Input {
             machine_seeds: &'static [u8],
             gpu_0_state: SpdmAttestationState,
             expected_status: SpdmAttestationStatus,
+            cancellation_target: Option<SpdmCancellationTarget>,
         }
 
         #[derive(Debug, PartialEq)]
@@ -1226,11 +1180,12 @@ mod tests {
 
         let cases = [
             Case {
-                scenario: "passed and cancelled devices make a cancelled job",
+                scenario: "passed and waived devices make a waived job",
                 input: Input {
+                    cancellation_target: None,
                     machine_seeds: &[1],
                     gpu_0_state: SpdmAttestationState::Passed,
-                    expected_status: SpdmAttestationStatus::Cancelled,
+                    expected_status: SpdmAttestationStatus::Waived,
                 },
                 expect: Yields(Observation {
                     job_status_matches: true,
@@ -1240,8 +1195,9 @@ mod tests {
                 }),
             },
             Case {
-                scenario: "failure takes precedence over cancellation",
+                scenario: "failure takes precedence over waiver",
                 input: Input {
+                    cancellation_target: None,
                     machine_seeds: &[2, 1],
                     gpu_0_state: SpdmAttestationState::Failed("verification failed".to_string()),
                     expected_status: SpdmAttestationStatus::Failed,
@@ -1254,11 +1210,57 @@ mod tests {
                 }),
             },
             Case {
-                scenario: "unfinished devices keep a cancelled job in progress",
+                scenario: "unfinished devices keep a waived job in progress",
                 input: Input {
+                    cancellation_target: None,
                     machine_seeds: &[3],
                     gpu_0_state: SpdmAttestationState::FetchMetadata,
                     expected_status: SpdmAttestationStatus::InProgress,
+                },
+                expect: Yields(Observation {
+                    job_status_matches: true,
+                    machine_status_matches: true,
+                    list_selectors_match: [true; 4],
+                    predicted_machine_selectors_match: [true; 4],
+                }),
+            },
+            Case {
+                scenario: "a completed failure can be waived without changing its evidence result",
+                input: Input {
+                    machine_seeds: &[4],
+                    gpu_0_state: SpdmAttestationState::Failed("verification failed".into()),
+                    expected_status: SpdmAttestationStatus::Waived,
+                    cancellation_target: Some(SpdmCancellationTarget::Waive),
+                },
+                expect: Yields(Observation {
+                    job_status_matches: true,
+                    machine_status_matches: true,
+                    list_selectors_match: [true; 4],
+                    predicted_machine_selectors_match: [true; 4],
+                }),
+            },
+            Case {
+                scenario: "a completed pass can be overridden as failed",
+                input: Input {
+                    machine_seeds: &[5],
+                    gpu_0_state: SpdmAttestationState::Passed,
+                    expected_status: SpdmAttestationStatus::Failed,
+                    cancellation_target: Some(SpdmCancellationTarget::Fail),
+                },
+                expect: Yields(Observation {
+                    job_status_matches: true,
+                    machine_status_matches: true,
+                    list_selectors_match: [true; 4],
+                    predicted_machine_selectors_match: [true; 4],
+                }),
+            },
+            Case {
+                scenario: "a waiver request cannot bypass unfinished collection",
+                input: Input {
+                    machine_seeds: &[6],
+                    gpu_0_state: SpdmAttestationState::FetchMetadata,
+                    expected_status: SpdmAttestationStatus::InProgress,
+                    cancellation_target: Some(SpdmCancellationTarget::Waive),
                 },
                 expect: Yields(Observation {
                     job_status_matches: true,
@@ -1299,7 +1301,7 @@ mod tests {
                     let devices = if index == 0 {
                         vec![
                             ("GPU_0", input.gpu_0_state.clone()),
-                            ("GPU_1", SpdmAttestationState::Cancelled),
+                            ("GPU_1", SpdmAttestationState::Waived),
                         ]
                     } else {
                         vec![("GPU_0", SpdmAttestationState::Passed)]
@@ -1313,12 +1315,22 @@ mod tests {
                         .bind(member_id)
                         .bind(device_id)
                         .bind(uuid::Uuid::new_v4())
-                        .bind(sqlx::types::Json(state))
+                        .bind(sqlx::types::Json(if state == SpdmAttestationState::Waived && input.expected_status == SpdmAttestationStatus::Waived {
+                            serde_json::json!("Waived")
+                        } else {
+                            serde_json::to_value(state).map_err(|error| error.to_string())?
+                        }))
                         .bind(job_id)
                         .execute(&mut *txn)
                         .await
                         .map_err(|e| e.to_string())?;
                     }
+                }
+                if let Some(target) = input.cancellation_target {
+                    // Override only the selected machine's first device; the shared job keeps its membership.
+                    sqlx::query("UPDATE spdm_machine_devices_attestation SET cancelled_at = now(), cancellation_target = $2
+                        WHERE job_id = $1 AND machine_id = $3 AND device_id = 'GPU_0'")
+                        .bind(job_id).bind(target).bind(machine_id).execute(&mut *txn).await.map_err(|e| e.to_string())?;
                 }
                 machine_ids.sort_by_key(ToString::to_string);
 
@@ -1334,7 +1346,7 @@ mod tests {
                 for (index, selector) in [
                     SpdmAttestationStatus::InProgress,
                     SpdmAttestationStatus::Failed,
-                    SpdmAttestationStatus::Cancelled,
+                    SpdmAttestationStatus::Waived,
                     SpdmAttestationStatus::Passed,
                 ]
                 .into_iter()

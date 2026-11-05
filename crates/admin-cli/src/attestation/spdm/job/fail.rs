@@ -24,6 +24,10 @@ use crate::cfg::runtime::RuntimeContext;
 use crate::errors::CarbideCliResult;
 
 #[derive(Parser, Debug)]
+#[command(about = "Request failure for an attestation job, including completed results")]
+#[command(
+    long_about = "Fail an attestation job, including completed results. Unfinished devices finish BMC evidence collection cleanup before failure takes effect. Terminal results immediately count as Failed. Later waive or fail requests replace the previous target and refresh the request time. Changing the request does not restart ongoing cleanup. Stored attestation results and completion times stay available as history. This request does not undo a machine lifecycle transition that has already completed."
+)]
 #[command(after_long_help = "\
 EXAMPLES:
 
@@ -38,13 +42,15 @@ pub(crate) struct Args {
 
 impl Run for Args {
     async fn run(self, ctx: &mut RuntimeContext) -> CarbideCliResult<()> {
-        // Submission is asynchronous; the job reaches Failed once cleanup finishes.
+        // Terminal status reads honour the target immediately; unfinished work still needs cleanup.
         ctx.api_client
             .0
             .fail_attestation(self.job_id)
             .await
             .context("fail the SPDM attestation job")?;
-        println!("Failure requested; unfinished device attestations will fail after BMC cleanup");
+        println!(
+            "Failure requested; terminal results count as Failed and unfinished work will resolve after BMC cleanup"
+        );
         Ok(())
     }
 }

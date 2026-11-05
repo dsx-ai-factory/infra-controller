@@ -24,8 +24,8 @@ use itertools::Itertools;
 use libredfish::Redfish;
 use libredfish::model::task::TaskState;
 use model::attestation::spdm::{
-    DeviceType, SpdmAttestationState, SpdmDeviceAttestation, SpdmHandlerError,
-    SpdmMachineDeviceMetadata, SpdmObjectId, Verifier,
+    DeviceType, SpdmAttestationState, SpdmCancellationTarget, SpdmDeviceAttestation,
+    SpdmHandlerError, SpdmMachineDeviceMetadata, SpdmObjectId, Verifier,
 };
 use model::bmc_info::BmcInfo;
 use nras::{DeviceAttestationInfo, EvidenceCertificate, RawAttestationOutcome, VerifierClient};
@@ -67,23 +67,21 @@ impl SpdmAttestationStateHandler {
         state: &SpdmAttestationState,
         ctx: &mut StateHandlerContext<'_, SpdmStateHandlerContextObjects>,
     ) -> Result<StateHandlerOutcome<SpdmAttestationState>, StateHandlerError> {
+        // A claim survives until BMC cleanup finishes or its original deadline expires.
         if snapshot.evidence_collection_locked
             && let Some(requested_at) = snapshot
-                .cancelled_at
-                .into_iter()
-                .chain(snapshot.fail_requested_at)
-                .min()
+                .cancellation_cleanup_started_at
+                .or(snapshot.cancellation_requested_at)
         {
-            // Keep the original deadline across retries and controller restarts.
             if chrono::Utc::now() - requested_at < self.cancellation_timeout {
                 let SpdmAttestationState::PollEvidenceCollection {
                     task_id,
                     retry_count,
                 } = state
                 else {
-                    // An ambiguous collection POST can hold the lock without a task ID.
+                    // An ambiguous collection POST can leave a claim without a task ID.
                     return Ok(StateHandlerOutcome::wait(
-                        "Cancellation has no BMC task ID; waiting for the cancellation timeout to release the evidence collection lock"
+                        "Cancellation is not in poll state; waiting for the cancellation timeout to release the evidence collection lock"
                             .to_string(),
                     ));
                 };
@@ -95,21 +93,23 @@ impl SpdmAttestationStateHandler {
                     .await
                     .map_err(|error| redfish_error("get_task_state", error))?;
                 if evidence_collection_task_stopped(task.task_state.as_ref()) {
-                    return self.complete_fail_waive(object_id, snapshot, ctx).await;
+                    return self.complete_fail_waive(object_id, ctx).await;
                 }
                 // Finish immediately when the BMC confirms cancellation; otherwise poll.
                 match client.cancel_task(task_id).await {
-                    Ok(true) => return self.complete_fail_waive(object_id, snapshot, ctx).await,
+                    Ok(true) => return self.complete_fail_waive(object_id, ctx).await,
                     Ok(false) => {}
                     Err(libredfish::RedfishError::NotSupported(_)) => {
                         tracing::warn!(%object_id, %task_id, "BMC task cancellation is unsupported; waiting for collection to stop");
                     }
                     Err(error) => return Err(redfish_error("cancel_task", error)),
                 }
+                // Count time spent waiting for the controller to handle the first request.
                 return Ok(StateHandlerOutcome::transition(
                     SpdmAttestationState::WaitForTaskCancellation {
                         task_id: task_id.clone(),
                         retry_count: *retry_count,
+                        cleanup_started_at: requested_at,
                     },
                 ));
             } else {
@@ -118,39 +118,28 @@ impl SpdmAttestationStateHandler {
             }
         }
 
-        self.complete_fail_waive(object_id, snapshot, ctx).await
+        self.complete_fail_waive(object_id, ctx).await
     }
 
     async fn complete_fail_waive(
         &self,
         object_id: &SpdmObjectId,
-        snapshot: &SpdmDeviceAttestation,
         ctx: &mut StateHandlerContext<'_, SpdmStateHandlerContextObjects>,
     ) -> Result<StateHandlerOutcome<SpdmAttestationState>, StateHandlerError> {
         // Completion and lock release must be committed together, including the timeout path.
         let mut txn = ctx.services.db_pool.begin().await?;
+        let target = db::attestation::spdm::lock_cancellation_target(&mut txn, object_id).await?;
         db::attestation::spdm::release_evidence_collection_lock(&mut txn, object_id).await?;
         db::attestation::spdm::set_completed_at(&mut txn, &object_id.0, &object_id.1, &object_id.2)
             .await?;
-        // Operator failure requests take precedence over waivers and obsolete-job cancellation.
-        let next_state = if snapshot.fail_requested_at.is_some() {
-            SpdmAttestationState::Failed("Failed by operator".to_string())
-        } else {
-            SpdmAttestationState::Cancelled
+        // Read under the finalisation lock so a stale snapshot cannot choose the outcome.
+        let next_state = match target {
+            SpdmCancellationTarget::Fail => {
+                SpdmAttestationState::Failed("Failed by operator".to_string())
+            }
+            SpdmCancellationTarget::Waive => SpdmAttestationState::Waived,
         };
-        let outcome = if snapshot.state == next_state {
-            StateHandlerOutcome::do_nothing()
-        } else {
-            StateHandlerOutcome::transition(next_state)
-        };
-        Ok(outcome.with_txn(txn))
-    }
-
-    fn record_metrics(
-        &self,
-        _state: &mut SpdmDeviceAttestation,
-        _ctx: &mut StateHandlerContext<SpdmStateHandlerContextObjects>,
-    ) {
+        Ok(StateHandlerOutcome::transition(next_state).with_txn(txn))
     }
 }
 
@@ -189,13 +178,15 @@ impl StateHandler for SpdmAttestationStateHandler {
         original_controller_state: &SpdmAttestationState,
         ctx: &mut StateHandlerContext<Self::ContextObjects>,
     ) -> Result<StateHandlerOutcome<SpdmAttestationState>, StateHandlerError> {
-        // record metrics irrespective of the state of the machine
-        self.record_metrics(snapshot, ctx);
-
-        if (snapshot.cancelled_at.is_some() || snapshot.fail_requested_at.is_some())
+        // Resolve unfinished work here. Late requests override status reads directly,
+        // preserving terminal controller states even before their timestamp is finalised.
+        if snapshot.cancellation_requested_at.is_some()
             && !matches!(
                 original_controller_state,
                 SpdmAttestationState::WaitForTaskCancellation { .. }
+                    | SpdmAttestationState::Passed
+                    | SpdmAttestationState::Failed(_)
+                    | SpdmAttestationState::Waived
             )
         {
             return self
@@ -396,12 +387,12 @@ impl StateHandler for SpdmAttestationStateHandler {
                             SpdmAttestationState::WaitForTaskCancellation {
                                 task_id: task_id.clone(),
                                 retry_count: *retry_count,
+                                cleanup_started_at: chrono::Utc::now(),
                             },
                         ));
                     }
                     Err(error) => return Err(redfish_error("get_task_state", error)),
                 };
-                let task_stopped = evidence_collection_task_stopped(task.task_state.as_ref());
                 let time_in_state = snapshot.state_version.since_state_change();
 
                 match classify_evidence_collection_task_state(task.task_state.as_ref()) {
@@ -455,15 +446,11 @@ impl StateHandler for SpdmAttestationStateHandler {
                     | EvidenceCollectionTaskStateClass::Unexpected(_)) => {
                         // Only confirmed termination permits another collection. Request
                         // cancellation for expired tasks before entering the cleanup state.
-                        let next_action = if task_stopped && *retry_count > 4 {
-                            EvidenceCollectionNextAction::Fail
-                        } else if task_stopped {
-                            EvidenceCollectionNextAction::Retry
-                        } else if time_in_state >= EVIDENCE_COLLECTION_POLL_TIMEOUT {
-                            EvidenceCollectionNextAction::Cancel
-                        } else {
-                            EvidenceCollectionNextAction::Wait
-                        };
+                        let next_action = EvidenceCollectionNextAction::for_retry(
+                            task.task_state.as_ref(),
+                            *retry_count,
+                            time_in_state,
+                        );
 
                         if let EvidenceCollectionTaskStateClass::Unexpected(task_state) =
                             task_state_class
@@ -486,7 +473,7 @@ impl StateHandler for SpdmAttestationStateHandler {
                             ));
                         }
                         if next_action == EvidenceCollectionNextAction::Cancel {
-                            // has the task cancellation happen immediately?
+                            // Ask the BMC to stop before allowing another collection.
                             let is_stopped = match redfish_client.cancel_task(task_id).await {
                                 Ok(stopped) => stopped,
                                 Err(libredfish::RedfishError::NotSupported(_)) => {
@@ -500,24 +487,25 @@ impl StateHandler for SpdmAttestationStateHandler {
                                     false
                                 }
                             };
-                            // task cancellation did not happen immediately, so need to wait and poll
+                            // Asynchronous or unconfirmed cancellation needs bounded polling.
                             if !is_stopped {
                                 return Ok(StateHandlerOutcome::transition(
                                     SpdmAttestationState::WaitForTaskCancellation {
                                         task_id: task_id.clone(),
                                         retry_count: *retry_count,
+                                        cleanup_started_at: chrono::Utc::now(),
                                     },
                                 ));
                             }
                         }
 
-                        // at this stage we either retry or fail, so release the lock in either case
+                        // A confirmed stop permits releasing the claim before retrying or failing.
                         let mut txn = ctx.services.db_pool.begin().await?;
                         db::attestation::spdm::release_evidence_collection_lock(
                             &mut txn, object_id,
                         )
                         .await?;
-                        // A synchronous cancellation also needs to honor the retry budget.
+                        // A synchronous cancellation also needs to honour the retry budget.
                         if *retry_count > 4 {
                             Ok(
                                 StateHandlerOutcome::transition(SpdmAttestationState::Failed(
@@ -541,6 +529,7 @@ impl StateHandler for SpdmAttestationStateHandler {
             SpdmAttestationState::WaitForTaskCancellation {
                 task_id,
                 retry_count,
+                cleanup_started_at,
             } => {
                 if !snapshot.evidence_collection_locked {
                     return Err(StateHandlerError::InvalidState(
@@ -548,13 +537,13 @@ impl StateHandler for SpdmAttestationStateHandler {
                             .to_string(),
                     ));
                 }
-                // A stop or repeated request must not postpone an earlier cleanup deadline.
-                let cancellation_started_at = snapshot.state_version.timestamp();
+                // A request may arrive while another iteration enters automatic cleanup.
+                // Preserve whichever deadline started first, including across restarts.
                 let started_at = snapshot
-                    .cancelled_at
+                    .cancellation_cleanup_started_at
+                    .or(snapshot.cancellation_requested_at)
                     .into_iter()
-                    .chain(snapshot.fail_requested_at)
-                    .fold(cancellation_started_at, |earliest, time| earliest.min(time));
+                    .fold(*cleanup_started_at, |earliest, time| earliest.min(time));
                 let timed_out = chrono::Utc::now() - started_at >= self.cancellation_timeout;
                 // Check the deadline before Redfish so transport failures cannot keep
                 // either a cancelled or a failed job's claim locked indefinitely.
@@ -580,8 +569,8 @@ impl StateHandler for SpdmAttestationStateHandler {
                 }
 
                 // Operator requests finish with their requested failure or waiver.
-                if snapshot.cancelled_at.is_some() || snapshot.fail_requested_at.is_some() {
-                    return self.complete_fail_waive(object_id, snapshot, ctx).await;
+                if snapshot.cancellation_requested_at.is_some() {
+                    return self.complete_fail_waive(object_id, ctx).await;
                 }
                 // Automatic recovery must fail rather than waive attestation if cleanup
                 // expires. Only a confirmed stop and remaining retries permit a new task.
@@ -634,20 +623,14 @@ impl StateHandler for SpdmAttestationStateHandler {
                     SpdmAttestationState::Passed,
                 ))
             }
-            SpdmAttestationState::Passed => {
+            SpdmAttestationState::Passed
+            | SpdmAttestationState::Failed(_)
+            | SpdmAttestationState::Waived => {
+                // Finalise the timestamp without applying later resolution requests.
                 let mut txn = ctx.services.db_pool.begin().await?;
                 db::attestation::spdm::set_completed_at(&mut txn, machine_id, device_id, job_id)
                     .await?;
                 Ok(StateHandlerOutcome::do_nothing().with_txn(txn))
-            }
-            SpdmAttestationState::Failed(_reason) => {
-                let mut txn = ctx.services.db_pool.begin().await?;
-                db::attestation::spdm::set_completed_at(&mut txn, machine_id, device_id, job_id)
-                    .await?;
-                Ok(StateHandlerOutcome::do_nothing().with_txn(txn))
-            }
-            SpdmAttestationState::Cancelled => {
-                self.complete_fail_waive(object_id, snapshot, ctx).await
             }
         }
     }
@@ -732,6 +715,27 @@ enum EvidenceCollectionNextAction {
     Cancel,
     Retry,
     Fail,
+}
+
+impl EvidenceCollectionNextAction {
+    fn for_retry(
+        task_state: Option<&TaskState>,
+        retry_count: i32,
+        time_in_state: chrono::Duration,
+    ) -> Self {
+        // Called after a task has not completed successfully. A confirmed stop takes
+        // precedence over the deadline; otherwise cancellation must precede a retry.
+        let task_stopped = evidence_collection_task_stopped(task_state);
+        if task_stopped && retry_count > 4 {
+            Self::Fail
+        } else if task_stopped {
+            Self::Retry
+        } else if time_in_state >= EVIDENCE_COLLECTION_POLL_TIMEOUT {
+            Self::Cancel
+        } else {
+            Self::Wait
+        }
+    }
 }
 
 #[derive(Event)]
@@ -921,7 +925,7 @@ mod tests {
     struct TaskStateCase {
         task_state: Option<TaskState>,
         retry_count: i32,
-        next_action: EvidenceCollectionNextAction,
+        time_in_state: chrono::Duration,
     }
 
     #[derive(Debug, PartialEq)]
@@ -940,7 +944,9 @@ mod tests {
         counter_delta: f64,
     }
 
-    fn observe_task_state(input: TaskStateCase) -> TaskStateObservation {
+    fn observe_task_state(
+        input: TaskStateCase,
+    ) -> (EvidenceCollectionNextAction, TaskStateObservation) {
         const MACHINE_ID: &str = "00000000-0000-0000-0000-000000000001";
         const DEVICE_ID: &str = "GPU-1";
         const TASK_ID: &str = "task-1";
@@ -951,7 +957,12 @@ mod tests {
             EvidenceCollectionTaskStateClass::Completed
             | EvidenceCollectionTaskStateClass::InProgress => None,
         };
-        let next_action = input.next_action;
+        // Exercise the production decision before checking its log and metric labels.
+        let next_action = EvidenceCollectionNextAction::for_retry(
+            input.task_state.as_ref(),
+            input.retry_count,
+            input.time_in_state,
+        );
         let metrics = MetricsCapture::start();
         let logs = capture_logs(|| {
             if let Some(task_state) = task_state {
@@ -982,7 +993,7 @@ mod tests {
         };
         let log = logs.first();
 
-        TaskStateObservation {
+        let observation = TaskStateObservation {
             log_count: logs.len(),
             level: log.map(|log| log.level),
             event_name: log
@@ -1009,7 +1020,8 @@ mod tests {
                 .map(str::to_string),
             error: log.and_then(|log| log.field("error")).map(str::to_string),
             counter_delta,
-        }
+        };
+        (next_action, observation)
     }
 
     fn no_event() -> TaskStateObservation {
@@ -1048,31 +1060,40 @@ mod tests {
 
     #[test]
     fn evidence_collection_task_states_log_and_count_when_unexpected() {
+        // Exercise the exact deadline and its nearest earlier instant without sleeping.
+        let at_timeout = EVIDENCE_COLLECTION_POLL_TIMEOUT;
+        let before_timeout = at_timeout - chrono::Duration::nanoseconds(1);
+
         value_scenarios!(
             run = observe_task_state;
             "normal states do not emit" {
-                TaskStateCase { task_state: Some(TaskState::New), retry_count: 0, next_action: Wait } => no_event(),
-                TaskStateCase { task_state: Some(TaskState::Starting), retry_count: 0, next_action: Wait } => no_event(),
-                TaskStateCase { task_state: Some(TaskState::Running), retry_count: 0, next_action: Wait } => no_event(),
-                TaskStateCase { task_state: Some(TaskState::Completed), retry_count: 0, next_action: Wait } => no_event(),
+                TaskStateCase { task_state: Some(TaskState::New), retry_count: 0, time_in_state: before_timeout } => (Wait, no_event()),
+                TaskStateCase { task_state: Some(TaskState::Starting), retry_count: 0, time_in_state: before_timeout } => (Wait, no_event()),
+                TaskStateCase { task_state: Some(TaskState::Running), retry_count: 0, time_in_state: before_timeout } => (Wait, no_event()),
+            }
+            "a running task reaches cancellation at the deadline, even with no retries left" {
+                TaskStateCase { task_state: Some(TaskState::Running), retry_count: 5, time_in_state: at_timeout } => (Cancel, no_event()),
             }
             "unexpected states retry only after stopping" {
-                TaskStateCase { task_state: Some(TaskState::Suspended), retry_count: 4, next_action: Wait } => emitted("suspended", "wait", 4),
-                TaskStateCase { task_state: Some(TaskState::Interrupted), retry_count: 4, next_action: Wait } => emitted("interrupted", "wait", 4),
-                TaskStateCase { task_state: Some(TaskState::Pending), retry_count: 4, next_action: Wait } => emitted("pending", "wait", 4),
-                TaskStateCase { task_state: Some(TaskState::Stopping), retry_count: 4, next_action: Wait } => emitted("stopping", "wait", 4),
-                TaskStateCase { task_state: Some(TaskState::Killed), retry_count: 4, next_action: Retry } => emitted("killed", "retry", 4),
-                TaskStateCase { task_state: Some(TaskState::Exception), retry_count: 4, next_action: Retry } => emitted("exception", "retry", 4),
-                TaskStateCase { task_state: Some(TaskState::Service), retry_count: 4, next_action: Wait } => emitted("service", "wait", 4),
-                TaskStateCase { task_state: Some(TaskState::Cancelling), retry_count: 4, next_action: Wait } => emitted("cancelling", "wait", 4),
-                TaskStateCase { task_state: Some(TaskState::Cancelled), retry_count: 4, next_action: Retry } => emitted("cancelled", "retry", 4),
-                TaskStateCase { task_state: None, retry_count: 4, next_action: Wait } => emitted("missing", "wait", 4),
+                TaskStateCase { task_state: Some(TaskState::Suspended), retry_count: 4, time_in_state: before_timeout } => (Wait, emitted("suspended", "wait", 4)),
+                TaskStateCase { task_state: Some(TaskState::Interrupted), retry_count: 4, time_in_state: before_timeout } => (Wait, emitted("interrupted", "wait", 4)),
+                TaskStateCase { task_state: Some(TaskState::Pending), retry_count: 4, time_in_state: before_timeout } => (Wait, emitted("pending", "wait", 4)),
+                TaskStateCase { task_state: Some(TaskState::Stopping), retry_count: 4, time_in_state: before_timeout } => (Wait, emitted("stopping", "wait", 4)),
+                TaskStateCase { task_state: Some(TaskState::Killed), retry_count: 4, time_in_state: before_timeout } => (Retry, emitted("killed", "retry", 4)),
+                TaskStateCase { task_state: Some(TaskState::Exception), retry_count: 4, time_in_state: at_timeout } => (Retry, emitted("exception", "retry", 4)),
+                TaskStateCase { task_state: Some(TaskState::Service), retry_count: 4, time_in_state: before_timeout } => (Wait, emitted("service", "wait", 4)),
+                TaskStateCase { task_state: Some(TaskState::Cancelling), retry_count: 4, time_in_state: before_timeout } => (Wait, emitted("cancelling", "wait", 4)),
+                TaskStateCase { task_state: Some(TaskState::Cancelled), retry_count: 4, time_in_state: before_timeout } => (Retry, emitted("cancelled", "retry", 4)),
+                TaskStateCase { task_state: None, retry_count: 4, time_in_state: before_timeout } => (Wait, emitted("missing", "wait", 4)),
+            }
+            "an exhausted retry budget still waits for a nonterminal task before the deadline" {
+                TaskStateCase { task_state: Some(TaskState::Suspended), retry_count: 5, time_in_state: before_timeout } => (Wait, emitted("suspended", "wait", 5)),
             }
             "failure is observable" {
-                TaskStateCase { task_state: Some(TaskState::Exception), retry_count: 5, next_action: Fail } => emitted("exception", "fail", 5),
+                TaskStateCase { task_state: Some(TaskState::Exception), retry_count: 5, time_in_state: at_timeout } => (Fail, emitted("exception", "fail", 5)),
             }
             "cancellation is observable" {
-                TaskStateCase { task_state: Some(TaskState::Cancelling), retry_count: 0, next_action: Cancel } => emitted("cancelling", "cancel", 0),
+                TaskStateCase { task_state: Some(TaskState::Cancelling), retry_count: 0, time_in_state: at_timeout } => (Cancel, emitted("cancelling", "cancel", 0)),
             }
         );
     }

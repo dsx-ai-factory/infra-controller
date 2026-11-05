@@ -4,8 +4,8 @@
 
 ## NAME
 
-nico-admin-cli-attestation-spdm-job-waive - Waive an attestation job
-after BMC cleanup (recorded as Cancelled)
+nico-admin-cli-attestation-spdm-job-waive - Request a waiver for an
+attestation job
 
 ## SYNOPSIS
 
@@ -16,7 +16,13 @@ nico-admin-cli attestation spdm job waive [--sort-by]
 
 ## DESCRIPTION
 
-Waive an attestation job after BMC cleanup (recorded as Cancelled)
+Waive an attestation job, including completed failures. Unfinished
+devices finish BMC evidence collection cleanup before the waiver takes
+effect. Terminal results immediately count as Waived without rerunning
+attestation. Later waive or fail requests replace the previous target
+and refresh the request time. Changing the request does not restart
+ongoing cleanup. Stored attestation results and completion times stay
+available as history.
 
 ## OPTIONS
 

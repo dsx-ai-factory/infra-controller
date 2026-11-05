@@ -1097,13 +1097,11 @@ service Forge {
 
   // SPDM attestation APIs start
   rpc TriggerMachineAttestation(SpdmMachineAttestationTriggerRequest) returns (SpdmMachineAttestationTriggerResponse);
-  // Requests a waiver, recorded as Cancelled after BMC evidence collection cleanup.
-  // Asynchronous and idempotent. Returns NOT_FOUND for an unknown job and
-  // INVALID_ARGUMENT for an invalid UUID.
+  // Records the latest waiver target, including for terminal jobs. Unfinished devices
+  // finish BMC cleanup before the override takes effect. Later fail or waive calls replace
+  // this request. Returns NOT_FOUND for an unknown job and INVALID_ARGUMENT for an invalid UUID.
   rpc WaiveAttestation(common.UUID) returns (google.protobuf.Empty);
-  // Fails unfinished device attestations after BMC cleanup.
-  // Asynchronous and idempotent; preserves terminal results. Returns NOT_FOUND
-  // for an unknown job and INVALID_ARGUMENT for an invalid UUID.
+  // Records the latest failure target with the same cleanup and replacement semantics.
   rpc FailAttestation(common.UUID) returns (google.protobuf.Empty);
 
   rpc ListAttestation(SpdmListAttestationRequest) returns (SpdmListAttestationResponse);
@@ -1335,8 +1333,12 @@ message LifecycleStatus {
 }
 
 enum SpdmAttestationStatus{
+  option allow_alias = true;
   SPDM_ATT_IN_PROGRESS = 0;
-  SPDM_ATT_CANCELLED = 1;
+  // At least one device was waived, with no unfinished or failed devices.
+  SPDM_ATT_WAIVED = 1;
+  // Legacy spelling retained for source and schema compatibility.
+  SPDM_ATT_CANCELLED = 1 [deprecated = true];
   SPDM_ATT_PASSED = 2;
   SPDM_ATT_FAILED = 3;
 }
@@ -1398,6 +1400,13 @@ message SpdmMachineAttestationTriggerResponse {
   common.UUID job_id = 8;
 }
 
+// Requested effective outcome after BMC evidence collection cleanup.
+enum SpdmCancellationTarget {
+  SPDM_CANCELLATION_TARGET_UNSPECIFIED = 0;
+  SPDM_CANCELLATION_TARGET_WAIVE = 1;
+  SPDM_CANCELLATION_TARGET_FAIL = 2;
+}
+
 message SpdmAttestationDetails{
   option (carbide.codegen.v1.message_derive) = "serde::Serialize";
   common.MachineId machine_id = 1;
@@ -1405,8 +1414,11 @@ message SpdmAttestationDetails{
   string state = 3;
 
   google.protobuf.Timestamp started_at = 7;
+  // Latest cancellation request time; legacy field name retained for wire compatibility.
   optional google.protobuf.Timestamp cancelled_at = 8;
   optional google.protobuf.Timestamp completed_at = 9;
+  // Latest operator target. Terminal stored state remains the historical attestation result.
+  optional SpdmCancellationTarget cancellation_target = 10;
 }
 
 message SpdmGetAttestationResponse {
@@ -1420,10 +1432,13 @@ message SpdmMachineAttestationTriggerRequest {
 }
 
 enum SpdmListAttestationRequestSelector {
+  option allow_alias = true;
   reserved 1;
   reserved "SPDM_LIST_UNSUCCESSFUL";
   SPDM_LIST_IN_PROGRESS = 0;
-  SPDM_LIST_CANCELLED = 2;
+  SPDM_LIST_WAIVED = 2;
+  // Legacy spelling retained for source and schema compatibility.
+  SPDM_LIST_CANCELLED = 2 [deprecated = true];
   SPDM_LIST_FAILED = 3;
   SPDM_LIST_PASSED = 4;
 }
@@ -13016,7 +13031,7 @@ message SpdmMachineAttestationStatus {
   option (carbide.codegen.v1.message_derive) = "serde::Serialize";
   // Always present: the machine whose status is reported.
   common.MachineId machine_id = 1;
-  // Unfinished takes precedence over failed, cancelled, then all-passed.
+  // Unfinished takes precedence over failed, waived, then all-passed.
   // Fleet: aggregate this machine's devices in its latest retained controller job;
   // absent when no controller job is retained (unknown).
   // Machine: aggregate each currently selected device's latest result, including external

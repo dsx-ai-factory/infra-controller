@@ -32,7 +32,7 @@ fn parse(args: &[&str]) -> Result<Args, clap::Error> {
 #[test]
 fn machine_list_selectors() {
     scenarios!(
-        run = |args: &[&str]| parse(args).map(|args| (args.passed, args.failed, args.cancelled, args.in_progress)).map_err(|error| error.kind());
+        run = |args: &[&str]| parse(args).map(|args| (args.passed, args.failed, args.waived, args.in_progress)).map_err(|error| error.kind());
         "all machines by default" {
             &["attestation", "spdm", "machines", "list"][..] => Yields((false, false, false, false)),
         }
@@ -42,8 +42,8 @@ fn machine_list_selectors() {
         "failed selector" {
             &["att", "spdm", "machines", "list", "--failed"][..] => Yields((false, true, false, false)),
         }
-        "cancelled selector" {
-            &["att", "spdm", "machines", "list", "--cancelled"][..] => Yields((false, false, true, false)),
+        "waived selector" {
+            &["att", "spdm", "machines", "list", "--waived"][..] => Yields((false, false, true, false)),
         }
         "in-progress selector" {
             &["att", "spdm", "machines", "list", "--in-progress"][..] => Yields((false, false, false, true)),
@@ -62,7 +62,7 @@ fn machine_list_selectors() {
         }
         "contradictory status selectors" {
             &["att", "spdm", "machines", "list", "--passed", "--failed"][..] => FailsWith(ErrorKind::ArgumentConflict),
-            &["att", "spdm", "machines", "list", "--passed", "--cancelled"][..] => FailsWith(ErrorKind::ArgumentConflict),
+            &["att", "spdm", "machines", "list", "--passed", "--waived"][..] => FailsWith(ErrorKind::ArgumentConflict),
             &["att", "spdm", "machines", "list", "--failed", "--in-progress"][..] => FailsWith(ErrorKind::ArgumentConflict),
         }
     );
@@ -193,8 +193,8 @@ async fn machine_table_follows_pages_and_prints_populated_and_empty_cells() {
         (
             "complete selection",
             SpdmAttesterSelectionStatus::Selected,
-            Some(SpdmAttestationStatus::SpdmAttPassed),
-            "SPDM_ATT_PASSED",
+            Some(SpdmAttestationStatus::SpdmAttWaived),
+            "SPDM_ATT_WAIVED",
             "",
         ),
         (
@@ -312,7 +312,7 @@ async fn status_filters_reach_rpc_and_empty_results_still_warn() {
     for (flag, status) in [
         ("--passed", SpdmAttestationStatus::SpdmAttPassed),
         ("--failed", SpdmAttestationStatus::SpdmAttFailed),
-        ("--cancelled", SpdmAttestationStatus::SpdmAttCancelled),
+        ("--waived", SpdmAttestationStatus::SpdmAttWaived),
         ("--in-progress", SpdmAttestationStatus::SpdmAttInProgress),
     ] {
         let client = FakeClient {

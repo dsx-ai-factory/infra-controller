@@ -12,7 +12,7 @@ statuses
 ```text
 nico-admin-cli attestation spdm machines list [--machine-id]
 [--redfish-timeout-secs] [--passed] [--failed]
-[--cancelled] [--in-progress] [-h|--help]
+[--waived] [--in-progress] [-h|--help]
 ```
 
 ## DESCRIPTION
@@ -22,8 +22,9 @@ List SPDM attestation statuses in machine-ID order.
 Without --machine-id, uses every device in the latest retained
 controller-triggered job for each machine, chosen by descending start
 time and then descending job ID. External and older jobs are ignored;
-BMCs are not contacted. Unfinished devices take precedence over
-failures, cancellations, then all-passed. Without a status flag, lists
+BMCs are not contacted. Terminal results use the latest operator
+cancellation target when present. Unfinished devices take precedence
+over failures, waivers, then all-passed. Without a status flag, lists
 all machines; machines without a controller job show unknown (JSON/YAML:
 null). Such machines are excluded by every status flag. Only one status
 flag may be supplied. A partially collected job is in progress even if a
@@ -62,9 +63,9 @@ Only machines whose latest controller job passed for every device
 Only machines whose latest controller job failed with no unfinished
 devices
 
-`--cancelled`
+`--waived`
 
-Only machines whose latest controller job has cancellations, with no
+Only machines whose latest controller job has waivers, with no
 unfinished or failed devices
 
 `--in-progress`
@@ -82,7 +83,7 @@ Print help (see a summary with -h)
 nico-admin-cli attestation spdm machines list
 nico-admin-cli attestation spdm machines list --passed
 nico-admin-cli attestation spdm machines list --failed
-nico-admin-cli attestation spdm machines list --cancelled
+nico-admin-cli attestation spdm machines list --waived
 nico-admin-cli attestation spdm machines list --in-progress
 nico-admin-cli attestation spdm machines list --machine-id fm100hsag07peffp850l14kvmhrqjf9h6jslilfahaknhvb6sq786c0g3jg --redfish-timeout-secs 60
 ```

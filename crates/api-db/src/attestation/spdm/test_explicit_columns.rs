@@ -136,8 +136,9 @@ async fn spdm_snapshot_uses_topology_selected_bmc(
         evidence_collection_locked: false,
         job_id: uuid::Uuid::new_v4(),
         started_at: Utc::now(),
-        cancelled_at: None,
-        fail_requested_at: None,
+        cancellation_requested_at: None,
+        cancellation_target: None,
+        cancellation_cleanup_started_at: None,
         completed_at: None,
     };
     insert_device_attestations(
@@ -298,7 +299,7 @@ async fn exercise_snapshot(
         device_id: "HGX_IRoT_GPU_0".to_string(),
         bmc_info,
         nonce: "11111111-2222-3333-4444-555555555555".parse()?,
-        state: SpdmAttestationState::Cancelled,
+        state: SpdmAttestationState::Waived,
         state_version: "V7-T0".parse()?,
         state_outcome: Some(PersistentStateHandlerOutcome::Wait {
             reason: "waiting for attestation evidence".to_string(),
@@ -326,8 +327,9 @@ async fn exercise_snapshot(
         evidence_collection_locked: false,
         job_id: uuid::Uuid::new_v4(),
         started_at: "2026-09-01T12:00:00Z".parse()?,
-        cancelled_at: Some("2026-09-01T12:01:00Z".parse()?),
-        fail_requested_at: Some("2026-09-01T12:01:30Z".parse()?),
+        cancellation_requested_at: Some("2026-09-01T12:01:00Z".parse()?),
+        cancellation_target: Some(model::attestation::spdm::SpdmCancellationTarget::Fail),
+        cancellation_cleanup_started_at: Some("2026-09-01T12:01:30Z".parse()?),
         completed_at: Some("2026-09-01T12:02:00Z".parse()?),
     };
     assert_eq!(
@@ -341,22 +343,24 @@ async fn exercise_snapshot(
         .await?,
         1
     );
+    // The model request time retains the main-branch database column name.
     sqlx::query(
         "UPDATE spdm_machine_devices_attestation
          SET metadata = $1, ca_certificate = $2, evidence = $3,
-             state_outcome = $4, cancelled_at = $5, completed_at = $6, fail_requested_at = $10
+             state_outcome = $4, cancelled_at = $5, completed_at = $6, cancellation_target = $10, cancellation_cleanup_started_at = $11
          WHERE machine_id = $7 AND device_id = $8 AND job_id = $9",
     )
     .bind(sqlx::types::Json(&expected.metadata))
     .bind(sqlx::types::Json(&expected.ca_certificate))
     .bind(sqlx::types::Json(&expected.evidence))
     .bind(sqlx::types::Json(&expected.state_outcome))
-    .bind(expected.cancelled_at)
+    .bind(expected.cancellation_requested_at)
     .bind(expected.completed_at)
     .bind(machine_id)
     .bind(&expected.device_id)
     .bind(expected.job_id)
-    .bind(expected.fail_requested_at)
+    .bind(expected.cancellation_target)
+    .bind(expected.cancellation_cleanup_started_at)
     .execute(txn.as_mut())
     .await?;
 

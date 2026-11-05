@@ -19,6 +19,10 @@ use clap::Parser;
 use uuid::Uuid;
 
 #[derive(Parser, Debug)]
+#[command(about = "Request a waiver for an attestation job, including completed failures")]
+#[command(
+    long_about = "Waive an attestation job, including completed failures. Unfinished devices finish BMC evidence collection cleanup before the waiver takes effect. Terminal results immediately count as Waived without rerunning attestation. Later waive or fail requests replace the previous target and refresh the request time. Changing the request does not restart ongoing cleanup. Stored attestation results and completion times stay available as history."
+)]
 #[command(after_long_help = "\
 EXAMPLES:
 

@@ -20,7 +20,8 @@ use clap::{Parser, ValueEnum};
 #[derive(Parser, Debug)]
 #[command(long_about = "List SPDM attestation jobs by status.\n\n\
     Always prints JSON to stdout: an array of [job_id, status, machine_ids] entries, or [] when no jobs match. \
-    Status names are SPDM_ATT_IN_PROGRESS, SPDM_ATT_CANCELLED, SPDM_ATT_FAILED, and SPDM_ATT_PASSED. \
+    Terminal results use the latest operator cancellation target when present. \
+    Status names are SPDM_ATT_IN_PROGRESS, SPDM_ATT_WAIVED, SPDM_ATT_FAILED, and SPDM_ATT_PASSED. \
     Machine IDs are distinct, sorted, and describe retained \
     device attestations for each job. Older Core versions return an empty machine-ID array; \
     upgrade Core first to obtain membership.")]
@@ -29,6 +30,9 @@ EXAMPLES:
 
 List in-progress SPDM attestation jobs:
     $ nico-admin-cli attestation spdm job list --selector in-progress
+
+List waived SPDM attestation jobs:
+    $ nico-admin-cli attestation spdm job list --selector waived
 
 ")]
 pub(crate) struct Args {
@@ -40,7 +44,7 @@ pub(crate) struct Args {
 #[clap(rename_all = "kebab_case")]
 pub(super) enum Selector {
     InProgress,
-    Cancelled,
+    Waived,
     Failed,
     Passed,
 }

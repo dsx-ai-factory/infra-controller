@@ -3,7 +3,7 @@
 **Status:** Implemented
 
 An SPDM attestation job records one attempt to check a machine's selected
-devices. The [profile design](https://github.com/dsx-ai-factory/infra-controller/blob/main/docs/design/attestation/attestation-profiles.md)
+devices. The [profile design](attestation-profiles.md)
 explains how those devices are selected. The job gives that attempt its own
 identity, progress, and results.
 
@@ -30,39 +30,63 @@ progress so it can resume after a restart. Jobs can overlap, but only one job
 can hold the evidence collection claim for a particular machine and device
 at a time. Other jobs wait for that claim to be released.
 
-A job's status combines its device states in this order:
+A job's status combines its devices' effective results in this order:
 
 1. **In progress** if any device has not reached a final state.
 2. **Failed** if any device failed.
-3. **Cancelled** if any device was cancelled.
+3. **Waived** if any device was waived.
 4. **Passed** if every device passed.
 
-`job waive` records a waiver request, which completes as `Cancelled`; it is
-not an immediate confirmation that the BMC stopped collecting evidence. The
-controller tries to stop an active BMC task before releasing its claim. A
-cancellation timeout allows release without confirmation that the task stopped. Repeating a waiver request
-preserves the original deadline. Waiving an unknown job returns not found.
+`job waive` and `job fail` record the latest cancellation request for every
+retained device in the job, including completed devices. Each call replaces
+`cancellation_requested_at` and `cancellation_target` (`waive` or `fail`). Both
+directions are allowed; the last committed request wins. Repeating a target
+refreshes its request timestamp. Unknown jobs return not found, and invalid UUIDs
+are rejected. Use these semantics after all Core replicas have been upgraded.
 
-`job fail` uses the same cleanup path, then moves unfinished device attestations
-to `Failed("Failed by operator")`. Completed results stay unchanged. Repeating
-fail preserves the request and its deadline; failing a terminal job succeeds
-without changing its results. An unknown job returns not found and an invalid
-UUID is rejected. Fail is asynchronous: the job remains in progress until
-cleanup finishes or its timeout expires. Use this command only after all Core
-replicas have been upgraded to support `FailAttestation`.
+Unfinished device attestations remain in progress until the SPDM controller
+finishes BMC cleanup and records a terminal result. If a device holds an evidence
+collection claim, the controller stops the BMC task before releasing that claim;
+the cancellation timeout permits release without BMC confirmation. Changing or
+repeating a request cannot postpone the original cleanup deadline. The first
+unfinished request is recorded separately as `cancellation_cleanup_started_at`;
+automatic cleanup also preserves its `cleanup_started_at` in
+`WaitForTaskCancellation`. The earliest cleanup start controls the timeout.
 
-The managed-host controller accepts `Cancelled` results as a waiver. Fail records a
-failure instead. Once its tracked job is terminal, that controller rechecks the
-selected device IDs. A changed selection schedules a replacement automatically;
-otherwise, failed latest results put the machine into its attestation failure
-state. A successful new run can then let the machine recover. Fail does not
-directly change the machine's state, and newer acceptable results can already
-satisfy its attestation requirement.
+For terminal devices, status queries apply the latest target immediately without
+rerunning attestation or rewriting stored results, evidence, or completion times.
+A completed failure can therefore count as `Waived`, and a completed pass or
+waiver can count as `Failed`. Without a request, the stored result determines the
+status. Job and machine aggregates use this effective result with the precedence
+above; unfinished devices still take precedence over terminal overrides.
+`GetAttestation` returns the stored device state and latest cancellation target,
+so the original result remains available as history.
+
+The database retains the existing `cancelled_at` column for
+`cancellation_requested_at`, and the RPC response retains its `cancelled_at`
+timestamp field. The stored `Cancelled` JSON spelling and `cancelled` metric label
+remain compatible; business models, API statuses, and CLI output use `Waived`
+(`SPDM_ATT_WAIVED`). Protobuf status and selector numbers are unchanged, with
+deprecated aliases for the old enum names. Legacy requests without a recorded
+target are treated as waivers.
+
+The managed-host recovery path reads the effective latest result for each
+device selected by the current profile and BMC inventory. Waiving a completed
+failed job can therefore let recovery resume ingestion without scheduling a new
+attestation. A newer result for a selected device still takes precedence over
+that device's result in an older waived job. Failing a completed job changes its
+effective status but does not undo a machine lifecycle transition that has
+already completed.
+
+Once its tracked job is terminal, the managed-host controller rechecks the
+selected device IDs. If that selection changed, including becoming empty, it
+returns to triggering without modifying the old job or its cancellation request.
+The next iteration schedules replacement work or skips an empty selection.
 
 ## Reading results and keeping history
 
 The commands below belong to `nico-admin-cli attestation spdm`. They use the
-[SPDM gRPC methods](https://github.com/dsx-ai-factory/infra-controller/blob/3b9810b9d32560579870654deba2a3904ac06ede/crates/rpc/proto/forge.proto#L1098).
+[SPDM gRPC methods](https://github.com/dsx-ai-factory/infra-controller/blob/f63617df0786b86a6a56d5260eb35e3de16712f8/crates/rpc/proto/forge.proto#L1098).
 
 ### Start a run: `trigger`
 
@@ -79,10 +103,10 @@ The `job` group operates on individual runs:
 | --- | --- | --- |
 | `list` | Find retained jobs by status | `ListAttestation` |
 | `get` | Read one job's device details | `GetAttestation` |
-| `waive` | Waive one job, recorded as Cancelled after BMC cleanup | `WaiveAttestation` |
-| `fail` | Fail unfinished devices after BMC cleanup | `FailAttestation` |
+| `waive` | Waive pending or completed device results | `WaiveAttestation` |
+| `fail` | Fail pending or completed device results | `FailAttestation` |
 
-`list` requires `--selector` with `in-progress`, `failed`, `cancelled`, or
+`list` requires `--selector` with `in-progress`, `failed`, `waived`, or
 `passed`. `get`, `waive`, and `fail` take a job ID. Both `list` and `get` print JSON;
 `get` returns the details from `SpdmGetAttestationResponse`. Reading an unknown
 or removed job returns not found. A successful `waive` or `fail` acknowledges the
@@ -124,7 +148,7 @@ descending, then `job_id` descending.
 The job being updated is also kept until a later cleanup, so ten is not a
 strict limit on retained jobs.
 
-Implementation: [scheduling](https://github.com/dsx-ai-factory/infra-controller/blob/3b9810b9d32560579870654deba2a3904ac06ede/crates/machine-controller/src/handler/attestation.rs),
-[job reads and status](https://github.com/dsx-ai-factory/infra-controller/blob/3b9810b9d32560579870654deba2a3904ac06ede/crates/api-db/src/attestation/spdm.rs),
-[worker](https://github.com/dsx-ai-factory/infra-controller/blob/3b9810b9d32560579870654deba2a3904ac06ede/crates/spdm-controller/src/handler.rs),
-and [storage and cleanup](https://github.com/dsx-ai-factory/infra-controller/blob/3b9810b9d32560579870654deba2a3904ac06ede/crates/api-db/migrations/20260917113009_spdm_job_id.sql).
+Implementation: [scheduling](https://github.com/dsx-ai-factory/infra-controller/blob/f63617df0786b86a6a56d5260eb35e3de16712f8/crates/machine-controller/src/handler/attestation.rs),
+[job reads and status](https://github.com/dsx-ai-factory/infra-controller/blob/f63617df0786b86a6a56d5260eb35e3de16712f8/crates/api-db/src/attestation/spdm.rs),
+[worker](https://github.com/dsx-ai-factory/infra-controller/blob/f63617df0786b86a6a56d5260eb35e3de16712f8/crates/spdm-controller/src/handler.rs),
+and [storage and cleanup](https://github.com/dsx-ai-factory/infra-controller/blob/f63617df0786b86a6a56d5260eb35e3de16712f8/crates/api-db/migrations/20260917113009_spdm_job_id.sql).

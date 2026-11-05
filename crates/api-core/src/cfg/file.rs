@@ -4140,8 +4140,9 @@ pub struct SpdmStateControllerConfig {
     /// Maximum wait from the persisted start of cancellation cleanup before releasing an
     /// evidence collection lock without BMC confirmation. Accepts positive
     /// durations up to five minutes (e.g. "30s", "5m"); defaults to "2m".
-    /// Covers operator failure, waivers, obsolete-job cancellation, and automatic recovery.
-    /// Requests use persisted timestamps and cannot extend cleanup already in progress.
+    /// Covers operator failure, waivers, and automatic recovery.
+    /// The first cleanup start is persisted independently of the latest operator request.
+    /// Repeating or switching targets cannot extend cleanup already in progress.
     /// Requires an API restart; controller retries do not reset the deadline.
     #[serde(
         deserialize_with = "SpdmStateControllerConfig::deserialize_cancellation_timeout",
@@ -4151,7 +4152,7 @@ pub struct SpdmStateControllerConfig {
 }
 
 impl SpdmStateControllerConfig {
-    // Bound how long an unresponsive BMC can hold a cancelled job's collection lock.
+    // Bound how long an unresponsive BMC can hold a job's collection lock during cleanup.
     const MAX_CANCELLATION_TIMEOUT: Duration = Duration::minutes(5);
 
     fn deserialize_cancellation_timeout<'de, D>(deserializer: D) -> Result<Duration, D::Error>

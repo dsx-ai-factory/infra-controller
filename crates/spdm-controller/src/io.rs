@@ -15,7 +15,7 @@
  * limitations under the License.
  */
 
-//! State Controller IO implementation for dpa interfaces
+//! State controller IO for SPDM device attestation jobs.
 
 use config_version::{ConfigVersion, Versioned};
 use db::attestation::spdm::load_snapshot_for_machine_and_device_id;
@@ -29,7 +29,7 @@ use state_controller::io::StateControllerIO;
 use crate::context::SpdmStateHandlerContextObjects;
 use crate::metrics::SpdmMetricsEmitter;
 
-/// State Controller IO implementation for dpa interfaces
+/// Loads and persists SPDM device attestation jobs for the state controller.
 #[derive(Default, Debug)]
 pub struct SpdmStateControllerIO {}
 
@@ -130,7 +130,7 @@ impl StateControllerIO for SpdmStateControllerIO {
             SpdmAttestationState::ApplyAppraisalPolicy => ("applyappraisalpolicy", ""),
             SpdmAttestationState::Failed(_) => ("failed", ""),
             SpdmAttestationState::Passed => ("passed", ""),
-            SpdmAttestationState::Cancelled => ("cancelled", ""),
+            SpdmAttestationState::Waived => ("cancelled", ""),
         }
     }
 

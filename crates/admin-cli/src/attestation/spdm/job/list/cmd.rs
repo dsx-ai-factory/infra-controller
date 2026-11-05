@@ -28,7 +28,7 @@ use crate::rpc::ApiClient;
 pub(super) async fn list(args: Args, api_client: &ApiClient) -> CarbideCliResult<()> {
     let selector = match args.selector {
         Selector::InProgress => SpdmListAttestationRequestSelector::SpdmListInProgress,
-        Selector::Cancelled => SpdmListAttestationRequestSelector::SpdmListCancelled,
+        Selector::Waived => SpdmListAttestationRequestSelector::SpdmListWaived,
         Selector::Failed => SpdmListAttestationRequestSelector::SpdmListFailed,
         Selector::Passed => SpdmListAttestationRequestSelector::SpdmListPassed,
     };

@@ -104,11 +104,12 @@ pub mod spdm {
         pub job_id: uuid::Uuid,
         // timestamps
         pub started_at: DateTime<Utc>,
-        /// Waiver or obsolete-job cancellation time, or an earlier BMC cleanup start
-        /// preserved by an operator failure request.
-        pub cancelled_at: Option<DateTime<Utc>>,
-        /// An operator failure request fails unfinished work after evidence collection cleanup.
-        pub fail_requested_at: Option<DateTime<Utc>>,
+        /// Time of the latest operator cancellation request, including after completion.
+        pub cancellation_requested_at: Option<DateTime<Utc>>,
+        /// Outcome requested by the operator; later requests may replace either target.
+        pub cancellation_target: Option<SpdmCancellationTarget>,
+        /// First cancellation request while unfinished; later requests cannot extend cleanup.
+        pub cancellation_cleanup_started_at: Option<DateTime<Utc>>,
         pub completed_at: Option<DateTime<Utc>>,
     }
 
@@ -116,6 +117,17 @@ pub mod spdm {
         pub fn nonce_hex(&self) -> String {
             hex::encode(Sha256::digest(self.nonce.as_bytes()))
         }
+    }
+
+    /// Operator-selected outcome after evidence collection cleanup.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
+    #[serde(rename_all = "snake_case")]
+    #[sqlx(type_name = "text", rename_all = "snake_case")]
+    pub enum SpdmCancellationTarget {
+        /// Accept the attestation requirement by operator waiver.
+        Waive,
+        /// Reject the attestation requirement by operator request.
+        Fail,
     }
 
     /// Major state, associated with Machine.
@@ -140,12 +152,17 @@ pub mod spdm {
             task_id: String,
             /// Number of collection retries already performed, excluding cancellation polling.
             retry_count: i32,
+            /// Start of the cleanup timeout, including any earlier waiver or failure request.
+            /// Preserved across repeated operator requests and controller restarts.
+            cleanup_started_at: DateTime<Utc>,
         },
         NrasVerification,
         ApplyAppraisalPolicy,
         Passed,
         Failed(String),
-        Cancelled,
+        /// Accepted by waiver. The legacy database spelling keeps older readers compatible.
+        #[serde(rename = "Cancelled", alias = "Waived")]
+        Waived,
     }
 
     impl<'r> sqlx::FromRow<'r, PgRow> for SpdmAttestationState {
@@ -158,15 +175,14 @@ pub mod spdm {
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub enum SpdmAttestationStatus {
         InProgress,
-        Cancelled,
+        /// At least one device was waived, with no unfinished or failed devices.
+        Waived,
         Passed,
         Failed,
     }
 
     #[derive(Clone, Debug, thiserror::Error, PartialEq, Eq)]
     pub enum SpdmHandlerError {
-        #[error("unable to complete measurement trigger: {0}")]
-        TriggerMeasurementFail(String),
         #[error("nras error: {0}")]
         NrasError(#[from] nras::NrasError),
         #[error("missing values: {field} - {machine_id}/{device_id}")]
@@ -181,15 +197,6 @@ pub mod spdm {
             machine_id: MachineId,
             device_id: String,
         },
-        #[error("verification failed: {0}")]
-        VerificationFailed(String),
-    }
-
-    #[derive(Clone, Debug, PartialEq, Eq)]
-    pub enum AttestationStatus {
-        Success,
-        NotSupported,
-        Failure { cause: SpdmHandlerError },
     }
 
     #[derive(Debug)]
@@ -210,12 +217,6 @@ pub mod spdm {
                 DeviceType::Unknown
             })
         }
-    }
-
-    #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, FromRow)]
-    pub struct SpdmObjectId_ {
-        pub machine_id: MachineId,
-        pub device_id: String,
     }
 
     #[derive(thiserror::Error, Debug, Clone)]
@@ -314,8 +315,9 @@ pub mod spdm {
                 evidence_collection_locked: row.try_get("evidence_collection_locked")?,
                 job_id: row.try_get("job_id")?,
                 started_at: row.try_get("started_at")?,
-                cancelled_at: row.try_get("cancelled_at")?,
-                fail_requested_at: row.try_get("fail_requested_at")?,
+                cancellation_requested_at: row.try_get("cancellation_requested_at")?,
+                cancellation_target: row.try_get("cancellation_target")?,
+                cancellation_cleanup_started_at: row.try_get("cancellation_cleanup_started_at")?,
                 completed_at: row.try_get("completed_at")?,
             })
         }
@@ -325,23 +327,33 @@ pub mod spdm {
     pub struct SpdmDeviceAttestationDetails {
         pub machine_id: MachineId,
         pub device_id: String,
+        /// Stored attestation result; later operator overrides do not rewrite it.
         pub state: SpdmAttestationState,
         // timestamps
         pub started_at: DateTime<Utc>,
-        pub cancelled_at: Option<DateTime<Utc>>,
+        /// Time of the latest operator cancellation request.
+        pub cancellation_requested_at: Option<DateTime<Utc>>,
+        /// Operator override of terminal results; unfinished devices still require cleanup.
+        pub cancellation_target: Option<SpdmCancellationTarget>,
         pub completed_at: Option<DateTime<Utc>>,
     }
 
     impl SpdmDeviceAttestationDetails {
+        /// Describes an effective terminal failure, including an operator failure override.
         pub fn get_failure_cause(&self) -> Option<String> {
-            if let SpdmAttestationState::Failed(msg) = &self.state {
-                Some(format!(
-                    "Device: {}, failed reason: {}",
-                    self.device_id, msg
-                ))
-            } else {
-                None
-            }
+            // A terminal override changes the effective result without rewriting evidence history.
+            let reason = match (&self.state, self.cancellation_target) {
+                (
+                    SpdmAttestationState::Passed
+                    | SpdmAttestationState::Failed(_)
+                    | SpdmAttestationState::Waived,
+                    Some(SpdmCancellationTarget::Fail),
+                ) => Some("Failed by operator"),
+                (_, Some(SpdmCancellationTarget::Waive)) => None,
+                (SpdmAttestationState::Failed(reason), None) => Some(reason.as_str()),
+                _ => None,
+            };
+            reason.map(|msg| format!("Device: {}, failed reason: {}", self.device_id, msg))
         }
     }
 
@@ -354,7 +366,8 @@ pub mod spdm {
                 state: controller_state.0,
                 device_id: row.try_get("device_id")?,
                 started_at: row.try_get("started_at")?,
-                cancelled_at: row.try_get("cancelled_at")?,
+                cancellation_requested_at: row.try_get("cancellation_requested_at")?,
+                cancellation_target: row.try_get("cancellation_target")?,
                 completed_at: row.try_get("completed_at")?,
             })
         }
@@ -1070,7 +1083,7 @@ mod test {
 
     #[test]
     fn spdm_evidence_collection_deserializes_legacy_states() {
-        // Persisted states must remain readable when retry/cancellation fields are absent.
+        // Persisted states must retain support for missing retry fields and legacy waiver names.
         scenarios!(run = |json| serde_json::from_str::<SpdmAttestationState>(json).map_err(drop);
             "legacy trigger state" {
                 r#"{"TriggerEvidenceCollection":{"retry_count":2}}"# => Yields(SpdmAttestationState::TriggerEvidenceCollection {
@@ -1085,6 +1098,17 @@ mod test {
                     retry_count: 2,
                 }),
             }
+            "legacy waiver spelling" {
+                r#""Cancelled""# => Yields(SpdmAttestationState::Waived),
+            }
+            "explicit waiver spelling" {
+                r#""Waived""# => Yields(SpdmAttestationState::Waived),
+            }
+        );
+        // Database writes retain the spelling understood by older running API instances.
+        assert_eq!(
+            serde_json::to_string(&SpdmAttestationState::Waived).unwrap(),
+            r#""Cancelled""#
         );
     }
 
@@ -1237,7 +1261,8 @@ mod test {
             device_id: "GPU_0".to_string(),
             state,
             started_at: now,
-            cancelled_at: None,
+            cancellation_requested_at: None,
+            cancellation_target: None,
             completed_at: None,
         }
     }
@@ -1256,12 +1281,22 @@ mod test {
                 details_with_state(SpdmAttestationState::Failed(String::new())) => Some("Device: GPU_0, failed reason: ".to_string()),
             }
 
+            "operator failure supplies a cause for a terminal pass" {
+                SpdmDeviceAttestationDetails { cancellation_target: Some(spdm::SpdmCancellationTarget::Fail), ..details_with_state(SpdmAttestationState::Passed) }
+                    => Some("Device: GPU_0, failed reason: Failed by operator".to_string()),
+            }
+            "operator waiver suppresses a historical verification failure" {
+                SpdmDeviceAttestationDetails { cancellation_target: Some(spdm::SpdmCancellationTarget::Waive), ..details_with_state(SpdmAttestationState::Failed("historical".into())) } => None,
+            }
+            "pending operator failure has no terminal cause yet" {
+                SpdmDeviceAttestationDetails { cancellation_target: Some(spdm::SpdmCancellationTarget::Fail), ..details_with_state(SpdmAttestationState::FetchMetadata) } => None,
+            }
             "passed state has no cause" {
                 details_with_state(SpdmAttestationState::Passed) => None,
             }
 
-            "cancelled state has no cause" {
-                details_with_state(SpdmAttestationState::Cancelled) => None,
+            "waived state has no cause" {
+                details_with_state(SpdmAttestationState::Waived) => None,
             }
 
             "fetch metadata state has no cause" {

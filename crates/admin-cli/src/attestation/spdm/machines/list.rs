@@ -27,11 +27,12 @@ mod tests;
 const PREDICTION_WARNING: &str = "Predicted attestation status, for definitive attestation status use \"attestation spdm machines list --machine-id <your machine id>\"";
 
 #[derive(Parser, Debug)]
-#[command(group(clap::ArgGroup::new("status").args(["passed", "failed", "cancelled", "in_progress"])))]
+#[command(group(clap::ArgGroup::new("status").args(["passed", "failed", "waived", "in_progress"])))]
 #[command(long_about = "List SPDM attestation statuses in machine-ID order.\n\n\
     Without --machine-id, uses every device in the latest retained controller-triggered job for each machine, chosen by \
     descending start time and then descending job ID. External and older jobs are ignored; BMCs are not contacted. \
-    Unfinished devices take precedence over failures, cancellations, then all-passed. \
+    Terminal results use the latest operator cancellation target when present. \
+    Unfinished devices take precedence over failures, waivers, then all-passed. \
     Without a status flag, lists all machines; machines without a controller job show unknown \
     (JSON/YAML: null). Such machines are excluded by every status flag. \
     Only one status flag may be supplied. \
@@ -57,8 +58,8 @@ List machines predicted to have passed:
 List machines predicted to have failed:
     $ nico-admin-cli attestation spdm machines list --failed
 
-List machines predicted to have been cancelled:
-    $ nico-admin-cli attestation spdm machines list --cancelled
+List machines predicted to have been waived:
+    $ nico-admin-cli attestation spdm machines list --waived
 
 List machines whose predicted attestation is in progress:
     $ nico-admin-cli attestation spdm machines list --in-progress
@@ -90,9 +91,9 @@ pub(crate) struct Args {
     failed: bool,
     #[arg(
         long,
-        help = "Only machines whose latest controller job has cancellations, with no unfinished or failed devices"
+        help = "Only machines whose latest controller job has waivers, with no unfinished or failed devices"
     )]
-    cancelled: bool,
+    waived: bool,
     #[arg(
         long,
         help = "Only machines whose latest controller job has unfinished devices, even if another device failed"
@@ -155,8 +156,8 @@ impl Args {
             Some(SpdmAttestationStatus::SpdmAttPassed as i32)
         } else if self.failed {
             Some(SpdmAttestationStatus::SpdmAttFailed as i32)
-        } else if self.cancelled {
-            Some(SpdmAttestationStatus::SpdmAttCancelled as i32)
+        } else if self.waived {
+            Some(SpdmAttestationStatus::SpdmAttWaived as i32)
         } else if self.in_progress {
             Some(SpdmAttestationStatus::SpdmAttInProgress as i32)
         } else {

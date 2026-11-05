@@ -24,7 +24,7 @@ pub(in crate::tests) mod tests {
         ANY_HARDWARE_CLASS, AttestationPolicyDocument, AttesterSelection, AttesterSelectionMode,
         ComponentIdMatch,
     };
-    use model::attestation::spdm::{SpdmAttestationState, SpdmObjectId};
+    use model::attestation::spdm::{SpdmAttestationState, SpdmCancellationTarget, SpdmObjectId};
     use model::controller_outcome::PersistentStateHandlerOutcome;
     use rpc::forge::forge_server::Forge;
     use rpc::forge::list_machine_attestation_statuses_request::Target;
@@ -82,7 +82,9 @@ pub(in crate::tests) mod tests {
     }
 
     #[crate::sqlx_test]
-    async fn test_spdm_controller_persistence_honors_supplied_versions(pool: sqlx::PgPool) {
+    async fn test_spdm_controller_persistence_honors_versions_and_terminal_results(
+        pool: sqlx::PgPool,
+    ) {
         let env = create_test_env(pool).await;
         let machine_id = create_managed_host(&env).await.host().id.into();
         let job_id = uuid::Uuid::new_v4();
@@ -189,6 +191,79 @@ pub(in crate::tests) mod tests {
                 "{}",
                 case.scenario
             );
+        }
+
+        // A request records intent without invalidating an in-flight transition.
+        env.api
+            .fail_attestation(Request::new(job_id.into()))
+            .await
+            .unwrap();
+        let terminal_version = replacement_version.increment();
+        let mut txn = env.db_txn().await;
+        assert_eq!(
+            io.persist_controller_state(
+                &mut txn,
+                &object_id,
+                replacement_version,
+                terminal_version,
+                &SpdmAttestationState::Passed,
+            )
+            .await
+            .unwrap(),
+            db::ConditionalWrite::Applied(())
+        );
+        txn.commit().await.unwrap();
+
+        // Terminal results stay final even with a pending marker and no completion
+        // timestamp. Explicit queueing also exercises work discovered before completion.
+        for state in [
+            SpdmAttestationState::Passed,
+            SpdmAttestationState::Failed("verification failed".to_string()),
+            SpdmAttestationState::Waived,
+        ] {
+            sqlx::query(
+                "UPDATE spdm_machine_devices_attestation
+                SET state = $2, completed_at = NULL WHERE job_id = $1",
+            )
+            .bind(job_id)
+            .bind(sqlx::types::Json(&state))
+            .execute(&env.pool)
+            .await
+            .unwrap();
+            let mut txn = env.db_txn().await;
+            db::attestation::spdm::request_attestation_cancellation(
+                &mut txn,
+                &job_id,
+                SpdmCancellationTarget::Fail,
+            )
+            .await
+            .unwrap();
+            txn.commit().await.unwrap();
+            state_controller::controller::Enqueuer::<SpdmStateControllerIO>::new(env.pool.clone())
+                .enqueue_object(&object_id)
+                .await
+                .unwrap();
+            env.run_spdm_controller_iteration_no_requeue().await;
+            let mut txn = env.db_txn().await;
+            let snapshot = db::attestation::spdm::load_snapshot_for_machine_and_device_id(
+                &mut txn,
+                &machine_id,
+                &object_id.1,
+                &job_id,
+            )
+            .await
+            .unwrap();
+            assert_eq!(snapshot.state, state);
+            assert_eq!(snapshot.state_version, terminal_version);
+            assert!(snapshot.completed_at.is_some());
+            assert_eq!(
+                snapshot.cancellation_target,
+                Some(SpdmCancellationTarget::Fail)
+            );
+            assert!(matches!(
+                snapshot.state_outcome,
+                Some(PersistentStateHandlerOutcome::DoNothing { .. })
+            ));
         }
     }
 
@@ -1089,11 +1164,11 @@ pub(in crate::tests) mod tests {
                 scenario: "operator waiver wins without extending cleanup",
                 initially_cancelling: true,
                 finish_collection: false,
-                operator_outcome: Some(SpdmAttestationState::Cancelled),
+                operator_outcome: Some(SpdmAttestationState::Waived),
                 cancel_error: None,
             },
             Case {
-                scenario: "operator failure wins without extending automatic cleanup",
+                scenario: "an earlier failure request bounds automatic cleanup",
                 initially_cancelling: true,
                 finish_collection: false,
                 operator_outcome: Some(SpdmAttestationState::Failed("Failed by operator".into())),
@@ -1204,12 +1279,15 @@ pub(in crate::tests) mod tests {
                 else {
                     unreachable!("the initial polling states were checked above");
                 };
-                assert_eq!(
-                    snapshot.state,
-                    SpdmAttestationState::WaitForTaskCancellation {
-                        task_id: task_id.clone(),
-                        retry_count: 0,
-                    },
+                assert!(
+                    matches!(
+                        snapshot.state,
+                        SpdmAttestationState::WaitForTaskCancellation {
+                            task_id: ref actual_task_id,
+                            retry_count: 0,
+                            ..
+                        } if actual_task_id == task_id
+                    ),
                     "{scenario}"
                 );
                 assert!(snapshot.evidence_collection_locked, "{scenario}");
@@ -1259,12 +1337,15 @@ pub(in crate::tests) mod tests {
 
             if finish_collection {
                 env.redfish_sim.set_evidence_collection_running(false);
-            } else {
-                sqlx::query("UPDATE spdm_machine_devices_attestation SET state_version = $2 WHERE job_id = $1")
-                    .bind(job_id).bind(old_version).execute(&env.pool).await?;
+            } else if !matches!(operator_outcome, Some(SpdmAttestationState::Failed(_))) {
+                // Cleanup has its own clock, independent of the current state version.
+                sqlx::query("UPDATE spdm_machine_devices_attestation
+                    SET state = jsonb_set(state, '{WaitForTaskCancellation,cleanup_started_at}', to_jsonb($2::timestamptz))
+                    WHERE job_id = $1")
+                    .bind(job_id).bind(old_version.timestamp()).execute(&env.pool).await?;
             }
             if let Some(outcome) = &operator_outcome {
-                if *outcome == SpdmAttestationState::Cancelled {
+                if *outcome == SpdmAttestationState::Waived {
                     env.api
                         .waive_attestation(Request::new(job_id.into()))
                         .await?;
@@ -1272,6 +1353,59 @@ pub(in crate::tests) mod tests {
                     env.api
                         .fail_attestation(Request::new(job_id.into()))
                         .await?;
+                    // Model a request accepted before the in-flight automatic cleanup
+                    // iteration committed its newer cleanup start.
+                    sqlx::query("UPDATE spdm_machine_devices_attestation SET cancellation_cleanup_started_at = $2, cancelled_at = $2 WHERE job_id = $1")
+                        .bind(job_id).bind(old_version.timestamp()).execute(&env.pool).await?;
+                }
+            }
+            // Request timestamps and the automatic cleanup start retain their own times.
+            let waiver_requested = operator_outcome == Some(SpdmAttestationState::Waived);
+            let failure_requested =
+                matches!(operator_outcome, Some(SpdmAttestationState::Failed(_)));
+            for device in &devices {
+                let snapshot = db::attestation::spdm::load_snapshot_for_machine_and_device_id(
+                    &mut txn,
+                    &machine_id,
+                    &device.device_id,
+                    &job_id,
+                )
+                .await?;
+                assert_eq!(
+                    snapshot.cancellation_requested_at.is_some(),
+                    waiver_requested || failure_requested,
+                    "{scenario}"
+                );
+                assert_eq!(
+                    snapshot.cancellation_target,
+                    if failure_requested {
+                        Some(SpdmCancellationTarget::Fail)
+                    } else if waiver_requested {
+                        Some(SpdmCancellationTarget::Waive)
+                    } else {
+                        None
+                    },
+                    "{scenario}"
+                );
+                if let Some(requested_at) = snapshot.cancellation_requested_at {
+                    if failure_requested {
+                        assert_eq!(requested_at, old_version.timestamp(), "{scenario}");
+                    } else {
+                        assert!(requested_at > old_version.timestamp(), "{scenario}");
+                    }
+                }
+                if operator_outcome.is_some() {
+                    let SpdmAttestationState::WaitForTaskCancellation {
+                        cleanup_started_at, ..
+                    } = snapshot.state
+                    else {
+                        panic!("{scenario}: expected automatic cleanup");
+                    };
+                    if failure_requested {
+                        assert!(cleanup_started_at > old_version.timestamp(), "{scenario}");
+                    } else {
+                        assert_eq!(cleanup_started_at, old_version.timestamp(), "{scenario}");
+                    }
                 }
             }
             env.run_spdm_controller_iteration_no_requeue().await;
@@ -1426,7 +1560,7 @@ pub(in crate::tests) mod tests {
             let expected_state = if case.fail {
                 SpdmAttestationState::Failed("Failed by operator".to_string())
             } else {
-                SpdmAttestationState::Cancelled
+                SpdmAttestationState::Waived
             };
             // Host setup performs its own attestation before the scenario starts.
             env.redfish_sim.set_evidence_collection_running(false);
@@ -1449,6 +1583,30 @@ pub(in crate::tests) mod tests {
             for _ in 0..case.trigger_iterations {
                 env.run_spdm_controller_iteration_no_requeue().await;
             }
+            let completed_device = if case.trigger_iterations == 2 && !case.claim_without_task {
+                // A terminal result in a mixed job must survive either operator request.
+                let completed_state = if case.fail {
+                    SpdmAttestationState::Passed
+                } else {
+                    SpdmAttestationState::Failed("verification failed".to_string())
+                };
+                let device_id: String = sqlx::query_scalar("UPDATE spdm_machine_devices_attestation
+                    SET state = $2, completed_at = now()
+                    WHERE job_id = $1 AND device_id = (
+                        SELECT min(device_id) FROM spdm_machine_devices_attestation WHERE job_id = $1)
+                    RETURNING device_id")
+                    .bind(job_id).bind(sqlx::types::Json(&completed_state))
+                    .fetch_one(&env.pool).await?;
+                Some((device_id, completed_state))
+            } else {
+                None
+            };
+            let expected_for_device = |device_id: &str| {
+                completed_device
+                    .as_ref()
+                    .filter(|(completed_id, _)| completed_id == device_id)
+                    .map_or(&expected_state, |(_, state)| state)
+            };
             if case.claim_without_task {
                 // Model a claim committed before a collection POST whose result was lost.
                 sqlx::query("UPDATE spdm_machine_devices_attestation SET evidence_collection_locked = TRUE WHERE job_id = $1")
@@ -1462,6 +1620,12 @@ pub(in crate::tests) mod tests {
                 env.redfish_sim.set_next_task_cancel_error(error);
             }
             if case.fail {
+                if case.trigger_iterations == 2 {
+                    // A later failure request replaces the pending waiver.
+                    env.api
+                        .waive_attestation(Request::new(job_id.into()))
+                        .await?;
+                }
                 env.api
                     .fail_attestation(Request::new(job_id.into()))
                     .await?;
@@ -1469,6 +1633,18 @@ pub(in crate::tests) mod tests {
                 env.api
                     .waive_attestation(Request::new(job_id.into()))
                     .await?;
+            }
+            if case.trigger_iterations == 3 {
+                // Include time spent waiting for the controller in the cleanup timeout.
+                sqlx::query(
+                    "UPDATE spdm_machine_devices_attestation
+                    SET cancelled_at = cancelled_at - INTERVAL '1 second',
+                        cancellation_cleanup_started_at = cancellation_cleanup_started_at - INTERVAL '1 second'
+                    WHERE job_id = $1",
+                )
+                .bind(job_id)
+                .execute(&env.pool)
+                .await?;
             }
             env.run_spdm_controller_iteration_no_requeue().await;
 
@@ -1531,7 +1707,53 @@ pub(in crate::tests) mod tests {
                 );
             }
             if !waiting {
-                assert!(devices.iter().all(|device| device.state == expected_state));
+                assert!(
+                    devices
+                        .iter()
+                        .all(|device| &device.state == expected_for_device(&device.device_id))
+                );
+                let response = env
+                    .api
+                    .get_attestation(Request::new(job_id.into()))
+                    .await?
+                    .into_inner();
+                for device in response.attestations_details {
+                    assert_eq!(
+                        device.state,
+                        format!("{:?}", expected_for_device(&device.device_id))
+                    );
+                }
+                if !case.fail {
+                    // Terminal overrides need no controller pass and preserve the attestation history.
+                    let snapshot_query = "SELECT jsonb_agg(to_jsonb(a) - 'cancelled_at' - 'cancellation_target' ORDER BY device_id)
+                        FROM spdm_machine_devices_attestation a WHERE job_id = $1";
+                    let before: serde_json::Value = sqlx::query_scalar(snapshot_query)
+                        .bind(job_id)
+                        .fetch_one(&env.pool)
+                        .await?;
+                    env.api
+                        .fail_attestation(Request::new(job_id.into()))
+                        .await?;
+                    let mut status_txn = env.db_txn().await;
+                    assert_eq!(
+                        db::attestation::spdm::get_attestation_job_status(&mut status_txn, &job_id)
+                            .await?,
+                        model::attestation::spdm::SpdmAttestationStatus::Failed
+                    );
+                    env.api
+                        .waive_attestation(Request::new(job_id.into()))
+                        .await?;
+                    assert_eq!(
+                        db::attestation::spdm::get_attestation_job_status(&mut status_txn, &job_id)
+                            .await?,
+                        model::attestation::spdm::SpdmAttestationStatus::Waived
+                    );
+                    let after: serde_json::Value = sqlx::query_scalar(snapshot_query)
+                        .bind(job_id)
+                        .fetch_one(&env.pool)
+                        .await?;
+                    assert_eq!(before, after);
+                }
                 continue;
             }
 
@@ -1556,11 +1778,15 @@ pub(in crate::tests) mod tests {
                 .await?;
                 assert!(snapshot.evidence_collection_locked, "{}", case.scenario);
                 if collecting {
-                    assert!(
-                        matches!(
-                            snapshot.state,
-                            SpdmAttestationState::WaitForTaskCancellation { .. }
-                        ),
+                    let SpdmAttestationState::WaitForTaskCancellation {
+                        cleanup_started_at, ..
+                    } = snapshot.state
+                    else {
+                        panic!("{}: expected cancellation cleanup", case.scenario);
+                    };
+                    assert_eq!(
+                        Some(cleanup_started_at),
+                        snapshot.cancellation_cleanup_started_at,
                         "{}",
                         case.scenario
                     );
@@ -1573,11 +1799,14 @@ pub(in crate::tests) mod tests {
                 // Advance the persisted deadline without a real two-minute sleep.
                 sqlx::query("UPDATE spdm_machine_devices_attestation
                     SET cancelled_at = CASE WHEN cancelled_at IS NOT NULL THEN NOW() - INTERVAL '2 minutes' END,
-                        fail_requested_at = CASE WHEN fail_requested_at IS NOT NULL THEN NOW() - INTERVAL '2 minutes' END
+                        cancellation_cleanup_started_at = CASE WHEN cancellation_cleanup_started_at IS NOT NULL THEN NOW() - INTERVAL '2 minutes' END,
+                        state = CASE WHEN state ? 'WaitForTaskCancellation'
+                            THEN jsonb_set(state, '{WaitForTaskCancellation,cleanup_started_at}', to_jsonb(NOW() - INTERVAL '2 minutes'))
+                            ELSE state END
                     WHERE job_id = $1")
                     .bind(job_id).execute(&env.pool).await?;
             }
-            let request_time_query = "SELECT COALESCE(fail_requested_at, cancelled_at)
+            let request_time_query = "SELECT cancelled_at
                 FROM spdm_machine_devices_attestation WHERE job_id = $1 LIMIT 1";
             let requested_at: chrono::DateTime<Utc> = sqlx::query_scalar(request_time_query)
                 .bind(job_id)
@@ -1598,7 +1827,7 @@ pub(in crate::tests) mod tests {
                     .bind(job_id)
                     .fetch_one(&env.pool)
                     .await?;
-            assert_eq!(requested_at, repeated_requested_at, "{}", case.scenario);
+            assert!(repeated_requested_at > requested_at, "{}", case.scenario);
             env.run_spdm_controller_iteration_no_requeue().await;
             for device in &devices {
                 let snapshot = db::attestation::spdm::load_snapshot_for_machine_and_device_id(
@@ -1613,7 +1842,7 @@ pub(in crate::tests) mod tests {
                 assert!(snapshot.completed_at.is_some(), "{}", case.scenario);
                 assert!(
                     snapshot.evidence.is_none(),
-                    "cancelled jobs must not read evidence"
+                    "resolved jobs must not read evidence"
                 );
             }
         }

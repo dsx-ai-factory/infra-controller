@@ -22,7 +22,8 @@ use carbide_test_harness::test_support::fixture_config::{
     FixtureDefault as _, MOCK_HOST_HARDWARE_CLASS,
 };
 use carbide_uuid::machine::MachineId;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
+use config_version::ConfigVersion;
 use model::attestation::profile::{
     AttestationPolicyDocument, AttesterSelection, AttesterSelectionMode, ComponentIdMatch,
 };
@@ -76,7 +77,7 @@ async fn matching_spdm_jobs_poll_latest_machine_results(pool: sqlx::PgPool) -> e
     let cases = [
         Case {
             scenario: "a cancelled job reports only current selected failures from another job",
-            job_state: SpdmAttestationState::Cancelled,
+            job_state: SpdmAttestationState::Waived,
             gpu_0_state: SpdmAttestationState::Passed,
             gpu_1_state: SpdmAttestationState::Failed("selected current failure".to_string()),
             expected: Expected::Failed,
@@ -91,7 +92,7 @@ async fn matching_spdm_jobs_poll_latest_machine_results(pool: sqlx::PgPool) -> e
         Case {
             scenario: "a cancelled machine advances after a passed job",
             job_state: SpdmAttestationState::Passed,
-            gpu_0_state: SpdmAttestationState::Cancelled,
+            gpu_0_state: SpdmAttestationState::Waived,
             gpu_1_state: SpdmAttestationState::Passed,
             expected: Expected::Advance,
         },
@@ -399,11 +400,21 @@ async fn spdm_job_creation_is_atomic_with_polling_state(pool: PgPool) -> eyre::R
 
 /// Membership changes restart terminal jobs, while active jobs keep polling without Redfish.
 #[sqlx_test]
-async fn changed_spdm_attesters_cancel_and_restart_jobs(pool: PgPool) -> eyre::Result<()> {
+async fn changed_spdm_attesters_retire_jobs_and_restart_attestation(
+    pool: PgPool,
+) -> eyre::Result<()> {
     struct Case {
         scenario: &'static str,
         job_devices: Vec<(&'static str, SpdmAttestationState)>,
         selected_devices: &'static [&'static str],
+    }
+    #[derive(sqlx::FromRow)]
+    struct PreviousDevice {
+        device_id: String,
+        state: sqlx::types::Json<SpdmAttestationState>,
+        state_version: ConfigVersion,
+        cancellation_requested_at: Option<DateTime<Utc>>,
+        completed_at: Option<DateTime<Utc>>,
     }
     let cases = [
         Case {
@@ -412,7 +423,7 @@ async fn changed_spdm_attesters_cancel_and_restart_jobs(pool: PgPool) -> eyre::R
             selected_devices: &["HGX_IRoT_GPU_0", "HGX_IRoT_GPU_1"],
         },
         Case {
-            scenario: "removing a failed attester cancels the terminal job",
+            scenario: "removing a failed attester retires the completed job",
             job_devices: vec![
                 ("HGX_IRoT_GPU_0", SpdmAttestationState::Passed),
                 (
@@ -423,17 +434,17 @@ async fn changed_spdm_attesters_cancel_and_restart_jobs(pool: PgPool) -> eyre::R
             selected_devices: &["HGX_IRoT_GPU_0"],
         },
         Case {
-            scenario: "a replacement with the same device count still restarts the job",
-            job_devices: vec![("HGX_IRoT_GPU_0", SpdmAttestationState::Passed)],
+            scenario: "a replacement with the same device count retires a waived job",
+            job_devices: vec![("HGX_IRoT_GPU_0", SpdmAttestationState::Waived)],
             selected_devices: &["HGX_IRoT_GPU_1"],
         },
         Case {
-            scenario: "an empty selection waits for completion, then cancels and skips without contacting the BMC",
+            scenario: "an empty selection waits for completion, then retires the job and skips without contacting the BMC",
             job_devices: vec![("HGX_IRoT_GPU_0", SpdmAttestationState::FetchMetadata)],
             selected_devices: &[],
         },
     ];
-    let (mut env, mh) = setup_spdm_host(pool, true).await;
+    let (mut env, mh) = setup_spdm_host(pool.clone(), true).await;
     let machine_id: MachineId = mh.host.id.into();
     let trigger_state = ManagedHostState::HostInit {
         machine_state: MachineState::SpdmMeasuring {
@@ -481,18 +492,20 @@ async fn changed_spdm_attesters_cancel_and_restart_jobs(pool: PgPool) -> eyre::R
         for (device_id, state) in &case.job_devices {
             sqlx::query(
                 "INSERT INTO spdm_machine_devices_attestation
-                 (machine_id, device_id, nonce, state, job_id, started_at)
-                 VALUES ($1, $2, gen_random_uuid(), $3, $4, now() - interval '1 minute')",
+                 (machine_id, device_id, nonce, state, job_id, started_at, completed_at, cancelled_at)
+                 VALUES ($1, $2, gen_random_uuid(), $3, $4, now() - interval '1 minute', $5, $6)",
             )
             .bind(machine_id)
             .bind(device_id)
             .bind(sqlx::types::Json(state))
             .bind(job_id)
+            .bind((!matches!(state, SpdmAttestationState::FetchMetadata)).then(Utc::now))
+            .bind(matches!(state, SpdmAttestationState::Waived).then(Utc::now))
             .execute(&mut *txn)
             .await?;
         }
         // Existing evidence elsewhere cannot substitute for membership in the polled job.
-        // This job must also remain uncancelled when the polled job is replaced.
+        // This job must remain unchanged when the polled job is replaced.
         sqlx::query(
             "INSERT INTO spdm_machine_devices_attestation
              (machine_id, device_id, nonce, state, job_id, started_at)
@@ -547,7 +560,7 @@ async fn changed_spdm_attesters_cancel_and_restart_jobs(pool: PgPool) -> eyre::R
             assert!(
                 attestations
                     .iter()
-                    .all(|attester| attester.cancelled_at.is_none()),
+                    .all(|attester| attester.cancellation_requested_at.is_none()),
                 "{}: active polling must not request cancellation",
                 case.scenario
             );
@@ -566,8 +579,16 @@ async fn changed_spdm_attesters_cancel_and_restart_jobs(pool: PgPool) -> eyre::R
                 .set_create_client_error("the BMC cannot be reached");
         }
 
+        // Capture final results before the controller retires the terminal job.
+        let previous_devices = sqlx::query_as::<_, PreviousDevice>(
+            "SELECT device_id, state, state_version, cancelled_at AS cancellation_requested_at, completed_at
+             FROM spdm_machine_devices_attestation WHERE job_id = $1",
+        )
+        .bind(job_id)
+        .fetch_all(&pool)
+        .await?;
         env.run_single_iteration().await;
-        // Reload both effects: cancellation and the lifecycle transition must be persisted together.
+        // Reload the lifecycle restart and verify that the old job remains unchanged.
         let mut txn = env.test_harness.db_txn().await;
         let machine = mh.host.db_machine(&mut txn).await;
         assert_eq!(machine.current_state(), &trigger_state, "{}", case.scenario);
@@ -579,20 +600,48 @@ async fn changed_spdm_attesters_cancel_and_restart_jobs(pool: PgPool) -> eyre::R
             "{}",
             case.scenario
         );
-        assert!(
-            old_attestations
-                .iter()
-                .all(|attester| attester.cancelled_at.is_some()),
-            "{}: every old job device must have a cancellation request",
-            case.scenario
-        );
+        for previous in previous_devices {
+            let snapshot = db::attestation::spdm::load_snapshot_for_machine_and_device_id(
+                &mut txn,
+                &machine_id,
+                &previous.device_id,
+                &job_id,
+            )
+            .await?;
+            assert_eq!(
+                snapshot.state_version.version_nr(),
+                previous.state_version.version_nr(),
+                "{}",
+                case.scenario
+            );
+            assert_eq!(
+                snapshot.cancellation_requested_at, previous.cancellation_requested_at,
+                "{}",
+                case.scenario
+            );
+            assert_eq!(
+                snapshot.cancellation_target,
+                previous
+                    .cancellation_requested_at
+                    .map(|_| model::attestation::spdm::SpdmCancellationTarget::Waive),
+                "{}",
+                case.scenario
+            );
+            assert_eq!(snapshot.state, previous.state.0, "{}", case.scenario);
+            assert_eq!(
+                snapshot.completed_at, previous.completed_at,
+                "{}",
+                case.scenario
+            );
+        }
         let other_attestations =
             db::attestation::spdm::get_attestations_for_job_id(&mut txn, &other_job_id).await?;
         assert!(
             other_attestations
                 .iter()
-                .all(|attester| attester.cancelled_at.is_none()),
-            "{}: unrelated jobs must remain uncancelled",
+                .all(|attester| attester.state == SpdmAttestationState::Passed
+                    && attester.cancellation_requested_at.is_none()),
+            "{}: unrelated jobs must remain unchanged",
             case.scenario
         );
         txn.commit().await?;
@@ -713,6 +762,7 @@ async fn failed_spdm_recovery_checks_current_attesters(pool: PgPool) -> eyre::Re
         source: StateMachineArea,
         expected: Option<ManagedHostState>,
         selection_mode: AttesterSelectionMode,
+        requests: &'static [model::attestation::spdm::SpdmCancellationTarget],
     }
     let passed_case = || Case {
         scenario: "a stale failed device absent from the BMC does not block selected passes",
@@ -722,6 +772,7 @@ async fn failed_spdm_recovery_checks_current_attesters(pool: PgPool) -> eyre::Re
             machine_state: MachineState::WaitingForDiscovery,
         }),
         selection_mode: AttesterSelectionMode::Allowlist,
+        requests: &[],
     };
     let (mut env, mh) = setup_spdm_host(pool, true).await;
     let machine_id: MachineId = mh.host.id.into();
@@ -729,10 +780,30 @@ async fn failed_spdm_recovery_checks_current_attesters(pool: PgPool) -> eyre::Re
     for case in [
         passed_case(),
         Case {
+            scenario: "a completed failed job resumes ingestion after fail is replaced by waive",
+            states: std::array::from_fn(|_| {
+                Some(SpdmAttestationState::Failed("verification failed".into()))
+            }),
+            requests: &[
+                model::attestation::spdm::SpdmCancellationTarget::Fail,
+                model::attestation::spdm::SpdmCancellationTarget::Waive,
+            ],
+            ..passed_case()
+        },
+        Case {
+            scenario: "replacing a completed waiver with failure keeps recovery waiting",
+            requests: &[
+                model::attestation::spdm::SpdmCancellationTarget::Waive,
+                model::attestation::spdm::SpdmCancellationTarget::Fail,
+            ],
+            expected: None,
+            ..passed_case()
+        },
+        Case {
             scenario: "passed and cancelled devices resume assignment without another job",
             states: [
                 Some(SpdmAttestationState::Passed),
-                Some(SpdmAttestationState::Cancelled),
+                Some(SpdmAttestationState::Waived),
                 Some(SpdmAttestationState::Passed),
             ],
             source: StateMachineArea::MainFlow,
@@ -741,7 +812,7 @@ async fn failed_spdm_recovery_checks_current_attesters(pool: PgPool) -> eyre::Re
         },
         Case {
             scenario: "all cancelled devices resume deprovisioning without another job",
-            states: std::array::from_fn(|_| Some(SpdmAttestationState::Cancelled)),
+            states: std::array::from_fn(|_| Some(SpdmAttestationState::Waived)),
             source: StateMachineArea::AssignedInstance,
             expected: Some(ManagedHostState::WaitingForCleanup {
                 cleanup_state: CleanupState::Init,
@@ -750,10 +821,12 @@ async fn failed_spdm_recovery_checks_current_attesters(pool: PgPool) -> eyre::Re
             ..passed_case()
         },
         Case {
-            scenario: "cancellation does not override a selected failure",
+            scenario: "a failed result keeps recovery waiting despite a waiver on another device",
             states: [
-                Some(SpdmAttestationState::Cancelled),
-                Some(SpdmAttestationState::Failed("still failing".to_string())),
+                Some(SpdmAttestationState::Waived),
+                Some(SpdmAttestationState::Failed(
+                    "verification failed".to_string(),
+                )),
                 Some(SpdmAttestationState::Passed),
             ],
             expected: None,
@@ -847,6 +920,15 @@ async fn failed_spdm_recovery_checks_current_attesters(pool: PgPool) -> eyre::Re
             .execute(&mut *txn)
             .await?;
         }
+        // Resolve requests on already completed rows without scheduling SPDM collection.
+        if !case.requests.is_empty() {
+            sqlx::query("UPDATE spdm_machine_devices_attestation SET completed_at = now() WHERE job_id = $1")
+                .bind(job_id).execute(&mut *txn).await?;
+            for target in case.requests {
+                db::attestation::spdm::request_attestation_cancellation(&mut txn, &job_id, *target)
+                    .await?;
+            }
+        }
         db::machine::update_state(&mut txn, &mh.host.id, &failed_state).await?;
         txn.commit().await?;
         if skip_bmc {
@@ -854,7 +936,14 @@ async fn failed_spdm_recovery_checks_current_attesters(pool: PgPool) -> eyre::Re
                 .set_create_client_error("the BMC cannot be reached");
         }
 
+        let collections_before = env.redfish_sim.evidence_collection_requests().len();
         env.run_single_iteration().await;
+        assert_eq!(
+            env.redfish_sim.evidence_collection_requests().len(),
+            collections_before,
+            "{}: recovery must not collect evidence again",
+            case.scenario
+        );
         // Reload state and outcome so an error cannot masquerade as blocked recovery.
         let mut txn = env.test_harness.db_txn().await;
         let machine = mh.host.db_machine(&mut txn).await;

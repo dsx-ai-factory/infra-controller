@@ -26,9 +26,9 @@ use crate::cfg::dispatch::Dispatch;
 
 #[derive(Dispatch, Parser, Debug)]
 pub(crate) enum Cmd {
-    #[clap(about = "Waive an attestation job after BMC cleanup (recorded as Cancelled)")]
+    #[clap(about = "Request a waiver for an attestation job")]
     Waive(waive::args::Args),
-    #[clap(about = "Fail unfinished device attestations after BMC cleanup")]
+    #[clap(about = "Request failure for an attestation job")]
     Fail(fail::Args),
     #[clap(about = "Get SPDM attestation details for a given job id")]
     Get(get::args::Args),

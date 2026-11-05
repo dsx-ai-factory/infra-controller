@@ -1475,13 +1475,11 @@ type ForgeClient interface {
 	FindInstancesByDpuExtensionService(ctx context.Context, in *FindInstancesByDpuExtensionServiceRequest, opts ...grpc.CallOption) (*FindInstancesByDpuExtensionServiceResponse, error)
 	// SPDM attestation APIs start
 	TriggerMachineAttestation(ctx context.Context, in *SpdmMachineAttestationTriggerRequest, opts ...grpc.CallOption) (*SpdmMachineAttestationTriggerResponse, error)
-	// Requests a waiver, recorded as Cancelled after BMC evidence collection cleanup.
-	// Asynchronous and idempotent. Returns NOT_FOUND for an unknown job and
-	// INVALID_ARGUMENT for an invalid UUID.
+	// Records the latest waiver target, including for terminal jobs. Unfinished devices
+	// finish BMC cleanup before the override takes effect. Later fail or waive calls replace
+	// this request. Returns NOT_FOUND for an unknown job and INVALID_ARGUMENT for an invalid UUID.
 	WaiveAttestation(ctx context.Context, in *UUID, opts ...grpc.CallOption) (*emptypb.Empty, error)
-	// Fails unfinished device attestations after BMC cleanup.
-	// Asynchronous and idempotent; preserves terminal results. Returns NOT_FOUND
-	// for an unknown job and INVALID_ARGUMENT for an invalid UUID.
+	// Records the latest failure target with the same cleanup and replacement semantics.
 	FailAttestation(ctx context.Context, in *UUID, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	ListAttestation(ctx context.Context, in *SpdmListAttestationRequest, opts ...grpc.CallOption) (*SpdmListAttestationResponse, error)
 	GetAttestation(ctx context.Context, in *UUID, opts ...grpc.CallOption) (*SpdmGetAttestationResponse, error)
@@ -8093,13 +8091,11 @@ type ForgeServer interface {
 	FindInstancesByDpuExtensionService(context.Context, *FindInstancesByDpuExtensionServiceRequest) (*FindInstancesByDpuExtensionServiceResponse, error)
 	// SPDM attestation APIs start
 	TriggerMachineAttestation(context.Context, *SpdmMachineAttestationTriggerRequest) (*SpdmMachineAttestationTriggerResponse, error)
-	// Requests a waiver, recorded as Cancelled after BMC evidence collection cleanup.
-	// Asynchronous and idempotent. Returns NOT_FOUND for an unknown job and
-	// INVALID_ARGUMENT for an invalid UUID.
+	// Records the latest waiver target, including for terminal jobs. Unfinished devices
+	// finish BMC cleanup before the override takes effect. Later fail or waive calls replace
+	// this request. Returns NOT_FOUND for an unknown job and INVALID_ARGUMENT for an invalid UUID.
 	WaiveAttestation(context.Context, *UUID) (*emptypb.Empty, error)
-	// Fails unfinished device attestations after BMC cleanup.
-	// Asynchronous and idempotent; preserves terminal results. Returns NOT_FOUND
-	// for an unknown job and INVALID_ARGUMENT for an invalid UUID.
+	// Records the latest failure target with the same cleanup and replacement semantics.
 	FailAttestation(context.Context, *UUID) (*emptypb.Empty, error)
 	ListAttestation(context.Context, *SpdmListAttestationRequest) (*SpdmListAttestationResponse, error)
 	GetAttestation(context.Context, *UUID) (*SpdmGetAttestationResponse, error)

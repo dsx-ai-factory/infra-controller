@@ -772,18 +772,19 @@ is present. `--format` is a root-level flag and must precede the command path:
 ### 6.5 What editing a profile does not do
 
 A job keeps the devices selected when it was created. Editing or deleting a
-profile does not rewrite that job's device records or results.
+profile does not add or remove device records from an existing job.
 
 The managed-host controller polls its job's database status without contacting
 the BMC while the job is in progress. Once the job has passed, failed, or been
-cancelled, it rechecks the selected device IDs before accepting the results.
-If that set changes, including becoming empty, it requests cancellation and
-returns to scheduling. An empty selection then follows the skip path. If the
-selected IDs stay the same, it evaluates their latest results.
+waived, it rechecks the selected device IDs before accepting the results.
+If that set changes, including becoming empty, it returns to scheduling without
+modifying the old job or its cancellation request. Stored device outcomes and
+completion timestamps stay unchanged. An empty selection then follows
+the skip path. If the selected IDs stay the same, it evaluates their latest results.
 
 Device removals and profile edits therefore do not restart an in-progress job.
 If a removed device leaves the job stuck, use `attestation spdm job fail` with
-that job's ID. Unfinished devices fail after BMC cleanup, allowing the controller
+that job's ID. Unfinished devices are resolved as failed after BMC cleanup, allowing the controller
 to recheck the selection. If the selected IDs still match, failed latest results
 put the machine in its attestation failure state; a successful new run can let it
 recover. See [job fail semantics](spdm-jobs.md#progress-waivers-and-failure).
@@ -791,7 +792,7 @@ A new manual trigger creates a separate job and does not replace the job the
 managed-host controller is waiting for. The final selection check requires
 the BMC to respond when the resolved profile needs inventory; BMC errors leave
 the machine polling for a later retry. Jobs started directly through the
-trigger API are not automatically cancelled by profile edits.
+trigger API are not automatically invalidated by profile edits.
 
 ## 7 Storage
 
@@ -1116,7 +1117,11 @@ is attesting under".
 were scheduled, including a `PartiallySatisfied` outcome. Use it with
 `GetAttestation` to read that job's device details in
 `SpdmGetAttestationResponse`, with `WaiveAttestation` to request a waiver,
-or with `FailAttestation` to fail unfinished work after BMC cleanup.
+or with `FailAttestation` to request failure. Either request may replace the
+previous target, including after completion. Terminal devices immediately count
+as waived or failed for status and recovery; unfinished devices finish BMC cleanup
+first. Stored attestation results and completion timestamps remain unchanged.
+See [job resolution semantics](spdm-jobs.md#progress-waivers-and-failure).
 
 `started_at` records when the job's device rows were written. Every row in the
 job carries the same value, also returned as `SpdmAttestationDetails.started_at`.
