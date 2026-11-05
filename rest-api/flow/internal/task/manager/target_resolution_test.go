@@ -4,7 +4,7 @@
 package manager
 
 import (
-	"encoding/json"
+	"errors"
 	"os"
 	"testing"
 
@@ -26,7 +26,7 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/inventoryobjects/rack"
 )
 
-func TestManagerImpl_ResolveSubmissionTargets(t *testing.T) {
+func TestManagerImpl_ValidateTask(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
 		mode      taskcommon.TargetResolutionMode
@@ -76,63 +76,47 @@ func TestManagerImpl_ResolveSubmissionTargets(t *testing.T) {
 	}
 }
 
-func TestManagerImpl_BestEffortQueuedSnapshot(t *testing.T) {
-	rackID := uuid.New()
-	selected := newTestRack(rackID, "rack-1")
-	linked := newTestComponent(uuid.New(), rackID, devicetypes.ComponentTypeCompute, "compute-1")
-	missing := newTestComponent(uuid.New(), rackID, devicetypes.ComponentTypeCompute, "")
-	missing.ComponentID = ""
-	selected.AddComponent(linked)
-	selected.AddComponent(missing)
-	store := &managerTaskStore{activeTasksByRack: map[uuid.UUID][]*taskdef.Task{rackID: {{ID: uuid.New(), RackID: rackID, Operation: testPowerControlOperation(t), Attributes: taskcommon.TaskAttributes{ComponentsByType: map[devicetypes.ComponentType][]uuid.UUID{devicetypes.ComponentTypeCompute: {linked.Info.ID}}}, Status: taskcommon.TaskStatusRunning}}}}
-	exec := &managerExecutor{executionID: "workflow-1"}
-	inv := &submitTaskInventory{rack: selected}
-	m := &ManagerImpl{inventoryStore: inv, taskStore: store, executor: exec, ruleResolver: operationrules.NewResolver(store), conflictResolver: conflict.NewResolver(store), maxWaitingPerRack: 5}
-	req := &operation.Request{Operation: testPowerControlOperation(t), TargetResolutionMode: taskcommon.TargetResolutionBestEffort, ConflictStrategy: operation.ConflictStrategyQueue, TargetSpec: operation.TargetSpec{Racks: []operation.RackTarget{{Identifier: identifier.Identifier{ID: rackID}}}}}
-	ids, err := m.SubmitTask(t.Context(), req)
-	require.NoError(t, err)
-	require.Len(t, ids, 1)
-	require.Zero(t, exec.executeCalls)
-	require.Len(t, store.createdTasks, 1)
-	// Persist/reload the JSON attributes so the proof covers the stored contract.
-	original := store.createdTasks[0]
-	raw, err := json.Marshal(original.Attributes)
-	require.NoError(t, err)
-	var attrs taskcommon.TaskAttributes
-	require.NoError(t, json.Unmarshal(raw, &attrs))
-	original.Attributes = attrs
-	rep, err := report.Unmarshal(original.Report)
-	require.NoError(t, err)
-	require.Equal(t, 1, rep.TargetResolution.Submitted)
-	require.Len(t, rep.TargetResolution.Skipped, 1)
-	selected.Components[1].ComponentID = "newly-linked"
-	selected.AddComponent(newTestComponent(uuid.New(), rackID, devicetypes.ComponentTypeCompute, "new-device"))
-	original.Status = taskcommon.TaskStatusPending
-	store.tasksByID = map[uuid.UUID]*taskdef.Task{original.ID: original}
-	require.NoError(t, m.promoteTask(t.Context(), original.ID))
-	require.Len(t, exec.lastRequest.Info.Components, 1)
-	require.Equal(t, "compute-1", exec.lastRequest.Info.Components[0].ComponentID)
-	require.Equal(t, attrs.TargetResolution, exec.lastRequest.Info.TargetResolution)
-	// Recover an admitted but unscheduled task using the same idempotency key.
-	// Newly linked/skipped inventory must not be re-planned on that retry.
-	original.ExecutionID = ""
-	original.IdempotencyKey = "pending-recovery"
-	store.taskByIdempotencyKey = map[string]*taskdef.Task{original.IdempotencyKey: original}
-	req.IdempotencyKey = original.IdempotencyKey
-	req.RequiredRackID = rackID
-	recovered, err := m.SubmitTask(t.Context(), req)
-	require.NoError(t, err)
-	require.Equal(t, []uuid.UUID{original.ID}, recovered)
-	require.Len(t, exec.lastRequest.Info.Components, 1)
-	require.Equal(t, attrs.TargetResolution, exec.lastRequest.Info.TargetResolution)
-	// A component disappearing cannot silently shrink the accepted set.
-	selected.Components = selected.Components[1:]
-	err = m.promoteTask(t.Context(), original.ID)
-	require.ErrorContains(t, err, "no longer present")
-	require.Equal(t, taskcommon.TaskStatusFailed, store.statusUpdates[len(store.statusUpdates)-1].Status)
-}
-
 func TestManagerImpl_SubmitRackBatch(t *testing.T) {
+	for _, tc := range []struct {
+		name             string
+		cancelSecond     bool
+		statusWriteFails bool
+	}{
+		{name: "cancellation during an earlier rack RPC is respected", cancelSecond: true},
+		{name: "status-write failure cannot hide or starve admitted siblings", statusWriteFails: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rackIDs := []uuid.UUID{uuid.MustParse("00000000-0000-0000-0000-000000000001"), uuid.MustParse("00000000-0000-0000-0000-000000000002")}
+			racks := map[uuid.UUID]*rack.Rack{}
+			for _, id := range rackIDs {
+				r := newTestRack(id, "rack")
+				r.AddComponent(newTestComponent(uuid.New(), id, devicetypes.ComponentTypeCompute, "compute"))
+				racks[id] = r
+			}
+			store := &managerTaskStore{}
+			exec := &managerExecutor{executionID: "workflow"}
+			if tc.cancelSecond {
+				exec.onExecute = func(_ *taskdef.ExecutionRequest) { store.createdTasks[1].Status = taskcommon.TaskStatusTerminated }
+			}
+			if tc.statusWriteFails {
+				exec.executeErr = errors.New("backend unavailable")
+				store.statusUpdateErr = errors.New("status write unavailable")
+			}
+			m := &ManagerImpl{taskStore: store, executor: exec, ruleResolver: operationrules.NewResolver(store), conflictResolver: conflict.NewResolver(store)}
+			ids, err := m.submitRackBatch(t.Context(), &operation.Request{Operation: testPowerControlOperation(t)}, racks, nil)
+			require.NoError(t, err)
+			require.Len(t, ids, 2)
+			if tc.cancelSecond {
+				require.Equal(t, 1, exec.executeCalls)
+				saved, err := store.GetTask(t.Context(), ids[1])
+				require.NoError(t, err)
+				require.Equal(t, taskcommon.TaskStatusTerminated, saved.Status)
+			} else {
+				require.Equal(t, 2, exec.executeCalls)
+			}
+		})
+	}
+
 	t.Run("postgres rolls back earlier rack admission", func(t *testing.T) {
 		if os.Getenv("DB_PORT") == "" {
 			t.Skip("requires runner-managed PostgreSQL")

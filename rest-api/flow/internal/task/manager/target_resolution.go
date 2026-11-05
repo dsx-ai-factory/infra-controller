@@ -108,14 +108,17 @@ func (m *ManagerImpl) submitRackBatch(ctx context.Context, req *operation.Reques
 	err := m.taskStore.RunInTransaction(ctx, func(txCtx context.Context) error {
 		for _, id := range rackIDs {
 			t := newTaskForRack(req, racks[id], resolutions[id])
-			if err := initializeTargetReport(&t); err != nil {
-				return err
+			initializeErr := initializeTargetReport(&t)
+			if initializeErr != nil {
+				return initializeErr
 			}
-			if err := m.lockRackAndResolveConflict(txCtx, req, racks[id], &t); err != nil {
-				return err
+			conflictErr := m.lockRackAndResolveConflict(txCtx, req, racks[id], &t)
+			if conflictErr != nil {
+				return conflictErr
 			}
-			if err := m.taskStore.CreateTask(txCtx, &t); err != nil {
-				return err
+			createErr := m.taskStore.CreateTask(txCtx, &t)
+			if createErr != nil {
+				return createErr
 			}
 			tasks = append(tasks, t)
 		}
@@ -128,19 +131,35 @@ func (m *ManagerImpl) submitRackBatch(ctx context.Context, req *operation.Reques
 	for i := range tasks {
 		ids[i] = tasks[i].ID
 	}
-	for i := range tasks {
-		t := &tasks[i]
-		if t.Status == taskcommon.TaskStatusWaiting {
+
+	// Earlier rack RPCs can yield while a later task is cancelled. Reload each
+	// task immediately before dispatch instead of using its admission-time status.
+	// Dispatch shares the caller's deadline; after admission, bookkeeping errors
+	// must not hide the batch's durable IDs or prevent remaining dispatch attempts.
+	for _, id := range ids {
+		t, loadErr := m.taskStore.GetTask(ctx, id)
+		if loadErr != nil {
+			log.Error().Err(loadErr).Str("task_id", id.String()).Msg("could not reload admitted task before dispatch")
 			continue
 		}
-		if err := m.resolveAndExecuteTask(ctx, t, racks[t.RackID]); err != nil {
-			if !t.IsScheduled() && t.Status != taskcommon.TaskStatusWaiting {
-				if updateErr := m.taskStore.UpdateTaskStatus(ctx, &taskdef.TaskStatusUpdate{ID: t.ID, Status: taskcommon.TaskStatusFailed, Message: message.ForFailure(err)}); updateErr != nil {
-					return ids, fmt.Errorf("record admitted task failure: %w", updateErr)
-				}
-			}
-			log.Error().Err(err).Str("task_id", t.ID.String()).Msg("admitted task could not be scheduled")
+		if t == nil {
+			log.Error().Str("task_id", id.String()).Msg("admitted task was not found before dispatch")
+			continue
 		}
+		if t.IsScheduled() || t.Status != taskcommon.TaskStatusPending {
+			continue
+		}
+		executionErr := m.resolveAndExecuteTask(ctx, t, racks[t.RackID])
+		if executionErr == nil {
+			continue
+		}
+		if !t.IsScheduled() && t.Status != taskcommon.TaskStatusWaiting {
+			updateErr := m.taskStore.UpdateTaskStatus(ctx, &taskdef.TaskStatusUpdate{ID: t.ID, Status: taskcommon.TaskStatusFailed, Message: message.ForFailure(executionErr)})
+			if updateErr != nil {
+				log.Error().Err(updateErr).Str("task_id", t.ID.String()).Msg("could not record admitted task scheduling failure")
+			}
+		}
+		log.Error().Err(executionErr).Str("task_id", t.ID.String()).Msg("admitted task could not be scheduled")
 	}
 	return ids, nil
 }

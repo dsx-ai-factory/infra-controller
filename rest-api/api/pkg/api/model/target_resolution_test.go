@@ -33,7 +33,7 @@ func TestTargetResolutionMode_Validate(t *testing.T) {
 	}
 }
 
-func TestAPITaskReportV1_TargetResolution(t *testing.T) {
+func TestAPITaskReportV1_UnmarshalJSON(t *testing.T) {
 	var rep APITaskReportV1
 	require.NoError(t, json.Unmarshal([]byte(`{"version":1,"stages":[],"target_resolution":{"mode":"BestEffort","selected":2,"submitted":1,"skipped":[{"component_id":"550e8400-e29b-41d4-a716-446655440000","component_type":"Compute","slot_id":9,"tray_index":2,"host_id":1,"reason":"unaddressable_target"}]}}`), &rep))
 	require.NotNil(t, rep.TargetResolution)
@@ -52,28 +52,4 @@ func TestAPITaskReportV1_TargetResolution(t *testing.T) {
 	raw, err = json.Marshal(rep)
 	require.NoError(t, err)
 	require.Contains(t, string(raw), `"targetResolution":null`)
-}
-
-func TestAPIUpdatePowerStateRequest_TargetResolutionMode(t *testing.T) {
-	for _, tc := range []struct {
-		name, body string
-		invalid    bool
-	}{
-		{"omitted", `{"siteId":"site","state":"On"}`, false},
-		{"strict", `{"siteId":"site","state":"On","targetResolutionMode":"Strict"}`, false},
-		{"best effort", `{"siteId":"site","state":"On","targetResolutionMode":"BestEffort"}`, false},
-		{"empty", `{"siteId":"site","state":"On","targetResolutionMode":""}`, true},
-		{"unknown", `{"siteId":"site","state":"On","targetResolutionMode":"AllowPartial"}`, true},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			var req APIUpdatePowerStateRequest
-			require.NoError(t, json.Unmarshal([]byte(tc.body), &req))
-			err := req.Validate()
-			if tc.invalid {
-				require.ErrorContains(t, err, "targetResolutionMode")
-				return
-			}
-			require.NoError(t, err)
-		})
-	}
 }

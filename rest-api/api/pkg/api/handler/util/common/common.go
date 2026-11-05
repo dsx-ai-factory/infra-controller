@@ -2092,8 +2092,9 @@ func ExecutePowerControlWorkflow(
 	var mode cam.TargetResolutionMode
 	if len(modes) > 0 && modes[0] != nil {
 		mode = *modes[0]
-		if err := mode.Validate(); err != nil {
-			return nil, cutil.NewAPIError(http.StatusBadRequest, err.Error(), nil)
+		validationErr := mode.Validate()
+		if validationErr != nil {
+			return nil, cutil.NewAPIError(http.StatusBadRequest, validationErr.Error(), nil)
 		}
 	}
 	if mode == cam.TargetResolutionBestEffort {
@@ -2199,8 +2200,9 @@ func ExecuteBringUpRackWorkflow(
 	var mode cam.TargetResolutionMode
 	if len(modes) > 0 && modes[0] != nil {
 		mode = *modes[0]
-		if err := mode.Validate(); err != nil {
-			return nil, cutil.NewAPIError(http.StatusBadRequest, err.Error(), nil)
+		validationErr := mode.Validate()
+		if validationErr != nil {
+			return nil, cutil.NewAPIError(http.StatusBadRequest, validationErr.Error(), nil)
 		}
 	}
 	if mode == cam.TargetResolutionBestEffort {
@@ -2260,8 +2262,9 @@ func ExecuteFirmwareUpdateWorkflow(
 	var mode cam.TargetResolutionMode
 	if len(modes) > 0 && modes[0] != nil {
 		mode = *modes[0]
-		if err := mode.Validate(); err != nil {
-			return nil, cutil.NewAPIError(http.StatusBadRequest, err.Error(), nil)
+		validationErr := mode.Validate()
+		if validationErr != nil {
+			return nil, cutil.NewAPIError(http.StatusBadRequest, validationErr.Error(), nil)
 		}
 	}
 	if mode == cam.TargetResolutionBestEffort {

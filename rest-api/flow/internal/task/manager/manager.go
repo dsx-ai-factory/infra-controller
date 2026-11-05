@@ -595,8 +595,9 @@ func (m *ManagerImpl) createAndExecuteTask(
 	}
 
 	task := newTaskForRack(req, targetRack, resolutions...)
-	if err := initializeTargetReport(&task); err != nil {
-		return uuid.Nil, err
+	initializeErr := initializeTargetReport(&task)
+	if initializeErr != nil {
+		return uuid.Nil, initializeErr
 	}
 
 	// Check for conflicts inside a transaction to avoid a race between the
@@ -668,8 +669,9 @@ func (m *ManagerImpl) createAndExecuteIdempotentTask(
 			} else {
 				// No existing tasks with this idempotency key, create a new one.
 				task = newTaskForRack(req, targetRack, resolutions...)
-				if err := initializeTargetReport(&task); err != nil {
-					return err
+				initializeErr := initializeTargetReport(&task)
+				if initializeErr != nil {
+					return initializeErr
 				}
 				if err := m.lockRackAndResolveConflict(txCtx, req, targetRack, &task); err != nil {
 					return err
@@ -844,7 +846,8 @@ func (m *ManagerImpl) promoteTask(ctx context.Context, taskID uuid.UUID) error {
 	targetRack, err := m.loadRackForTask(ctx, task)
 	if err != nil {
 		if task.Attributes.TargetResolution != nil {
-			if updateErr := m.taskStore.UpdateTaskStatus(ctx, &taskdef.TaskStatusUpdate{ID: task.ID, Status: taskcommon.TaskStatusFailed, Message: message.ForFailure(err)}); updateErr != nil {
+			updateErr := m.taskStore.UpdateTaskStatus(ctx, &taskdef.TaskStatusUpdate{ID: task.ID, Status: taskcommon.TaskStatusFailed, Message: message.ForFailure(err)})
+			if updateErr != nil {
 				return fmt.Errorf("record target snapshot failure: %w", errors.Join(err, updateErr))
 			}
 		}

@@ -7,8 +7,10 @@ import (
 	"encoding/json"
 	"testing"
 
-	flowv1 "github.com/NVIDIA/infra-controller/rest-api/proto/flow/gen/v1"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	flowv1 "github.com/NVIDIA/infra-controller/rest-api/proto/flow/gen/v1"
 )
 
 func TestAPIUpdatePowerStateRequest_OverrideReadinessCheck(t *testing.T) {
@@ -22,6 +24,31 @@ func TestAPIUpdatePowerStateRequest_OverrideReadinessCheck(t *testing.T) {
 }
 
 func TestAPIUpdatePowerStateRequest_Validate(t *testing.T) {
+	t.Run("target resolution mode", func(t *testing.T) {
+		for _, tc := range []struct {
+			name, body string
+			invalid    bool
+		}{
+			{"omitted", `{"siteId":"site","state":"On"}`, false},
+			{"strict", `{"siteId":"site","state":"On","targetResolutionMode":"Strict"}`, false},
+			{"best effort", `{"siteId":"site","state":"On","targetResolutionMode":"BestEffort"}`, false},
+			{"empty", `{"siteId":"site","state":"On","targetResolutionMode":""}`, true},
+			{"unknown", `{"siteId":"site","state":"On","targetResolutionMode":"AllowPartial"}`, true},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				var req APIUpdatePowerStateRequest
+				require.NoError(t, json.Unmarshal([]byte(tc.body), &req))
+				err := req.Validate()
+				if tc.invalid {
+					require.ErrorContains(t, err, "targetResolutionMode")
+					return
+				}
+				require.NoError(t, err)
+			})
+		}
+
+	})
+
 	states := []struct {
 		canonical string
 		legacy    string
