@@ -649,10 +649,114 @@ func TestRunGeneratedCommand(t *testing.T) {
 				assert.Equal(t, []string{" Ready,Error ", "Pending", "-Leading"}, observed["status"])
 			},
 		},
+		// Alternate interfaces must reject a following flag consumed as a missing value.
+		{
+			name: "missing repeated value rejected before request",
+			run: func(t *testing.T) {
+				spec, err := ParseSpec(openapi.Spec)
+				require.NoError(t, err)
+
+				var requestCount atomic.Int32
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+					requestCount.Add(1)
+					w.WriteHeader(http.StatusNoContent)
+				}))
+				t.Cleanup(server.Close)
+				client := NewClient(server.URL, "test-org", "test-token", nil, false)
+
+				err = RunGeneratedCommand(
+					spec,
+					client,
+					"vpc-peering list",
+					[]string{"--status", "--output=json"},
+				)
+				require.ErrorContains(t, err, "flag needs an argument")
+				assert.Zero(t, requestCount.Load())
+			},
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, tt.run)
+	}
+}
+
+func TestValidateMissingFlagValues(t *testing.T) {
+	commands := []*cli.Command{
+		{
+			Name:    "resource",
+			Aliases: []string{"r"},
+			Subcommands: []*cli.Command{
+				{
+					Name:    "list",
+					Aliases: []string{"ls"},
+					Flags: []cli.Flag{
+						&cli.StringSliceFlag{Name: "status"},
+						&cli.StringFlag{Name: "output"},
+						&cli.BoolFlag{Name: "verbose"},
+					},
+				},
+			},
+		},
+	}
+	tests := []struct {
+		name      string
+		args      []string
+		wantError string
+	}{
+		// A recognized flag cannot satisfy the preceding value-taking flag.
+		{
+			name:      "missing value before recognized flag",
+			args:      []string{"resource", "list", "--status", "--output=json"},
+			wantError: "flag needs an argument: -status",
+		},
+		// Equals syntax makes a leading-dash value unambiguous.
+		{
+			name: "explicit leading-dash value",
+			args: []string{"resource", "list", "--status=-Ready", "--output=json"},
+		},
+		// A non-flag token is consumed as the preceding flag's value.
+		{
+			name: "separate consumed value token",
+			args: []string{"resource", "list", "--status", "Ready", "--output=json"},
+		},
+		// Command aliases follow the same leaf flag contract.
+		{
+			name:      "command aliases",
+			args:      []string{"r", "ls", "--status", "--output=json"},
+			wantError: "flag needs an argument: -status",
+		},
+		// Once a value has been consumed, the separator ends option parsing.
+		{
+			name: "separator after consumed value",
+			args: []string{"resource", "list", "--status", "Ready", "--", "--output=json"},
+		},
+		// A separator encountered while no value is pending ends flag parsing.
+		{
+			name: "separator ends flag parsing",
+			args: []string{"resource", "list", "--", "--status", "--output=json"},
+		},
+		// The parser consumes a separator token when a preceding flag still needs a value.
+		{
+			name: "separator consumed as value",
+			args: []string{"resource", "list", "--status", "--", "--output=json"},
+		},
+		// A positional token ends stdlib flag parsing; misplaced flags are handled separately.
+		{
+			name: "positional ends flag parsing",
+			args: []string{"resource", "list", "machine-1", "--status", "--output=json"},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := validateMissingFlagValues(test.args, commands)
+			if test.wantError != "" {
+				require.ErrorContains(t, err, test.wantError)
+				return
+			}
+			require.NoError(t, err)
+		})
 	}
 }
 
@@ -1734,6 +1838,12 @@ func testNewAppPreservesRepeatedQueryFlags(t *testing.T) {
 			command:   []string{"vpc-peering", "list", "--status", "Ready", "--status", "Error", "--output", "json"},
 			wantPath:  "/v2/org/test-org/nico/vpc-peering",
 			wantQuery: url.Values{"status": {"Ready", "Error"}},
+		},
+		// A following flag cannot be consumed as the missing repeated value.
+		{
+			name:      "missing repeated string value",
+			command:   []string{"vpc-peering", "list", "--status", "--output=json"},
+			wantError: "flag needs an argument",
 		},
 		// One occurrence remains one exact value even when it contains spaces and a comma.
 		{

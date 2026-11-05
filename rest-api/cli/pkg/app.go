@@ -106,6 +106,10 @@ func NewApp(specData []byte) (*cli.App, error) {
 		},
 		Commands: commands,
 		Before: func(c *cli.Context) error {
+			err := validateMissingFlagValues(c.Args().Slice(), commands)
+			if err != nil {
+				return err
+			}
 			if cfg := c.String("config"); cfg != "" {
 				SetConfigPath(cfg)
 			}

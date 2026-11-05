@@ -313,11 +313,78 @@ func RunGeneratedCommand(spec *Spec, client *Client, name string, args []string)
 		Name:                      binaryName,
 		Commands:                  commands,
 		DisableSliceFlagSeparator: true,
+		Before: func(c *cli.Context) error {
+			return validateMissingFlagValues(c.Args().Slice(), commands)
+		},
 	}
 	appArgs := []string{binaryName}
 	appArgs = append(appArgs, strings.Fields(name)...)
 	appArgs = append(appArgs, args...)
 	return app.Run(appArgs)
+}
+
+// validateMissingFlagValues prevents urfave/cli from consuming a following
+// recognized flag as the value of a value-taking leaf flag. Values supplied in
+// --flag=value form are unambiguous and remain untouched, including values
+// whose first character is a dash.
+func validateMissingFlagValues(args []string, commands []*cli.Command) error {
+	var command *cli.Command
+	for len(args) > 0 {
+		var nextCommand *cli.Command
+		for _, candidate := range commands {
+			if candidate.HasName(args[0]) {
+				nextCommand = candidate
+				break
+			}
+		}
+		if nextCommand == nil {
+			break
+		}
+		command = nextCommand
+		args = args[1:]
+		commands = command.Subcommands
+	}
+	if command == nil {
+		return nil
+	}
+
+	valueFlags := make(map[string]bool)
+	knownFlags := make(map[string]bool)
+	for _, commandFlag := range command.Flags {
+		takesValue := false
+		documentedFlag, ok := commandFlag.(cli.DocGenerationFlag)
+		if ok {
+			takesValue = documentedFlag.TakesValue()
+		}
+		for _, name := range commandFlag.Names() {
+			valueFlags[name] = takesValue
+			knownFlags[name] = true
+		}
+	}
+
+	flagName := func(value string) string {
+		name, _, _ := strings.Cut(strings.TrimLeft(value, "-"), "=")
+		return name
+	}
+	for index := 0; index < len(args); index++ {
+		argument := args[index]
+		if argument == "--" || !strings.HasPrefix(argument, "-") {
+			break
+		}
+		if strings.Contains(argument, "=") {
+			continue
+		}
+		name := flagName(argument)
+		if !valueFlags[name] || index+1 >= len(args) {
+			continue
+		}
+		next := args[index+1]
+		if strings.HasPrefix(next, "-") && knownFlags[flagName(next)] {
+			return fmt.Errorf("flag needs an argument: -%s", name)
+		}
+		index++
+	}
+	return nil
 }
 
 func buildCommands(spec *Spec, options commandBuildOptions) []*cli.Command {
@@ -1490,7 +1557,8 @@ func isRepeatableQueryParameter(operationID string, p Parameter) bool {
 	if p.Schema != nil && p.Schema.Type == "array" {
 		return true
 	}
-	if _, ok := repeatableQueryParameters[queryParameterKey{operationID: operationID, name: p.Name}]; ok {
+	_, ok := repeatableQueryParameters[queryParameterKey{operationID: operationID, name: p.Name}]
+	if ok {
 		return true
 	}
 	// Legacy scalar schemas state repeatability in their descriptions.
