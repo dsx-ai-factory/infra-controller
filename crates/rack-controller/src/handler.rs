@@ -164,9 +164,8 @@ impl RackStateHandler {
             RackState::Error {
                 cause,
                 recovery_policy,
-                source,
                 ..
-            } => handle_error(id, state, &config, cause, *recovery_policy, *source, ctx).await,
+            } => handle_error(id, state, &config, cause, *recovery_policy, ctx).await,
             RackState::Deleting => handle_deleting().await,
         }
     }

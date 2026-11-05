@@ -19,9 +19,9 @@
 
 use carbide_rack_controller::context::RackStateHandlerContextObjects;
 use carbide_rack_controller::maintenance::first_maintenance_state;
-use carbide_rack_controller::ready::{all_components_ready, detect_component_failure};
+use carbide_rack_controller::ready::detect_component_failure;
 use carbide_uuid::rack::RackId;
-use model::rack::{Rack, RackConfig, RackErrorRecoveryPolicy, RackErrorSource, RackState};
+use model::rack::{Rack, RackConfig, RackErrorRecoveryPolicy, RackState};
 use state_controller::state_handler::{
     StateHandlerContext, StateHandlerError, StateHandlerOutcome,
 };
@@ -34,7 +34,6 @@ pub async fn handle_error(
     config: &RackConfig,
     cause: &str,
     recovery_policy: RackErrorRecoveryPolicy,
-    source: Option<RackErrorSource>,
     ctx: &mut StateHandlerContext<'_, RackStateHandlerContextObjects>,
 ) -> Result<StateHandlerOutcome<RackState>, StateHandlerError> {
     if let Some(scope) = &config.maintenance_requested {
@@ -83,17 +82,10 @@ pub async fn handle_error(
         )));
     }
 
-    let can_recover = match source {
-        Some(RackErrorSource::ComponentFailure) => {
-            detect_component_failure(id, ctx).await?.is_none()
-        }
-        None => all_components_ready(id, ctx).await?,
-    };
-    if can_recover {
+    if detect_component_failure(id, ctx).await?.is_none() {
         tracing::info!(
             rack_id = %id,
-            ?source,
-            "Rack error recovery condition met, transitioning from Error back to Ready",
+            "No terminal component failure remains, transitioning rack from Error back to Ready",
         );
         let txn = ctx.services.db_pool.begin().await?;
         return Ok(StateHandlerOutcome::transition(RackState::Ready).with_txn(txn));

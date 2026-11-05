@@ -6800,7 +6800,6 @@ mod tests {
         let mut rack = test_rack_with_job(Some(job));
         rack.controller_state = Versioned::new(
             RackState::Error {
-                source: None,
                 certificate_failure: None,
                 cause: cause.to_string(),
                 recovery_policy: RackErrorRecoveryPolicy::MaintenanceRequestRequired,
@@ -6836,7 +6835,6 @@ mod tests {
         let mut rack = test_rack_with_job(Some(job));
         rack.controller_state = Versioned::new(
             RackState::Error {
-                source: None,
                 certificate_failure: None,
                 cause: unrelated.to_string(),
                 recovery_policy: RackErrorRecoveryPolicy::MaintenanceRequestRequired,
