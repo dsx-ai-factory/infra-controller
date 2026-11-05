@@ -249,7 +249,8 @@ impl ServerCertVerifier for ChainRecordingVerifier {
 }
 
 /// Counts rotations scheduled per endpoint while NMX-C keeps serving the same
-/// certificate. The budget lives in memory, so a restart grants a fresh one.
+/// certificate. The budget lives in this monitor's memory: each `nico-api`
+/// replica keeps its own, and a restart grants a fresh one.
 #[derive(Debug, Default)]
 struct UnchangedRotationTracker {
     attempts_by_endpoint: Mutex<HashMap<String, UnchangedRotationAttempts>>,
@@ -680,9 +681,10 @@ impl SwitchCertificateMonitor {
     const ITERATION_WORK_KEY: &'static str = "SwitchCertificateMonitor::run_single_iteration";
     const PROBE_CANCELLED_ERROR: &'static str = "NMX-C server certificate probe cancelled";
     const APPLY_CANCELLED_ERROR: &'static str = "NMX-C server certificate apply cancelled";
-    /// Full-rack ConfigureNmxCluster requests allowed while NMX-C keeps serving
-    /// the same certificate. Beyond this, rotation is not repairing the
-    /// failure and an operator must investigate.
+    /// Full-rack ConfigureNmxCluster requests this monitor may schedule while
+    /// NMX-C keeps serving the same certificate. Beyond this, an operator must
+    /// investigate whether the scheduled maintenance ran and why it did not
+    /// change the certificate.
     const MAX_UNCHANGED_ROTATION_ATTEMPTS: u32 = 2;
     /// Rotation signature for an expired leaf whose chain could not be inspected.
     const UNIDENTIFIED_CERTIFICATE_SIGNATURE: &'static str = "unidentified";
@@ -1185,7 +1187,7 @@ impl SwitchCertificateMonitor {
                     endpoint = %target.endpoint_url,
                     certificate_signature,
                     scheduled_rotations,
-                    "NMX-C kept serving the same certificate after repeated full-rack NMX-C cluster configuration; not scheduling another rotation, operator investigation is required"
+                    "NMX-C still serves the same certificate after this monitor scheduled full-rack NMX-C cluster configuration for it the maximum number of times; not scheduling another rotation, operator investigation is required"
                 );
                 return Ok(SwitchCertApplyStatus::RetryExhausted);
             }
@@ -1336,10 +1338,10 @@ impl SwitchCertificateMonitor {
                     ));
                 }
                 Ok(Err(error)) => {
-                    if let Some(verification_time) = expired_certificate_verification_time(&error) {
+                    if let Some(expired_not_after) = expired_certificate_not_after(&error) {
                         return Ok(classify_expired_chain(
                             &verifier.presented_chain(),
-                            verification_time,
+                            expired_not_after,
                         ));
                     }
                     return Err(format!("TLS handshake failed for {endpoint_url}: {error}"));
@@ -1359,52 +1361,62 @@ impl SwitchCertificateMonitor {
     }
 }
 
-/// Returns the verification time when a handshake failed because a presented
-/// certificate is expired.
-fn expired_certificate_verification_time(error: &io::Error) -> Option<UnixTime> {
+/// Returns the `notAfter` of the certificate that failed validation when a
+/// handshake failed because that certificate is expired.
+fn expired_certificate_not_after(error: &io::Error) -> Option<UnixTime> {
     // tokio-rustls retains the rustls handshake error inside io::Error.
     match error
         .get_ref()
         .and_then(|source| source.downcast_ref::<RustlsError>())
     {
         Some(RustlsError::InvalidCertificate(CertificateError::ExpiredContext {
-            time, ..
-        })) => Some(*time),
+            not_after,
+            ..
+        })) => Some(*not_after),
         _ => None,
     }
 }
 
-/// Works out which certificate caused an `ExpiredContext` handshake failure,
-/// using the chain NMX-C presented.
+/// Works out which certificate caused an `ExpiredContext` handshake failure by
+/// matching the error's `notAfter` against the chain NMX-C presented.
 ///
-/// - If any intermediate is expired, returns `ExpiredIntermediate`, even when
-///   the leaf is expired too: a rotated leaf would be issued under the same
-///   expired intermediate and still fail.
-/// - Otherwise returns `ExpiredLeaf`. This includes the case where no
-///   certificate in the chain could be parsed or found to be expired; rotating
-///   is the best guess, and the rotation retry limit stops it repeating forever.
+/// Only the certificate the error names counts. WebPKI checks the leaf before
+/// any issuer and never checks presented certificates that are not on the
+/// chosen path, so other expired certificates in the chain prove nothing.
+///
+/// - If the leaf matches, returns `ExpiredLeaf`. If an intermediate on the
+///   path is also expired, the next probe after rotation reports it.
+/// - If exactly one intermediate matches, returns `ExpiredIntermediate`.
+/// - Otherwise (no match, or several intermediates match) returns
+///   `ExpiredLeaf`; rotating is the best guess, and the rotation retry limit
+///   stops it repeating forever.
 fn classify_expired_chain(
     presented_chain: &[CertificateDer<'_>],
-    verification_time: UnixTime,
+    expired_not_after: UnixTime,
 ) -> CertificateProbeOutcome {
-    let verification_time = i64::try_from(verification_time.as_secs()).unwrap_or(i64::MAX);
-    for der in presented_chain.iter().skip(1) {
-        let Ok((_, cert)) = X509Certificate::from_der(der.as_ref()) else {
-            continue;
-        };
-        let not_after_timestamp = cert.validity.not_after.timestamp();
-        // WebPKI treats a certificate as expired once the time passes notAfter.
-        if verification_time > not_after_timestamp {
-            return CertificateProbeOutcome::ExpiredIntermediate {
-                subject: cert.subject().to_string(),
-                not_after_timestamp,
-            };
-        }
+    let expired_not_after = i64::try_from(expired_not_after.as_secs()).unwrap_or(i64::MAX);
+    let leaf = presented_chain
+        .first()
+        .and_then(|der| certificate_info_from_der(der.as_ref()).ok());
+    if leaf
+        .as_ref()
+        .is_some_and(|leaf| leaf.not_after_timestamp == expired_not_after)
+    {
+        return CertificateProbeOutcome::ExpiredLeaf { leaf };
     }
-    CertificateProbeOutcome::ExpiredLeaf {
-        leaf: presented_chain
-            .first()
-            .and_then(|der| certificate_info_from_der(der.as_ref()).ok()),
+
+    let mut matching_intermediates = presented_chain
+        .iter()
+        .skip(1)
+        .filter_map(|der| X509Certificate::from_der(der.as_ref()).ok())
+        .map(|(_, cert)| cert)
+        .filter(|cert| cert.validity.not_after.timestamp() == expired_not_after);
+    match (matching_intermediates.next(), matching_intermediates.next()) {
+        (Some(intermediate), None) => CertificateProbeOutcome::ExpiredIntermediate {
+            subject: intermediate.subject().to_string(),
+            not_after_timestamp: expired_not_after,
+        },
+        _ => CertificateProbeOutcome::ExpiredLeaf { leaf },
     }
 }
 
@@ -1698,7 +1710,7 @@ mod tests {
 
     #[test]
     fn probe_classifies_only_expired_certificate_tls_errors_for_rotation() {
-        let now = UnixTime::since_unix_epoch(Duration::from_secs(2_000_000_000));
+        let not_after = UnixTime::since_unix_epoch(Duration::from_secs(1_900_000_000));
         check_values(
             [
                 Check {
@@ -1706,13 +1718,11 @@ mod tests {
                     input: io::Error::new(
                         io::ErrorKind::InvalidData,
                         RustlsError::InvalidCertificate(CertificateError::ExpiredContext {
-                            time: now,
-                            not_after: UnixTime::since_unix_epoch(Duration::from_secs(
-                                1_900_000_000,
-                            )),
+                            time: UnixTime::since_unix_epoch(Duration::from_secs(2_000_000_000)),
+                            not_after,
                         }),
                     ),
-                    expect: Some(now),
+                    expect: Some(not_after),
                 },
                 Check {
                     scenario: "certificate hostname mismatch",
@@ -1728,13 +1738,28 @@ mod tests {
                     expect: None,
                 },
             ],
-            |error| expired_certificate_verification_time(&error),
+            |error| expired_certificate_not_after(&error),
         );
     }
 
     const TEST_AUTHORITY: &str = "nmxc.example.test";
+    // Expired leaves and intermediates expire at different times, so the
+    // `notAfter` in an `ExpiredContext` identifies which one failed.
+    const EXPIRED_LEAF_YEAR: i32 = 2001;
+    const EXPIRED_INTERMEDIATE_YEAR: i32 = 2002;
+    const VALID_YEAR: i32 = 2999;
 
-    fn test_certificate_params(common_name: &str, expired: bool, is_ca: bool) -> CertificateParams {
+    fn not_after_of_year(year: i32) -> UnixTime {
+        UnixTime::since_unix_epoch(Duration::from_secs(
+            rcgen::date_time_ymd(year, 1, 1).unix_timestamp() as u64,
+        ))
+    }
+
+    fn test_certificate_params(
+        common_name: &str,
+        not_after_year: i32,
+        is_ca: bool,
+    ) -> CertificateParams {
         let mut params = CertificateParams::new(if is_ca {
             vec![]
         } else {
@@ -1745,11 +1770,7 @@ mod tests {
             .distinguished_name
             .push(DnType::CommonName, common_name);
         params.not_before = rcgen::date_time_ymd(2000, 1, 1);
-        params.not_after = if expired {
-            rcgen::date_time_ymd(2001, 1, 1)
-        } else {
-            rcgen::date_time_ymd(2999, 1, 1)
-        };
+        params.not_after = rcgen::date_time_ymd(not_after_year, 1, 1);
         if is_ca {
             params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
         }
@@ -1766,22 +1787,37 @@ mod tests {
 
     fn test_chain(leaf_expired: bool, intermediate_expired: bool) -> TestChain {
         let root_key = KeyPair::generate().unwrap();
-        let root_params = test_certificate_params("NICo test root", false, true);
+        let root_params = test_certificate_params("NICo test root", VALID_YEAR, true);
         let root = root_params.self_signed(&root_key).unwrap();
         let root_issuer = Issuer::new(root_params, root_key);
 
         let intermediate_key = KeyPair::generate().unwrap();
-        let intermediate_params =
-            test_certificate_params("NICo test intermediate", intermediate_expired, true);
+        let intermediate_params = test_certificate_params(
+            "NICo test intermediate",
+            if intermediate_expired {
+                EXPIRED_INTERMEDIATE_YEAR
+            } else {
+                VALID_YEAR
+            },
+            true,
+        );
         let intermediate = intermediate_params
             .signed_by(&intermediate_key, &root_issuer)
             .unwrap();
         let intermediate_issuer = Issuer::new(intermediate_params, intermediate_key);
 
         let leaf_key = KeyPair::generate().unwrap();
-        let leaf = test_certificate_params("NMX-C test leaf", leaf_expired, false)
-            .signed_by(&leaf_key, &intermediate_issuer)
-            .unwrap();
+        let leaf = test_certificate_params(
+            "NMX-C test leaf",
+            if leaf_expired {
+                EXPIRED_LEAF_YEAR
+            } else {
+                VALID_YEAR
+            },
+            false,
+        )
+        .signed_by(&leaf_key, &intermediate_issuer)
+        .unwrap();
 
         TestChain {
             root_pem: root.pem(),
@@ -1791,71 +1827,53 @@ mod tests {
     }
 
     #[test]
-    fn expired_chain_is_attributed_to_the_expired_certificate() {
-        #[derive(Clone, Copy)]
-        struct ChainCase {
-            leaf_expired: bool,
-            intermediate_expired: bool,
-            presented_certificates: usize,
-        }
+    fn expired_chain_is_attributed_to_the_certificate_the_error_names() {
+        // Leaf and intermediate are both expired, at different times.
+        let chain = test_chain(true, true).presented;
+        // An unrelated presented certificate expiring with the intermediate.
+        let other_expired_intermediate = test_chain(false, true).presented[1].clone();
 
-        let verification_time = UnixTime::since_unix_epoch(Duration::from_secs(1_800_000_000));
         check_values(
             [
                 Check {
-                    scenario: "only the leaf is expired",
-                    input: ChainCase {
-                        leaf_expired: true,
-                        intermediate_expired: false,
-                        presented_certificates: 2,
-                    },
+                    scenario: "error names the leaf while a presented intermediate is also expired",
+                    input: (chain.clone(), EXPIRED_LEAF_YEAR),
                     expect: "expired_leaf_identified",
                 },
                 Check {
-                    scenario: "only the intermediate is expired",
-                    input: ChainCase {
-                        leaf_expired: false,
-                        intermediate_expired: true,
-                        presented_certificates: 2,
-                    },
+                    scenario: "error names one presented intermediate",
+                    input: (chain.clone(), EXPIRED_INTERMEDIATE_YEAR),
                     expect: "expired_intermediate",
                 },
                 Check {
-                    scenario: "leaf and intermediate are both expired",
-                    input: ChainCase {
-                        leaf_expired: true,
-                        intermediate_expired: true,
-                        presented_certificates: 2,
-                    },
-                    expect: "expired_intermediate",
+                    scenario: "error names no presented certificate",
+                    input: (chain.clone(), 2003),
+                    expect: "expired_leaf_identified",
+                },
+                Check {
+                    scenario: "error matches several presented intermediates",
+                    input: (
+                        [chain.clone(), vec![other_expired_intermediate]].concat(),
+                        EXPIRED_INTERMEDIATE_YEAR,
+                    ),
+                    expect: "expired_leaf_identified",
                 },
                 Check {
                     scenario: "no presented chain was recorded",
-                    input: ChainCase {
-                        leaf_expired: true,
-                        intermediate_expired: false,
-                        presented_certificates: 0,
-                    },
+                    input: (vec![], EXPIRED_LEAF_YEAR),
                     expect: "expired_leaf_unidentified",
                 },
             ],
-            |case| {
-                let chain = test_chain(case.leaf_expired, case.intermediate_expired);
-                match classify_expired_chain(
-                    &chain.presented[..case.presented_certificates],
-                    verification_time,
-                ) {
-                    CertificateProbeOutcome::Observed(_) => "observed",
-                    CertificateProbeOutcome::ExpiredLeaf { leaf: Some(_) } => {
-                        "expired_leaf_identified"
-                    }
-                    CertificateProbeOutcome::ExpiredLeaf { leaf: None } => {
-                        "expired_leaf_unidentified"
-                    }
-                    CertificateProbeOutcome::ExpiredIntermediate { subject, .. } => {
-                        assert!(subject.contains("NICo test intermediate"), "{subject}");
-                        "expired_intermediate"
-                    }
+            |(presented, expired_year)| match classify_expired_chain(
+                &presented,
+                not_after_of_year(expired_year),
+            ) {
+                CertificateProbeOutcome::Observed(_) => "observed",
+                CertificateProbeOutcome::ExpiredLeaf { leaf: Some(_) } => "expired_leaf_identified",
+                CertificateProbeOutcome::ExpiredLeaf { leaf: None } => "expired_leaf_unidentified",
+                CertificateProbeOutcome::ExpiredIntermediate { subject, .. } => {
+                    assert!(subject.contains("NICo test intermediate"), "{subject}");
+                    "expired_intermediate"
                 }
             },
         );
@@ -1882,10 +1900,10 @@ mod tests {
                     expect: Yields("observed"),
                 },
                 Case {
-                    scenario: "expired leaf is rotatable",
+                    scenario: "WebPKI reports the expired leaf before its expired intermediate",
                     input: ProbeCase {
                         leaf_expired: true,
-                        intermediate_expired: false,
+                        intermediate_expired: true,
                         trusted_root: true,
                     },
                     expect: Yields("expired_leaf"),

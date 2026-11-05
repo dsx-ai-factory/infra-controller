@@ -76,22 +76,27 @@ with that operational impact in mind.
 </Note>
 
 When chain validation fails because a certificate is expired, rustls returns
-`ExpiredContext` without identifying which certificate expired. The monitor
-records the chain NMX-C presented during the handshake and checks each
-certificate's `notAfter` against the validation time:
+`ExpiredContext` with the `notAfter` time of the certificate that failed, but
+not the certificate itself. The monitor records the chain NMX-C presented
+during the handshake and identifies the failed certificate by matching that
+`notAfter` time. Other expired certificates in the presented chain do not
+count: WebPKI checks the leaf before any issuer and does not check presented
+certificates outside the validated path, such as unused cross-signed
+certificates or a served root.
 
-- If only the server leaf expired, the monitor treats the failure as a rotation
-  signal, records the leaf's fingerprint and expiry, and requests
-  `ConfigureNmxCluster`.
-- If a server-provided intermediate expired, alone or together with the leaf,
-  the monitor does not request rotation, because a leaf-only replacement cannot
-  recover TLS. It logs `NMX-C served an expired intermediate CA certificate`
-  at error level with the intermediate's subject and expiry, and reports the
-  probe failure with `error_kind="expired_ca_chain"`. Renew the intermediate,
-  then install and bind a complete chain containing a valid intermediate.
-- If no certificate in the recorded chain can be identified as expired, the
-  monitor assumes the leaf and relies on the rotation retry budget described in
-  [Monitor Rotation](#monitor-rotation).
+- If the error matches the server leaf, the monitor treats the failure as a
+  rotation signal, records the leaf's fingerprint and expiry, and requests
+  `ConfigureNmxCluster`. If an intermediate on the path has also expired, a
+  later pass reports that intermediate after the leaf is replaced.
+- If the error matches exactly one server-provided intermediate, the monitor
+  does not request rotation, because a leaf-only replacement cannot recover
+  TLS. It logs `NMX-C served an expired intermediate CA certificate` at error
+  level with the intermediate's subject and expiry, and reports the probe
+  failure with `error_kind="expired_ca_chain"`. Renew the intermediate, then
+  install and bind a complete chain containing a valid intermediate.
+- If the error matches no presented certificate, or matches several
+  intermediates, the monitor assumes the leaf and relies on the rotation retry
+  budget described in [Monitor Rotation](#monitor-rotation).
 
 The recorded chain is used only to classify the failure; it does not change
 which certificates rustls accepts. The monitor does not check the expiry of
@@ -648,7 +653,7 @@ The following table describes the certificate monitor metrics:
 | `carbide_nvlink_switch_cert_monitor_observed_cert_expiration_time` | Gauge | Earliest observed leaf expiry as epoch seconds, grouped by `status=ok\|expiring_soon`. An expired leaf is included when the presented chain could be parsed. An expired intermediate has no sample here; see `probe_error_count`. |
 | `carbide_nvlink_switch_cert_monitor_probe_success` | Gauge | Endpoint count grouped by `status=ok\|error`. |
 | `carbide_nvlink_switch_cert_monitor_expiring_soon` | Gauge | Endpoint count grouped by `status=ok\|expiring_soon\|unknown`. |
-| `carbide_nvlink_switch_cert_monitor_apply_status` | Gauge | Endpoint count grouped by `status=not_needed\|pending\|error\|skipped\|retry_exhausted`. `pending` means maintenance was queued or already queued, not that installation has completed. `retry_exhausted` means rotation stopped because NMX-C kept serving the same certificate. |
+| `carbide_nvlink_switch_cert_monitor_apply_status` | Gauge | Endpoint count grouped by `status=not_needed\|pending\|error\|skipped\|retry_exhausted`. `pending` means maintenance was queued or already queued, not that installation has completed. `retry_exhausted` means the probing replica stopped scheduling rotation because NMX-C still serves a certificate for which that replica already scheduled the maximum number of requests; it does not show that the maintenance ran. |
 | `carbide_nvlink_switch_cert_monitor_probe_error_count` | Gauge | Probe failures grouped by `status="error"` and `error_kind`, such as `timeout`, `connection`, `tls`, `certificate_file`, or `expired_ca_chain`. |
 | `carbide_nvlink_switch_cert_monitor_apply_error_count` | Gauge | Rotation-request failures grouped by `status="error"` and `error_kind`. |
 
@@ -683,13 +688,19 @@ while a rack is busy or not ready.
 
 After maintenance completes, confirm that a later pass observes a new
 fingerprint and an expiry outside the rotation window. If the switch continues
-to present the same certificate, NICo requests maintenance at most twice for
-that certificate. After that, it stops requesting maintenance, logs an error,
-and reports `status="retry_exhausted"` until NMX-C serves a different
+to present the same certificate, each `nico-api` replica schedules
+`ConfigureNmxCluster` at most twice for that certificate and endpoint. The
+count covers requests the replica scheduled; it does not record whether the
+maintenance ran or completed. Once a replica reaches the limit, and the rack
+is ready with no maintenance pending, that replica stops scheduling, logs an
+error, and reports `status="retry_exhausted"` until NMX-C serves a different
 certificate or the certificate leaves the rotation window. An expired leaf
-whose chain could not be parsed counts as one unchanged certificate. The
-budget is held in memory, so restarting `nico-api` allows another two
-attempts.
+whose chain could not be parsed counts as one unchanged certificate.
+
+Each replica keeps its count in memory. The shared work lock lasts one pass,
+so different replicas can probe on different passes, and with N replicas NICo
+can schedule up to 2 × N requests for the same certificate. Restarting a
+replica resets its count.
 
 ## Troubleshoot Rotation
 
@@ -705,6 +716,6 @@ Use the following table to troubleshoot certificate rotation:
 | Apply status is `error` | NICo could not request rack maintenance. Inspect the accompanying log for missing component-manager configuration or a database/state-controller request error. |
 | Apply status remains `pending` | `pending` means only that maintenance was accepted or was already queued. Inspect the rack state, rack-controller logs, and RMS job for the eventual result. |
 | Kubernetes Secret is renewed but the switch serves the old leaf | The issuer has completed only the issuance step. Verify RMS's configured certificate source and inspect the RMS certificate or NMX cluster job; NICo does not tell RMS which Secret to use. |
-| Apply status is `retry_exhausted` | Maintenance ran twice but NMX-C still serves the same certificate. RMS is reinstalling the old certificate, cannot access the renewed Secret, or NMX-C is not bound to the installed replacement. Fix the cause and confirm that NMX-C serves a new fingerprint. |
+| Apply status is `retry_exhausted` | The replica scheduled maintenance twice for this certificate, but NMX-C still serves it. First check the rack state, rack-controller logs, and RMS job history to confirm whether the maintenance ran. If it ran, RMS is reinstalling the old certificate, cannot access the renewed Secret, or NMX-C is not bound to the installed replacement. Fix the cause and confirm that NMX-C serves a new fingerprint. |
 | TLS validation reports an expired server leaf | NICo requests maintenance. Recovery still depends on working RMS-to-switch TLS paths. If NVUE shares the expired identity, manual recovery can be required. Do not rely on post-expiry rotation. |
-| Probe error kind is `expired_ca_chain` | NMX-C served an expired intermediate, so NICo does not request rotation. Renew the intermediate, then install and bind a complete valid chain on the switch. The error log names the intermediate's subject and expiry. |
+| Probe error kind is `expired_ca_chain` | TLS validation failed on an expired intermediate served by NMX-C, so NICo does not request rotation. Renew the intermediate, then install and bind a complete valid chain on the switch. The error log names the intermediate's subject and expiry. |
