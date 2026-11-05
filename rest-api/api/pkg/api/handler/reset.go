@@ -93,8 +93,8 @@ func (h NVOSFactoryResetHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve client for Site", nil)
 	}
 	var response flowv1.SubmitTaskResponse
-	proxyErr := common.ProxyFlowGRPC(ctx, logger, client, flowv1.Flow_ResetSwitches_FullMethodName,
-		&flowv1.ResetSwitchesRequest{TargetSpec: target, Description: "API NVOS factory reset"}, &response,
+	proxyErr := common.ProxyFlowGRPC(ctx, logger, client, flowv1.Flow_FactoryResetSwitches_FullMethodName,
+		&flowv1.FactoryResetSwitchesRequest{TargetSpec: target, Description: "API NVOS factory reset"}, &response,
 		fmt.Sprintf("nvos-factory-reset-%s-%s", h.scope, uuid.NewString()), temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_UNSPECIFIED)
 	if proxyErr != nil {
 		return cutil.NewAPIErrorResponse(c, proxyErr.Code, proxyErr.Message, nil)

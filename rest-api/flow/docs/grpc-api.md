@@ -69,6 +69,7 @@
   - [EventRuleSendAlertAction](#v1-EventRuleSendAlertAction)
   - [EventRuleSubmitTaskAction](#v1-EventRuleSubmitTaskAction)
   - [ExternalRef](#v1-ExternalRef)
+  - [FactoryResetSwitchesRequest](#v1-FactoryResetSwitchesRequest)
   - [FieldDiff](#v1-FieldDiff)
   - [Filter](#v1-Filter)
   - [FirmwareAuthenticationData](#v1-FirmwareAuthenticationData)
@@ -194,7 +195,6 @@
   - [RackTarget](#v1-RackTarget)
   - [RackTargets](#v1-RackTargets)
   - [RemoveTaskScheduleScopeRequest](#v1-RemoveTaskScheduleScopeRequest)
-  - [ResetSwitchesRequest](#v1-ResetSwitchesRequest)
   - [ResumeOperationRunRequest](#v1-ResumeOperationRunRequest)
   - [ResumeTaskScheduleRequest](#v1-ResumeTaskScheduleRequest)
   - [ScheduleConfig](#v1-ScheduleConfig)
@@ -925,6 +925,18 @@ ExternalRef identifies a component by its external identifier and optional type.
 | ----- | ---- | ----- | ----------- |
 | type | [ComponentType](#v1-ComponentType) |  | UNKNOWN requires an unambiguous ID. |
 | id | [string](#string) |  |  |
+
+<a name="v1-FactoryResetSwitchesRequest"></a>
+
+### FactoryResetSwitchesRequest
+
+Targets must resolve exclusively to ingested switches. Domain selectors must
+include the NVSwitch component filter. Existing rack conflict handling applies.
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| target_spec | [OperationTargetSpec](#v1-OperationTargetSpec) |  |  |
+| description | [string](#string) |  |  |
 
 <a name="v1-FieldDiff"></a>
 
@@ -2250,18 +2262,6 @@ In-flight tasks for that rack are not cancelled.
 | ----- | ---- | ----- | ----------- |
 | scope_id | [UUID](#v1-UUID) |  |  |
 
-<a name="v1-ResetSwitchesRequest"></a>
-
-### ResetSwitchesRequest
-
-Targets must resolve exclusively to ingested switches. Domain selectors must
-include the NVSwitch component filter. Existing rack conflict handling applies.
-
-| Field | Type | Label | Description |
-| ----- | ---- | ----- | ----------- |
-| target_spec | [OperationTargetSpec](#v1-OperationTargetSpec) |  |  |
-| description | [string](#string) |  |  |
-
 <a name="v1-ResumeOperationRunRequest"></a>
 
 ### ResumeOperationRunRequest
@@ -3067,7 +3067,7 @@ Task kinds include rack lifecycle work not represented by OperationType.
 | PowerOffRack | [PowerOffRackRequest](#v1-PowerOffRackRequest) | [SubmitTaskResponse](#v1-SubmitTaskResponse) |  |
 | PowerResetRack | [PowerResetRackRequest](#v1-PowerResetRackRequest) | [SubmitTaskResponse](#v1-SubmitTaskResponse) |  |
 | ACPowerCycleRack | [ACPowerCycleRackRequest](#v1-ACPowerCycleRackRequest) | [SubmitTaskResponse](#v1-SubmitTaskResponse) |  |
-| ResetSwitches | [ResetSwitchesRequest](#v1-ResetSwitchesRequest) | [SubmitTaskResponse](#v1-SubmitTaskResponse) | Restores NVOS configuration defaults on switches. Accepted work is polled; uncertain submissions are never automatically repeated. No reprovisioning. |
+| FactoryResetSwitches | [FactoryResetSwitchesRequest](#v1-FactoryResetSwitchesRequest) | [SubmitTaskResponse](#v1-SubmitTaskResponse) | Restores NVOS configuration defaults on switches. Accepted work is polled; uncertain submissions are never automatically repeated. No reprovisioning. |
 | GetComponentInfoByID | [GetComponentInfoByIDRequest](#v1-GetComponentInfoByIDRequest) | [GetComponentInfoResponse](#v1-GetComponentInfoResponse) | Component CRUD |
 | GetComponentInfoBySerial | [GetComponentInfoBySerialRequest](#v1-GetComponentInfoBySerialRequest) | [GetComponentInfoResponse](#v1-GetComponentInfoResponse) |  |
 | GetComponents | [GetComponentsRequest](#v1-GetComponentsRequest) | [GetComponentsResponse](#v1-GetComponentsResponse) |  |

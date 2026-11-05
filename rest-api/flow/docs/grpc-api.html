@@ -435,6 +435,10 @@
                 </li>
 
                 <li>
+                  <a href="#v1.FactoryResetSwitchesRequest"><span class="badge">M</span>FactoryResetSwitchesRequest</a>
+                </li>
+
+                <li>
                   <a href="#v1.FieldDiff"><span class="badge">M</span>FieldDiff</a>
                 </li>
 
@@ -932,10 +936,6 @@
 
                 <li>
                   <a href="#v1.RemoveTaskScheduleScopeRequest"><span class="badge">M</span>RemoveTaskScheduleScopeRequest</a>
-                </li>
-
-                <li>
-                  <a href="#v1.ResetSwitchesRequest"><span class="badge">M</span>ResetSwitchesRequest</a>
                 </li>
 
                 <li>
@@ -3336,6 +3336,37 @@ this operation. </p></td>
 
                 <tr>
                   <td>id</td>
+                  <td><a href="#string">string</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+            </tbody>
+          </table>
+
+
+
+
+
+        <h3 id="v1.FactoryResetSwitchesRequest">FactoryResetSwitchesRequest</h3>
+        <p>Targets must resolve exclusively to ingested switches. Domain selectors must</p><p>include the NVSwitch component filter. Existing rack conflict handling applies.</p>
+
+
+          <table class="field-table">
+            <thead>
+              <tr><td>Field</td><td>Type</td><td>Label</td><td>Description</td></tr>
+            </thead>
+            <tbody>
+
+                <tr>
+                  <td>target_spec</td>
+                  <td><a href="#v1.OperationTargetSpec">OperationTargetSpec</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>description</td>
                   <td><a href="#string">string</a></td>
                   <td></td>
                   <td><p> </p></td>
@@ -7891,37 +7922,6 @@ conflict_strategy is CONFLICT_STRATEGY_QUEUE. </p></td>
 
 
 
-        <h3 id="v1.ResetSwitchesRequest">ResetSwitchesRequest</h3>
-        <p>Targets must resolve exclusively to ingested switches. Domain selectors must</p><p>include the NVSwitch component filter. Existing rack conflict handling applies.</p>
-
-
-          <table class="field-table">
-            <thead>
-              <tr><td>Field</td><td>Type</td><td>Label</td><td>Description</td></tr>
-            </thead>
-            <tbody>
-
-                <tr>
-                  <td>target_spec</td>
-                  <td><a href="#v1.OperationTargetSpec">OperationTargetSpec</a></td>
-                  <td></td>
-                  <td><p> </p></td>
-                </tr>
-
-                <tr>
-                  <td>description</td>
-                  <td><a href="#string">string</a></td>
-                  <td></td>
-                  <td><p> </p></td>
-                </tr>
-
-            </tbody>
-          </table>
-
-
-
-
-
         <h3 id="v1.ResumeOperationRunRequest">ResumeOperationRunRequest</h3>
         <p></p>
 
@@ -10648,8 +10648,8 @@ becomes available, or can be cancelled explicitly via CancelTask.</p></td>
               </tr>
 
               <tr>
-                <td>ResetSwitches</td>
-                <td><a href="#v1.ResetSwitchesRequest">ResetSwitchesRequest</a></td>
+                <td>FactoryResetSwitches</td>
+                <td><a href="#v1.FactoryResetSwitchesRequest">FactoryResetSwitchesRequest</a></td>
                 <td><a href="#v1.SubmitTaskResponse">SubmitTaskResponse</a></td>
                 <td><p>Restores NVOS configuration defaults on switches. Accepted work is polled;
 uncertain submissions are never automatically repeated. No reprovisioning.</p></td>

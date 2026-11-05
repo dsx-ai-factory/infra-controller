@@ -1354,6 +1354,8 @@ func TestBuildCommands_RunnablePaths(t *testing.T) {
 		name string
 		path []string
 	}{
+		{name: "tray factory reset", path: []string{"tray", "factory-reset"}},
+		{name: "domain factory reset", path: []string{"domain", "nvlink", "factory-reset"}},
 		{name: "tenant current", path: []string{"tenant", "current"}},
 		{name: "infrastructure provider current", path: []string{"infrastructure-provider", "current"}},
 		{name: "service account current", path: []string{"service-account", "current"}},

@@ -13,7 +13,7 @@ import (
 	pb "github.com/NVIDIA/infra-controller/rest-api/flow/pkg/proto/v1"
 )
 
-func TestFlowServerImpl_ResetSwitches(t *testing.T) {
+func TestFlowServerImpl_FactoryResetSwitches(t *testing.T) {
 	for _, invalid := range []bool{false, true} {
 		name := "submits fixed reset"
 		if invalid {
@@ -22,11 +22,11 @@ func TestFlowServerImpl_ResetSwitches(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			manager := &firmwareTaskManager{}
 			server := &FlowServerImpl{taskManager: manager}
-			request := &pb.ResetSwitchesRequest{}
+			request := &pb.FactoryResetSwitchesRequest{}
 			if !invalid {
 				request.TargetSpec = &pb.OperationTargetSpec{Targets: &pb.OperationTargetSpec_Components{Components: &pb.ComponentTargets{Targets: []*pb.ComponentTarget{{Identifier: &pb.ComponentTarget_External{External: &pb.ExternalRef{Id: "switch-1"}}}}}}}
 			}
-			response, err := server.ResetSwitches(context.Background(), request)
+			response, err := server.FactoryResetSwitches(context.Background(), request)
 			require.Equal(t, invalid, err != nil)
 			if invalid {
 				require.Nil(t, manager.request)

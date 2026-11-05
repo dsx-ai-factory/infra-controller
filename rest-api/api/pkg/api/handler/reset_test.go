@@ -71,7 +71,7 @@ func TestNVOSFactoryResetHandler_Handle(t *testing.T) {
 				taskID = "invalid"
 			}
 			captured := fixture.installFlowReply(t, &flowv1.SubmitTaskResponse{TaskIds: []*flowv1.UUID{{Id: taskID}}})
-			ec, rec := fixture.echoContext(t, "/reset", body, user, "target-1")
+			ec, rec := fixture.echoContext(t, "/factory-reset", body, user, "target-1")
 			ec.Request().Method = http.MethodPost
 			handler := NVOSFactoryResetHandler{dbSession: fixture.dbSession, scp: fixture.scp, scope: tc.scope}
 			require.NoError(t, handler.Handle(ec))
@@ -85,8 +85,8 @@ func TestNVOSFactoryResetHandler_Handle(t *testing.T) {
 				return
 			}
 			require.JSONEq(t, fmt.Sprintf(`{"taskIds":[%q]}`, taskID), rec.Body.String())
-			require.Equal(t, flowv1.Flow_ResetSwitches_FullMethodName, captured.request.FullMethod)
-			var request flowv1.ResetSwitchesRequest
+			require.Equal(t, flowv1.Flow_FactoryResetSwitches_FullMethodName, captured.request.FullMethod)
+			var request flowv1.FactoryResetSwitchesRequest
 			require.NoError(t, protojson.Unmarshal(captured.request.RequestJSON, &request))
 			if tc.scope == resetDomain {
 				require.Len(t, request.TargetSpec.GetNvlDomains().Targets[0].ComponentTypes, 1)

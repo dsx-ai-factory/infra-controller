@@ -6611,7 +6611,7 @@ func (x *PowerOnRackRequest) GetOverrideReadinessCheck() bool {
 
 // Targets must resolve exclusively to ingested switches. Domain selectors must
 // include the NVSwitch component filter. Existing rack conflict handling applies.
-type ResetSwitchesRequest struct {
+type FactoryResetSwitchesRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	TargetSpec    *OperationTargetSpec   `protobuf:"bytes,1,opt,name=target_spec,json=targetSpec,proto3" json:"target_spec,omitempty"`
 	Description   string                 `protobuf:"bytes,2,opt,name=description,proto3" json:"description,omitempty"`
@@ -6619,20 +6619,20 @@ type ResetSwitchesRequest struct {
 	sizeCache     protoimpl.SizeCache
 }
 
-func (x *ResetSwitchesRequest) Reset() {
-	*x = ResetSwitchesRequest{}
+func (x *FactoryResetSwitchesRequest) Reset() {
+	*x = FactoryResetSwitchesRequest{}
 	mi := &file_flow_proto_msgTypes[76]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *ResetSwitchesRequest) String() string {
+func (x *FactoryResetSwitchesRequest) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*ResetSwitchesRequest) ProtoMessage() {}
+func (*FactoryResetSwitchesRequest) ProtoMessage() {}
 
-func (x *ResetSwitchesRequest) ProtoReflect() protoreflect.Message {
+func (x *FactoryResetSwitchesRequest) ProtoReflect() protoreflect.Message {
 	mi := &file_flow_proto_msgTypes[76]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -6644,19 +6644,19 @@ func (x *ResetSwitchesRequest) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use ResetSwitchesRequest.ProtoReflect.Descriptor instead.
-func (*ResetSwitchesRequest) Descriptor() ([]byte, []int) {
+// Deprecated: Use FactoryResetSwitchesRequest.ProtoReflect.Descriptor instead.
+func (*FactoryResetSwitchesRequest) Descriptor() ([]byte, []int) {
 	return file_flow_proto_rawDescGZIP(), []int{76}
 }
 
-func (x *ResetSwitchesRequest) GetTargetSpec() *OperationTargetSpec {
+func (x *FactoryResetSwitchesRequest) GetTargetSpec() *OperationTargetSpec {
 	if x != nil {
 		return x.TargetSpec
 	}
 	return nil
 }
 
-func (x *ResetSwitchesRequest) GetDescription() string {
+func (x *FactoryResetSwitchesRequest) GetDescription() string {
 	if x != nil {
 		return x.Description
 	}
@@ -15991,8 +15991,8 @@ const file_flow_proto_rawDesc = "" +
 	"\x18override_readiness_check\x18\x05 \x01(\bR\x16overrideReadinessCheckB\x10\n" +
 	"\x0e_queue_optionsB\n" +
 	"\n" +
-	"\b_rule_id\"r\n" +
-	"\x14ResetSwitchesRequest\x128\n" +
+	"\b_rule_id\"y\n" +
+	"\x1bFactoryResetSwitchesRequest\x128\n" +
 	"\vtarget_spec\x18\x01 \x01(\v2\x17.v1.OperationTargetSpecR\n" +
 	"targetSpec\x12 \n" +
 	"\vdescription\x18\x02 \x01(\tR\vdescription\"\xc5\x02\n" +
@@ -16872,7 +16872,7 @@ const file_flow_proto_rawDesc = "" +
 	"\x12TASK_KIND_BRING_UP\x10\x03\x12\x1a\n" +
 	"\x16TASK_KIND_DECOMMISSION\x10\x04\x12 \n" +
 	"\x1cTASK_KIND_INJECT_EXPECTATION\x10\x05\x12\x1d\n" +
-	"\x19TASK_KIND_COMPONENT_RESET\x10\x062\xc4.\n" +
+	"\x19TASK_KIND_COMPONENT_RESET\x10\x062\xd2.\n" +
 	"\x04Flow\x12,\n" +
 	"\aVersion\x12\x12.v1.VersionRequest\x1a\r.v1.BuildInfo\x12E\n" +
 	"\x12CreateTaskSchedule\x12\x1d.v1.CreateTaskScheduleRequest\x1a\x10.v1.TaskSchedule\x12?\n" +
@@ -16904,8 +16904,8 @@ const file_flow_proto_rawDesc = "" +
 	"\vPowerOnRack\x12\x16.v1.PowerOnRackRequest\x1a\x16.v1.SubmitTaskResponse\x12?\n" +
 	"\fPowerOffRack\x12\x17.v1.PowerOffRackRequest\x1a\x16.v1.SubmitTaskResponse\x12C\n" +
 	"\x0ePowerResetRack\x12\x19.v1.PowerResetRackRequest\x1a\x16.v1.SubmitTaskResponse\x12G\n" +
-	"\x10ACPowerCycleRack\x12\x1b.v1.ACPowerCycleRackRequest\x1a\x16.v1.SubmitTaskResponse\x12A\n" +
-	"\rResetSwitches\x12\x18.v1.ResetSwitchesRequest\x1a\x16.v1.SubmitTaskResponse\x12U\n" +
+	"\x10ACPowerCycleRack\x12\x1b.v1.ACPowerCycleRackRequest\x1a\x16.v1.SubmitTaskResponse\x12O\n" +
+	"\x14FactoryResetSwitches\x12\x1f.v1.FactoryResetSwitchesRequest\x1a\x16.v1.SubmitTaskResponse\x12U\n" +
 	"\x14GetComponentInfoByID\x12\x1f.v1.GetComponentInfoByIDRequest\x1a\x1c.v1.GetComponentInfoResponse\x12]\n" +
 	"\x18GetComponentInfoBySerial\x12#.v1.GetComponentInfoBySerialRequest\x1a\x1c.v1.GetComponentInfoResponse\x12D\n" +
 	"\rGetComponents\x12\x18.v1.GetComponentsRequest\x1a\x19.v1.GetComponentsResponse\x12S\n" +
@@ -17079,7 +17079,7 @@ var file_flow_proto_goTypes = []any{
 	(*SubmitTaskResponse)(nil),                         // 105: v1.SubmitTaskResponse
 	(*QueueOptions)(nil),                               // 106: v1.QueueOptions
 	(*PowerOnRackRequest)(nil),                         // 107: v1.PowerOnRackRequest
-	(*ResetSwitchesRequest)(nil),                       // 108: v1.ResetSwitchesRequest
+	(*FactoryResetSwitchesRequest)(nil),                // 108: v1.FactoryResetSwitchesRequest
 	(*PowerOffRackRequest)(nil),                        // 109: v1.PowerOffRackRequest
 	(*PowerResetRackRequest)(nil),                      // 110: v1.PowerResetRackRequest
 	(*ACPowerCycleRackRequest)(nil),                    // 111: v1.ACPowerCycleRackRequest
@@ -17353,7 +17353,7 @@ var file_flow_proto_depIdxs = []int32{
 	43,  // 122: v1.PowerOnRackRequest.target_spec:type_name -> v1.OperationTargetSpec
 	106, // 123: v1.PowerOnRackRequest.queue_options:type_name -> v1.QueueOptions
 	32,  // 124: v1.PowerOnRackRequest.rule_id:type_name -> v1.UUID
-	43,  // 125: v1.ResetSwitchesRequest.target_spec:type_name -> v1.OperationTargetSpec
+	43,  // 125: v1.FactoryResetSwitchesRequest.target_spec:type_name -> v1.OperationTargetSpec
 	43,  // 126: v1.PowerOffRackRequest.target_spec:type_name -> v1.OperationTargetSpec
 	106, // 127: v1.PowerOffRackRequest.queue_options:type_name -> v1.QueueOptions
 	32,  // 128: v1.PowerOffRackRequest.rule_id:type_name -> v1.UUID
@@ -17641,7 +17641,7 @@ var file_flow_proto_depIdxs = []int32{
 	109, // 410: v1.Flow.PowerOffRack:input_type -> v1.PowerOffRackRequest
 	110, // 411: v1.Flow.PowerResetRack:input_type -> v1.PowerResetRackRequest
 	111, // 412: v1.Flow.ACPowerCycleRack:input_type -> v1.ACPowerCycleRackRequest
-	108, // 413: v1.Flow.ResetSwitches:input_type -> v1.ResetSwitchesRequest
+	108, // 413: v1.Flow.FactoryResetSwitches:input_type -> v1.FactoryResetSwitchesRequest
 	66,  // 414: v1.Flow.GetComponentInfoByID:input_type -> v1.GetComponentInfoByIDRequest
 	67,  // 415: v1.Flow.GetComponentInfoBySerial:input_type -> v1.GetComponentInfoBySerialRequest
 	87,  // 416: v1.Flow.GetComponents:input_type -> v1.GetComponentsRequest
@@ -17719,7 +17719,7 @@ var file_flow_proto_depIdxs = []int32{
 	105, // 488: v1.Flow.PowerOffRack:output_type -> v1.SubmitTaskResponse
 	105, // 489: v1.Flow.PowerResetRack:output_type -> v1.SubmitTaskResponse
 	105, // 490: v1.Flow.ACPowerCycleRack:output_type -> v1.SubmitTaskResponse
-	105, // 491: v1.Flow.ResetSwitches:output_type -> v1.SubmitTaskResponse
+	105, // 491: v1.Flow.FactoryResetSwitches:output_type -> v1.SubmitTaskResponse
 	68,  // 492: v1.Flow.GetComponentInfoByID:output_type -> v1.GetComponentInfoResponse
 	68,  // 493: v1.Flow.GetComponentInfoBySerial:output_type -> v1.GetComponentInfoResponse
 	88,  // 494: v1.Flow.GetComponents:output_type -> v1.GetComponentsResponse

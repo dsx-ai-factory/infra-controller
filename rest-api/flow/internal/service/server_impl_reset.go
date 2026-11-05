@@ -16,9 +16,9 @@ import (
 	pb "github.com/NVIDIA/infra-controller/rest-api/flow/pkg/proto/v1"
 )
 
-// ResetSwitches submits fixed NVOS reset work through the existing rack conflict
+// FactoryResetSwitches submits fixed NVOS reset work through the existing rack conflict
 // scheduler. Core owns action support and hardware execution.
-func (rs *FlowServerImpl) ResetSwitches(ctx context.Context, req *pb.ResetSwitchesRequest) (*pb.SubmitTaskResponse, error) {
+func (rs *FlowServerImpl) FactoryResetSwitches(ctx context.Context, req *pb.FactoryResetSwitchesRequest) (*pb.SubmitTaskResponse, error) {
 	if req == nil || req.TargetSpec == nil {
 		return nil, status.Error(codes.InvalidArgument, "target_spec is required")
 	}

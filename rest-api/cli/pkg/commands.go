@@ -216,6 +216,8 @@ var commandPathAliases = map[string][]string{
 // old top-level resource and the synthetic path under the new tag both need to
 // disappear.
 var commandPathReplacements = map[string][]string{
+	"factory-reset-tray-nvos":            {"tray", "factory-reset"},
+	"factory-reset-nvlink-domain-nvos":   {"domain", "nvlink", "factory-reset"},
 	"get-all-machine-validation-results": {"machine", "validation", "results", "list"},
 	"get-all-machine-validation-runs":    {"machine", "validation", "runs", "list"},
 	"reprovision-machine-dpu":            {"machine", "dpu", "reprovision"},

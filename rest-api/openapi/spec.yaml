@@ -18810,10 +18810,10 @@ paths:
         '503':
           description: Core gRPC API is unavailable.
           $ref: '#/components/responses/GenericHttpError'
-  '/v2/org/{org}/nico/tray/{id}/reset':
+  '/v2/org/{org}/nico/tray/{id}/factory-reset':
     post:
       tags: [Tray]
-      operationId: reset-tray-nvos
+      operationId: factory-reset-tray-nvos
       summary: Restore NVOS factory defaults on a switch tray
       description: >-
         Provider Admin operation. Clears switch NVOS configuration and reboots the selected switches.
@@ -18866,10 +18866,10 @@ paths:
           description: Flow returned missing or invalid task references.
         '504':
           description: Submission outcome is unknown; do not automatically resubmit.
-  '/v2/org/{org}/nico/domain/nvlink/{id}/reset':
+  '/v2/org/{org}/nico/domain/nvlink/{id}/factory-reset':
     post:
       tags: [Domain]
-      operationId: reset-nvlink-domain-nvos
+      operationId: factory-reset-nvlink-domain-nvos
       summary: Restore NVOS factory defaults on an NVLink Domain’s switches
       description: >-
         Provider Admin operation. Clears switch NVOS configuration and reboots the selected switches.
