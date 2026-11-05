@@ -285,6 +285,60 @@ pub async fn set_primary_interface(
     Ok(id)
 }
 
+/// Updates a group of primary flags and invalidates DNS for the changed rows.
+pub async fn set_primary_interfaces(
+    interface_ids: &[MachineInterfaceId],
+    primary: bool,
+    txn: &mut PgConnection,
+) -> DatabaseResult<()> {
+    if interface_ids.is_empty() {
+        return Ok(());
+    }
+    let query = "UPDATE machine_interfaces SET primary_interface=$1 \
+                 WHERE id=ANY($2) AND primary_interface IS DISTINCT FROM $1 RETURNING id";
+    let changed: Vec<MachineInterfaceId> = sqlx::query_scalar(query)
+        .bind(primary)
+        .bind(interface_ids)
+        .fetch_all(&mut *txn)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))?;
+    crate::dns::domain::bump_serial_for_interfaces(txn, &changed).await
+}
+
+/// Associates a group of interfaces after their primary flags have been settled.
+pub async fn associate_interfaces_with_machine(
+    interface_ids: &[MachineInterfaceId],
+    machine_id: &MachineId,
+    txn: &mut PgConnection,
+) -> DatabaseResult<()> {
+    if interface_ids.is_empty() {
+        return Ok(());
+    }
+    let query = "UPDATE machine_interfaces SET machine_id=$1, association_type='Machine'::association_type WHERE id=ANY($2)";
+    sqlx::query(query)
+        .bind(machine_id)
+        .bind(interface_ids)
+        .execute(txn)
+        .await
+        .map_err(|error| match error {
+            sqlx::Error::Database(ref e)
+                if e.constraint() == Some(SQL_VIOLATION_ONE_PRIMARY_INTERFACE) =>
+            {
+                DatabaseError::OnePrimaryInterface
+            }
+            sqlx::Error::Database(ref e)
+                if e.constraint() == Some(SQL_VIOLATION_MAX_ONE_ASSOCIATION) =>
+            {
+                DatabaseError::MaxOneInterfaceAssociation
+            }
+            error => DatabaseError::query(query, error),
+        })?;
+    for id in interface_ids {
+        tracing::info!(machine_interface_id = %id, %machine_id, "Migrating unowned machine_interface to managed host");
+    }
+    Ok(())
+}
+
 /// Clears `primary_interface` on every interface a machine currently owns.
 ///
 /// Used when a new interface takes over as the machine's sole primary -- e.g. a
@@ -502,6 +556,18 @@ pub async fn find_by_mac_address(
     macaddr: MacAddress,
 ) -> Result<Vec<MachineInterfaceSnapshot>, DatabaseError> {
     find_by(txn, ObjectColumnFilter::One(MacAddressColumn, &macaddr)).await
+}
+
+/// Loads all interface rows for report MACs, including unowned and BMC rows.
+pub async fn find_by_mac_addresses(
+    db: impl DbReader<'_>,
+    mac_addresses: &[MacAddress],
+) -> DatabaseResult<Vec<MachineInterfaceSnapshot>> {
+    find_by(
+        db,
+        ObjectColumnFilter::List(MacAddressColumn, mac_addresses),
+    )
+    .await
 }
 
 /// Associates an unowned OOB interface with the supplied DPU or predicts it before DHCP.

@@ -190,3 +190,122 @@ pub async fn create(
         .await
         .map_err(|e| DatabaseError::query(&query, e))
 }
+
+/// Promotes the requested pending interfaces after competing predictions are demoted.
+pub async fn promote_interfaces(macs: &[MacAddress], txn: &mut PgConnection) -> DatabaseResult<()> {
+    if macs.is_empty() {
+        return Ok(());
+    }
+    let query =
+        "UPDATE predicted_machine_interfaces SET primary_interface=true WHERE mac_address=ANY($1)";
+    sqlx::query(query)
+        .bind(macs)
+        .execute(txn)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))?;
+    Ok(())
+}
+
+/// Refreshes report IDs in one statement, preserving IDs omitted from the report.
+pub async fn set_boot_interface_ids(
+    ids: &[(MacAddress, &str)],
+    txn: &mut PgConnection,
+) -> DatabaseResult<()> {
+    if ids.is_empty() {
+        return Ok(());
+    }
+    let macs: Vec<_> = ids.iter().map(|(mac, _)| *mac).collect();
+    let boot_ids: Vec<_> = ids.iter().map(|(_, id)| *id).collect();
+    let query = "UPDATE predicted_machine_interfaces AS p SET boot_interface_id=v.boot_id \
+                 FROM UNNEST($1::macaddr[], $2::text[]) AS v(mac, boot_id) WHERE p.mac_address=v.mac";
+    sqlx::query(query)
+        .bind(macs)
+        .bind(boot_ids)
+        .execute(txn)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))?;
+    Ok(())
+}
+
+/// Inserts pending interfaces in batches bounded by PostgreSQL's bind limit.
+pub async fn create_many(
+    values: &[NewPredictedMachineInterface<'_>],
+    txn: &mut PgConnection,
+) -> DatabaseResult<()> {
+    for chunk in values.chunks(crate::BIND_LIMIT / 5) {
+        let mut query = sqlx::QueryBuilder::new(
+            "INSERT INTO predicted_machine_interfaces (machine_id, mac_address, expected_network_segment_type, boot_interface_id, primary_interface) ",
+        );
+        query.push_values(chunk, |mut row, value| {
+            row.push_bind(value.machine_id)
+                .push_bind(value.mac_address)
+                .push_bind(value.expected_network_segment_type)
+                .push_bind(value.boot_interface_id)
+                .push_bind(value.primary_interface);
+        });
+        query
+            .build()
+            .execute(&mut *txn)
+            .await
+            .map_err(|error| DatabaseError::query(query.sql(), error))?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod test_bulk_host_interfaces {
+    use carbide_uuid::machine::{MachineIdSource, MachineType};
+
+    use super::*;
+
+    #[crate::sqlx_test]
+    async fn bulk_host_interface_predictions_preserve_omitted_ids(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let machine_id = MachineId::new(
+            MachineIdSource::ProductBoardChassisSerial,
+            [0x91; 32],
+            MachineType::Host,
+        );
+        let mut txn = pool.begin().await?;
+        sqlx::query("INSERT INTO machines (id, dpf) VALUES ($1, '{}'::jsonb)")
+            .bind(machine_id)
+            .execute(txn.as_mut())
+            .await?;
+        let macs = [
+            MacAddress::new([2, 0, 0, 0, 0x91, 1]),
+            MacAddress::new([2, 0, 0, 0, 0x91, 2]),
+        ];
+        let values: Vec<_> = macs
+            .iter()
+            .map(|mac| NewPredictedMachineInterface {
+                machine_id: &machine_id,
+                mac_address: *mac,
+                expected_network_segment_type:
+                    model::network_segment::NetworkSegmentType::HostInband,
+                boot_interface_id: Some("NIC.Stored"),
+                primary_interface: false,
+            })
+            .collect();
+        create_many(&values, txn.as_mut()).await?;
+        promote_interfaces(&macs[1..], txn.as_mut()).await?;
+        set_boot_interface_ids(&[(macs[1], "NIC.Refreshed")], txn.as_mut()).await?;
+        for (mac, primary, boot_id) in [
+            (macs[0], false, "NIC.Stored"),
+            (macs[1], true, "NIC.Refreshed"),
+        ] {
+            let row = find_by_mac_address(txn.as_mut(), mac).await?.unwrap();
+            assert_eq!(row.machine_id, machine_id);
+            assert_eq!(row.primary_interface, primary);
+            assert_eq!(row.boot_interface_id.as_deref(), Some(boot_id));
+        }
+        txn.rollback().await?;
+        let mut connection = pool.acquire().await?;
+        assert!(
+            find_by_mac_address(&mut connection, macs[0])
+                .await?
+                .is_none()
+        );
+        Ok(())
+    }
+}

@@ -77,6 +77,7 @@ mod redfish;
 pub use bmc_endpoint_explorer::{AuthenticatedBmcClient, BmcEndpointExplorer};
 pub use redfish::{BmcAccess, EstablishedBmc, ProxiedPools};
 mod boot_interfaces;
+mod host_interfaces;
 use boot_interfaces::NicBootInterfaces;
 mod host_dpu_matches;
 use host_dpu_matches::{HostDpuMatches, MatchedDpu};

@@ -23,8 +23,7 @@ use std::time::{Duration, Instant};
 use carbide_instrument::emit;
 use carbide_utils::none_if_empty::NoneIfEmpty;
 use carbide_uuid::machine::{
-    HostMachineId, MachineId, MachineIdSubtype, PredictedHostMachineId,
-    StableHostMachineId,
+    HostMachineId, MachineId, MachineIdSubtype, PredictedHostMachineId, StableHostMachineId,
 };
 use carbide_uuid::rack::RackId;
 use component_manager::MachineInfoProvider;
@@ -43,7 +42,6 @@ use model::machine::{
     AnyMachine, CURRENT_STATE_MODEL_VERSION, ConfigureAstraState, LoadSnapshotOptions,
     MachineInterfaceSnapshot, ManagedHostState, dpf_based_dpu_provisioning_possible,
 };
-use model::machine_interface::InterfaceType;
 use model::machine_interface_address::MachineInterfaceAssociation;
 use model::network_segment::NetworkSegmentType;
 use model::predicted_machine_interface::NewPredictedMachineInterface;
@@ -735,7 +733,7 @@ impl MachineCreator {
         )
         .await?;
 
-        Self::reconcile_zero_dpu_host_interfaces(
+        crate::host_interfaces::reconcile(
             txn,
             &machine_id,
             &mac_addresses,
@@ -824,7 +822,7 @@ impl MachineCreator {
         // DHCP and admin repair flows that lock those rows under the
         // segment locks.
         db::machine_interface::lock_all_admin_segments(&mut *txn).await?;
-        Self::reconcile_zero_dpu_host_interfaces(
+        crate::host_interfaces::reconcile(
             txn,
             machine_id,
             mac_addresses,
@@ -833,192 +831,6 @@ impl MachineCreator {
         )
         .await?;
         reconcile_desired_boot_interface(txn, machine_id, None, declared_primary).await?;
-
-        Ok(())
-    }
-
-    /// Reconciles every discovered Host candidate with a zero-DPU host.
-    ///
-    /// This runs for both a newly minted host and a refreshed report for an
-    /// existing predicted host. That second path matters when the BMC learns a
-    /// declared NIC through supplemental adapter-Port inventory after it has
-    /// already reported other System interfaces.
-    async fn reconcile_zero_dpu_host_interfaces(
-        txn: &mut PgConnection,
-        machine_id: &MachineId,
-        mac_addresses: &[MacAddress],
-        report_boot_interface_ids: &[(MacAddress, &str)],
-        primary_mac: Option<MacAddress>,
-    ) -> SiteExplorerResult<()> {
-        // If the selected primary has already DHCP'd, settle the host's real
-        // rows before adopting it so the partial unique index never sees two
-        // primary interfaces at once. A pending prediction does not require
-        // demoting the currently leased primary; DHCP promotion handles that
-        // transition when the selected NIC actually arrives.
-        let selected_primary = primary_mac.filter(|mac| mac_addresses.contains(mac));
-        let selected_primary_has_real_row = if let Some(primary_mac) = selected_primary
-            && let Some(primary_interface) =
-                db::machine_interface::find_by_mac_address(&mut *txn, primary_mac)
-                    .await?
-                    .into_iter()
-                    .min_by_key(|interface| interface.interface_type == InterfaceType::Bmc)
-            && primary_interface.interface_type != InterfaceType::Bmc
-            && primary_interface
-                .machine_id
-                .is_none_or(|existing_machine_id| existing_machine_id == *machine_id)
-        {
-            if primary_interface.machine_id.is_none() || !primary_interface.primary_interface {
-                db::machine_interface::demote_primary_interfaces_for_machine(machine_id, txn)
-                    .await?;
-            }
-            true
-        } else {
-            false
-        };
-        if let Some(primary_mac) = selected_primary {
-            db::predicted_machine_interface::demote_other_primary_interfaces_for_machine(
-                machine_id,
-                primary_mac,
-                txn,
-            )
-            .await?;
-        }
-
-        // Route already-leased rows and pending predictions through the same
-        // declaration so a refresh can add inventory without minting another
-        // host or depending on DHCP arrival order.
-        for mac_address in mac_addresses.iter().copied() {
-            let is_primary = selected_primary == Some(mac_address);
-            if let Some(machine_interface) =
-                db::machine_interface::find_by_mac_address(&mut *txn, mac_address)
-                    .await?
-                    .into_iter()
-                    .min_by_key(|interface| interface.interface_type == InterfaceType::Bmc)
-            {
-                // There's already a machine_interface with this MAC...
-                if let Some(existing_machine_id) = machine_interface.machine_id {
-                    // Same machine_id means the preallocated BMC interface row we
-                    // just attached via update_machine_topology(), not a contradiction.
-                    if existing_machine_id == *machine_id {
-                        // Preserve a settled primary when no declaration (or
-                        // retained fallback) selects a replacement. Likewise,
-                        // a primary that exists only as a prediction takes over
-                        // at DHCP promotion, not while it is still pending.
-                        // Once the selected primary is an owned row, reconcile
-                        // every owned row to the machine-wide choice.
-                        let want_primary =
-                            is_primary && machine_interface.interface_type != InterfaceType::Bmc;
-                        if (selected_primary_has_real_row
-                            || machine_interface.interface_type == InterfaceType::Bmc)
-                            && machine_interface.primary_interface != want_primary
-                        {
-                            db::machine_interface::set_primary_interface(
-                                &machine_interface.id,
-                                want_primary,
-                                txn,
-                            )
-                            .await?;
-                        }
-                        continue;
-                    }
-                    // Different machine_id contradicts the find_by_mac() above.
-                    tracing::error!(
-                        %mac_address,
-                        %machine_id,
-                        %existing_machine_id,
-                        "BUG! Found existing machine_interface with this MAC address, we should not have gotten here!"
-                    );
-                    return Err(SiteExplorerError::AlreadyFoundError {
-                        kind: "MachineInterface",
-                        id: mac_address.to_string(),
-                    });
-                } else {
-                    // ...If it has no MachineId, the host must have DHCP'd before site-explorer ran.
-                    // Reconcile its primary flag to the declaration before adopting it: an anonymous
-                    // DHCP row defaults to primary=true, so without this two pre-ingestion leases
-                    // would both arrive primary and collide on association.
-                    if machine_interface.primary_interface != is_primary {
-                        db::machine_interface::set_primary_interface(
-                            &machine_interface.id,
-                            is_primary,
-                            txn,
-                        )
-                        .await?;
-                    }
-                    tracing::info!(%mac_address, %machine_id, "Migrating unowned machine_interface to new managed host");
-                    db::machine_interface::associate_interface_with_machine(
-                        &machine_interface.id,
-                        MachineInterfaceAssociation::Machine(*machine_id),
-                        txn,
-                    )
-                    .await?;
-                }
-                continue;
-            }
-
-            let boot_interface_id = report_boot_interface_ids
-                .iter()
-                .find(|(mac, _)| *mac == mac_address)
-                .map(|(_, id)| *id);
-
-            if let Some(prediction) =
-                db::predicted_machine_interface::find_by_mac_address(&mut *txn, mac_address).await?
-            {
-                if prediction.machine_id != *machine_id {
-                    tracing::error!(
-                        %mac_address,
-                        %machine_id,
-                        existing_machine_id = %prediction.machine_id,
-                        "BUG! Found existing predicted_machine_interface with this MAC address, we should not have gotten here!",
-                    );
-                    return Err(SiteExplorerError::AlreadyFoundError {
-                        kind: "PredictedMachineInterface",
-                        id: mac_address.to_string(),
-                    });
-                }
-                // An absent declaration is not an instruction to clear a
-                // retained or previously settled prediction. A real primary
-                // selection is authoritative across every pending candidate.
-                if is_primary && !prediction.primary_interface {
-                    db::predicted_machine_interface::set_primary_interface(
-                        prediction.id,
-                        true,
-                        txn,
-                    )
-                    .await?;
-                }
-                if let Some(boot_interface_id) = boot_interface_id
-                    && prediction.boot_interface_id.as_deref() != Some(boot_interface_id)
-                {
-                    db::predicted_machine_interface::set_boot_interface_id(
-                        txn,
-                        mac_address,
-                        boot_interface_id,
-                    )
-                    .await?;
-                }
-            } else {
-                // Give the predicted interface its boot interface id when
-                // the live report resolves one, so the promoted row starts
-                // with the full boot pair. Retained ids are deliberately
-                // NOT copied here: a prediction has no recorded_at, so a
-                // copy would dodge the `retained_boot_interface_window`
-                // check. The retained pair instead lands on the row at
-                // creation (see `create_with_type`), where the window is
-                // checked at DHCP time.
-                db::predicted_machine_interface::create(
-                    NewPredictedMachineInterface {
-                        machine_id,
-                        mac_address,
-                        expected_network_segment_type: NetworkSegmentType::HostInband,
-                        boot_interface_id,
-                        primary_interface: is_primary,
-                    },
-                    txn,
-                )
-                .await?;
-            }
-        }
 
         Ok(())
     }
