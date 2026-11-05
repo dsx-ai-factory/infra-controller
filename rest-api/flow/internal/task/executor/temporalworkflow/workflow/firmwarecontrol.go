@@ -5,6 +5,7 @@ package workflow
 
 import (
 	"maps"
+	"slices"
 	"time"
 
 	"github.com/rs/zerolog/log"
@@ -13,6 +14,7 @@ import (
 
 	taskcommon "github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/common"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/executor/temporalworkflow/common"
+	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/operationrules"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/operations"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/task"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/devicetypes"
@@ -66,6 +68,7 @@ func firmwareControl(
 		executionTargets = selectFirmwareTargets(typeToTargets, info.TargetVersion)
 	}
 
+	continuations := firmwareRestartContinuations(&reqInfo, info, executionTargets)
 	report, err := executeRuleBasedOperation(
 		ctx,
 		reqInfo.TaskID,
@@ -73,6 +76,7 @@ func firmwareControl(
 		typeToTargets,
 		info,
 		reqInfo.RuleDefinition,
+		continuations...,
 	)
 
 	return updateFinishedTaskStatus(ctx, reqInfo.TaskID, err, report)
@@ -101,4 +105,42 @@ func selectFirmwareTargets(
 func checkFirmwareUpdatePrerequisites(_ workflow.Context, _ *task.ExecutionInfo) error {
 	log.Info().Msg("Firmware update prerequisite checks: TODO - not yet implemented")
 	return nil
+}
+
+// A durable snapshot is also the rollout boundary: predecessor tasks and
+// histories have no restart components and retain their previous command sequence.
+func firmwareRestartContinuations(
+	info *task.ExecutionInfo,
+	firmware *operations.FirmwareControlTaskInfo,
+	selected map[devicetypes.ComponentType]common.Target,
+) []ruleContinuation {
+	if len(info.FirmwareRestartComponents) == 0 ||
+		selected[devicetypes.ComponentTypeNVSwitch].Len() == 0 || info.RuleDefinition == nil {
+		return nil
+	}
+	hasNVOSUpdate := false
+	for _, step := range info.RuleDefinition.Steps {
+		if step.ComponentType != devicetypes.ComponentTypeNVSwitch {
+			continue
+		}
+		for _, action := range step.OrderedActions() {
+			if action.Name == operationrules.ActionFirmwareControl {
+				hasNVOSUpdate = true
+			}
+		}
+	}
+	if !hasNVOSUpdate {
+		return nil
+	}
+	// Snapshot admission checks sub-targets; check again at execution because
+	// task histories and custom rules can originate outside the manager.
+	if len(firmware.SubTargets) != 0 && !slices.Contains(firmware.SubTargets, "nvos") {
+		return nil
+	}
+	continuation := ruleContinuation{
+		rule: operationrules.RuleDefinition{Version: operationrules.CurrentRuleDefinitionVersion,
+			Steps: operationrules.ComputeRestartSteps()},
+		targets: buildTargets(&task.ExecutionInfo{Components: info.FirmwareRestartComponents}),
+	}
+	return []ruleContinuation{continuation}
 }

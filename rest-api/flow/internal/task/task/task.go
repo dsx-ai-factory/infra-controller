@@ -77,6 +77,11 @@ type ExecutionInfo struct {
 	TaskID     uuid.UUID
 	Components []WorkflowComponent
 
+	// FirmwareRestartComponents is the admission-time rack compute snapshot.
+	// These devices are restarted after NVOS updates, without receiving firmware
+	// unless they were also selected in Components. Absent on predecessor tasks.
+	FirmwareRestartComponents []WorkflowComponent `json:",omitempty"`
+
 	// RuleDefinition is the resolved operation rule, determined at task
 	// creation time and carried through to the workflow unchanged.
 	RuleDefinition *operationrules.RuleDefinition

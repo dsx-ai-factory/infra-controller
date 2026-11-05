@@ -110,6 +110,11 @@ type OperationRuleListOptions struct {
 // TaskAttributes holds flexible task metadata stored as a single jsonb
 // column. New fields can be added here without requiring a DB migration.
 type TaskAttributes struct {
+	// FirmwareTargetsByType preserves the original update selection when an
+	// NVOS task also reserves rack compute for its subsequent restart. Nil
+	// retains predecessor tasks' firmware-only behavior.
+	FirmwareTargetsByType map[devicetypes.ComponentType][]uuid.UUID `json:"firmware_targets_by_type,omitempty"`
+
 	// ComponentsByType maps each targeted component type to its UUIDs.
 	// Nil means the task targets no specific components.
 	ComponentsByType map[devicetypes.ComponentType][]uuid.UUID `json:"components_by_type,omitempty"` //nolint:lll
