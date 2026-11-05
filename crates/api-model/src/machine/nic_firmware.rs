@@ -25,6 +25,7 @@
 //! state unsafe. Embedded shared catalog and execution types retain their own
 //! decoding contracts.
 
+use carbide_libmlx_model::firmware::FirmwareDeliveryMode;
 use carbide_libmlx_model::firmware::operation::{
     FirmwareOperation, FirmwareOperationPhase, FirmwareOperationState,
 };
@@ -59,6 +60,10 @@ pub struct NicFirmwareOperation {
     pub targets: Vec<NicFirmwareTarget>,
     /// Execution choices sent unchanged with every card's request.
     pub options: NicFirmwareExecutionOptions,
+    /// Delivery chosen at admission, independent of subsequent site settings.
+    /// Omission preserves the original Direct behavior of an older workflow.
+    #[serde(default, skip_serializing_if = "FirmwareDeliveryMode::is_direct")]
+    pub delivery_mode: FirmwareDeliveryMode,
     /// Where the workflow stands. A step must be stored before its commands go
     /// out, so a restart resumes from it.
     pub phase: NicFirmwarePhase,

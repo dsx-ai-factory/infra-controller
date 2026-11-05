@@ -794,6 +794,34 @@ request_timeout_seconds = 5"#
         })
     }
 
+    #[test]
+    #[allow(clippy::result_large_err)]
+    fn nic_firmware_delivery_mode_is_loaded_and_validated() {
+        use carbide_libmlx_model::firmware::FirmwareDeliveryMode;
+
+        figment::Jail::expect_with(|jail| {
+            scenarios!(
+                run = |settings| {
+                    jail.create_file(
+                        "config.toml",
+                        &format!("{}\n{settings}\n", include_str!("test_data/min_config.toml")),
+                    ).unwrap();
+                    parse_carbide_config(Path::new("config.toml"), None)
+                        .map(|config| config.firmware_global.nic_firmware_delivery_mode)
+                        .map_err(drop)
+                };
+                "NIC firmware delivery policy" {
+                    "" => Yields(FirmwareDeliveryMode::SiteCache),
+                    "[firmware_global]\nnic_firmware_delivery_mode = \"direct\""
+                        => Yields(FirmwareDeliveryMode::Direct),
+                    "[firmware_global]\nnic_firmware_delivery_mode = \"automatic\""
+                        => Fails,
+                }
+            );
+            Ok(())
+        })
+    }
+
     /// Verifies production configuration loading traverses both admin and named
     /// profiles so invalid route targets cannot survive startup.
     #[test]
