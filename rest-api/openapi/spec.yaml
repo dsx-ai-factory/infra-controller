@@ -30662,6 +30662,10 @@ components:
     MachineDisk:
       title: MachineDisk
       type: object
+      x-go-has-nullable-required-properties: true
+      x-go-nullable-required-properties:
+        - sizeMb
+        - pciPath
       description: Describes a disk of a Machine
       required:
         - type
