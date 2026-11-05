@@ -1020,13 +1020,7 @@ pub(crate) async fn record_dpu_network_status(
 ) -> Result<Response<()>, tonic::Status> {
     log_request_data(&request);
 
-    let request = request.into_inner();
-    let supports_config_acknowledgment = request.lldp_snapshot_fingerprint.is_some();
-    let lldp_error = process_dpu_network_status(api, request).await?;
-    if !supports_config_acknowledgment && let Some(error) = lldp_error {
-        return Err(error.into());
-    }
-
+    process_dpu_network_status(api, request.into_inner()).await?;
     Ok(Response::new(()))
 }
 
@@ -1119,12 +1113,12 @@ mod lldp_fingerprint_validation_tests {
     }
 }
 
-/// Applies a DPU status report, retaining LLDP rejection until post-commit
-/// follow-up completes.
+/// Applies a DPU status report. LLDP rejection is reported to agents that cannot
+/// read the accepted fingerprint from their network configuration.
 async fn process_dpu_network_status(
     api: &Api,
     mut request: rpc::DpuNetworkStatus,
-) -> Result<Option<CarbideError>, tonic::Status> {
+) -> Result<(), tonic::Status> {
     let dpu_machine_id: DpuMachineId = convert_and_log_machine_id(request.dpu_machine_id.as_ref())?;
 
     let mut txn = api.txn_begin().await?;
@@ -1359,7 +1353,14 @@ async fn process_dpu_network_status(
         });
     }
 
-    Ok(lldp_error)
+    // Agents that send no fingerprint learn of LLDP rejection only through the RPC status;
+    // operational status is already committed at this point.
+    if let Some(error) = lldp_error
+        && request.lldp_snapshot_fingerprint.is_none()
+    {
+        return Err(error.into());
+    }
+    Ok(())
 }
 
 async fn wakeup_host_state_handler_by_dpu_id(
