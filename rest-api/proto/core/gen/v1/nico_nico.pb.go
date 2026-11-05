@@ -67501,19 +67501,27 @@ func (x *IpxeTemplateArtifacts) GetItems() []*IpxeTemplateArtifact {
 }
 
 type UpdateOperatingSystemRequest struct {
-	state                      protoimpl.MessageState  `protogen:"open.v1"`
-	Id                         *OperatingSystemId      `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
-	Name                       *string                 `protobuf:"bytes,2,opt,name=name,proto3,oneof" json:"name,omitempty"`
-	Description                *string                 `protobuf:"bytes,3,opt,name=description,proto3,oneof" json:"description,omitempty"`
-	IsActive                   *bool                   `protobuf:"varint,4,opt,name=is_active,json=isActive,proto3,oneof" json:"is_active,omitempty"`
-	AllowOverride              *bool                   `protobuf:"varint,5,opt,name=allow_override,json=allowOverride,proto3,oneof" json:"allow_override,omitempty"`
-	PhoneHomeEnabled           *bool                   `protobuf:"varint,6,opt,name=phone_home_enabled,json=phoneHomeEnabled,proto3,oneof" json:"phone_home_enabled,omitempty"`
-	UserData                   *string                 `protobuf:"bytes,7,opt,name=user_data,json=userData,proto3,oneof" json:"user_data,omitempty"`
-	IpxeScript                 *string                 `protobuf:"bytes,20,opt,name=ipxe_script,json=ipxeScript,proto3,oneof" json:"ipxe_script,omitempty"`
-	IpxeTemplateId             *IpxeTemplateId         `protobuf:"bytes,22,opt,name=ipxe_template_id,json=ipxeTemplateId,proto3,oneof" json:"ipxe_template_id,omitempty"`
-	IpxeTemplateParameters     *IpxeTemplateParameters `protobuf:"bytes,23,opt,name=ipxe_template_parameters,json=ipxeTemplateParameters,proto3,oneof" json:"ipxe_template_parameters,omitempty"`
-	IpxeTemplateArtifacts      *IpxeTemplateArtifacts  `protobuf:"bytes,24,opt,name=ipxe_template_artifacts,json=ipxeTemplateArtifacts,proto3,oneof" json:"ipxe_template_artifacts,omitempty"`
-	IpxeTemplateDefinitionHash *string                 `protobuf:"bytes,25,opt,name=ipxe_template_definition_hash,json=ipxeTemplateDefinitionHash,proto3,oneof" json:"ipxe_template_definition_hash,omitempty"` // if provided, used as-is; otherwise recomputed
+	state                  protoimpl.MessageState  `protogen:"open.v1"`
+	Id                     *OperatingSystemId      `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	Name                   *string                 `protobuf:"bytes,2,opt,name=name,proto3,oneof" json:"name,omitempty"`
+	Description            *string                 `protobuf:"bytes,3,opt,name=description,proto3,oneof" json:"description,omitempty"`
+	IsActive               *bool                   `protobuf:"varint,4,opt,name=is_active,json=isActive,proto3,oneof" json:"is_active,omitempty"`
+	AllowOverride          *bool                   `protobuf:"varint,5,opt,name=allow_override,json=allowOverride,proto3,oneof" json:"allow_override,omitempty"`
+	PhoneHomeEnabled       *bool                   `protobuf:"varint,6,opt,name=phone_home_enabled,json=phoneHomeEnabled,proto3,oneof" json:"phone_home_enabled,omitempty"`
+	UserData               *string                 `protobuf:"bytes,7,opt,name=user_data,json=userData,proto3,oneof" json:"user_data,omitempty"`
+	IpxeScript             *string                 `protobuf:"bytes,20,opt,name=ipxe_script,json=ipxeScript,proto3,oneof" json:"ipxe_script,omitempty"`
+	IpxeTemplateId         *IpxeTemplateId         `protobuf:"bytes,22,opt,name=ipxe_template_id,json=ipxeTemplateId,proto3,oneof" json:"ipxe_template_id,omitempty"`
+	IpxeTemplateParameters *IpxeTemplateParameters `protobuf:"bytes,23,opt,name=ipxe_template_parameters,json=ipxeTemplateParameters,proto3,oneof" json:"ipxe_template_parameters,omitempty"`
+	// Omitted lists keep their stored values; present lists replace them, including empty lists.
+	// Caller-supplied cached_url values are ignored. An unchanged template, parameter list,
+	// and artifact definition (including cache_strategy) retain the site's stored cached URLs.
+	// Changing that definition clears the cached URLs and recomputes readiness: an uncached
+	// CACHED_ONLY artifact makes the OS PROVISIONING; otherwise it is READY.
+	// Use UpdateOperatingSystemCachableIpxeTemplateArtifacts to set or clear cached URLs.
+	IpxeTemplateArtifacts *IpxeTemplateArtifacts `protobuf:"bytes,24,opt,name=ipxe_template_artifacts,json=ipxeTemplateArtifacts,proto3,oneof" json:"ipxe_template_artifacts,omitempty"`
+	// If provided, used as-is. Otherwise validate the effective definition and recompute
+	// its hash. Correcting a stored hash alone does not invalidate unchanged artifacts.
+	IpxeTemplateDefinitionHash *string `protobuf:"bytes,25,opt,name=ipxe_template_definition_hash,json=ipxeTemplateDefinitionHash,proto3,oneof" json:"ipxe_template_definition_hash,omitempty"`
 	unknownFields              protoimpl.UnknownFields
 	sizeCache                  protoimpl.SizeCache
 }
