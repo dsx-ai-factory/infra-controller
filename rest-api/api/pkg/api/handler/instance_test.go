@@ -9301,7 +9301,9 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 				assert.Equal(t, *tt.args.expectedPropagationStatus, rst.NetworkSecurityGroupPropagationDetails.Status)
 			}
 
-			if len(tt.args.ibInterfaceToDelete) > 0 && len(tt.args.reqData.InfiniBandInterfaces) > 0 {
+			// An explicit InfiniBandInterfaces list (including empty []) triggers replacement logic.
+			// Check Deleting status for interfaces that should be removed.
+			if len(tt.args.ibInterfaceToDelete) > 0 && tt.args.reqData.InfiniBandInterfaces != nil {
 				// Make sure the InfiniBand Interfaces are deleting
 				ibiDAO := cdbm.NewInfiniBandInterfaceDAO(tt.fields.dbSession)
 				for _, ibifc := range tt.args.ibInterfaceToDelete {
@@ -9318,7 +9320,7 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 					}
 				}
 
-				// Make sure the InfiniBand Interfaces are pending
+				// Make sure the InfiniBand Interfaces are pending (for non-empty request lists)
 				// It should be in order of the request received
 				// Get all InfiniBand Interfaces for the Instance in creation and assert they are in order and status is pending
 				ibifcs, _, _ := ibiDAO.GetAll(ec.Request().Context(), nil,
@@ -9488,11 +9490,12 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 						}
 					}
 
-					// Verify the InfiniBand Interfaces are in the Site Controller request
-					if len(tt.args.reqData.InfiniBandInterfaces) > 0 {
+					// Verify the InfiniBand Interfaces are in the Site Controller request.
+					// An explicit list (including empty []) replaces the config; nil omits the field and preserves existing.
+					if tt.args.reqData.InfiniBandInterfaces != nil {
 						assert.Equal(t, len(siteReq.Config.Infiniband.IbInterfaces), len(tt.args.reqData.InfiniBandInterfaces))
 
-						// Make sure order to should be same as the request received
+						// Make sure order is the same as the request received
 						for i := range siteReq.Config.Infiniband.IbInterfaces {
 							assert.Equal(t, siteReq.Config.Infiniband.IbInterfaces[i].IbPartitionId.Value, tt.args.reqData.InfiniBandInterfaces[i].InfiniBandPartitionID)
 						}
