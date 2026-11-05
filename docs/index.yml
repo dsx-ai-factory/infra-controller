@@ -417,6 +417,12 @@ navigation:
                   href: https://github.com/dsx-ai-factory/infra-controller/blob/main/docs/manuals/nico-admin-cli/commands/routing-profile/routing-profile.md
                 - link: Show Routing Profiles
                   href: https://github.com/dsx-ai-factory/infra-controller/blob/main/docs/manuals/nico-admin-cli/commands/routing-profile/routing-profile-show.md
+            - section: Network Segment CLI Reference
+              contents:
+                - link: Network Segment Overview
+                  href: https://github.com/dsx-ai-factory/infra-controller/blob/main/docs/manuals/nico-admin-cli/commands/network-segment/network-segment.md
+                - link: Add a Missing Address Family
+                  href: https://github.com/dsx-ai-factory/infra-controller/blob/main/docs/manuals/nico-admin-cli/commands/network-segment/network-segment-add-prefix.md
             - section: Component Reset CLI Reference
               contents:
                 - link: Reset Components
