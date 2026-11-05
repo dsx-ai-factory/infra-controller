@@ -5,12 +5,14 @@
     "cluster" (dict "binary" "/tests/cluster.test" "run" "^TestAgainstARealCluster$")
     "probe" (dict "binary" "/tests/probe.test" "run" "^TestAgainstARealProbe$")
     "inventory" (dict "binary" "/tests/inventory.test" "run" "^TestAcceptance$")
-    "history" (dict "binary" "/tests/history.test" "run" "^TestAcceptanceReplaysARealProbeCapture$") -}}
+    "history" (dict "binary" "/tests/history.test" "run" "^TestAcceptanceReplaysARealProbeCapture$")
+    "store" (dict "binary" "/tests/store.test" "run" "^TestAgainstARealStore$")
+    "store-transition" (dict "binary" "/tests/store.test" "run" "^TestControlledTransition$") -}}
 {{- $enabled := list -}}
 {{- range $name, $suite := .Values.suites -}}
 {{- if $suite.enabled -}}
 {{- if not (hasKey $known $name) -}}
-{{- fail (printf "unknown suite %q; the known suites are cluster, probe, inventory and history" $name) -}}
+{{- fail (printf "unknown suite %q; the known suites are cluster, probe, inventory, history, store and store-transition" $name) -}}
 {{- end -}}
 {{- $enabled = append $enabled $name -}}
 {{- end -}}
@@ -143,6 +145,44 @@ spec:
               value: {{ $cap.producerRevision | quote }}
             {{- end }}
             {{- end }}
+            {{- if has $name (list "store" "store-transition") }}
+            {{- $s := $root.Values.store }}
+            - name: SCALE_TEST_STORE_URL  # the store and the probe; an empty URL fails the test, not skips
+              value: {{ $s.url | quote }}
+            - name: SCALE_TEST_PROBE_URL
+              value: {{ $root.Values.probeUrl | quote }}
+            {{- $delay := $s.ingestionDelaySeconds | toString }}
+            {{- if not (regexMatch "^([0-9]|[1-5][0-9]|60)$" $delay) }}
+            {{- fail (printf "store.ingestionDelaySeconds must be a whole number of seconds from 0 to 60, got %q" $delay) }}
+            {{- end }}
+            {{- if ne $delay "0" }}
+            - name: SCALE_TEST_STORE_INGESTION_DELAY
+              value: {{ $delay | quote }}
+            {{- end }}
+            {{- if $s.tokenSecret }}
+            - name: SCALE_TEST_STORE_TOKEN_FILE
+              value: /var/run/secrets/store-token/token
+            {{- end }}
+            {{- if $s.caSecret }}
+            - name: SCALE_TEST_STORE_CA_FILE
+              value: /var/run/secrets/store-ca/ca.crt
+            {{- end }}
+            {{- end }}
+            {{- if eq $name "store-transition" }}
+            {{- $t := $root.Values.store.transition }}
+            - name: SCALE_TEST_CAPTURE_START  # the operator-driven window; the test fails if unset
+              value: {{ $t.start | quote }}
+            - name: SCALE_TEST_CAPTURE_END
+              value: {{ $t.end | quote }}
+            - name: SCALE_TEST_CAPTURE_N
+              value: {{ $t.n | quote }}
+            - name: SCALE_TEST_CAPTURE_TARGETS
+              value: {{ $t.targets | quote }}
+            - name: SCALE_TEST_CAPTURE_REACHED
+              value: {{ $t.reached | quote }}
+            - name: SCALE_TEST_CAPTURE_MIN_TIMING_ERROR
+              value: {{ $t.minTimingErrorSeconds | quote }}
+            {{- end }}
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
@@ -161,6 +201,19 @@ spec:
             - name: capture
               mountPath: /capture
               readOnly: true
+            {{- end }}
+            {{- if has $name (list "store" "store-transition") }}
+            {{- $s := $root.Values.store }}
+            {{- if $s.tokenSecret }}
+            - name: store-token
+              mountPath: /var/run/secrets/store-token
+              readOnly: true
+            {{- end }}
+            {{- if $s.caSecret }}
+            - name: store-ca
+              mountPath: /var/run/secrets/store-ca
+              readOnly: true
+            {{- end }}
             {{- end }}
       volumes:
         - name: tmp
@@ -181,5 +234,18 @@ spec:
             claimName: {{ $cap.existingClaim | quote }}
             readOnly: true
           {{- end }}
+        {{- end }}
+        {{- if has $name (list "store" "store-transition") }}
+        {{- $s := $root.Values.store }}
+        {{- if $s.tokenSecret }}
+        - name: store-token
+          secret:
+            secretName: {{ $s.tokenSecret | quote }}
+        {{- end }}
+        {{- if $s.caSecret }}
+        - name: store-ca
+          secret:
+            secretName: {{ $s.caSecret | quote }}
+        {{- end }}
         {{- end }}
 {{- end }}

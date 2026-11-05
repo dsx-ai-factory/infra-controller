@@ -21,7 +21,8 @@ fullnameOverride: ""
 
 # Suites. Each enabled entry renders one `helm test` Job that runs a fixed
 # binary and anchored test; only the suites the chart knows (cluster, probe,
-# history) may be enabled, and at least one must be. Lower weight runs first.
+# inventory, history, store, store-transition) may be enabled, and at least one
+# must be. Lower weight runs first.
 suites:
   cluster:
     enabled: true
@@ -35,6 +36,12 @@ suites:
   history:
     enabled: false
     weight: 4
+  store:
+    enabled: false
+    weight: 5
+  store-transition:
+    enabled: false
+    weight: 6
 
 # Base URL of the probe Service (SCALE_TEST_PROBE_URL) for the probe suite. When
 # unset, the enabled probe fixture fails rather than skipping.
@@ -78,6 +85,23 @@ historyCapture:
   subPath: capture.json
   producerImage: ""
   producerRevision: ""
+
+# The store and store-transition suites read the history store that scrapes the
+# probe: url is SCALE_TEST_STORE_URL, probeUrl above SCALE_TEST_PROBE_URL, both
+# required (empty fails). Credentials are mounted read-only Secret files:
+# tokenSecret a "token" key, caSecret a "ca.crt" key; ingestionDelaySeconds the delay.
+store:
+  url: ""
+  ingestionDelaySeconds: 0
+  tokenSecret: ""
+  caSecret: ""
+  transition:
+    start: ""
+    end: ""
+    n: ""
+    targets: ""
+    reached: ""
+    minTimingErrorSeconds: ""
 
 # The Job deadline and the go test timeout for each suite, both positive
 # integer seconds (the timeout renders as a Go duration such as 480s).

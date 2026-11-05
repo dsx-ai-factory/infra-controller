@@ -10,9 +10,12 @@ build:
 test:
 	go test -race -count=1 ./...
 
-# Runs the probe client against a real probe at SCALE_TEST_PROBE_URL.
+# Runs the probe client against a real probe at SCALE_TEST_PROBE_URL, and the
+# history store client against the store at SCALE_TEST_STORE_URL that scrapes
+# it. Both fail, rather than skip, when their URL is unset.
 devsite-test:
 	go test -tags devsite -count=1 -run TestAgainstARealProbe ./internal/probe/
+	go test -tags devsite -count=1 -run TestAgainstARealStore ./internal/store/
 
 # Replays a captured real-probe producer run through the fleet-time math and
 # checks every crossing, final count, process binding and the timing bound.
