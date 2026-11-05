@@ -90,7 +90,9 @@ func GetTestDBSession(t *testing.T, reset bool) *db.Session {
 	}
 
 	if count > 0 && reset {
-		_, err = dbSession.DB.Exec("DROP DATABASE " + tdbcfg.Name)
+		// WITH (FORCE) terminates connections a previous test left behind, which
+		// would otherwise fail the drop with SQLSTATE 55006.
+		_, err = dbSession.DB.Exec("DROP DATABASE " + tdbcfg.Name + " WITH (FORCE)")
 		if err != nil {
 			dbSession.Close()
 			t.Fatal(err)

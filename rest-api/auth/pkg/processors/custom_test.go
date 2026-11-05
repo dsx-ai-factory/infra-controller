@@ -50,7 +50,6 @@ func setupTestEnvironment(t *testing.T, audiences []string, scopes []string) (*C
 
 	// Create JWKS config
 	jwksConfig := config.NewJwksConfig(
-		"custom-provider",
 		jwksServer.URL,
 		"https://custom.example.com",
 		config.TokenOriginCustom,
@@ -286,6 +285,31 @@ func TestCustomProcessor_ClaimMappingAudiences(t *testing.T) {
 			assert.Contains(t, apiErr.Message, "not authorized for organization")
 		})
 	}
+}
+
+// TestCustomProcessor_MixedMappingMissesName both causes: when one mapping of
+// the org refuses the token's audience and another its scopes, the 403 must not
+// name audience alone, which would send the caller to fix the wrong mapping.
+func TestCustomProcessor_MixedMappingMisses(t *testing.T) {
+	processor, jwksConfig, privateKey, _, cleanup := setupTestEnvironment(t, []string{"issuer-audience"}, []string{"carbide"})
+	defer cleanup()
+	jwksConfig.ClaimMappings = []config.ClaimMapping{
+		{OrgName: "acme", Roles: []string{"TENANT_ADMIN"}, Audiences: []string{"a"}},
+		{OrgName: "acme", Roles: []string{"TENANT_ADMIN"}, Audiences: []string{"b"}, Scopes: []string{"nico:read"}},
+	}
+	tokenString := createTestToken(t, privateKey, jwt.MapClaims{
+		"sub": "mixed", "iss": "https://custom.example.com", "aud": []string{"issuer-audience", "b"}, "scope": "carbide",
+		"exp": time.Now().Add(time.Hour).Unix(), "iat": time.Now().Unix(),
+	})
+	c := echo.New().NewContext(httptest.NewRequest(http.MethodGet, "/org/acme/test", nil), httptest.NewRecorder())
+	c.SetParamNames("orgName")
+	c.SetParamValues("acme")
+
+	_, apiErr := processor.ProcessToken(c, tokenString, jwksConfig, zerolog.Nop())
+
+	require.NotNil(t, apiErr)
+	assert.Equal(t, http.StatusForbidden, apiErr.Code)
+	assert.Equal(t, "No claim mapping accepts the token's audience and scopes for organization specified in URL", apiErr.Message)
 }
 
 func TestCustomProcessor_ValidateScopes_Success(t *testing.T) {
@@ -668,7 +692,6 @@ func TestValidateAudiences_DirectTest(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			jwksConfig := &config.JwksConfig{
-				Name:      "test",
 				Audiences: tt.configuredAudiences,
 			}
 			err := jwksConfig.ValidateAudience(tt.tokenClaims)
@@ -774,7 +797,6 @@ func TestValidateScopes_DirectTest(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			jwksConfig := &config.JwksConfig{
-				Name:   "test",
 				Scopes: tt.requiredScopes,
 			}
 			err := jwksConfig.ValidateScopes(tt.tokenClaims)
@@ -846,7 +868,6 @@ func TestCombinedValidation_DirectTest(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			jwksConfig := &config.JwksConfig{
-				Name:      "test",
 				Audiences: tt.configuredAudiences,
 				Scopes:    tt.requiredScopes,
 			}

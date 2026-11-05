@@ -270,6 +270,32 @@ func TestTxAcquireAdvisoryLock(t *testing.T) {
 	}
 }
 
+// TestTxAcquireAdvisoryLockBlockingHonorsCancellation: a caller that gives up
+// while waiting for a held lock gets its error at once instead of holding its
+// connection until the holder commits.
+func TestTxAcquireAdvisoryLockBlockingHonorsCancellation(t *testing.T) {
+	dbSession := testTxGetTestSession(t)
+	defer dbSession.Close()
+	ctx := context.Background()
+	lockID := GetAdvisoryLockIDFromString(uuid.NewString())
+
+	holder, err := BeginTx(ctx, dbSession, &sql.TxOptions{})
+	require.NoError(t, err)
+	defer holder.Rollback()
+	require.NoError(t, holder.AcquireAdvisoryLock(ctx, lockID, true))
+
+	waiter, err := BeginTx(ctx, dbSession, &sql.TxOptions{})
+	require.NoError(t, err)
+	defer waiter.Rollback()
+	waitCtx, cancel := context.WithTimeout(ctx, 200*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	err = waiter.AcquireAdvisoryLock(waitCtx, lockID, true)
+	require.Error(t, err)
+	assert.Less(t, time.Since(start), 5*time.Second, "the wait ends with the caller's context, not with the holder")
+}
+
 func TestGetAdvisoryLockIDFromString(t *testing.T) {
 	dbSession := testTxGetTestSession(t)
 	defer dbSession.Close()

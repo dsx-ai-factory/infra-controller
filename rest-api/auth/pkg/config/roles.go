@@ -23,6 +23,12 @@ var (
 		authz.TenantAdminRole:   true,
 		authz.ProviderAdminRole: true,
 	}
+
+	// TenantRoles is the subset of AllowedRoles a claim mapping written through the
+	// Auth Issuer API may grant. Provider roles come only from the ConfigMap.
+	TenantRoles = map[string]bool{
+		authz.TenantAdminRole: true,
+	}
 )
 
 // =============================================================================

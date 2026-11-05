@@ -42,7 +42,7 @@ type KASProcessor struct {
 func (h *KASProcessor) ProcessToken(c echo.Context, tokenStr string, jwksCfg *config.JwksConfig, logger zerolog.Logger) (*cdbm.User, *cutil.APIError) {
 	claims := &claim.NgcKasClaims{}
 
-	token, err := jwksCfg.ValidateToken(tokenStr, claims)
+	token, err := jwksCfg.ValidateTokenContext(c.Request().Context(), tokenStr, claims)
 	if err != nil {
 		if strings.Contains(err.Error(), jwt.ErrTokenExpired.Error()) {
 			logger.Error().Err(err).Msg("Token expired")

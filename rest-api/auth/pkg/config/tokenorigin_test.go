@@ -4,14 +4,19 @@
 package config
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/rsa"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -67,8 +72,8 @@ func TestNewTokenOriginConfig(t *testing.T) {
 			}
 
 			// Add token origins using the new API
-			got.AddConfig("kas", "authn.nvidia.com", tt.args.legacyJwksURL, TokenOriginKasLegacy, false, nil, nil)
-			got.AddConfig("ssa", "ssa.nvidia.com", tt.args.ssaJwksURL, TokenOriginKasSsa, false, nil, nil)
+			got.AddConfig("authn.nvidia.com", tt.args.legacyJwksURL, TokenOriginKasLegacy, false, nil, nil)
+			got.AddConfig("ssa.nvidia.com", tt.args.ssaJwksURL, TokenOriginKasSsa, false, nil, nil)
 
 			// Verify configurations were added correctly
 			kasConfig := got.GetFirstConfigByOrigin(TokenOriginKasLegacy)
@@ -98,7 +103,7 @@ func TestTokenOriginConfig_UpdateAllJWKS(t *testing.T) {
 		defer testServer.Close()
 
 		config := NewTokenOriginConfig()
-		config.AddConfig("keycloak", "test-issuer", testServer.URL, TokenOriginKeycloak, false, nil, nil)
+		config.AddConfig("test-issuer", testServer.URL, TokenOriginKeycloak, false, nil, nil)
 
 		err := config.UpdateAllJWKS()
 		require.EqualError(t, err, "all JWKS updates failed (1 issuers)")
@@ -120,8 +125,8 @@ func TestTokenOriginConfig_UpdateAllJWKS(t *testing.T) {
 		defer testServer.Close()
 
 		config := NewTokenOriginConfig()
-		config.AddConfig("healthy", "healthy-issuer", testServer.URL+"/healthy", TokenOriginKasSsa, false, nil, nil)
-		config.AddConfig("unavailable", "unavailable-issuer", testServer.URL+"/unavailable", TokenOriginKeycloak, false, nil, nil)
+		config.AddConfig("healthy-issuer", testServer.URL+"/healthy", TokenOriginKasSsa, false, nil, nil)
+		config.AddConfig("unavailable-issuer", testServer.URL+"/unavailable", TokenOriginKeycloak, false, nil, nil)
 
 		require.NoError(t, config.UpdateAllJWKS())
 		assert.NotNil(t, config.GetConfig("healthy-issuer").GetJWKS())
@@ -181,12 +186,12 @@ func TestJWTOptionalKID_GoJose(t *testing.T) {
 			defer jwksServer.Close()
 
 			// Create JWKS config and update keys
-			jwksConfig := NewJwksConfig("test-ssa-config", jwksServer.URL, "test-issuer", TokenOriginKasSsa, false, nil, nil)
+			jwksConfig := NewJwksConfig(jwksServer.URL, "test-issuer", TokenOriginKasSsa, false, nil, nil)
 			err = jwksConfig.UpdateJWKS()
 			require.NoError(t, err, "Failed to update JWKS")
 
 			// Test token validation directly with JWKS config
-			token, err := jwksConfig.ValidateToken(tokenString, jwt.MapClaims{})
+			token, err := jwksConfig.ValidateTokenContext(context.Background(), tokenString, jwt.MapClaims{})
 
 			if tt.shouldSucceed {
 				assert.NoError(t, err, "Token validation should succeed: %s", tt.description)
@@ -259,12 +264,12 @@ func TestJWTOptionalKID_MultipleKeys(t *testing.T) {
 			defer jwksServer.Close()
 
 			// Create JWKS config and update keys
-			jwksConfig := NewJwksConfig("test-ssa-config", jwksServer.URL, "test-issuer", TokenOriginKasSsa, false, nil, nil)
+			jwksConfig := NewJwksConfig(jwksServer.URL, "test-issuer", TokenOriginKasSsa, false, nil, nil)
 			err = jwksConfig.UpdateJWKS()
 			require.NoError(t, err, "Failed to update JWKS")
 
 			// Test token validation directly with JWKS config
-			token, err := jwksConfig.ValidateToken(tokenString, jwt.MapClaims{})
+			token, err := jwksConfig.ValidateTokenContext(context.Background(), tokenString, jwt.MapClaims{})
 
 			if tt.shouldSucceed {
 				assert.NoError(t, err, "Token validation should succeed: %s", tt.description)
@@ -328,14 +333,14 @@ func TestJWTOptionalKID_AlgorithmMatching(t *testing.T) {
 			defer jwksServer.Close()
 
 			// Create JWKS config
-			jwksConfig := NewJwksConfig("test-ssa-config", jwksServer.URL, "test-issuer", TokenOriginKasSsa, false, nil, nil)
+			jwksConfig := NewJwksConfig(jwksServer.URL, "test-issuer", TokenOriginKasSsa, false, nil, nil)
 			err = jwksConfig.UpdateJWKS()
 
 			if tt.shouldSucceed {
 				require.NoError(t, err, "Failed to update JWKS")
 
 				// Test token validation directly with JWKS config
-				token, err := jwksConfig.ValidateToken(tokenString, jwt.MapClaims{})
+				token, err := jwksConfig.ValidateTokenContext(context.Background(), tokenString, jwt.MapClaims{})
 
 				assert.NoError(t, err, "Token validation should succeed: %s", tt.description)
 				assert.NotNil(t, token, "Token should not be nil")
@@ -352,7 +357,7 @@ func TestJWTOptionalKID_AlgorithmMatching(t *testing.T) {
 					require.NoError(t, err, "Failed to update JWKS")
 
 					// Test token validation - should fail
-					_, err := jwksConfig.ValidateToken(tokenString, jwt.MapClaims{})
+					_, err := jwksConfig.ValidateTokenContext(context.Background(), tokenString, jwt.MapClaims{})
 					assert.Error(t, err, "Token validation should fail: %s", tt.description)
 					t.Logf("Expected failure: %s - Token Validation Error: %v", tt.description, err)
 				}
@@ -490,4 +495,134 @@ func createJWKSResponse(publicKey *rsa.PublicKey, keyId, algorithm, use string) 
 // Helper function to encode big.Int as base64url
 func encodeBase64URLBigInt(n *big.Int) string {
 	return base64.RawURLEncoding.EncodeToString(n.Bytes())
+}
+
+// TestResolveConfigWaiterCancellationIsIndependent covers both halves of the
+// singleflight contract on the token path: a request that hangs up gets nothing
+// back promptly, and its departure does not abort the resolution the other
+// requests are still waiting on.
+func TestResolveConfigWaiterCancellationIsIndependent(t *testing.T) {
+	const issuer = "https://idp.example.com"
+
+	jc := NewTokenOriginConfig()
+
+	entered := make(chan struct{}, 1)
+	release := make(chan struct{})
+	releaseOnce := sync.OnceFunc(func() { close(release) })
+	t.Cleanup(releaseOnce)
+
+	var calls atomic.Int32
+	jc.SetIssuerResolver(func(ctx context.Context, issuerURL string) (*JwksConfig, error) {
+		calls.Add(1)
+		entered <- struct{}{}
+		select {
+		case <-release:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+
+		cfg := NewJwksConfig(issuerURL+"/jwks", issuerURL, TokenOriginCustom, false, nil, nil)
+		jc.AddJwksConfig(cfg)
+		return cfg, nil
+	})
+
+	leaderDone := make(chan *JwksConfig, 1)
+	go func() { leaderDone <- jc.ResolveConfig(context.Background(), issuer) }()
+	<-entered
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	start := time.Now()
+	assert.Nil(t, jc.ResolveConfig(ctx, issuer), "a caller that has given up resolves nothing")
+	assert.Less(t, time.Since(start), time.Second, "and it does not wait for the shared resolution")
+
+	releaseOnce()
+	assert.NotNil(t, <-leaderDone, "the shared resolution survives the other waiter's cancellation")
+	assert.Equal(t, int32(1), calls.Load(), "both callers shared one resolution")
+}
+
+// TestResolveConfigBacksOffAfterResolverError covers the store-outage case: a
+// resolver failure must be remembered like a miss, so sequential requests naming
+// the same unknown issuer do not each pay for another lookup.
+func TestResolveConfigBacksOffAfterResolverError(t *testing.T) {
+	const issuer = "https://idp.example.com"
+
+	jc := NewTokenOriginConfig()
+	var calls atomic.Int32
+	jc.SetIssuerResolver(func(context.Context, string) (*JwksConfig, error) {
+		calls.Add(1)
+		return nil, errors.New("connection refused")
+	})
+
+	for i := 0; i < 3; i++ {
+		assert.Nil(t, jc.ResolveConfig(context.Background(), issuer))
+	}
+	assert.Equal(t, int32(1), calls.Load(), "a failed resolution is negative-cached for the backoff window")
+}
+
+// TestResolveConfigServesOnlyWhatTheResolverPublished pins the publication
+// contract: the registry, not the resolver's return value, decides what is
+// served, so an issuer withdrawn while it was being resolved stays withdrawn.
+func TestResolveConfigServesOnlyWhatTheResolverPublished(t *testing.T) {
+	const issuer = "https://idp.example.com"
+
+	jc := NewTokenOriginConfig()
+	jc.SetIssuerResolver(func(_ context.Context, issuerURL string) (*JwksConfig, error) {
+		// Stands in for a resolver whose final locked check lost to a delete: it
+		// built a config but deliberately did not publish it.
+		return NewJwksConfig(issuerURL+"/jwks", issuerURL, TokenOriginCustom, false, nil, nil), nil
+	})
+
+	assert.Nil(t, jc.ResolveConfig(context.Background(), issuer))
+	assert.Nil(t, jc.GetConfig(issuer), "an unpublished resolution must not join the registry")
+}
+
+// TestResolveConfigBoundsDistinctFlights: an issuer name is unauthenticated
+// input, so distinct unknown names must not open unbounded resolver work. Beyond
+// the cap a caller gets nil at once, without poisoning the unknown-issuer cache,
+// and a slot freed by a settled flight admits the next name.
+func TestResolveConfigBoundsDistinctFlights(t *testing.T) {
+	jc := NewTokenOriginConfig()
+	release := make(chan struct{})
+	var started atomic.Int32
+	jc.SetIssuerResolver(func(ctx context.Context, issuerURL string) (*JwksConfig, error) {
+		started.Add(1)
+		<-release
+		cfg := NewJwksConfig(issuerURL+"/jwks", issuerURL, TokenOriginCustom, false, nil, nil)
+		jc.AddJwksConfig(cfg)
+		return cfg, nil
+	})
+
+	results := make(chan *JwksConfig, maxResolveFlights+1)
+	for i := 0; i <= maxResolveFlights; i++ {
+		go func(i int) {
+			results <- jc.ResolveConfig(context.Background(), fmt.Sprintf("https://idp-%d.example.com", i))
+		}(i)
+	}
+	require.Eventually(t, func() bool { return int(started.Load()) == maxResolveFlights }, 5*time.Second, 10*time.Millisecond)
+	assert.Nil(t, <-results, "the caller past the cap returns at once")
+	assert.Equal(t, int32(maxResolveFlights), started.Load())
+
+	close(release)
+	for i := 0; i < maxResolveFlights; i++ {
+		assert.NotNil(t, <-results)
+	}
+	assert.NotNil(t, jc.ResolveConfig(context.Background(), "https://idp-late.example.com"), "a refused name is not negative-cached and a freed slot admits it")
+}
+
+// TestUnknownIssuerCacheEvictsOneEntry: a client cycling through more distinct
+// names than the cache holds must not clear it on every pass, or repeated
+// unknown names cost a lookup each.
+func TestUnknownIssuerCacheEvictsOneEntry(t *testing.T) {
+	jc := NewTokenOriginConfig()
+	for i := 0; i < maxUnknownIssuers; i++ {
+		jc.rememberUnknownIssuer(fmt.Sprintf("https://idp-%d.example.com", i))
+	}
+	jc.rememberUnknownIssuer("https://idp-overflow.example.com")
+
+	jc.RLock()
+	defer jc.RUnlock()
+	assert.Len(t, jc.unknownIssuers, maxUnknownIssuers)
+	assert.Contains(t, jc.unknownIssuers, "https://idp-overflow.example.com")
 }

@@ -17,10 +17,13 @@ spec:
     metadata:
       labels:
         {{- include "nico-rest-api.selectorLabels" . | nindent 8 }}
-      {{- with .Values.podAnnotations }}
       annotations:
+        # Issuers are read only at startup, so a config change must restart every
+        # pod; otherwise replicas keep serving the old issuer definitions.
+        checksum/config: {{ include (print .Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- with .Values.podAnnotations }}
         {{- toYaml . | nindent 8 }}
-      {{- end }}
+        {{- end }}
     spec:
       {{- with .Values.global.imagePullSecrets }}
       imagePullSecrets:
@@ -51,8 +54,14 @@ spec:
           env:
             - name: CONFIG_FILE_PATH
               value: /app/config.yaml
+            # Orders ConfigMap issuer syncs across replicas during a rollout: a
+            # replica on an older revision does not sync over a newer one's rows.
+            - name: CONFIG_REVISION
+              value: {{ .Release.Revision | quote }}
+            - name: CONFIG_REVISION_RESET
+              value: {{ .Release.IsInstall | quote }}
             {{- range $k, $v := .Values.extraEnv }}
-            {{- if has $k (list "CONFIG_FILE_PATH") }}
+            {{- if has $k (list "CONFIG_FILE_PATH" "CONFIG_REVISION" "CONFIG_REVISION_RESET") }}
             {{- fail (printf "extraEnv must not override chart-managed variable %s" $k) }}
             {{- end }}
             - name: {{ $k }}
