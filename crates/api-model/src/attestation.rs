@@ -339,18 +339,17 @@ pub mod spdm {
     }
 
     impl SpdmDeviceAttestationDetails {
-        /// Describes an effective terminal failure, including an operator failure override.
+        /// Describes an effective terminal failure, preserving its stored reason unless waived.
+        /// An operator failure supplies a reason only when the stored state has not failed.
         pub fn get_failure_cause(&self) -> Option<String> {
-            // A terminal override changes the effective result without rewriting evidence history.
+            // A waiver suppresses the failure; an operator failure must not hide its original cause.
             let reason = match (&self.state, self.cancellation_target) {
+                (_, Some(SpdmCancellationTarget::Waive)) => None,
+                (SpdmAttestationState::Failed(reason), _) => Some(reason.as_str()),
                 (
-                    SpdmAttestationState::Passed
-                    | SpdmAttestationState::Failed(_)
-                    | SpdmAttestationState::Waived,
+                    SpdmAttestationState::Passed | SpdmAttestationState::Waived,
                     Some(SpdmCancellationTarget::Fail),
                 ) => Some("Failed by operator"),
-                (_, Some(SpdmCancellationTarget::Waive)) => None,
-                (SpdmAttestationState::Failed(reason), None) => Some(reason.as_str()),
                 _ => None,
             };
             reason.map(|msg| format!("Device: {}, failed reason: {}", self.device_id, msg))
@@ -1279,6 +1278,13 @@ mod test {
 
             "failed with empty reason" {
                 details_with_state(SpdmAttestationState::Failed(String::new())) => Some("Device: GPU_0, failed reason: ".to_string()),
+            }
+
+            "operator failure preserves the original failure reason" {
+                SpdmDeviceAttestationDetails {
+                    cancellation_target: Some(spdm::SpdmCancellationTarget::Fail),
+                    ..details_with_state(SpdmAttestationState::Failed("signature mismatch".to_string()))
+                } => Some("Device: GPU_0, failed reason: signature mismatch".to_string()),
             }
 
             "operator failure supplies a cause for a terminal pass" {
