@@ -29955,9 +29955,14 @@ type ManagedHostServiceInterfaceConfig struct {
 	// Stable service-interface MAC assigned by NICo and reused on every DPU.
 	MacAddress string `protobuf:"bytes,15,opt,name=mac_address,json=macAddress,proto3" json:"mac_address,omitempty"`
 	// Stable identity used to correlate this service interface across reconciliation.
-	InternalUuid  *UUID `protobuf:"bytes,16,opt,name=internal_uuid,json=internalUuid,proto3" json:"internal_uuid,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	InternalUuid *UUID `protobuf:"bytes,16,opt,name=internal_uuid,json=internalUuid,proto3" json:"internal_uuid,omitempty"`
+	// Administrative loopback assigned to the selected VPC's tenant VRF on this DPU.
+	// Unlike ManagedHostNetworkConfig.loopback_ip, this address is not the DPU VXLAN VTEP.
+	// Host and service interfaces selecting the same VPC on this DPU reuse this address.
+	// Omitted when fnn.use_vpc_vrf_loopback is false.
+	TenantVrfLoopbackIp *string `protobuf:"bytes,17,opt,name=tenant_vrf_loopback_ip,json=tenantVrfLoopbackIp,proto3,oneof" json:"tenant_vrf_loopback_ip,omitempty"`
+	unknownFields       protoimpl.UnknownFields
+	sizeCache           protoimpl.SizeCache
 }
 
 func (x *ManagedHostServiceInterfaceConfig) Reset() {
@@ -30100,6 +30105,13 @@ func (x *ManagedHostServiceInterfaceConfig) GetInternalUuid() *UUID {
 		return x.InternalUuid
 	}
 	return nil
+}
+
+func (x *ManagedHostServiceInterfaceConfig) GetTenantVrfLoopbackIp() string {
+	if x != nil && x.TenantVrfLoopbackIp != nil {
+		return *x.TenantVrfLoopbackIp
+	}
+	return ""
 }
 
 // Complete fixed service-slot inventory for one DPU deployment.
@@ -80424,7 +80436,7 @@ const file_nico_nico_proto_rawDesc = "" +
 	"\x1a_bgp_leaf_session_passwordB\x0f\n" +
 	"\r_astra_configB\x1c\n" +
 	"\x1a_use_admin_network_changedB\x1d\n" +
-	"\x1b_service_vpc_slot_inventoryJ\x04\b\x01\x10\x02J\x04\bi\x10jJ\x04\bq\x10rR\x18traffic_intercept_config\"\xf4\x06\n" +
+	"\x1b_service_vpc_slot_inventoryJ\x04\b\x01\x10\x02J\x04\bi\x10jJ\x04\bq\x10rR\x18traffic_intercept_config\"\xc9\a\n" +
 	"!ManagedHostServiceInterfaceConfig\x12\x1d\n" +
 	"\n" +
 	"service_id\x18\x01 \x01(\tR\tserviceId\x121\n" +
@@ -80446,11 +80458,13 @@ const file_nico_nico_proto_rawDesc = "" +
 	"linkPrefix\x12\x1f\n" +
 	"\vmac_address\x18\x0f \x01(\tR\n" +
 	"macAddress\x121\n" +
-	"\rinternal_uuid\x18\x10 \x01(\v2\f.common.UUIDR\finternalUuidB\x16\n" +
+	"\rinternal_uuid\x18\x10 \x01(\v2\f.common.UUIDR\finternalUuid\x128\n" +
+	"\x16tenant_vrf_loopback_ip\x18\x11 \x01(\tH\x04R\x13tenantVrfLoopbackIp\x88\x01\x01B\x16\n" +
 	"\x14_vpc_routing_profileB\x1c\n" +
 	"\x1a_interface_routing_profileB\x19\n" +
 	"\x17_network_security_groupB\x06\n" +
-	"\x04_mtu\"F\n" +
+	"\x04_mtuB\x19\n" +
+	"\x17_tenant_vrf_loopback_ip\"F\n" +
 	"\x17ServiceVpcSlotInventory\x12+\n" +
 	"\x05slots\x18\x01 \x03(\v2\x15.forge.ServiceVpcSlotR\x05slots\"]\n" +
 	"\x0eServiceVpcSlot\x12\x1d\n" +
