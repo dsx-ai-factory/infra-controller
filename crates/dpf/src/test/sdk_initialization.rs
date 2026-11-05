@@ -1420,6 +1420,30 @@ async fn scoped_bf3_gb200_bf4_and_astra_initialization_coexists() {
     assert_eq!(mock.flavors.len(), 3);
     assert_eq!(mock.flavor_templates.len(), 1);
 
+    // Publish an exact predecessor for update detection while selecting the new flavor for
+    // every installation. Astra's per-DPU rendered flavor is not compared by name.
+    for deployment in DpuDeploymentRepository::list(&mock, TEST_NS).await.unwrap() {
+        if let Some(name) = deployment.spec.dpus.flavor.as_ref() {
+            let flavor = DpuFlavorRepository::get(&mock, name, TEST_NS)
+                .await
+                .unwrap()
+                .unwrap();
+            let predecessor_name = flavor
+                .name_without_pcie_emulation(name.rsplit_once('-').unwrap().0)
+                .unwrap();
+            assert_ne!(name, &predecessor_name);
+            assert_eq!(
+                deployment
+                    .metadata
+                    .annotations
+                    .as_ref()
+                    .unwrap()
+                    .get("nico/pcie-emulation-predecessor-flavor"),
+                Some(&predecessor_name),
+            );
+        }
+    }
+
     // The effective inventories must produce exact, non-overlapping scoped resource names.
     let interfaces = DpuServiceInterfaceRepository::list(&mock, TEST_NS, None)
         .await

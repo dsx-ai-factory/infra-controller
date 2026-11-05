@@ -134,6 +134,8 @@ const BLUEFIELD_SOFTWARE_NAME_PREFIX: &str = "bf-software";
 /// Label set by DPF on deployment-owned resources and propagated to the corresponding
 /// DPU-cluster Node. Value format: `<namespace>_<deployment_name>`.
 const DPU_OWNED_BY_DEPLOYMENT_LABEL: &str = "svc.dpu.nvidia.com/owned-by-dpudeployment";
+// An exact predecessor hash lets installed DPUs retain their settings until their next install.
+const PCIE_EMULATION_PREDECESSOR_ANNOTATION: &str = "nico/pcie-emulation-predecessor-flavor";
 const SERVICE_INTERFACE_MIGRATION_BLOCKED_LOG_DELAY: Duration = Duration::from_secs(10 * 60);
 // Bound optional startup cleanup to two minutes for the whole batch, including lookup,
 // delete, and finalizer polling, so stuck deletion cannot indefinitely delay the API listener.
@@ -824,14 +826,14 @@ fn is_legacy_pldm_bundle_type_rejection(error: &DpfError) -> bool {
 }
 
 /// Creates a DPUFlavor with a hash-derived name (`{default_flavor_name}-{spec_hash}`).
-/// Any change in the spec produces a different hash and therefore a new flavor name, which
-/// causes MachineUpdateManager to detect the DPUs as outdated and trigger reprovisioning.
+/// Returns its name and the exact predecessor name without PCIe emulation defaults, which
+/// must not independently schedule reprovisioning. Other spec changes still mark DPUs outdated.
 async fn create_dpu_flavor<R: DpuFlavorRepository>(
     repo: &R,
     namespace: &str,
     config: &InitDpfResourcesConfig,
     resolved: &ResolvedInitialization<'_>,
-) -> Result<String, DpfError> {
+) -> Result<(String, String), DpfError> {
     let mut flavor = crate::flavor::default_flavor_for_with_topology(
         namespace,
         &config.proxy,
@@ -848,10 +850,11 @@ async fn create_dpu_flavor<R: DpuFlavorRepository>(
         config.enable_delay_host_init,
     )?;
     let name = flavor.unique_name(&config.flavor_name)?;
+    let predecessor_name = flavor.name_without_pcie_emulation(&config.flavor_name)?;
     flavor.metadata.name = Some(name.clone());
 
     match DpuFlavorRepository::create(repo, &flavor).await {
-        Ok(_) => Ok(name),
+        Ok(_) => Ok((name, predecessor_name)),
         Err(DpfError::KubeError(kube::Error::Api(ref err)))
             if err.is_already_exists() || err.is_conflict() =>
         {
@@ -872,7 +875,7 @@ async fn create_dpu_flavor<R: DpuFlavorRepository>(
                 }
                 Some(_) => {
                     tracing::debug!(flavor = %name, "DPU flavor already exists");
-                    Ok(name)
+                    Ok((name, predecessor_name))
                 }
             }
         }
@@ -2510,12 +2513,14 @@ async fn create_flavor_services_and_deployment<
         )));
     }
 
-    let flavor_name = match deployment_type {
-        DpuDeploymentType::Bf4Astra => {
-            create_dpu_flavor_template(repo, namespace, config, resolved).await?
-        }
+    let (flavor_name, predecessor_name) = match deployment_type {
+        DpuDeploymentType::Bf4Astra => (
+            create_dpu_flavor_template(repo, namespace, config, resolved).await?,
+            None,
+        ),
         DpuDeploymentType::Bf3 | DpuDeploymentType::Bf3Gb200 | DpuDeploymentType::Bf4Generic => {
-            create_dpu_flavor(repo, namespace, config, resolved).await?
+            let (name, predecessor) = create_dpu_flavor(repo, namespace, config, resolved).await?;
+            (name, Some(predecessor))
         }
     };
 
@@ -2623,7 +2628,7 @@ async fn create_flavor_services_and_deployment<
         }
     }
 
-    let deployment = build_deployment(
+    let mut deployment = build_deployment(
         services,
         &config.deployment_name,
         source,
@@ -2633,6 +2638,16 @@ async fn create_flavor_services_and_deployment<
         deployment_node_labels,
         deployment_type,
     );
+    if let Some(predecessor_name) = predecessor_name {
+        deployment
+            .metadata
+            .annotations
+            .get_or_insert_default()
+            .insert(
+                PCIE_EMULATION_PREDECESSOR_ANNOTATION.to_string(),
+                predecessor_name,
+            );
+    }
     DpuDeploymentRepository::apply(repo, &deployment).await?;
     Ok(())
 }
@@ -4061,7 +4076,9 @@ impl<R: DpuRepository + DpuDeploymentRepository, L: ResourceLabeler> DpfSdk<R, L
             };
             let phase = DpuPhase::from(phase);
             if phase == DpuPhase::Ready {
-                match dpu_comparison(&self.namespace, &dpu, &deployment) {
+                // A requested installation must converge to the new flavor, even when the
+                // predecessor is acceptable for an already-running DPU during update scans.
+                match dpu_comparison(&self.namespace, &dpu, &deployment, None) {
                     DpuComparison::Match => {}
                     DpuComparison::Mismatch(mismatch) => {
                         return Err(DpfError::InvalidState(format!(
@@ -4339,10 +4356,24 @@ impl<R: DpuDeploymentRepository + DpuRepository + DpfOperatorConfigRepository, L
 /// exercised directly, without standing up repository mocks for a namespace
 /// scan.
 fn dpu_mismatch(namespace: &str, dpu: &DPU, deployment: &DPUDeployment) -> Option<DpuMismatch> {
-    match dpu_comparison(namespace, dpu, deployment) {
+    match dpu_comparison(
+        namespace,
+        dpu,
+        deployment,
+        pcie_emulation_predecessor(deployment),
+    ) {
         DpuComparison::Mismatch(mismatch) => Some(mismatch),
         DpuComparison::Match | DpuComparison::Inconclusive => None,
     }
+}
+
+fn pcie_emulation_predecessor(deployment: &DPUDeployment) -> Option<&str> {
+    deployment
+        .metadata
+        .annotations
+        .as_ref()?
+        .get(PCIE_EMULATION_PREDECESSOR_ANNOTATION)
+        .map(String::as_str)
 }
 
 /// The outcome of comparing one DPU against the DPUDeployment that owns it.
@@ -4361,7 +4392,12 @@ enum DpuComparison {
     Inconclusive,
 }
 
-fn dpu_comparison(namespace: &str, dpu: &DPU, deployment: &DPUDeployment) -> DpuComparison {
+fn dpu_comparison(
+    namespace: &str,
+    dpu: &DPU,
+    deployment: &DPUDeployment,
+    compatible_flavor: Option<&str>,
+) -> DpuComparison {
     let Some(cr_name) = dpu.metadata.name.clone() else {
         return DpuComparison::Inconclusive;
     };
@@ -4373,7 +4409,10 @@ fn dpu_comparison(namespace: &str, dpu: &DPU, deployment: &DPUDeployment) -> Dpu
         .dpus
         .flavor
         .as_ref()
-        .is_none_or(|expected_flavor| dpu.spec.dpu_flavor == *expected_flavor);
+        .is_none_or(|expected_flavor| {
+            dpu.spec.dpu_flavor == *expected_flavor
+                || compatible_flavor == Some(dpu.spec.dpu_flavor.as_str())
+        });
 
     // A DPUDeployment provisions from either a BFB or a BlueFieldSoftware CR;
     // the DPU CRD enforces that exactly one is set. BFB staleness is read from
@@ -4803,6 +4842,8 @@ impl<R: DpuRepository + DpuDeploymentRepository + DpuServiceTemplateRepository, 
     ///
     /// This answers "is a reprovision still coming for this DPU", which gates
     /// work that must not land on an OS about to be replaced.
+    /// The exact predecessor flavor without PCIe emulation defaults is accepted because
+    /// those defaults apply at the next installation rather than scheduling an update.
     ///
     /// Note the deliberate asymmetry with [`Self::find_outdated_dpus_dpf`],
     /// which skips a DPU it cannot evaluate so a malformed deployment never
@@ -4821,7 +4862,12 @@ impl<R: DpuRepository + DpuDeploymentRepository + DpuServiceTemplateRepository, 
             return Ok(true);
         }
 
-        match dpu_comparison(&self.namespace, &dpu, &deployment) {
+        match dpu_comparison(
+            &self.namespace,
+            &dpu,
+            &deployment,
+            pcie_emulation_predecessor(&deployment),
+        ) {
             DpuComparison::Match => Ok(false),
             DpuComparison::Mismatch(mismatch) => {
                 tracing::info!(
@@ -9540,7 +9586,7 @@ mod tests {
         let mock = SdkMock::new();
         let config = flavor_test_config();
         let resolved = resolve_initialization_inventory(&config, None).unwrap();
-        let name = create_dpu_flavor(&mock, TEST_NAMESPACE, &config, &resolved)
+        let (name, _) = create_dpu_flavor(&mock, TEST_NAMESPACE, &config, &resolved)
             .await
             .unwrap();
 
@@ -9574,7 +9620,7 @@ mod tests {
             .build()
             .expect("proxy flavor test configuration must be valid");
         let resolved = resolve_initialization_inventory(&config, None).unwrap();
-        let name_with_proxy = create_dpu_flavor(&mock, TEST_NAMESPACE, &config, &resolved)
+        let (name_with_proxy, _) = create_dpu_flavor(&mock, TEST_NAMESPACE, &config, &resolved)
             .await
             .unwrap();
 
@@ -9678,7 +9724,7 @@ mod tests {
         let expected_name = flavor_name.clone();
         let config = flavor_test_config();
         let resolved = resolve_initialization_inventory(&config, None).unwrap();
-        let returned = create_dpu_flavor(&mock, TEST_NAMESPACE, &config, &resolved)
+        let (returned, _) = create_dpu_flavor(&mock, TEST_NAMESPACE, &config, &resolved)
             .await
             .unwrap();
 
@@ -10062,6 +10108,43 @@ mod tests {
 
         let mismatch = dpu_mismatch(TEST_NAMESPACE, &dpu, &deployment).expect("outdated");
         assert_eq!(mismatch.target_source, "bf-software-abc");
+    }
+
+    #[test]
+    fn pcie_emulation_default_does_not_schedule_existing_dpus_for_reprovisioning() {
+        let mut deployment = deployment_with(
+            DpuProvisioningSource::BlueFieldSoftware("bf-software-new".to_string()),
+            "new-flavor",
+        );
+        deployment
+            .metadata
+            .annotations
+            .get_or_insert_default()
+            .insert(
+                PCIE_EMULATION_PREDECESSOR_ANNOTATION.to_string(),
+                TEST_FLAVOR.to_string(),
+            );
+
+        value_scenarios!(
+            run = |(software, flavor)| {
+                let dpu = dpu_with(None, Some(software), flavor, None);
+                dpu_mismatch(TEST_NAMESPACE, &dpu, &deployment).is_some()
+            };
+            "only installation defaults differ" {
+                ("bf-software-new", TEST_FLAVOR) => false,
+            }
+            "other changes still require an update" {
+                ("bf-software-old", TEST_FLAVOR) => true,
+                ("bf-software-new", "unrelated-flavor") => true,
+            }
+        );
+
+        // Completion of a requested installation must require the new flavor.
+        let old_dpu = dpu_with(None, Some("bf-software-new"), TEST_FLAVOR, None);
+        assert!(matches!(
+            dpu_comparison(TEST_NAMESPACE, &old_dpu, &deployment, None),
+            DpuComparison::Mismatch(_)
+        ));
     }
 
     /// The DPU CRD requires exactly one provisioning source. A deployment that

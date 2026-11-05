@@ -1528,9 +1528,8 @@ Astra deployments), using that deployment's own `bfb_url`, `flavor_name`, and
 - A `BFB` CR named `bf-bundle-<sha256(bfb_url)>`, from the deployment's `bfb_url`
 - A `DPUFlavor` CR (BF3/generic BF4) or `DPUFlavorTemplate` CR (Astra) named
   `<flavor_name>-<spec-hash>`. The 16-character hex suffix is a SHA-256 digest
-  of the flavor spec or template; changing it, including adding or changing
-  `[dpf.proxy]` or `[dpf].extra_bfcfg_parameters`, produces a new name and
-  triggers reprovisioning.
+  of the flavor spec or template. Changing `[dpf.proxy]` or
+  `[dpf].extra_bfcfg_parameters` produces a new name and triggers reprovisioning.
 - A set of `DPUServiceInterface`, `DPUServiceTemplate`,
   `DPUServiceConfiguration`, and `DPUServiceNAD` CRs, one per mandatory
   DPUService (`dts`, `doca-hbn`, `carbide-dpu-agent`, `carbide-dhcp-server`,
@@ -1542,6 +1541,20 @@ Astra deployments), using that deployment's own `bfb_url`, `flavor_name`, and
   Astra, it uses `flavorTemplate`, which the DPF operator renders into a
   per-DPU `DPUFlavor`; otherwise it uses `flavor`. The operator then reconciles
   these into actual `DPUService` and per-DPU resources.
+
+New DPF installations and reprovisioning enable PCIe switch emulation through
+`PCI_SWITCH_EMULATION_ENABLE=1` and reserve 16 switch ports with
+`PCI_SWITCH_EMULATION_NUM_PORT=16`. DPF applies these NVConfig settings during
+installation, including for restricted-mode DPUs, within the host maintenance
+window. Storage services configure their emulated controllers separately.
+
+The generated deployment retains its `OnDelete` strategy. For ordinary flavors,
+its `nico/pcie-emulation-predecessor-flavor` annotation identifies the exact flavor
+hash without these two installation defaults. NICo accepts that predecessor when
+checking for updates, so these defaults alone do not schedule existing DPUs for
+reprovisioning. Other flavor or provisioning-source changes still require an
+update. A requested installation must finish on the new flavor. Astra uses
+DPF-rendered per-DPU flavors and does not compare their names with template names.
 
 Because this path runs only at process start, **any change to `[dpf]`** —
 enabling DPF for the first time, changing a deployment's BFB URL, renaming a
