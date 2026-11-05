@@ -203,7 +203,10 @@ impl MachineUpdateModule for DpuNicFirmwareUpdate {
         Ok(updates_started)
     }
 
-    async fn clear_completed_updates(&self, txn: &mut PgConnection) -> CarbideResult<()> {
+    async fn clear_completed_updates(
+        &self,
+        txn: &mut PgConnection,
+    ) -> CarbideResult<Vec<FirmwareUpdateProgress>> {
         let updated_machines =
             dpu_machine_update::get_updated_machines(txn, self.config.host_health).await?;
         tracing::debug!(
@@ -255,7 +258,7 @@ impl MachineUpdateModule for DpuNicFirmwareUpdate {
                 });
             }
         }
-        Ok(())
+        Ok(Vec::new())
     }
 
     async fn update_metrics(
