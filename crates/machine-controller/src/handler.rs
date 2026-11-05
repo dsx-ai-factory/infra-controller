@@ -10842,7 +10842,7 @@ impl HostUpgradeState {
                         && matches!(next_state, ManagedHostState::HostInit {
                             machine_state: MachineState::WaitingForLockdown {
                                 lockdown_info: LockdownInfo {
-                                    state: LockdownState::PollingLockdownStatus,
+                                    state: LockdownState::SetLockdown | LockdownState::PollingLockdownStatus,
                                     mode: Enable,
                                 },
                             },
@@ -13328,12 +13328,7 @@ async fn do_ipmi_restart(
         trigger_location = %trigger_location,
         "IPMI Host Power Control"
     );
-    ctx.pending_db_writes
-        .push(MachineWriteOp::UpdateRebootRequestedTime {
-            machine_id: machine.id.into(),
-            mode: machine_last_reboot_requested_mode(action),
-            time: Utc::now(),
-        });
+    let requested_at = Utc::now();
 
     let bmc_mac = machine
         .status
@@ -13368,7 +13363,15 @@ async fn do_ipmi_restart(
         .await
         .map_err(|e| {
             StateHandlerError::GenericError(eyre!("IPMI restart failed for {}: {}", machine.id, e))
-        })
+        })?;
+    ctx.pending_db_writes
+        .push(MachineWriteOp::UpdateRebootRequestedTime {
+            machine_id: machine.id.into(),
+            mode: machine_last_reboot_requested_mode(action),
+            time: requested_at,
+        });
+
+    Ok(())
 }
 
 async fn resolve_ipmi_address(
