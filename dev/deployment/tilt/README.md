@@ -145,6 +145,41 @@ The volume survives pod restarts and is removed with the local Kind cluster.
 When enabling observability in an existing session, trigger the manual
 `nico-api` resource in Tilt to apply its tracing configuration.
 
+To export REST traces into the same Tempo instance, enable both profiles:
+
+```bash
+tilt up -f dev/deployment/tilt/Tiltfile -- --observability=true --rest=true
+```
+
+Tilt enables trace export for the REST API, cloud and site workers, site-agent,
+cert-manager, and site-manager. Existing HTTP, Temporal, and Core gRPC
+instrumentation carries W3C trace context from REST requests into `carbide-api`.
+In Grafana Explore, search Tempo for `nico-rest-api`, `nico-rest-cloud-worker`,
+`nico-rest-site-worker`, `nico-rest-site-agent`, `nico-rest-cert-manager`, or
+`nico-rest-site-manager`. Requests that reach Core through Temporal should show
+REST and `carbide-api` spans in the same trace.
+
+Under `tilt.rest` in [`values.yaml`](values.yaml), configure `OTEL_*` overrides in
+`api.extraEnv`, `certManager.extraEnv`, `siteManager.extraEnv`,
+`workflow.extraEnv`, or `siteAgent.envConfig`. The workers also accept
+`workflow.cloudWorker.extraEnv` and `workflow.siteWorker.extraEnv`, which take
+precedence over shared worker environment settings. Tilt defaults the exporter
+endpoint to `http://tempo.<observabilityNamespace>.svc.cluster.local:4317` and
+the protocol to `grpc` only when neither the general nor traces-specific
+variable has a non-empty value. The Go exporter gives traces-specific variables
+precedence over general variables. Explicit `OTEL_SERVICE_NAME` values override
+configured service names; an explicit `workflow.config.tracing.serviceName`
+replaces the distinct worker defaults. Other services retain their existing
+service-name defaults. Disabling observability adds no REST tracing settings;
+explicit exporter configuration remains effective.
+
+For an existing Tilt session, use `tilt args -- --observability=true --rest=true`,
+then trigger `nico-api`, `nico-rest-api`, `nico-rest-workflow`,
+`nico-rest-site-agent`, `nico-rest-cert-manager`, and `nico-rest-site-manager`
+to apply the configuration to these manual resources. Once the services are
+ready, trigger `rest-integration` to restore the registered site ID after the
+site-agent chart reapplies its development placeholder.
+
 ## Pod metrics
 
 Prometheus discovers ServiceMonitor and PodMonitor resources across the local
