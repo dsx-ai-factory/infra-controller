@@ -177,12 +177,12 @@ Otherwise it consults, in order, the [environment source](#environment-source), 
 | Source | Selected by |
 | --- | --- |
 | Environment | `CARBIDE_CREDENTIALS_ENV_ENABLED=true` |
-| File | `CARBIDE_CREDENTIALS_FILE_ENABLED=true` and `CARBIDE_CREDENTIALS_FILE_PATH` |
+| File | `CARBIDE_CREDENTIALS_FILE_ENABLED=true`; `CARBIDE_CREDENTIALS_FILE_PATH` is optional and defaults to `secrets.yaml` |
 | Vault | `VAULT_ADDR` |
 
 The consumer builds a Vault client only when `VAULT_ADDR` is set. When it is set, the consumer also requires `VAULT_KV_MOUNT_LOCATION`, `VAULT_PKI_MOUNT_LOCATION`, `VAULT_PKI_ROLE_NAME`, and a Vault root CA bundle (`VAULT_CACERT`, default `/var/run/secrets/forge-roots/ca.crt`). A mounted Kubernetes service-account token selects Kubernetes authentication, which needs a Vault auth role for the pod's service account and ignores `VAULT_TOKEN`; `VAULT_TOKEN` applies only when the pod has no service-account token. An incomplete Vault configuration fails startup instead of dropping Vault from the chain.
 
-When `auth_mode` requires a credential and no source supplies it, the consumer fails with `Missing MQTT credentials for mqtt/dsx-exchange-consumer/auth` for `basic_auth` at startup, or with `Missing MQTT OAuth2 credentials for mqtt/dsx-exchange-consumer/auth` for `oauth2` when it first requests a token.
+When `auth_mode` requires a credential and no source supplies it, the consumer fails with `Missing MQTT credentials for mqtt/dsx-exchange-consumer/auth: none of the environment, file, or Vault sources provides it` for `basic_auth` at startup, or with `Missing MQTT OAuth2 credentials for mqtt/dsx-exchange-consumer/auth` for `oauth2` when it first requests a token.
 
 To run without Vault, create a Secret whose key holds the file in the [File Source](#file-source) format, and set `credentials.secretName` and `credentials.key` in the `nico-dsx-exchange-consumer` chart. The chart mounts the whole Secret as a directory and sets both file variables. Sites that keep Vault set the `VAULT_*` variables through the chart's `extraEnv`, mount the Vault CA through `extraVolumes` and `extraVolumeMounts`, and change nothing else.
 

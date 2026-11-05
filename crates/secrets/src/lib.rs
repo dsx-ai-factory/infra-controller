@@ -295,6 +295,32 @@ mod tests {
     use super::*;
     use crate::credentials::{CredentialKey, Credentials, MqttCredentialType};
 
+    /// Removes an environment variable and restores it on drop, including
+    /// while unwinding from a panic.
+    struct ClearedEnvVar {
+        name: &'static str,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl ClearedEnvVar {
+        fn clear(name: &'static str) -> Self {
+            let previous = std::env::var_os(name);
+            // SAFETY: callers mark tests `#[serial]`, which serializes the
+            // tests that read or write process environment variables.
+            unsafe { std::env::remove_var(name) };
+            Self { name, previous }
+        }
+    }
+
+    impl Drop for ClearedEnvVar {
+        fn drop(&mut self) {
+            if let Some(value) = &self.previous {
+                // SAFETY: as in `clear`.
+                unsafe { std::env::set_var(self.name, value) };
+            }
+        }
+    }
+
     #[test]
     fn vault_is_named_only_by_an_address() {
         let with_address = VaultConfig {
@@ -370,9 +396,10 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn credential_reader_fails_when_named_vault_cannot_be_built() {
-        // An explicit CA path that does not exist fails regardless of ambient
-        // VAULT_* settings: a named Vault that cannot start fails startup
-        // instead of being dropped from the chain.
+        // A named Vault that cannot start fails startup instead of being
+        // dropped from the chain. `resolve_vault_root_ca_path` falls back to
+        // VAULT_CACERT when the configured path is missing, so clear it.
+        let _cacert = ClearedEnvVar::clear("VAULT_CACERT");
         let config = CredentialConfig {
             vault: VaultConfig {
                 address: Some("https://vault.example:8200".to_string()),
