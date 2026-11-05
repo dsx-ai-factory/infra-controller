@@ -136,11 +136,7 @@ Where `expected-machines.json` is a JSON array of `ExpectedMachineCreateRequest`
 ]
 ```
 
-REST create/update also accepts **`dpuPolicy`** (`manage`, `nic`, `ignore`), **`bmcRetainCredentials`**, and legacy **`hostNics`** (each entry: `macAddress`, optional `primary`, `networkSegmentType`, `role`, `ipAllocation`, `fixedIp`, optional legacy `nicType` / `fixedMask` / `fixedGateway`). Prefer **`interfaces`** for host NIC declarations (see the OpenAPI `ExpectedMachineInterface` schema); do not send `interfaces` and `hostNics` in the same create or PATCH body.
-
-For **`hostNics`** on PATCH: omission or `null` preserves the stored list; a non-null array **replaces** the full list (use `[]` to clear). That is separate from **`replaceHostNics`**, which defaults to `true` when `hostNics` is present and only marks a complete replacement for the site workflow / Forge patch—it does not enable REST merge semantics when set to `false`.
-
-Replace-all (`PUT .../expected-machine/all`) accepts the same create fields, including `dpuPolicy`, `hostNics`, and `bmcRetainCredentials`. These map to Forge `dpu_mode`, `bmc_retain_credentials`, and `host_nics`. **`isDpfEnabled`** is separate: it marks DPF provisioning eligibility, not the per-host DPU policy.
+REST create, update and replace-all (`PUT .../expected-machine/all`) also accept **`dpuPolicy`** (`manage`, `nic`, `ignore`), which maps to Forge `dpu_mode`. **`isDpfEnabled`** is separate: it marks DPF provisioning eligibility, not the per-host DPU policy.
 
 Two constraints apply to every batch request, both enforced at the API gateway:
 

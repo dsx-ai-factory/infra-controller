@@ -334,29 +334,13 @@ func TestAPIExpectedMachineCreateRequest_Validate(t *testing.T) {
 			expectErr: false,
 		},
 		{
-			desc: "ok with dpuPolicy ignore and hostNics",
+			desc: "ok with dpuPolicy ignore",
 			obj: APIExpectedMachineCreateRequest{
 				BmcMacAddress:       "00:11:22:33:44:55",
 				DefaultBmcUsername:  &validUsername,
 				DefaultBmcPassword:  &validPassword,
 				ChassisSerialNumber: validChassisSerial,
 				DpuPolicy:           cutil.GetPtr(cdbm.ExpectedMachineDpuPolicyIgnore),
-				HostNics: []APIExpectedHostNic{
-					{MacAddress: "aa:bb:cc:dd:ee:01", Primary: cutil.GetPtr(true), NetworkSegmentType: cutil.GetPtr("hostInband")},
-				},
-			},
-			expectErr: false,
-		},
-		{
-			desc: "ok with empty hostNic macAddress for Astra legacy",
-			obj: APIExpectedMachineCreateRequest{
-				BmcMacAddress:       "00:11:22:33:44:55",
-				DefaultBmcUsername:  &validUsername,
-				DefaultBmcPassword:  &validPassword,
-				ChassisSerialNumber: validChassisSerial,
-				HostNics: []APIExpectedHostNic{
-					{MacAddress: "", Primary: cutil.GetPtr(true), NetworkSegmentType: cutil.GetPtr("hostInband")},
-				},
 			},
 			expectErr: false,
 		},
@@ -379,36 +363,6 @@ func TestAPIExpectedMachineCreateRequest_Validate(t *testing.T) {
 				DefaultBmcPassword:  &validPassword,
 				ChassisSerialNumber: validChassisSerial,
 				DpuPolicy:           cutil.GetPtr(""),
-			},
-			expectErr: true,
-		},
-		{
-			desc: "error when interfaces and hostNics are both set",
-			obj: APIExpectedMachineCreateRequest{
-				BmcMacAddress:       "00:11:22:33:44:55",
-				DefaultBmcUsername:  &validUsername,
-				DefaultBmcPassword:  &validPassword,
-				ChassisSerialNumber: validChassisSerial,
-				Interfaces: APIExpectedMachineInterfaces{
-					{MacAddress: cutil.GetPtr("02:00:00:00:00:09"), NicType: cutil.GetPtr("CX9")},
-				},
-				HostNics: []APIExpectedHostNic{
-					{MacAddress: "aa:bb:cc:dd:ee:01"},
-				},
-			},
-			expectErr: true,
-		},
-		{
-			desc: "error when two hostNics set primary",
-			obj: APIExpectedMachineCreateRequest{
-				BmcMacAddress:       "00:11:22:33:44:55",
-				DefaultBmcUsername:  &validUsername,
-				DefaultBmcPassword:  &validPassword,
-				ChassisSerialNumber: validChassisSerial,
-				HostNics: []APIExpectedHostNic{
-					{MacAddress: "aa:bb:cc:dd:ee:01", Primary: cutil.GetPtr(true)},
-					{MacAddress: "aa:bb:cc:dd:ee:02", Primary: cutil.GetPtr(true)},
-				},
 			},
 			expectErr: true,
 		},
@@ -800,43 +754,8 @@ func TestNewAPIExpectedMachine(t *testing.T) {
 			}
 			assert.Contains(t, fields, "dpuPolicy")
 			assert.Equal(t, "null", string(fields["dpuPolicy"]))
-			assert.Contains(t, fields, "hostNics")
-			assert.JSONEq(t, `[]`, string(fields["hostNics"]))
-			assert.Contains(t, fields, "bmcRetainCredentials")
-			assert.Equal(t, "null", string(fields["bmcRetainCredentials"]))
 		})
 	}
-}
-
-func TestNewAPIExpectedMachine_ProjectsLegacyHostNics(t *testing.T) {
-	mac := "02:00:00:00:00:09"
-	dbEM := &cdbm.ExpectedMachine{
-		BmcMacAddress:       "00:11:22:33:44:55",
-		ChassisSerialNumber: "CHASSIS123",
-		HostNics: cdbm.ExpectedHostNics{
-			{
-				MacAddress:         mac,
-				Primary:            cutil.GetPtr(true),
-				NetworkSegmentType: cutil.GetPtr("hostInband"),
-				Role:               cutil.GetPtr("host"),
-				IPAllocation:       cutil.GetPtr("dynamic"),
-			},
-		},
-		Created: cdb.GetCurTime(),
-		Updated: cdb.GetCurTime(),
-	}
-
-	got := NewAPIExpectedMachine(dbEM)
-	require.Len(t, got.Interfaces, 1)
-	require.NotNil(t, got.Interfaces[0].Identifier)
-	require.NotNil(t, got.Interfaces[0].Identifier.MacAddress)
-	assert.Equal(t, mac, string(*got.Interfaces[0].Identifier.MacAddress))
-	assert.Equal(t, cutil.GetPtr(true), got.Interfaces[0].Primary)
-	if assert.NotNil(t, got.Interfaces[0].NetworkSegmentType) {
-		assert.Equal(t, cdbm.ExpectedInterfaceNetworkSegmentTypeHostInband, *got.Interfaces[0].NetworkSegmentType)
-	}
-	require.Len(t, got.HostNics, 1)
-	assert.Equal(t, mac, got.HostNics[0].MacAddress)
 }
 
 func TestAPIHostLifecycleProfile_Conversions(t *testing.T) {
@@ -980,18 +899,6 @@ func TestAPIExpectedMachineUpdateRequest_Validate(t *testing.T) {
 				{MacAddress: cutil.GetPtr("02:00:00:00:00:01"), Primary: cutil.GetPtr(true)},
 				{MacAddress: cutil.GetPtr("02:00:00:00:00:02"), Primary: cutil.GetPtr(true)},
 			}},
-			expectErr: true,
-		},
-		{
-			desc: "reject interfaces and hostNics together",
-			obj: APIExpectedMachineUpdateRequest{
-				Interfaces: APIExpectedMachineInterfaces{
-					{MacAddress: cutil.GetPtr("02:00:00:00:00:09"), NicType: cutil.GetPtr("CX9")},
-				},
-				HostNics: &[]APIExpectedHostNic{
-					{MacAddress: "aa:bb:cc:dd:ee:01"},
-				},
-			},
 			expectErr: true,
 		},
 		{

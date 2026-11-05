@@ -31206,84 +31206,6 @@ components:
           description: Optional logical interface name, for example `eth_r0_p0`. May contain only ASCII letters, digits, `_`, `.`, and `-`. Omission or null clears it when replacing the declaration.
       required:
         - physicalName
-    ExpectedHostNic:
-      title: ExpectedHostNic
-      type: object
-      description: Declared host interface on an Expected Machine (legacy REST field; prefer interfaces).
-      properties:
-        macAddress:
-          type: string
-          pattern: '^$|^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$'
-          description: MAC address of the host interface. May be empty for Astra hosts that identify interfaces by name elsewhere.
-        primary:
-          type:
-            - boolean
-            - 'null'
-          description: When true, marks the host's primary (boot) interface. At most one entry may be true.
-        networkSegmentType:
-          type:
-            - string
-            - 'null'
-          enum:
-            - tenant
-            - admin
-            - underlay
-            - hostInband
-            - host_inband
-            - null
-          description: Optional network segment type guard for DHCP and fixed-address allocation.
-        nicType:
-          type:
-            - string
-            - 'null'
-          description: Legacy segment hint. Prefer networkSegmentType.
-        fixedIp:
-          type:
-            - string
-            - 'null'
-          description: Reserved address when ipAllocation is fixed.
-        fixedMask:
-          type:
-            - string
-            - 'null'
-          description: Compatibility metadata for fixed addresses.
-        fixedGateway:
-          type:
-            - string
-            - 'null'
-          description: Compatibility metadata for fixed addresses.
-        role:
-          type:
-            - string
-            - 'null'
-          enum:
-            - host
-            - dpuOs
-            - dpuBmc
-            - hostBmc
-            - dpu_os
-            - dpu_bmc
-            - host_bmc
-            - null
-          description: Interface role. Defaults to host when omitted on create.
-        ipAllocation:
-          type:
-            - string
-            - 'null'
-          enum:
-            - dynamic
-            - fixed
-            - retained
-            - null
-          description: Address allocation policy for this interface.
-      example:
-        macAddress: 'de:ad:be:ef:00:02'
-        primary: true
-        networkSegmentType: hostInband
-        role: host
-        ipAllocation: dynamic
-      required:
-        - macAddress
     ExpectedMachine:
       title: ExpectedMachine
       type: object
@@ -31440,16 +31362,6 @@ components:
             - ignore
             - null
           description: Per-host DPU policy. Distinct from isDpfEnabled, which controls DPF provisioning eligibility.
-        hostNics:
-          type: array
-          description: Declared host interfaces for this Expected Machine (legacy REST field; prefer interfaces).
-          items:
-            $ref: '#/components/schemas/ExpectedHostNic'
-        bmcRetainCredentials:
-          type:
-            - boolean
-            - 'null'
-          description: When true, site-explorer skips BMC password rotation and stores factory credentials.
         labels:
           $ref: '#/components/schemas/Labels'
           description: User-defined key-value pairs for organizing and categorizing Expected Machines
@@ -31618,18 +31530,6 @@ components:
             - ignore
             - null
           description: Per-host DPU policy. Distinct from isDpfEnabled.
-        hostNics:
-          type:
-            - array
-            - 'null'
-          description: Declared host interfaces for this Expected Machine (legacy REST field; prefer interfaces).
-          items:
-            $ref: '#/components/schemas/ExpectedHostNic'
-        bmcRetainCredentials:
-          type:
-            - boolean
-            - 'null'
-          description: When true, site-explorer skips BMC password rotation and stores factory credentials.
         labels:
           $ref: '#/components/schemas/Labels'
           description: User-defined key-value pairs for organizing and categorizing Expected Machines
@@ -31748,7 +31648,7 @@ components:
           type:
             - array
             - 'null'
-          description: Complete expected host NIC list. Omission or null preserves the current list; an explicit empty list clears it. Cannot be combined with `hostNics` in the same request, including when both are empty arrays.
+          description: Complete expected host NIC list. Omission or null preserves the current list; an explicit empty list clears it.
           items:
             $ref: '#/components/schemas/ExpectedMachineInterface'
         skuId:
@@ -31828,23 +31728,6 @@ components:
             - ignore
             - null
           description: Per-host DPU policy. Distinct from isDpfEnabled.
-        hostNics:
-          type:
-            - array
-            - 'null'
-          description: Replaces the full declared host interface list when provided in a PATCH request (legacy REST field; prefer interfaces). Cannot be combined with `interfaces` in the same request, including when both are empty arrays.
-          items:
-            $ref: '#/components/schemas/ExpectedHostNic'
-        replaceHostNics:
-          type:
-            - boolean
-            - 'null'
-          description: When true with hostNics, marks a complete host interface replacement for the site workflow. Defaults to true when hostNics is set.
-        bmcRetainCredentials:
-          type:
-            - boolean
-            - 'null'
-          description: When true, site-explorer skips BMC password rotation and stores factory credentials.
         labels:
           $ref: '#/components/schemas/Labels'
           description: User-defined key-value pairs for organizing and categorizing Expected Machines

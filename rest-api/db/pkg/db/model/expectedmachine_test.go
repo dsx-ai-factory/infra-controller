@@ -113,9 +113,6 @@ func TestExpectedMachine_FromProto(t *testing.T) {
 				MachineID:                cutil.GetPtr("machine-1"),
 				FallbackDpuSerialNumbers: []string{"dpu-1", "dpu-2"},
 				Interfaces:               []ExpectedMachineInterface{{MacAddress: cutil.GetPtr("02:00:00:00:00:09"), PhysicalName: cutil.GetPtr("C1-1-L1"), LogicalName: cutil.GetPtr("rail0"), NicType: &nicType, FixedIP: &fixedIP}},
-				HostNics: ExpectedHostNics{
-					{MacAddress: "02:00:00:00:00:09", NicType: &nicType, FixedIP: &fixedIP},
-				},
 				IsDpfEnabled:             cutil.GetPtr(false),
 				HostLifecycleProfile:     HostLifecycleProfile{DisableLockdown: cutil.GetPtr(false)},
 			},
@@ -126,7 +123,7 @@ func TestExpectedMachine_FromProto(t *testing.T) {
 				Id:            &corev1.UUID{Value: "not-a-uuid"},
 				BmcMacAddress: "aa:bb",
 			},
-			want: ExpectedMachine{ID: id, SiteID: siteID, BmcMacAddress: "aa:bb", Interfaces: []ExpectedMachineInterface{}, HostNics: ExpectedHostNics{}},
+			want: ExpectedMachine{ID: id, SiteID: siteID, BmcMacAddress: "aa:bb", Interfaces: []ExpectedMachineInterface{}},
 		},
 		{
 			name: "empty metadata does not read obsolete names",
@@ -135,7 +132,7 @@ func TestExpectedMachine_FromProto(t *testing.T) {
 				Description: cutil.GetPtr("obsolete-description"),
 				Metadata:    &corev1.Metadata{},
 			},
-			want: ExpectedMachine{ID: id, SiteID: siteID, Interfaces: []ExpectedMachineInterface{}, HostNics: ExpectedHostNics{}},
+			want: ExpectedMachine{ID: id, SiteID: siteID, Interfaces: []ExpectedMachineInterface{}},
 		},
 	}
 	for _, tc := range tests {
@@ -2196,9 +2193,9 @@ func TestExpectedMachineSQLDAO_UpdateMultiple_BmcIpAddress(t *testing.T) {
 	assert.Equal(t, &preservedIPName, stored.Name)
 }
 
-// TestExpectedMachineSQLDAO_UpdateMultiple_ZeroDpuRESTFields guards against zero-DPU
-// REST columns supplied for one row clearing values omitted by another row.
-func TestExpectedMachineSQLDAO_UpdateMultiple_ZeroDpuRESTFields(t *testing.T) {
+// TestExpectedMachineSQLDAO_UpdateMultiple_DpuPolicy guards against dpu_policy supplied for
+// one row clearing the value omitted by another row.
+func TestExpectedMachineSQLDAO_UpdateMultiple_DpuPolicy(t *testing.T) {
 	ctx := context.Background()
 	dbSession := testInitDB(t)
 	defer dbSession.Close()
@@ -2212,42 +2209,30 @@ func TestExpectedMachineSQLDAO_UpdateMultiple_ZeroDpuRESTFields(t *testing.T) {
 	originalPolicy := ExpectedMachineDpuPolicyManage
 	preservedPolicy := ExpectedMachineDpuPolicyNic
 	updatedPolicy := ExpectedMachineDpuPolicyIgnore
-	originalRetain := true
-	preservedRetain := false
-	updatedRetain := true
-	originalHostNics := ExpectedHostNics{{MacAddress: "aa:bb:cc:dd:ee:01"}}
-	preservedHostNics := ExpectedHostNics{{MacAddress: "aa:bb:cc:dd:ee:02"}}
-	updatedHostNics := ExpectedHostNics{{MacAddress: "aa:bb:cc:dd:ee:03"}}
 
 	emUpdated, err := emsd.Create(ctx, nil, ExpectedMachineCreateInput{
-		ExpectedMachineID:      uuid.New(),
-		SiteID:                 site.ID,
-		BmcMacAddress:          "00:1B:44:11:3A:F6",
-		ChassisSerialNumber:    "CHASSIS-ZERO-DPU-A",
-		DpuPolicy:              &originalPolicy,
-		BmcRetainCredentials:   &originalRetain,
-		HostNics:               originalHostNics,
-		CreatedBy:              user.ID,
+		ExpectedMachineID:   uuid.New(),
+		SiteID:              site.ID,
+		BmcMacAddress:       "00:1B:44:11:3A:F6",
+		ChassisSerialNumber: "CHASSIS-ZERO-DPU-A",
+		DpuPolicy:           &originalPolicy,
+		CreatedBy:           user.ID,
 	})
 	require.NoError(t, err)
 	emPreserved, err := emsd.Create(ctx, nil, ExpectedMachineCreateInput{
-		ExpectedMachineID:      uuid.New(),
-		SiteID:                 site.ID,
-		BmcMacAddress:          "00:1B:44:11:3A:F7",
-		ChassisSerialNumber:    "CHASSIS-ZERO-DPU-B",
-		DpuPolicy:              &preservedPolicy,
-		BmcRetainCredentials:   &preservedRetain,
-		HostNics:               preservedHostNics,
-		CreatedBy:              user.ID,
+		ExpectedMachineID:   uuid.New(),
+		SiteID:              site.ID,
+		BmcMacAddress:       "00:1B:44:11:3A:F7",
+		ChassisSerialNumber: "CHASSIS-ZERO-DPU-B",
+		DpuPolicy:           &preservedPolicy,
+		CreatedBy:           user.ID,
 	})
 	require.NoError(t, err)
 
 	got, err := emsd.UpdateMultiple(ctx, nil, []ExpectedMachineUpdateInput{
 		{
-			ExpectedMachineID:      emUpdated.ID,
-			DpuPolicy:              &updatedPolicy,
-			BmcRetainCredentials:   &updatedRetain,
-			HostNics:               &updatedHostNics,
+			ExpectedMachineID: emUpdated.ID,
+			DpuPolicy:         &updatedPolicy,
 		},
 		{
 			ExpectedMachineID: emPreserved.ID,
@@ -2256,18 +2241,12 @@ func TestExpectedMachineSQLDAO_UpdateMultiple_ZeroDpuRESTFields(t *testing.T) {
 	require.NoError(t, err)
 	if assert.Len(t, got, 2) {
 		assert.Equal(t, &updatedPolicy, got[0].DpuPolicy)
-		assert.Equal(t, &updatedRetain, got[0].BmcRetainCredentials)
-		assert.Equal(t, updatedHostNics, got[0].HostNics)
 		assert.Equal(t, &preservedPolicy, got[1].DpuPolicy)
-		assert.Equal(t, &preservedRetain, got[1].BmcRetainCredentials)
-		assert.Equal(t, preservedHostNics, got[1].HostNics)
 	}
 
 	stored, err := emsd.Get(ctx, nil, emPreserved.ID, nil, false)
 	require.NoError(t, err)
 	assert.Equal(t, &preservedPolicy, stored.DpuPolicy)
-	assert.Equal(t, &preservedRetain, stored.BmcRetainCredentials)
-	assert.Equal(t, preservedHostNics, stored.HostNics)
 }
 
 // TestExpectedMachineSQLDAO_UpdateMultiple_HostLifecycleProfile guards against a

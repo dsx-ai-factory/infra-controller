@@ -313,164 +313,6 @@ func NewAPIHostLifecycleProfile(p cdbm.HostLifecycleProfile) *APIHostLifecyclePr
 	return &APIHostLifecycleProfile{DisableLockdown: p.DisableLockdown}
 }
 
-// APIExpectedHostNic declares one host interface on an ExpectedMachine.
-type APIExpectedHostNic struct {
-	MacAddress         string  `json:"macAddress"`
-	Primary            *bool   `json:"primary"`
-	NetworkSegmentType *string `json:"networkSegmentType"`
-	NicType            *string `json:"nicType"`
-	FixedIP            *string `json:"fixedIp"`
-	FixedMask          *string `json:"fixedMask"`
-	FixedGateway       *string `json:"fixedGateway"`
-	Role               *string `json:"role"`
-	IPAllocation       *string `json:"ipAllocation"`
-}
-
-// ExpectedHostNicsToDB converts API host NICs for create requests.
-func ExpectedHostNicsToDB(nics []APIExpectedHostNic) cdbm.ExpectedHostNics {
-	return expectedHostNicsToDB(nics)
-}
-
-func expectedHostNicsToDB(nics []APIExpectedHostNic) cdbm.ExpectedHostNics {
-	if len(nics) == 0 {
-		return cdbm.ExpectedHostNics{}
-	}
-	out := make(cdbm.ExpectedHostNics, 0, len(nics))
-	for _, nic := range nics {
-		out = append(out, cdbm.ExpectedHostNic{
-			MacAddress:         nic.MacAddress,
-			Primary:            nic.Primary,
-			NetworkSegmentType: nic.NetworkSegmentType,
-			NicType:            nic.NicType,
-			FixedIP:            nic.FixedIP,
-			FixedMask:          nic.FixedMask,
-			FixedGateway:       nic.FixedGateway,
-			Role:               nic.Role,
-			IPAllocation:       nic.IPAllocation,
-		})
-	}
-	return out
-}
-
-func newAPIExpectedHostNics(nics cdbm.ExpectedHostNics) []APIExpectedHostNic {
-	if len(nics) == 0 {
-		return []APIExpectedHostNic{}
-	}
-	out := make([]APIExpectedHostNic, 0, len(nics))
-	for _, nic := range nics {
-		out = append(out, APIExpectedHostNic{
-			MacAddress:         nic.MacAddress,
-			Primary:            nic.Primary,
-			NetworkSegmentType: nic.NetworkSegmentType,
-			NicType:            nic.NicType,
-			FixedIP:            nic.FixedIP,
-			FixedMask:          nic.FixedMask,
-			FixedGateway:       nic.FixedGateway,
-			Role:               nic.Role,
-			IPAllocation:       nic.IPAllocation,
-		})
-	}
-	return out
-}
-
-func hostNicNetworkSegmentToInterface(segmentType string) *cdbm.ExpectedInterfaceNetworkSegmentType {
-	switch strings.ToLower(segmentType) {
-	case "tenant":
-		v := cdbm.ExpectedInterfaceNetworkSegmentTypeTenant
-		return &v
-	case "admin":
-		v := cdbm.ExpectedInterfaceNetworkSegmentTypeAdmin
-		return &v
-	case "underlay":
-		v := cdbm.ExpectedInterfaceNetworkSegmentTypeUnderlay
-		return &v
-	case "hostinband", "host_inband":
-		v := cdbm.ExpectedInterfaceNetworkSegmentTypeHostInband
-		return &v
-	default:
-		return nil
-	}
-}
-
-func hostNicRoleToInterface(role string) *cdbm.ExpectedInterfaceRole {
-	switch role {
-	case "host":
-		v := cdbm.ExpectedInterfaceRoleHost
-		return &v
-	case "dpuOs", "dpu_os":
-		v := cdbm.ExpectedInterfaceRoleDpuOs
-		return &v
-	case "dpuBmc", "dpu_bmc":
-		v := cdbm.ExpectedInterfaceRoleDpuBmc
-		return &v
-	case "hostBmc", "host_bmc":
-		v := cdbm.ExpectedInterfaceRoleHostBmc
-		return &v
-	default:
-		return nil
-	}
-}
-
-func hostNicIPAllocationToInterface(allocation string) *cdbm.ExpectedInterfaceIPAllocation {
-	switch allocation {
-	case "dynamic":
-		v := cdbm.ExpectedInterfaceIPAllocationDynamic
-		return &v
-	case "fixed":
-		v := cdbm.ExpectedInterfaceIPAllocationFixed
-		return &v
-	case "retained":
-		v := cdbm.ExpectedInterfaceIPAllocationRetained
-		return &v
-	default:
-		return nil
-	}
-}
-
-func expectedMachineInterfaceFromHostNic(nic cdbm.ExpectedHostNic) cdbm.ExpectedMachineInterface {
-	result := cdbm.ExpectedMachineInterface{
-		NicType:      nic.NicType,
-		FixedIP:      nic.FixedIP,
-		FixedMask:    nic.FixedMask,
-		FixedGateway: nic.FixedGateway,
-		Primary:      nic.Primary,
-	}
-	if nic.MacAddress != "" {
-		result.MacAddress = cutil.GetPtr(nic.MacAddress)
-	}
-	if nic.NetworkSegmentType != nil && *nic.NetworkSegmentType != "" {
-		result.NetworkSegmentType = hostNicNetworkSegmentToInterface(*nic.NetworkSegmentType)
-	}
-	if nic.Role != nil && *nic.Role != "" {
-		result.Role = hostNicRoleToInterface(*nic.Role)
-	}
-	if nic.IPAllocation != nil && *nic.IPAllocation != "" {
-		result.IPAllocation = hostNicIPAllocationToInterface(*nic.IPAllocation)
-	}
-	return result
-}
-
-// ExpectedHostNicsToDBPtr converts an optional API host NIC list for PATCH updates.
-func ExpectedHostNicsToDBPtr(nics *[]APIExpectedHostNic) *cdbm.ExpectedHostNics {
-	if nics == nil {
-		return nil
-	}
-	v := expectedHostNicsToDB(*nics)
-	return &v
-}
-
-// ExpectedMachineReplaceHostNics reports whether the site workflow should replace host_nics.
-// When hostNics is present and replaceHostNics is omitted, replacement defaults to true.
-func ExpectedMachineReplaceHostNics(hostNics *[]APIExpectedHostNic, replaceHostNics *bool) bool {
-	if hostNics == nil {
-		return false
-	}
-	if replaceHostNics != nil {
-		return *replaceHostNics
-	}
-	return true
-}
-
 func validateExpectedMachineDpuPolicy(policy *string) error {
 	if policy == nil {
 		return nil
@@ -484,62 +326,6 @@ func validateExpectedMachineDpuPolicy(policy *string) error {
 			cdbm.ExpectedMachineDpuPolicyNic,
 			cdbm.ExpectedMachineDpuPolicyIgnore,
 		).Error("dpuPolicy must be manage, nic, or ignore"))
-}
-
-func validateExpectedHostNics(nics []APIExpectedHostNic) error {
-	primaryCount := 0
-	for i := range nics {
-		nic := &nics[i]
-		segmentTypes := []any{"tenant", "admin", "underlay", "hostInband", "host_inband"}
-		err := validation.ValidateStruct(nic,
-			validation.Field(&nic.MacAddress,
-				validation.When(nic.MacAddress != "", validationis.MAC)),
-			validation.Field(&nic.NetworkSegmentType,
-				validation.NilOrNotEmpty.Error("networkSegmentType cannot be empty"),
-				validation.When(nic.NetworkSegmentType != nil && *nic.NetworkSegmentType != "",
-					validation.In(segmentTypes...).Error(
-						"networkSegmentType must be tenant, admin, underlay, hostInband, or host_inband"))),
-			validation.Field(&nic.Role,
-				validation.NilOrNotEmpty.Error("role cannot be empty"),
-				validation.When(nic.Role != nil && *nic.Role != "",
-					validation.In("host", "dpuOs", "dpuBmc", "hostBmc", "dpu_os", "dpu_bmc", "host_bmc").Error(
-						"role must be host, dpuOs, dpuBmc, or hostBmc"))),
-			validation.Field(&nic.IPAllocation,
-				validation.NilOrNotEmpty.Error("ipAllocation cannot be empty"),
-				validation.When(nic.IPAllocation != nil && *nic.IPAllocation != "",
-					validation.In("dynamic", "fixed", "retained").Error(
-						"ipAllocation must be dynamic, fixed, or retained"))),
-			validation.Field(&nic.FixedIP,
-				validation.When(nic.FixedIP != nil && *nic.FixedIP != "",
-					validationis.IP.Error("fixedIp must be a valid IPv4 or IPv6 address"))),
-			validation.Field(&nic.FixedGateway,
-				validation.When(nic.FixedGateway != nil && *nic.FixedGateway != "",
-					validationis.IP.Error("fixedGateway must be a valid IPv4 or IPv6 address"))),
-		)
-		if err != nil {
-			return err
-		}
-		allocation := ""
-		if nic.IPAllocation != nil {
-			allocation = *nic.IPAllocation
-		}
-		hasFixedIP := nic.FixedIP != nil && *nic.FixedIP != ""
-		if allocation == "dynamic" || allocation == "retained" {
-			if hasFixedIP {
-				return errors.New("fixedIp cannot be set when ipAllocation is dynamic or retained")
-			}
-		}
-		if allocation == "fixed" && !hasFixedIP {
-			return errors.New("fixedIp is required when ipAllocation is fixed")
-		}
-		if nic.Primary != nil && *nic.Primary {
-			primaryCount++
-		}
-	}
-	if primaryCount > 1 {
-		return errors.New("at most one hostNic may set primary to true")
-	}
-	return nil
 }
 
 // APIExpectedMachineCreateRequest is the data structure to capture instance request to create a new ExpectedMachine
@@ -584,10 +370,6 @@ type APIExpectedMachineCreateRequest struct {
 	IsDpfEnabled *bool `json:"isDpfEnabled"`
 	// DpuPolicy selects how NICo treats DPU hardware for this host (manage, nic, ignore)
 	DpuPolicy *string `json:"dpuPolicy"`
-	// HostNics declares expected host interfaces for this machine
-	HostNics []APIExpectedHostNic `json:"hostNics"`
-	// BmcRetainCredentials skips BMC password rotation when true
-	BmcRetainCredentials *bool `json:"bmcRetainCredentials"`
 	// Labels is the labels of the expected machine
 	Labels map[string]string `json:"labels"`
 	// HostLifecycleProfile is the optional per-host lifecycle profile
@@ -649,11 +431,7 @@ func (emcr *APIExpectedMachineCreateRequest) Validate() error {
 		return err
 	}
 
-	if len(emcr.Interfaces) > 0 && len(emcr.HostNics) > 0 {
-		return validation.Errors{"hostNics": errors.New("cannot be combined with interfaces")}
-	}
-
-	return validateExpectedHostNics(emcr.HostNics)
+	return nil
 }
 
 // APIExpectedMachineUpdateRequest is the data structure to capture user request to update an ExpectedMachine
@@ -703,12 +481,6 @@ type APIExpectedMachineUpdateRequest struct {
 	IsDpfEnabled *bool `json:"isDpfEnabled"`
 	// DpuPolicy selects how NICo treats DPU hardware for this host (manage, nic, ignore)
 	DpuPolicy *string `json:"dpuPolicy"`
-	// HostNics replaces the declared host interfaces when set in a PATCH request
-	HostNics *[]APIExpectedHostNic `json:"hostNics"`
-	// ReplaceHostNics marks an intentional hostNics list replacement for the site workflow
-	ReplaceHostNics *bool `json:"replaceHostNics"`
-	// BmcRetainCredentials skips BMC password rotation when true
-	BmcRetainCredentials *bool `json:"bmcRetainCredentials"`
 	// Labels is the labels of the expected machine
 	Labels map[string]string `json:"labels"`
 	// HostLifecycleProfile is the optional per-host lifecycle profile
@@ -786,14 +558,6 @@ func (emur *APIExpectedMachineUpdateRequest) Validate() error {
 		return err
 	}
 
-	if emur.Interfaces != nil && emur.HostNics != nil {
-		return validation.Errors{"hostNics": errors.New("cannot be combined with interfaces")}
-	}
-
-	if emur.HostNics != nil {
-		return validateExpectedHostNics(*emur.HostNics)
-	}
-
 	return nil
 }
 
@@ -819,17 +583,11 @@ func (emur *APIExpectedMachineUpdateRequest) ToProto(entity *cdbm.ExpectedMachin
 		for _, expectedInterface := range emur.Interfaces {
 			resource.HostNics = append(resource.HostNics, expectedInterface.ToDBModel().ToProto())
 		}
-	} else if emur.HostNics != nil {
-		resource.HostNics = expectedHostNicsToDB(*emur.HostNics).ToProto()
-	}
-	if ExpectedMachineReplaceHostNics(emur.HostNics, emur.ReplaceHostNics) {
-		resource.ReplaceHostNics = true
 	}
 	setBmcIP := emur.BmcIpAddress != nil && *emur.BmcIpAddress != ""
 	if setBmcIP {
 		resource.BmcIpAllocation = corev1.BmcIpAllocationType_BMC_IP_ALLOCATION_TYPE_AUTO.Enum()
 	}
-	hostNicsPresent := emur.Interfaces != nil || emur.HostNics != nil
 	return &corev1.PatchExpectedMachineRequest{
 		ExpectedMachine: resource,
 		UpdateMask: util.ExpectedComponentUpdateMask(
@@ -843,12 +601,11 @@ func (emur *APIExpectedMachineUpdateRequest) ToProto(entity *cdbm.ExpectedMachin
 			util.ExpectedComponentUpdateField{Path: "metadata.labels", Present: emur.Labels != nil || emur.Manufacturer != nil || emur.Model != nil || emur.SlotID != nil || emur.TrayIdx != nil || emur.HostID != nil},
 			util.ExpectedComponentUpdateField{Path: "chassis_serial_number", Present: emur.ChassisSerialNumber != nil},
 			util.ExpectedComponentUpdateField{Path: "fallback_dpu_serial_numbers", Present: emur.FallbackDPUSerialNumbers != nil},
-			util.ExpectedComponentUpdateField{Path: "host_nics", Present: hostNicsPresent},
+			util.ExpectedComponentUpdateField{Path: "host_nics", Present: emur.Interfaces != nil},
 			util.ExpectedComponentUpdateField{Path: "sku_id", Present: emur.SkuID != nil},
 			util.ExpectedComponentUpdateField{Path: "server_name", Present: emur.ServerName != nil},
 			util.ExpectedComponentUpdateField{Path: "is_dpf_enabled", Present: emur.IsDpfEnabled != nil},
 			util.ExpectedComponentUpdateField{Path: "dpu_mode", Present: emur.DpuPolicy != nil},
-			util.ExpectedComponentUpdateField{Path: "bmc_retain_credentials", Present: emur.BmcRetainCredentials != nil},
 			util.ExpectedComponentUpdateField{Path: "host_lifecycle_profile.disable_lockdown", Present: emur.HostLifecycleProfile != nil && emur.HostLifecycleProfile.DisableLockdown != nil},
 		),
 	}
@@ -902,10 +659,6 @@ type APIExpectedMachine struct {
 	IsDpfEnabled bool `json:"isDpfEnabled"`
 	// DpuPolicy selects how NICo treats DPU hardware for this host
 	DpuPolicy *string `json:"dpuPolicy"`
-	// HostNics lists declared host interfaces for this machine (legacy REST field; prefer interfaces)
-	HostNics []APIExpectedHostNic `json:"hostNics"`
-	// BmcRetainCredentials skips BMC password rotation when true
-	BmcRetainCredentials *bool `json:"bmcRetainCredentials"`
 	// Labels is the labels of the expected machine
 	Labels APILabels `json:"labels"`
 	// HostLifecycleProfile is the optional per-host lifecycle profile
@@ -921,15 +674,9 @@ func NewAPIExpectedMachine(dibp *cdbm.ExpectedMachine) *APIExpectedMachine {
 	fallbackDPUSerialNumbers := make([]string, len(dibp.FallbackDpuSerialNumbers))
 	copy(fallbackDPUSerialNumbers, dibp.FallbackDpuSerialNumbers)
 
-	interfaces := make([]APIExpectedMachineInterface, 0, len(dibp.Interfaces)+len(dibp.HostNics))
+	interfaces := make([]APIExpectedMachineInterface, 0, len(dibp.Interfaces))
 	for _, expectedInterface := range dibp.Interfaces {
 		interfaces = append(interfaces, NewAPIExpectedMachineInterface(expectedInterface))
-	}
-	if len(dibp.Interfaces) == 0 && len(dibp.HostNics) > 0 {
-		interfaces = interfaces[:0]
-		for _, hostNic := range dibp.HostNics {
-			interfaces = append(interfaces, NewAPIExpectedMachineInterface(expectedMachineInterfaceFromHostNic(hostNic)))
-		}
 	}
 	apiem := &APIExpectedMachine{
 		ID:                       dibp.ID,
@@ -952,8 +699,6 @@ func NewAPIExpectedMachine(dibp *cdbm.ExpectedMachine) *APIExpectedMachine {
 		HostID:                   dibp.HostID,
 		IsDpfEnabled:             dibp.IsDpfEnabled == nil || *dibp.IsDpfEnabled,
 		DpuPolicy:                dibp.DpuPolicy,
-		HostNics:                 newAPIExpectedHostNics(dibp.HostNics),
-		BmcRetainCredentials:     dibp.BmcRetainCredentials,
 		Labels:                   APILabels(dibp.Labels),
 		HostLifecycleProfile:     NewAPIHostLifecycleProfile(dibp.HostLifecycleProfile),
 		Created:                  dibp.Created,

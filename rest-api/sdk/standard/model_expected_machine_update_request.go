@@ -35,7 +35,7 @@ type ExpectedMachineUpdateRequest struct {
 	ChassisSerialNumber NullableString `json:"chassisSerialNumber,omitempty"`
 	// Serial numbers of the Expected Machine's fallback DPUs (Data Processing Units)
 	FallbackDPUSerialNumbers []string `json:"fallbackDPUSerialNumbers,omitempty"`
-	// Complete expected host NIC list. Omission or null preserves the current list; an explicit empty list clears it. Cannot be combined with `hostNics` in the same request, including when both are empty arrays.
+	// Complete expected host NIC list. Omission or null preserves the current list; an explicit empty list clears it.
 	Interfaces []ExpectedMachineInterface `json:"interfaces,omitempty"`
 	// Optional ID of an existing SKU at this Expected Machine's Site. Omission or null preserves the current SKU association in single and batch PATCH requests. REST rejects an empty string with HTTP 400. PATCH cannot remove the SKU association.
 	SkuId NullableString `json:"skuId,omitempty"`
@@ -63,12 +63,6 @@ type ExpectedMachineUpdateRequest struct {
 	IsDpfEnabled NullableBool `json:"isDpfEnabled,omitempty"`
 	// Per-host DPU policy. Distinct from isDpfEnabled.
 	DpuPolicy NullableString `json:"dpuPolicy,omitempty"`
-	// Replaces the full declared host interface list when provided in a PATCH request (legacy REST field; prefer interfaces). Cannot be combined with `interfaces` in the same request, including when both are empty arrays.
-	HostNics []ExpectedHostNic `json:"hostNics,omitempty"`
-	// When true with hostNics, marks a complete host interface replacement for the site workflow. Defaults to true when hostNics is set.
-	ReplaceHostNics NullableBool `json:"replaceHostNics,omitempty"`
-	// When true, site-explorer skips BMC password rotation and stores factory credentials.
-	BmcRetainCredentials NullableBool `json:"bmcRetainCredentials,omitempty"`
 	// User-defined key-value pairs for organizing and categorizing Expected Machines
 	Labels map[string]string `json:"labels,omitempty"`
 	// Optional per-host lifecycle profile
@@ -124,6 +118,7 @@ func (o *ExpectedMachineUpdateRequest) HasId() bool {
 func (o *ExpectedMachineUpdateRequest) SetId(v string) {
 	o.Id.Set(&v)
 }
+
 // SetIdNil sets the value for Id to be an explicit nil
 func (o *ExpectedMachineUpdateRequest) SetIdNil() {
 	o.Id.Set(nil)
@@ -169,6 +164,7 @@ func (o *ExpectedMachineUpdateRequest) HasBmcMacAddress() bool {
 func (o *ExpectedMachineUpdateRequest) SetBmcMacAddress(v string) {
 	o.BmcMacAddress.Set(&v)
 }
+
 // SetBmcMacAddressNil sets the value for BmcMacAddress to be an explicit nil
 func (o *ExpectedMachineUpdateRequest) SetBmcMacAddressNil() {
 	o.BmcMacAddress.Set(nil)
@@ -211,6 +207,7 @@ func (o *ExpectedMachineUpdateRequest) HasDefaultBmcUsername() bool {
 func (o *ExpectedMachineUpdateRequest) SetDefaultBmcUsername(v string) {
 	o.DefaultBmcUsername.Set(&v)
 }
+
 // SetDefaultBmcUsernameNil sets the value for DefaultBmcUsername to be an explicit nil
 func (o *ExpectedMachineUpdateRequest) SetDefaultBmcUsernameNil() {
 	o.DefaultBmcUsername.Set(nil)
@@ -253,6 +250,7 @@ func (o *ExpectedMachineUpdateRequest) HasDefaultBmcPassword() bool {
 func (o *ExpectedMachineUpdateRequest) SetDefaultBmcPassword(v string) {
 	o.DefaultBmcPassword.Set(&v)
 }
+
 // SetDefaultBmcPasswordNil sets the value for DefaultBmcPassword to be an explicit nil
 func (o *ExpectedMachineUpdateRequest) SetDefaultBmcPasswordNil() {
 	o.DefaultBmcPassword.Set(nil)
@@ -295,6 +293,7 @@ func (o *ExpectedMachineUpdateRequest) HasChassisSerialNumber() bool {
 func (o *ExpectedMachineUpdateRequest) SetChassisSerialNumber(v string) {
 	o.ChassisSerialNumber.Set(&v)
 }
+
 // SetChassisSerialNumberNil sets the value for ChassisSerialNumber to be an explicit nil
 func (o *ExpectedMachineUpdateRequest) SetChassisSerialNumberNil() {
 	o.ChassisSerialNumber.Set(nil)
@@ -401,6 +400,7 @@ func (o *ExpectedMachineUpdateRequest) HasSkuId() bool {
 func (o *ExpectedMachineUpdateRequest) SetSkuId(v string) {
 	o.SkuId.Set(&v)
 }
+
 // SetSkuIdNil sets the value for SkuId to be an explicit nil
 func (o *ExpectedMachineUpdateRequest) SetSkuIdNil() {
 	o.SkuId.Set(nil)
@@ -443,6 +443,7 @@ func (o *ExpectedMachineUpdateRequest) HasRackId() bool {
 func (o *ExpectedMachineUpdateRequest) SetRackId(v string) {
 	o.RackId.Set(&v)
 }
+
 // SetRackIdNil sets the value for RackId to be an explicit nil
 func (o *ExpectedMachineUpdateRequest) SetRackIdNil() {
 	o.RackId.Set(nil)
@@ -485,6 +486,7 @@ func (o *ExpectedMachineUpdateRequest) HasBmcIpAddress() bool {
 func (o *ExpectedMachineUpdateRequest) SetBmcIpAddress(v string) {
 	o.BmcIpAddress.Set(&v)
 }
+
 // SetBmcIpAddressNil sets the value for BmcIpAddress to be an explicit nil
 func (o *ExpectedMachineUpdateRequest) SetBmcIpAddressNil() {
 	o.BmcIpAddress.Set(nil)
@@ -527,6 +529,7 @@ func (o *ExpectedMachineUpdateRequest) HasName() bool {
 func (o *ExpectedMachineUpdateRequest) SetName(v string) {
 	o.Name.Set(&v)
 }
+
 // SetNameNil sets the value for Name to be an explicit nil
 func (o *ExpectedMachineUpdateRequest) SetNameNil() {
 	o.Name.Set(nil)
@@ -569,6 +572,7 @@ func (o *ExpectedMachineUpdateRequest) HasManufacturer() bool {
 func (o *ExpectedMachineUpdateRequest) SetManufacturer(v string) {
 	o.Manufacturer.Set(&v)
 }
+
 // SetManufacturerNil sets the value for Manufacturer to be an explicit nil
 func (o *ExpectedMachineUpdateRequest) SetManufacturerNil() {
 	o.Manufacturer.Set(nil)
@@ -611,6 +615,7 @@ func (o *ExpectedMachineUpdateRequest) HasModel() bool {
 func (o *ExpectedMachineUpdateRequest) SetModel(v string) {
 	o.Model.Set(&v)
 }
+
 // SetModelNil sets the value for Model to be an explicit nil
 func (o *ExpectedMachineUpdateRequest) SetModelNil() {
 	o.Model.Set(nil)
@@ -653,6 +658,7 @@ func (o *ExpectedMachineUpdateRequest) HasDescription() bool {
 func (o *ExpectedMachineUpdateRequest) SetDescription(v string) {
 	o.Description.Set(&v)
 }
+
 // SetDescriptionNil sets the value for Description to be an explicit nil
 func (o *ExpectedMachineUpdateRequest) SetDescriptionNil() {
 	o.Description.Set(nil)
@@ -695,6 +701,7 @@ func (o *ExpectedMachineUpdateRequest) HasServerName() bool {
 func (o *ExpectedMachineUpdateRequest) SetServerName(v string) {
 	o.ServerName.Set(&v)
 }
+
 // SetServerNameNil sets the value for ServerName to be an explicit nil
 func (o *ExpectedMachineUpdateRequest) SetServerNameNil() {
 	o.ServerName.Set(nil)
@@ -737,6 +744,7 @@ func (o *ExpectedMachineUpdateRequest) HasSlotId() bool {
 func (o *ExpectedMachineUpdateRequest) SetSlotId(v int32) {
 	o.SlotId.Set(&v)
 }
+
 // SetSlotIdNil sets the value for SlotId to be an explicit nil
 func (o *ExpectedMachineUpdateRequest) SetSlotIdNil() {
 	o.SlotId.Set(nil)
@@ -779,6 +787,7 @@ func (o *ExpectedMachineUpdateRequest) HasTrayIdx() bool {
 func (o *ExpectedMachineUpdateRequest) SetTrayIdx(v int32) {
 	o.TrayIdx.Set(&v)
 }
+
 // SetTrayIdxNil sets the value for TrayIdx to be an explicit nil
 func (o *ExpectedMachineUpdateRequest) SetTrayIdxNil() {
 	o.TrayIdx.Set(nil)
@@ -821,6 +830,7 @@ func (o *ExpectedMachineUpdateRequest) HasHostId() bool {
 func (o *ExpectedMachineUpdateRequest) SetHostId(v int32) {
 	o.HostId.Set(&v)
 }
+
 // SetHostIdNil sets the value for HostId to be an explicit nil
 func (o *ExpectedMachineUpdateRequest) SetHostIdNil() {
 	o.HostId.Set(nil)
@@ -863,6 +873,7 @@ func (o *ExpectedMachineUpdateRequest) HasIsDpfEnabled() bool {
 func (o *ExpectedMachineUpdateRequest) SetIsDpfEnabled(v bool) {
 	o.IsDpfEnabled.Set(&v)
 }
+
 // SetIsDpfEnabledNil sets the value for IsDpfEnabled to be an explicit nil
 func (o *ExpectedMachineUpdateRequest) SetIsDpfEnabledNil() {
 	o.IsDpfEnabled.Set(nil)
@@ -905,6 +916,7 @@ func (o *ExpectedMachineUpdateRequest) HasDpuPolicy() bool {
 func (o *ExpectedMachineUpdateRequest) SetDpuPolicy(v string) {
 	o.DpuPolicy.Set(&v)
 }
+
 // SetDpuPolicyNil sets the value for DpuPolicy to be an explicit nil
 func (o *ExpectedMachineUpdateRequest) SetDpuPolicyNil() {
 	o.DpuPolicy.Set(nil)
@@ -913,122 +925,6 @@ func (o *ExpectedMachineUpdateRequest) SetDpuPolicyNil() {
 // UnsetDpuPolicy ensures that no value is present for DpuPolicy, not even an explicit nil
 func (o *ExpectedMachineUpdateRequest) UnsetDpuPolicy() {
 	o.DpuPolicy.Unset()
-}
-
-// GetHostNics returns the HostNics field value if set, zero value otherwise (both if not set or set to explicit null).
-func (o *ExpectedMachineUpdateRequest) GetHostNics() []ExpectedHostNic {
-	if o == nil {
-		var ret []ExpectedHostNic
-		return ret
-	}
-	return o.HostNics
-}
-
-// GetHostNicsOk returns a tuple with the HostNics field value if set, nil otherwise
-// and a boolean to check if the value has been set.
-func (o *ExpectedMachineUpdateRequest) GetHostNicsOk() ([]ExpectedHostNic, bool) {
-	if o == nil || IsNil(o.HostNics) {
-		return nil, false
-	}
-	return o.HostNics, true
-}
-
-// HasHostNics returns a boolean if a field has been set.
-func (o *ExpectedMachineUpdateRequest) HasHostNics() bool {
-	if o != nil && !IsNil(o.HostNics) {
-		return true
-	}
-
-	return false
-}
-
-// SetHostNics gets a reference to the given []ExpectedHostNic and assigns it to the HostNics field.
-func (o *ExpectedMachineUpdateRequest) SetHostNics(v []ExpectedHostNic) {
-	o.HostNics = v
-}
-
-// GetReplaceHostNics returns the ReplaceHostNics field value if set, zero value otherwise (both if not set or set to explicit null).
-func (o *ExpectedMachineUpdateRequest) GetReplaceHostNics() bool {
-	if o == nil || IsNil(o.ReplaceHostNics.Get()) {
-		var ret bool
-		return ret
-	}
-	return *o.ReplaceHostNics.Get()
-}
-
-// GetReplaceHostNicsOk returns a tuple with the ReplaceHostNics field value if set, nil otherwise
-// and a boolean to check if the value has been set.
-// NOTE: If the value is an explicit nil, `nil, true` will be returned
-func (o *ExpectedMachineUpdateRequest) GetReplaceHostNicsOk() (*bool, bool) {
-	if o == nil {
-		return nil, false
-	}
-	return o.ReplaceHostNics.Get(), o.ReplaceHostNics.IsSet()
-}
-
-// HasReplaceHostNics returns a boolean if a field has been set.
-func (o *ExpectedMachineUpdateRequest) HasReplaceHostNics() bool {
-	if o != nil && o.ReplaceHostNics.IsSet() {
-		return true
-	}
-
-	return false
-}
-
-// SetReplaceHostNics gets a reference to the given NullableBool and assigns it to the ReplaceHostNics field.
-func (o *ExpectedMachineUpdateRequest) SetReplaceHostNics(v bool) {
-	o.ReplaceHostNics.Set(&v)
-}
-// SetReplaceHostNicsNil sets the value for ReplaceHostNics to be an explicit nil
-func (o *ExpectedMachineUpdateRequest) SetReplaceHostNicsNil() {
-	o.ReplaceHostNics.Set(nil)
-}
-
-// UnsetReplaceHostNics ensures that no value is present for ReplaceHostNics, not even an explicit nil
-func (o *ExpectedMachineUpdateRequest) UnsetReplaceHostNics() {
-	o.ReplaceHostNics.Unset()
-}
-
-// GetBmcRetainCredentials returns the BmcRetainCredentials field value if set, zero value otherwise (both if not set or set to explicit null).
-func (o *ExpectedMachineUpdateRequest) GetBmcRetainCredentials() bool {
-	if o == nil || IsNil(o.BmcRetainCredentials.Get()) {
-		var ret bool
-		return ret
-	}
-	return *o.BmcRetainCredentials.Get()
-}
-
-// GetBmcRetainCredentialsOk returns a tuple with the BmcRetainCredentials field value if set, nil otherwise
-// and a boolean to check if the value has been set.
-// NOTE: If the value is an explicit nil, `nil, true` will be returned
-func (o *ExpectedMachineUpdateRequest) GetBmcRetainCredentialsOk() (*bool, bool) {
-	if o == nil {
-		return nil, false
-	}
-	return o.BmcRetainCredentials.Get(), o.BmcRetainCredentials.IsSet()
-}
-
-// HasBmcRetainCredentials returns a boolean if a field has been set.
-func (o *ExpectedMachineUpdateRequest) HasBmcRetainCredentials() bool {
-	if o != nil && o.BmcRetainCredentials.IsSet() {
-		return true
-	}
-
-	return false
-}
-
-// SetBmcRetainCredentials gets a reference to the given NullableBool and assigns it to the BmcRetainCredentials field.
-func (o *ExpectedMachineUpdateRequest) SetBmcRetainCredentials(v bool) {
-	o.BmcRetainCredentials.Set(&v)
-}
-// SetBmcRetainCredentialsNil sets the value for BmcRetainCredentials to be an explicit nil
-func (o *ExpectedMachineUpdateRequest) SetBmcRetainCredentialsNil() {
-	o.BmcRetainCredentials.Set(nil)
-}
-
-// UnsetBmcRetainCredentials ensures that no value is present for BmcRetainCredentials, not even an explicit nil
-func (o *ExpectedMachineUpdateRequest) UnsetBmcRetainCredentials() {
-	o.BmcRetainCredentials.Unset()
 }
 
 // GetLabels returns the Labels field value if set, zero value otherwise.
@@ -1096,7 +992,7 @@ func (o *ExpectedMachineUpdateRequest) SetHostLifecycleProfile(v HostLifecyclePr
 }
 
 func (o ExpectedMachineUpdateRequest) MarshalJSON() ([]byte, error) {
-	toSerialize,err := o.ToMap()
+	toSerialize, err := o.ToMap()
 	if err != nil {
 		return []byte{}, err
 	}
@@ -1165,15 +1061,6 @@ func (o ExpectedMachineUpdateRequest) ToMap() (map[string]interface{}, error) {
 	if o.DpuPolicy.IsSet() {
 		toSerialize["dpuPolicy"] = o.DpuPolicy.Get()
 	}
-	if o.HostNics != nil {
-		toSerialize["hostNics"] = o.HostNics
-	}
-	if o.ReplaceHostNics.IsSet() {
-		toSerialize["replaceHostNics"] = o.ReplaceHostNics.Get()
-	}
-	if o.BmcRetainCredentials.IsSet() {
-		toSerialize["bmcRetainCredentials"] = o.BmcRetainCredentials.Get()
-	}
 	if !IsNil(o.Labels) {
 		toSerialize["labels"] = o.Labels
 	}
@@ -1218,4 +1105,3 @@ func (v *NullableExpectedMachineUpdateRequest) UnmarshalJSON(src []byte) error {
 	v.isSet = true
 	return json.Unmarshal(src, &v.value)
 }
-
