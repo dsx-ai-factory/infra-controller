@@ -16,7 +16,7 @@ The REST response confirms that the task was created; it does not mean that
 the firmware update has completed.
 
 ```mermaid
-flowchart LR
+flowchart TD
     A["Provider Admin submits rack or tray request"] --> B["Flow resolves targets and an operation rule"]
     B --> C["Wait for affected hosts to be ready"]
     C --> D["Start update through NICo Core"]
