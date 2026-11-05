@@ -236,6 +236,7 @@ jobs:
           retention-days: 7
 
       - name: Save Go caches
+        if: ${{ !cancelled() }}
         uses: ./.github/actions/go-cache-save
         with:
           key: ${{ steps.go-cache.outputs.key }}

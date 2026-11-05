@@ -72,6 +72,7 @@ jobs:
         run: python3 -B scripts/test_local_core_address.py
 
       - name: Save Go caches
+        if: ${{ !cancelled() }}
         uses: ./.github/actions/go-cache-save
         with:
           key: ${{ steps.go-cache.outputs.key }}
@@ -114,6 +115,7 @@ jobs:
           working-directory: rest-api
 
       - name: Save Go caches
+        if: ${{ !cancelled() }}
         uses: ./.github/actions/go-cache-save
         with:
           key: ${{ steps.go-cache.outputs.key }}
@@ -222,6 +224,7 @@ jobs:
           "make rest-api/generate-sdk (from the repository root)"
 
       - name: Save Go caches
+        if: ${{ !cancelled() }}
         uses: ./.github/actions/go-cache-save
         with:
           key: ${{ steps.go-cache.outputs.key }}
@@ -264,6 +267,7 @@ jobs:
           "make sync-protobuf (from the repository root)"
 
       - name: Save Go caches
+        if: ${{ !cancelled() }}
         uses: ./.github/actions/go-cache-save
         with:
           key: ${{ steps.go-cache.outputs.key }}
@@ -335,6 +339,7 @@ jobs:
         run: make rest-api/test-${{ matrix.module }}
 
       - name: Save Go caches
+        if: ${{ !cancelled() }}
         uses: ./.github/actions/go-cache-save
         with:
           key: ${{ steps.go-cache.outputs.key }}

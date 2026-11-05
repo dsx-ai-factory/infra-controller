@@ -1225,6 +1225,7 @@ jobs:
         run: make -C dev/k8s/machine-a-tron-controller test
 
       - name: Save Go caches
+        if: ${{ !cancelled() }}
         uses: ./.github/actions/go-cache-save
         with:
           key: ${{ steps.go-cache.outputs.key }}
@@ -2137,6 +2138,7 @@ jobs:
           "make sync-protobuf (from the repository root)"
 
       - name: Save Go caches
+        if: ${{ !cancelled() }}
         uses: ./.github/actions/go-cache-save
         with:
           key: ${{ steps.go-cache.outputs.key }}
