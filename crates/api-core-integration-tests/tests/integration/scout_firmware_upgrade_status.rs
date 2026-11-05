@@ -52,6 +52,7 @@ fn waiting_reprovision_state(upgrade_task_id: &str) -> HostReprovisionState {
         power_drains_needed: None,
         started_at: chrono::Utc::now(),
         deadline: chrono::Utc::now() + chrono::TimeDelta::minutes(60),
+        delivered_at: None,
         task_json: String::new(),
         result: None,
     }
@@ -111,9 +112,15 @@ async fn stores_successful_result(pool: PgPool) {
     else {
         panic!("Not in HostReprovision");
     };
-    let HostReprovisionState::WaitingForScoutUpgrade { result, .. } = reprovision_state else {
+    let HostReprovisionState::WaitingForScoutUpgrade {
+        result,
+        delivered_at,
+        ..
+    } = reprovision_state
+    else {
         panic!("Not in WaitingForScoutUpgrade");
     };
+    assert!(delivered_at.is_none());
     let result = result.as_ref().expect("result should be set");
     assert!(result.success);
     assert_eq!(result.exit_code, 0);
@@ -145,9 +152,15 @@ async fn stores_successful_result_for_assigned_host(pool: PgPool) {
     else {
         panic!("assigned host reprovision wrapper was not preserved");
     };
-    let HostReprovisionState::WaitingForScoutUpgrade { result, .. } = reprovision_state else {
+    let HostReprovisionState::WaitingForScoutUpgrade {
+        result,
+        delivered_at,
+        ..
+    } = reprovision_state
+    else {
         panic!("Not in WaitingForScoutUpgrade");
     };
+    assert!(delivered_at.is_none());
     let result = result.as_ref().expect("result should be set");
     assert!(result.success);
     assert_eq!(result.stdout, "assigned upgrade complete");
@@ -181,9 +194,15 @@ async fn stores_failed_result(pool: PgPool) {
     else {
         panic!("Not in HostReprovision");
     };
-    let HostReprovisionState::WaitingForScoutUpgrade { result, .. } = reprovision_state else {
+    let HostReprovisionState::WaitingForScoutUpgrade {
+        result,
+        delivered_at,
+        ..
+    } = reprovision_state
+    else {
         panic!("Not in WaitingForScoutUpgrade");
     };
+    assert!(delivered_at.is_none());
     let result = result.as_ref().expect("result should be set");
     assert!(!result.success);
     assert_eq!(result.exit_code, 1);
@@ -298,11 +317,102 @@ async fn truncates_result_output(pool: PgPool) {
     else {
         panic!("Not in HostReprovision");
     };
-    let HostReprovisionState::WaitingForScoutUpgrade { result, .. } = reprovision_state else {
+    let HostReprovisionState::WaitingForScoutUpgrade {
+        result,
+        delivered_at,
+        ..
+    } = reprovision_state
+    else {
         panic!("Not in WaitingForScoutUpgrade");
     };
+    assert!(delivered_at.is_none());
     let result = result.as_ref().expect("result should be set");
     assert!(result.stdout.len() <= 1500);
     assert!(result.stderr.len() <= 1500);
     assert!(result.error.len() <= 1500);
+}
+
+#[sqlx_test]
+async fn concurrent_completion_preserves_result_against_stale_poll(pool: PgPool) {
+    let TestContext { env, mh } = init(pool.clone()).await;
+    let task = rpc::scout_firmware_upgrade::ScoutFirmwareUpgradeTask {
+        upgrade_task_id: "concurrent-task".into(),
+        ..Default::default()
+    };
+    let mut waiting = waiting_reprovision_state(&task.upgrade_task_id);
+    if let HostReprovisionState::WaitingForScoutUpgrade { task_json, .. } = &mut waiting {
+        *task_json = serde_json::to_string(&task).unwrap();
+    }
+    mh.advance_state(ManagedHostState::HostReprovision {
+        retry_count: 0,
+        reprovision_state: waiting.clone(),
+    })
+    .await;
+    let before = mh.host.machine().await;
+    if let HostReprovisionState::WaitingForScoutUpgrade { result, .. } = &mut waiting {
+        *result = Some(model::machine::ScoutUpgradeResult {
+            success: true,
+            exit_code: 0,
+            stdout: "completed".into(),
+            stderr: String::new(),
+            error: String::new(),
+        });
+    }
+    let completed = ManagedHostState::HostReprovision {
+        retry_count: 0,
+        reprovision_state: waiting,
+    };
+    let mut txn = pool.begin().await.unwrap();
+    let host_id = mh.host.id.try_into().unwrap();
+    let write = db::machine::try_update_controller_state(
+        &mut txn,
+        &host_id,
+        before.state.version,
+        before.state.version.increment(),
+        &completed,
+    )
+    .await
+    .unwrap();
+    assert_eq!(write, db::ConditionalWrite::Applied(()));
+
+    // The poll reads the committed pending state, then waits behind the completion
+    // writer's history lock. Committing that writer makes the poll's version stale.
+    let api = env.api_arc();
+    let machine_id = mh.host.id;
+    let poll = tokio::spawn(async move {
+        api.forge_agent_control(Request::new(rpc::forge::ForgeAgentControlRequest {
+            machine_id: Some(machine_id),
+        }))
+        .await
+    });
+    let waiting_for_lock = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let blocked: bool = sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM pg_stat_activity \
+                 WHERE datname = current_database() AND wait_event_type = 'Lock' \
+                 AND query LIKE 'INSERT INTO machine_state_history%')",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            if blocked {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    txn.commit().await.unwrap();
+    let result = tokio::time::timeout(std::time::Duration::from_secs(5), poll)
+        .await
+        .expect("poll should finish after completion commits")
+        .unwrap();
+    waiting_for_lock.expect("poll should wait behind the completion writer");
+    assert_eq!(result.unwrap_err().code(), tonic::Code::Aborted);
+    let after = mh.host.machine().await;
+    assert_eq!(after.current_state(), &completed);
+    assert_eq!(
+        after.status.last_scout_contact_time,
+        before.status.last_scout_contact_time
+    );
 }

@@ -257,6 +257,15 @@ The route precedence is:
 For the packaged CX7 Scout route on DGX H100, refer to
 [ConnectX-7 firmware configuration](configuration.md#connectx-7-infiniband-firmware).
 
+Scout tasks allow 30 minutes for delivery, inferred from Scout contact. The
+completion budget starts at inferred delivery and covers download and execution
+timeouts plus 30 minutes for reporting, capped at five hours. Later polls do not
+extend it. A missing completion report leaves the execution outcome unknown.
+
+Scout caches completed results until restart, so a repeated task retries the
+report without rerunning the script. Older Scouts may rerun tasks after a lost
+report.
+
 All successful routes eventually return to component selection. Scout and
 Redfish updates first pass through NICo's activation and inventory-verification
 states; the legacy script path returns directly to inventory checking.
@@ -321,7 +330,7 @@ The principal host firmware substates are:
 |---|---|
 | `CheckingFirmwareV2`, `CheckingFirmwareRepeatV2` | Refresh inventory and select the next mismatched component. |
 | `WaitingForManualUpgrade` | Wait for completion of the approved platform procedure. |
-| `WaitingForScoutUpgrade` | Wait for Scout to execute the packaged upgrade task and report its result. |
+| `WaitingForScoutUpgrade` | Wait for Scout to execute the task and report its result. |
 | `WaitingForScript` | Wait for the legacy Core-local script. |
 | `WaitingForUpload` | A Redfish upload is running asynchronously. |
 | `WaitingForFirmwareUpgrade` | The upload completed and NICo is polling the Redfish task. |

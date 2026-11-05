@@ -101,6 +101,7 @@ async fn host_reprovision_scout_upgrade_does_not_reset_without_cleanup_timestamp
             power_drains_needed: None,
             started_at: chrono::Utc::now(),
             deadline: chrono::Utc::now() + chrono::TimeDelta::minutes(60),
+            delivered_at: None,
             task_json,
             result: None,
         },
@@ -176,6 +177,7 @@ async fn waiting_for_scout_upgrade_returns_task_without_cleanup_timestamp(pool: 
             power_drains_needed: None,
             started_at: chrono::Utc::now(),
             deadline: chrono::Utc::now() + chrono::TimeDelta::minutes(60),
+            delivered_at: None,
             task_json: task_json.clone(),
             result: None,
         },
@@ -248,6 +250,7 @@ async fn assigned_waiting_for_scout_upgrade_returns_task(pool: PgPool) {
                 power_drains_needed: Some(1),
                 started_at: chrono::Utc::now(),
                 deadline: chrono::Utc::now() + chrono::TimeDelta::hours(3),
+                delivered_at: None,
                 task_json,
                 result: None,
             },
@@ -280,6 +283,7 @@ async fn invalid_json_falls_back_to_noop(pool: PgPool) {
             power_drains_needed: None,
             started_at: chrono::Utc::now(),
             deadline: chrono::Utc::now() + chrono::TimeDelta::minutes(60),
+            delivered_at: None,
             task_json: "{not valid json".to_string(),
             result: None,
         },
@@ -436,4 +440,134 @@ async fn ready_returns_noop(pool: PgPool) {
     let response = mh.host.forge_agent_control().await;
     assert!(matches!(response.action, Some(Action::Noop(_))));
     assert_eq!(response.legacy_action(), LegacyAction::Noop);
+}
+
+#[sqlx_test]
+async fn firmware_poll_uses_delivery_and_completion_windows(pool: PgPool) {
+    let TestContext { env, mh, .. } = init(pool.clone()).await;
+    let now = chrono::Utc::now();
+    for (
+        label,
+        age_minutes,
+        contact_age_minutes,
+        delivered_age_minutes,
+        budget_minutes,
+        returns_task,
+    ) in [
+        ("awaiting first delivery", 10, None, None, 60, true),
+        ("delivery expired", 40, None, None, 60, false),
+        ("contact awaiting controller", 40, Some(20), None, 30, true),
+        ("inferred completion expired", 60, Some(40), None, 30, false),
+        ("recorded delivery", 40, None, Some(20), 60, true),
+        ("recorded completion expired", 60, None, Some(40), 30, false),
+    ] {
+        let started_at = now - chrono::Duration::minutes(age_minutes);
+        let delivered_at = delivered_age_minutes.map(|age| now - chrono::Duration::minutes(age));
+        let task = rpc::scout_firmware_upgrade::ScoutFirmwareUpgradeTask {
+            upgrade_task_id: label.into(),
+            ..Default::default()
+        };
+        mh.advance_state(ManagedHostState::HostReprovision {
+            retry_count: 0,
+            reprovision_state: HostReprovisionState::WaitingForScoutUpgrade {
+                upgrade_task_id: task.upgrade_task_id.clone(),
+                firmware_type: FirmwareComponentType::Bmc,
+                final_version: "1.2.3".into(),
+                power_drains_needed: None,
+                started_at,
+                deadline: delivered_at.unwrap_or(started_at)
+                    + chrono::Duration::minutes(budget_minutes),
+                delivered_at,
+                task_json: serde_json::to_string(&task).unwrap(),
+                result: None,
+            },
+        })
+        .await;
+        sqlx::query("UPDATE machines SET last_scout_contact_time = $1 WHERE id = $2")
+            .bind(contact_age_minutes.map(|age| now - chrono::Duration::minutes(age)))
+            .bind(mh.host.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let response = env
+            .api()
+            .forge_agent_control(Request::new(rpc::forge::ForgeAgentControlRequest {
+                machine_id: Some(mh.host.id),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        if returns_task {
+            assert_eq!(
+                response.action,
+                Some(Action::FirmwareUpgrade(
+                    rpc::forge_agent_control_response::FirmwareUpgrade { task: Some(task) }
+                )),
+                "{label}"
+            );
+            let machine = mh.host.machine().await;
+            let ManagedHostState::HostReprovision {
+                reprovision_state:
+                    HostReprovisionState::WaitingForScoutUpgrade {
+                        delivered_at: Some(recorded),
+                        deadline,
+                        ..
+                    },
+                ..
+            } = machine.current_state()
+            else {
+                panic!("{label}: delivery was not persisted");
+            };
+            let expected_contact = delivered_at
+                .or_else(|| contact_age_minutes.map(|age| now - chrono::Duration::minutes(age)))
+                .unwrap_or(machine.status.last_scout_contact_time.unwrap());
+            // PostgreSQL stores microsecond precision for the contact column.
+            assert_eq!(
+                recorded.timestamp_micros(),
+                expected_contact.timestamp_micros(),
+                "{label}"
+            );
+            assert_eq!(
+                *deadline - *recorded,
+                chrono::Duration::minutes(budget_minutes),
+                "{label}"
+            );
+            let expected = machine.current_state().clone();
+            let retry = env
+                .api()
+                .forge_agent_control(Request::new(rpc::forge::ForgeAgentControlRequest {
+                    machine_id: Some(mh.host.id),
+                }))
+                .await
+                .unwrap()
+                .into_inner();
+            assert_eq!(retry.action, response.action, "{label}");
+            assert_eq!(
+                mh.host.machine().await.current_state(),
+                &expected,
+                "{label}"
+            );
+        } else {
+            assert_eq!(response.action, Some(Action::noop()), "{label}");
+            let machine = mh.host.machine().await;
+            let ManagedHostState::HostReprovision {
+                reprovision_state:
+                    HostReprovisionState::WaitingForScoutUpgrade {
+                        delivered_at: recorded,
+                        ..
+                    },
+                ..
+            } = machine.current_state()
+            else {
+                panic!("{label}: task state changed");
+            };
+            let expected = delivered_at
+                .or_else(|| contact_age_minutes.map(|age| now - chrono::Duration::minutes(age)));
+            assert_eq!(
+                recorded.map(|time| time.timestamp_micros()),
+                expected.map(|time| time.timestamp_micros()),
+                "{label}"
+            );
+        }
+    }
 }

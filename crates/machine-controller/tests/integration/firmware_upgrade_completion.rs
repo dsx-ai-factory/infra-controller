@@ -95,6 +95,7 @@ impl TestManagedHostFirmwareExt for TestManagedHost {
                 power_drains_needed,
                 started_at: chrono::Utc::now(),
                 deadline,
+                delivered_at: Some(chrono::Utc::now()),
                 task_json: String::new(),
                 result,
             },
@@ -318,39 +319,287 @@ async fn scout_upgrade_past_deadline_times_out(pool: PgPool) {
         panic!("expected FailedFirmwareUpgrade, got {reprovision_state:?}");
     };
     assert!(
-        reason
-            .as_deref()
-            .is_some_and(|reason| reason.starts_with("scout firmware upgrade timed out")),
+        reason.as_deref().is_some_and(
+            |reason| reason.starts_with("scout firmware upgrade completion report missing")
+        ),
         "unexpected reason: {reason:?}",
     );
 }
 
 #[sqlx_test]
-async fn scout_upgrade_before_deadline_waits(pool: PgPool) {
-    let TestContext { mut env, mh } = TestContext::init(pool).await;
-    mh.put_in_waiting_for_scout_upgrade(
-        chrono::Utc::now() + chrono::TimeDelta::minutes(60),
-        None,
-        None,
-    )
-    .await;
-
-    env.run_single_iteration().await;
-
-    let machine = mh.host.machine().await;
-    let ManagedHostState::HostReprovision {
-        reprovision_state, ..
-    } = machine.current_state()
-    else {
-        panic!("Not in HostReprovision");
+async fn scout_upgrade_waits_for_first_contact(pool: PgPool) {
+    let TestContext { mut env, mh } = TestContext::init(pool.clone()).await;
+    let started_at = chrono::Utc::now();
+    let waiting = ManagedHostState::HostReprovision {
+        retry_count: 1,
+        reprovision_state: HostReprovisionState::WaitingForScoutUpgrade {
+            upgrade_task_id: "pending-task".into(),
+            firmware_type: FirmwareComponentType::Bmc,
+            final_version: "1.2.3".into(),
+            power_drains_needed: None,
+            started_at,
+            deadline: started_at + chrono::Duration::hours(1),
+            delivered_at: None,
+            task_json: String::new(),
+            result: None,
+        },
     };
-    assert!(
-        matches!(
-            reprovision_state,
-            HostReprovisionState::WaitingForScoutUpgrade { result: None, .. }
+    mh.advance_state(waiting.clone()).await;
+    sqlx::query("UPDATE machines SET last_scout_contact_time = NULL WHERE id = $1")
+        .bind(mh.host.id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    env.run_single_iteration().await;
+    assert_eq!(mh.host.machine().await.current_state(), &waiting);
+}
+
+#[sqlx_test]
+async fn scout_upgrade_delivery_and_completion_have_independent_deadlines(pool: PgPool) {
+    let TestContext { mut env, mh } = TestContext::init(pool).await;
+    let now = chrono::Utc::now();
+    for (scenario, started_at, delivered_at, completion_deadline, expected_reason) in [
+        (
+            "delivery expires independently",
+            now - chrono::TimeDelta::minutes(31),
+            None,
+            now + chrono::TimeDelta::hours(1),
+            "scout firmware task delivery timed out without contact",
         ),
-        "expected to remain in WaitingForScoutUpgrade, got {reprovision_state:?}",
-    );
+        (
+            "delivered task has no completion report",
+            now - chrono::TimeDelta::minutes(5),
+            Some(now - chrono::TimeDelta::minutes(4)),
+            now - chrono::TimeDelta::minutes(1),
+            "scout firmware upgrade completion report missing",
+        ),
+    ] {
+        let state = ManagedHostState::HostReprovision {
+            retry_count: 1,
+            reprovision_state: HostReprovisionState::WaitingForScoutUpgrade {
+                upgrade_task_id: scenario.into(),
+                firmware_type: FirmwareComponentType::Bmc,
+                final_version: "1.2.3".into(),
+                power_drains_needed: None,
+                started_at,
+                deadline: completion_deadline,
+                delivered_at,
+                task_json: String::new(),
+                result: None,
+            },
+        };
+        mh.advance_state(state.clone()).await;
+        env.run_single_iteration().await;
+        let machine = mh.host.machine().await;
+        let ManagedHostState::HostReprovision {
+            retry_count,
+            reprovision_state:
+                HostReprovisionState::FailedFirmwareUpgrade {
+                    reason: Some(reason),
+                    report_time,
+                    ..
+                },
+        } = machine.current_state()
+        else {
+            panic!("{scenario}: {:?}", machine.current_state())
+        };
+        assert!(reason.starts_with(expected_reason), "{scenario}: {reason}");
+        assert!(report_time.is_some(), "{scenario}");
+        assert_eq!(*retry_count, 1, "{scenario}");
+    }
+}
+
+#[sqlx_test]
+async fn scout_poll_starts_completion_budget_once(pool: PgPool) {
+    let TestContext { mut env, mh } = TestContext::init(pool.clone()).await;
+    for assigned in [false, true] {
+        let started_at = chrono::Utc::now() - chrono::Duration::minutes(10);
+        let budget = chrono::Duration::minutes(60);
+        let task = rpc::scout_firmware_upgrade::ScoutFirmwareUpgradeTask {
+            upgrade_task_id: format!("poll-task-{assigned}"),
+            ..Default::default()
+        };
+        let waiting = HostReprovisionState::WaitingForScoutUpgrade {
+            upgrade_task_id: task.upgrade_task_id.clone(),
+            firmware_type: FirmwareComponentType::Bmc,
+            final_version: "1.2.3".into(),
+            power_drains_needed: Some(2),
+            started_at,
+            deadline: started_at + budget,
+            delivered_at: None,
+            task_json: serde_json::to_string(&task).unwrap(),
+            result: None,
+        };
+        let wrap = |reprovision_state| {
+            if assigned {
+                ManagedHostState::Assigned {
+                    instance_state: model::machine::InstanceState::HostReprovision {
+                        reprovision_state,
+                    },
+                }
+            } else {
+                ManagedHostState::HostReprovision {
+                    retry_count: 1,
+                    reprovision_state,
+                }
+            }
+        };
+        mh.advance_state(wrap(waiting.clone())).await;
+        sqlx::query("UPDATE machines SET last_scout_contact_time = NULL WHERE id = $1")
+            .bind(mh.host.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let response = env
+            .test_harness
+            .api()
+            .forge_agent_control(tonic::Request::new(rpc::forge::ForgeAgentControlRequest {
+                machine_id: Some(mh.host.id),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(
+            response.action,
+            Some(rpc::forge_agent_control_response::Action::FirmwareUpgrade(
+                rpc::forge_agent_control_response::FirmwareUpgrade { task: Some(task) }
+            ))
+        );
+        let contact = mh
+            .host
+            .machine()
+            .await
+            .status
+            .last_scout_contact_time
+            .unwrap();
+        assert!(contact > started_at);
+        let mut expected = waiting;
+        if let HostReprovisionState::WaitingForScoutUpgrade {
+            delivered_at,
+            deadline,
+            ..
+        } = &mut expected
+        {
+            *delivered_at = Some(contact);
+            *deadline = contact + budget;
+        }
+        assert_eq!(
+            mh.host.machine().await.current_state(),
+            &wrap(expected.clone())
+        );
+        env.run_single_iteration().await;
+        assert_eq!(
+            mh.host.machine().await.current_state(),
+            &wrap(expected.clone())
+        );
+        env.test_harness
+            .api()
+            .forge_agent_control(tonic::Request::new(rpc::forge::ForgeAgentControlRequest {
+                machine_id: Some(mh.host.id),
+            }))
+            .await
+            .unwrap();
+        env.run_single_iteration().await;
+        assert_eq!(mh.host.machine().await.current_state(), &wrap(expected));
+    }
+}
+
+#[sqlx_test]
+async fn scout_delivery_contact_window(pool: PgPool) {
+    let TestContext { mut env, mh } = TestContext::init(pool.clone()).await;
+    let now =
+        chrono::DateTime::from_timestamp_micros(chrono::Utc::now().timestamp_micros()).unwrap();
+    let started_at = now - chrono::Duration::minutes(40);
+    let budget = chrono::Duration::hours(2);
+    for (label, contact, delivered) in [
+        ("no contact", None, false),
+        ("stale contact", Some(started_at), false),
+        (
+            "late contact",
+            Some(started_at + chrono::Duration::minutes(31)),
+            false,
+        ),
+        (
+            "timely contact observed late",
+            Some(started_at + chrono::Duration::minutes(20)),
+            true,
+        ),
+        (
+            "contact at cutoff",
+            Some(started_at + chrono::Duration::minutes(30)),
+            true,
+        ),
+    ] {
+        let waiting = HostReprovisionState::WaitingForScoutUpgrade {
+            upgrade_task_id: label.into(),
+            firmware_type: FirmwareComponentType::Bmc,
+            final_version: "1.2.3".into(),
+            power_drains_needed: None,
+            started_at,
+            deadline: started_at + budget,
+            delivered_at: None,
+            task_json: String::new(),
+            result: None,
+        };
+        mh.advance_state(ManagedHostState::HostReprovision {
+            retry_count: 1,
+            reprovision_state: waiting.clone(),
+        })
+        .await;
+        sqlx::query("UPDATE machines SET last_scout_contact_time = $1 WHERE id = $2")
+            .bind(contact)
+            .bind(mh.host.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        env.run_single_iteration().await;
+        let machine = mh.host.machine().await;
+        if delivered {
+            let mut expected = waiting;
+            if let HostReprovisionState::WaitingForScoutUpgrade {
+                delivered_at,
+                deadline,
+                ..
+            } = &mut expected
+            {
+                *delivered_at = contact;
+                *deadline = contact.unwrap() + budget;
+            }
+            assert_eq!(
+                machine.current_state(),
+                &ManagedHostState::HostReprovision {
+                    retry_count: 1,
+                    reprovision_state: expected,
+                },
+                "{label}"
+            );
+        } else {
+            let ManagedHostState::HostReprovision {
+                retry_count: 1,
+                reprovision_state:
+                    HostReprovisionState::FailedFirmwareUpgrade {
+                        reason,
+                        report_time,
+                        ..
+                    },
+            } = machine.current_state()
+            else {
+                panic!("{label}: {:?}", machine.current_state());
+            };
+            assert_eq!(
+                reason.as_deref(),
+                Some(
+                    format!(
+                        "scout firmware task delivery timed out without contact (deadline {})",
+                        started_at + chrono::Duration::minutes(30)
+                    )
+                    .as_str()
+                ),
+                "{label}"
+            );
+            assert!(report_time.is_some(), "{label}");
+        }
+    }
 }
 
 /// Drives the `FailedFirmwareUpgrade` arm through all three of its retry
