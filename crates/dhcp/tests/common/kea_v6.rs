@@ -69,6 +69,8 @@ pub(crate) struct Kea6Config {
     pub(crate) nico_pxe_service_url: Option<&'static str>,
     pub(crate) option_data: Vec<serde_json::Value>,
     pub(crate) ddns_port: Option<u16>,
+    pub(crate) pool_ddns_updates: Option<bool>,
+    pub(crate) subnet_ddns_updates: Option<bool>,
     pub(crate) continue_after_store_failure: bool,
     pub(crate) reject_runtime_capability: Option<&'static str>,
     pub(crate) reserved_address: Option<(&'static str, &'static str, bool)>,
@@ -92,6 +94,8 @@ impl Default for Kea6Config {
             nico_pxe_service_url: None,
             option_data: Vec::new(),
             ddns_port: None,
+            pool_ddns_updates: None,
+            subnet_ddns_updates: None,
             continue_after_store_failure: false,
             reject_runtime_capability: None,
             reserved_address: None,
@@ -789,6 +793,12 @@ impl Kea6 {
             });
             dhcp6["ddns-send-updates"] = json!(true);
             dhcp6["ddns-qualifying-suffix"] = json!("example.test");
+        }
+        if let Some(updates) = config.pool_ddns_updates {
+            dhcp6["subnet6"][0]["pools"][0]["ddns-send-updates"] = json!(updates);
+        }
+        if let Some(updates) = config.subnet_ddns_updates {
+            dhcp6["subnet6"][0]["ddns-send-updates"] = json!(updates);
         }
         if let Some((duid, address, global)) = config.reserved_address {
             let reservations = json!([{"duid": duid, "ip-addresses": [address]}]);
