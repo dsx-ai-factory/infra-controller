@@ -421,30 +421,33 @@ mod tests {
         // Keep independent readiness prerequisites and their precedence explicit.
         // Repair cannot hide a pending phone-home or extension-service update.
         scenarios!(
-            run = |(synced, enrolled, last_contact, extensions_ready, repair)| {
+            run = |(synced, enrolled, last_contact, extensions_ready, operator_networking, repair)| {
                 instance_status_tenant_state(
                     ManagedHostState::Assigned { instance_state: InstanceState::Ready },
-                    synced, enrolled, last_contact, extensions_ready, false, repair,
+                    synced, enrolled, last_contact, extensions_ready, operator_networking, repair,
                 ).map_err(drop)
             };
             "phone-home is optional when not enrolled" {
-                (SyncState::Synced, false, None, true, false) => Yields(TenantState::Ready),
+                (SyncState::Synced, false, None, true, false, false) => Yields(TenantState::Ready),
             }
             "enrolled instance becomes ready after contacting home" {
-                (SyncState::Synced, true, contacted, true, false) => Yields(TenantState::Ready),
+                (SyncState::Synced, true, contacted, true, false, false) => Yields(TenantState::Ready),
             }
             "enrolled instance must contact home first" {
-                (SyncState::Synced, true, None, true, false) => Yields(TenantState::Provisioning),
+                (SyncState::Synced, true, None, true, false, false) => Yields(TenantState::Provisioning),
             }
             "initial phone-home takes precedence over updates and repair" {
-                (SyncState::Pending, true, None, false, true) => Yields(TenantState::Provisioning),
+                (SyncState::Pending, true, None, false, false, true) => Yields(TenantState::Provisioning),
             }
             "configuration changes after phone-home are configuring" {
-                (SyncState::Pending, true, contacted, true, false) => Yields(TenantState::Configuring),
+                (SyncState::Pending, true, contacted, true, false, false) => Yields(TenantState::Configuring),
             }
             "extension readiness is independent of phone-home enrollment" {
-                (SyncState::Synced, false, None, false, true) => Yields(TenantState::Configuring),
-                (SyncState::Synced, true, contacted, false, false) => Yields(TenantState::Configuring),
+                (SyncState::Synced, false, None, false, false, true) => Yields(TenantState::Configuring),
+                (SyncState::Synced, true, contacted, false, false, false) => Yields(TenantState::Configuring),
+            }
+            "operator networking still exposes an active repair" {
+                (SyncState::Pending, true, None, false, true, true) => Yields(TenantState::Repairing),
             }
         );
     }
