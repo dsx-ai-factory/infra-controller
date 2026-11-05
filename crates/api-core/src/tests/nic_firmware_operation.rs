@@ -18,6 +18,7 @@
 //! Exercise admitted NIC work through authenticated reporting, Scout delivery,
 //! and persisted controller iterations. Admission itself remains disabled.
 
+use carbide_libmlx_model::firmware::FirmwareDeliveryMode;
 use carbide_libmlx_model::firmware::operation::{
     FirmwareOperation, FirmwareOperationPhase, FirmwareOperationState,
 };
@@ -241,10 +242,19 @@ async fn record_cleanup_failure(env: &TestEnv, machine_id: MachineId, message: &
 }
 
 async fn action(env: &TestEnv, host_id: HostMachineId) -> fac::Action {
+    action_with_site_cache_support(env, host_id, false).await
+}
+
+async fn action_with_site_cache_support(
+    env: &TestEnv,
+    host_id: HostMachineId,
+    site_cache_supported: bool,
+) -> fac::Action {
     env.api
         .forge_agent_control(authenticated(
             ForgeAgentControlRequest {
                 machine_id: Some(host_id.into()),
+                nic_firmware_site_cache_supported: site_cache_supported,
             },
             host_id.into(),
         ))
@@ -373,6 +383,161 @@ async fn inventory(
         .await
         .expect("publish ordinary inventory");
     observed_at
+}
+
+#[crate::sqlx_test]
+async fn site_cache_delivery_requires_support_and_preserves_recovery(pool: sqlx::PgPool) {
+    let env = environment(pool).await;
+    let host = create_managed_host(&env).await;
+    let host_id = *host.id;
+    let mut admitted = fixtures::operation();
+    admitted.delivery_mode = FirmwareDeliveryMode::SiteCache;
+
+    for phase in [
+        NicFirmwarePhase::ObservingSupervisor { target_index: 0 },
+        NicFirmwarePhase::Unlocking { target_index: 0 },
+        NicFirmwarePhase::UpdatingFirmware { target_index: 0 },
+    ] {
+        admitted.phase = phase;
+        admitted.targets[0].supervisor_instance_id =
+            (!matches!(admitted.phase, NicFirmwarePhase::ObservingSupervisor { .. }))
+                .then(|| "helper".into());
+        seed(&env, host_id, admitted.clone()).await;
+        let error = env
+            .api
+            .forge_agent_control(authenticated(
+                ForgeAgentControlRequest {
+                    machine_id: Some(host_id.into()),
+                    nic_firmware_site_cache_supported: false,
+                },
+                host_id.into(),
+            ))
+            .await
+            .expect_err("unsupported Scout cannot receive SiteCache work");
+        assert_eq!(error.code(), Code::FailedPrecondition);
+        assert!(error.message().contains("SiteCache"));
+        assert_eq!(operation(&env, host_id).await, admitted);
+
+        let resumed = command(action_with_site_cache_support(&env, host_id, true).await);
+        assert_eq!(operation(&env, host_id).await, admitted);
+        match (admitted.phase.clone(), resumed) {
+            (
+                NicFirmwarePhase::ObservingSupervisor { .. },
+                fac::mlx_device_action::Command::ObserveFirmwareUpdate(observe),
+            ) => {
+                assert_eq!(observe.operation_id, admitted.operation_id);
+                assert_eq!(
+                    observe.delivery_mode,
+                    i32::from(pb::FirmwareDeliveryMode::SiteCache)
+                );
+                // No firmware was submitted by the rejected poll. A capable
+                // Scout can still establish the helper and authorize unlocking.
+                publish(
+                    &env,
+                    host_id,
+                    missing(&admitted, &admitted.targets[0], "helper"),
+                )
+                .await;
+                env.run_machine_state_controller_iteration_without_requeue()
+                    .await;
+                let mut expected = admitted.clone();
+                expected.targets[0].supervisor_instance_id = Some("helper".into());
+                expected.phase = NicFirmwarePhase::Unlocking { target_index: 0 };
+                assert_eq!(operation(&env, host_id).await, expected);
+            }
+            (
+                NicFirmwarePhase::Unlocking { .. },
+                fac::mlx_device_action::Command::Lockdown(lockdown),
+            ) => {
+                assert_eq!(
+                    lockdown.expected_device,
+                    Some(admitted.targets[0].selector.clone().into())
+                );
+                assert!(matches!(lockdown.request, Some(LockdownRequest::Status(_))));
+            }
+            (
+                NicFirmwarePhase::UpdatingFirmware { .. },
+                fac::mlx_device_action::Command::UpdateFirmware(update),
+            ) => {
+                assert_eq!(update.operation_id, admitted.operation_id);
+                assert_eq!(
+                    update.supervisor_instance_id,
+                    admitted.targets[0].supervisor_instance_id
+                );
+                assert_eq!(
+                    update.delivery_mode,
+                    i32::from(pb::FirmwareDeliveryMode::SiteCache)
+                );
+            }
+            (phase, command) => panic!("unexpected resumed command for {phase:?}: {command:?}"),
+        }
+    }
+
+    admitted.targets[0].receipt = Some(complete(&admitted, &admitted.targets[0]));
+    admitted.phase = NicFirmwarePhase::RestoringLockdown {
+        target_index: 0,
+        failure: None,
+    };
+    seed(&env, host_id, admitted.clone()).await;
+    assert!(matches!(
+        command(action(&env, host_id).await),
+        fac::mlx_device_action::Command::Lockdown(_)
+    ));
+    assert_eq!(operation(&env, host_id).await, admitted);
+
+    admitted.phase = NicFirmwarePhase::Reobserving {
+        not_before: Utc::now(),
+    };
+    seed(&env, host_id, admitted.clone()).await;
+    assert!(matches!(
+        action(&env, host_id).await,
+        fac::Action::MlxDeviceInfoReport(_)
+    ));
+    assert_eq!(operation(&env, host_id).await, admitted);
+}
+
+#[crate::sqlx_test]
+async fn site_cache_tasks_keep_the_saved_mode_and_original_sources(pool: sqlx::PgPool) {
+    let env = environment(pool).await;
+    let host = create_managed_host(&env).await;
+    let host_id = *host.id;
+    let mut admitted = fixtures::operation();
+    admitted.delivery_mode = FirmwareDeliveryMode::SiteCache;
+    admitted.targets[0].supervisor_instance_id = Some("helper".into());
+    admitted.targets[0].resolution.entry.device_config = Some(NicFirmwareArtifact {
+        url: "https://firmware.example.test/device.conf".parse().unwrap(),
+        sha256: "cd".repeat(32),
+    });
+    seed(&env, host_id, admitted.clone()).await;
+    let fac::mlx_device_action::Command::ObserveFirmwareUpdate(observe) =
+        command(action_with_site_cache_support(&env, host_id, true).await)
+    else {
+        panic!("supported Scout receives checked SiteCache observation")
+    };
+    admitted.phase = NicFirmwarePhase::UpdatingFirmware { target_index: 0 };
+    seed(&env, host_id, admitted.clone()).await;
+    let fac::mlx_device_action::Command::UpdateFirmware(update) =
+        command(action_with_site_cache_support(&env, host_id, true).await)
+    else {
+        panic!("supported Scout receives frozen SiteCache update")
+    };
+    assert_eq!(
+        update.delivery_mode,
+        i32::from(pb::FirmwareDeliveryMode::SiteCache)
+    );
+    assert_eq!(observe.delivery_mode, update.delivery_mode);
+    assert_eq!(observe.profile, update.profile);
+    assert_eq!(observe.expected_digests, update.expected_digests);
+    let flash = update.profile.unwrap().flash_spec.unwrap();
+    assert_eq!(
+        flash.firmware_url,
+        admitted.targets[0].resolution.entry.image.url.as_str()
+    );
+    assert_eq!(
+        flash.device_conf_url.as_deref(),
+        Some("https://firmware.example.test/device.conf")
+    );
+    assert_eq!(operation(&env, host_id).await, admitted);
 }
 
 // Drive authenticated reports into actual control delivery with DPA disabled.
@@ -517,6 +682,7 @@ async fn generic_delivery_freezes_helper_before_submission_and_never_replaces_it
                 image_sha256: "ab".repeat(32),
                 configuration_sha256: Some("cd".repeat(32)),
             }),
+            delivery_mode: pb::FirmwareDeliveryMode::Direct.into(),
             expected_device: Some(pb::MlxDeviceSelector {
                 identity: Some(pb::mlx_device_selector::Identity::BaseMac(
                     "02:00:00:00:00:01".into()
@@ -529,6 +695,7 @@ async fn generic_delivery_freezes_helper_before_submission_and_never_replaces_it
     assert_eq!(observe.profile, submit.profile);
     assert_eq!(observe.expected_digests, submit.expected_digests);
     assert_eq!(observe.expected_device, submit.expected_device);
+    assert_eq!(observe.delivery_mode, submit.delivery_mode);
 
     // Delivery failures stay visible independently of receipt availability.
     // Unavailable remains retryable under the same frozen helper and recipe.
@@ -1002,6 +1169,7 @@ async fn generic_reports_reject_foreign_or_contradictory_evidence_without_state_
     for principal in [None, Some(host.dpu().id.into())] {
         let poll = ForgeAgentControlRequest {
             machine_id: Some(host_id.into()),
+            nic_firmware_site_cache_supported: false,
         };
         let request = principal.map_or_else(
             || Request::new(poll.clone()),

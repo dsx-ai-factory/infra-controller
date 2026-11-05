@@ -657,6 +657,7 @@ mod tests {
                 command: Some(fac::mlx_device_action::Command::Lockdown(task)),
             }],
             Ok(config),
+            None,
             |_| panic!("lockdown commands never use the legacy discovery"),
             |request| {
                 published = Some(request);
