@@ -1254,6 +1254,7 @@ impl ApiClient {
                     dpu_mode: dpu_policy.map(|policy| rpc::DpuMode::from(policy) as i32),
                     bmc_ip_allocation: bmc_ip_allocation.map(|allocation| allocation as i32),
                     host_lifecycle_profile,
+                    replace_dpu_loopbacks: parsed_interfaces.is_some(),
                     host_nics: parsed_interfaces.unwrap_or_default(),
                     ..Default::default()
                 }),
@@ -1400,6 +1401,7 @@ impl ApiClient {
                 .map(|policy| ::rpc::forge::DpuMode::from(policy) as i32)
                 .or(expected_machine.dpu_mode),
             bmc_ip_allocation: legacy_bmc_fields.bmc_ip_allocation,
+            replace_dpu_loopbacks: replace_interfaces,
             replace_host_nics: replace_interfaces,
             host_lifecycle_profile: host_lifecycle_profile
                 .or(expected_machine.host_lifecycle_profile),
@@ -1447,6 +1449,7 @@ impl ApiClient {
                     bmc_ip_allocation: machine.bmc_ip_allocation.map(|m| m as i32),
                     // replace-all is authoritative even when the JSON field is
                     // omitted and therefore resolves to an empty list.
+                    replace_dpu_loopbacks: true,
                     replace_host_nics: true,
                     host_lifecycle_profile: machine.host_lifecycle_profile.map(|hlp| {
                         ::rpc::forge::HostLifecycleProfile {

@@ -89,7 +89,7 @@ combinations and gateway omission rules, refer to
 ### 1.3 Expected Interface IP Allocation
 
 Expected Machine declarations can allocate addresses for host OS, DPU OS, DPU
-BMC, and host BMC interfaces. Every role supports three allocation policies:
+BMC, and host BMC interfaces. These physical roles support three allocation policies:
 
 | Policy | Behavior |
 |---|---|
@@ -97,10 +97,14 @@ BMC, and host BMC interfaces. Every role supports three allocation policies:
 | **Fixed** | NICo reserves the configured `fixed_ip` as Static for its address family before serving DHCP. The address normally selects the managed segment whose prefix contains it; [legacy inferred reservations](expected-machine-interfaces.md#network-segment-selection) can fall back to `static-assignments`. |
 | **Retained** | NICo selects an address through DHCP and immediately stores it as Static. It remains reserved until explicit removal or deletion of the machine-interface record. |
 
-All four interface roles (`host`, `dpu_os`, `dpu_bmc`, and `host_bmc`) support
+All four physical-interface roles (`host`, `dpu_os`, `dpu_bmc`, and `host_bmc`) support
 all three policies. The default is Dynamic for every role except `host_bmc`,
 which defaults to Retained. A declaration with `fixed_ip` and no explicit
 policy remains Fixed for backward compatibility.
+
+The separate `dpu_loopback` role reserves a Fixed address from `lo-ip` or
+`lo-ip-v6`, selected by the DPU OS/admin MAC. It does not participate in DHCP
+or physical-interface allocation. See [deterministic DPU loopback reservations](../manuals/networking/ip_resource_pools.md#deterministic-dpu-loopback-reservations).
 
 NICo applies the current configuration separately to each family's first
 successful DHCP or Static allocation. Mixing policies within the same site

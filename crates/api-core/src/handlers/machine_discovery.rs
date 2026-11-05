@@ -170,19 +170,19 @@ pub(crate) async fn discover_machine(
     // caller interface's current machine id tells a host's first discovery (a
     // rename) from a repeat one; a DPU's host link row tells an allocation
     // from a reattach.
-    let caller_machine_id = match &direct_interface {
-        Some(interface) => interface.machine_id,
+    let (caller_machine_id, caller_mac) = match &direct_interface {
+        Some(interface) => (interface.machine_id, Some(interface.mac_address)),
         None => match machine_discovery_info.machine_interface_id {
             Some(interface_id) => {
                 match db::machine_interface::find_one(api.pg_pool(), interface_id).await {
-                    Ok(interface) => interface.machine_id,
+                    Ok(interface) => (interface.machine_id, Some(interface.mac_address)),
                     // The transaction below loads this interface again and
                     // reports a missing one itself.
-                    Err(db::DatabaseError::FindOneReturnedNoResultsError(_)) => None,
+                    Err(db::DatabaseError::FindOneReturnedNoResultsError(_)) => (None, None),
                     Err(error) => return Err(error.into()),
                 }
             }
-            None => None,
+            None => (None, None),
         },
     };
     let admin_segment_locks = admin_segment_locks_for_discovery(
@@ -203,6 +203,21 @@ pub(crate) async fn discover_machine(
     };
 
     let mut txn = api.txn_begin().await?;
+
+    // Reservation intent precedes admin/interface locks in both creation paths
+    // and expected-machine writes. The caller interface is revalidated below.
+    let loopback_reservation = if hardware_info.is_dpu() && machine_discovery_info.create_machine {
+        if let Some(mac) = caller_mac {
+            db::expected_dpu_loopback_reservation::find_by_dpu_oob_net0_mac_for_update(
+                &mut txn, mac,
+            )
+            .await?
+        } else {
+            None
+        }
+    } else {
+        None
+    };
 
     // Segment advisory locks come before any interface row lock, so the ones
     // this transaction needs are taken before the caller interface is locked.
@@ -389,12 +404,38 @@ pub(crate) async fn discover_machine(
             })?;
         }
 
+        // The authenticated caller's OS/admin interface identifies the DPU even
+        // before that interface has a persisted machine association.
+        let reservation = if machine_discovery_info.create_machine
+            && db::machine::find_one(
+                &mut txn,
+                &stable_machine_id,
+                MachineSearchConfig {
+                    include_dpus: true,
+                    ..Default::default()
+                },
+            )
+            .await?
+            .is_none()
+        {
+            loopback_reservation
+        } else {
+            None
+        };
+        let requested_loopback_v4 = reservation
+            .as_ref()
+            .and_then(|reservation| reservation.loopback_ipv4.map(std::net::IpAddr::V4));
+        let requested_loopback_v6 = reservation
+            .as_ref()
+            .and_then(|reservation| reservation.loopback_ipv6);
+
         let db_machine = if machine_discovery_info.create_machine {
             let machine = db::machine::get_or_create(
                 &mut txn,
                 Some(&api.common_pools),
                 &stable_machine_id,
                 &caller_interface,
+                requested_loopback_v6,
             )
             .await?;
 
@@ -422,7 +463,10 @@ pub(crate) async fn discover_machine(
             })?
         };
 
-        (db_machine.id, Some(db_machine.network_config))
+        (
+            db_machine.id,
+            Some((db_machine.network_config, requested_loopback_v4)),
+        )
     } else {
         // Now we know stable machine id for host. Let's update it in db.
         let stable_host_machine_id = StableHostMachineId::try_from(stable_machine_id)
@@ -475,7 +519,7 @@ pub(crate) async fn discover_machine(
         // The loopback fill writes machines rows, so it follows the host link
         // row update above: interface rows before machines rows, the order the
         // host rename and the admin address repair lock in.
-        if let Some(dpu_network_config) = dpu_network_config {
+        if let Some((dpu_network_config, requested_loopback_v4)) = dpu_network_config {
             // Collect every missing address into one `network_config` write.
             // Each write bumps the whole machine group, so writing one field
             // at a time leaves the later call with a stale
@@ -485,17 +529,25 @@ pub(crate) async fn discover_machine(
             let mut network_config_changed = false;
 
             if network_config.loopback_ip.is_none() {
-                let loopback_ip =
-                    db::machine::allocate_loopback_ip(&api.common_pools, &mut txn, &owner_id)
-                        .await?;
+                let loopback_ip = db::machine::allocate_loopback_ip(
+                    &api.common_pools,
+                    &mut txn,
+                    &owner_id,
+                    requested_loopback_v4,
+                )
+                .await?;
                 network_config.loopback_ip = Some(loopback_ip);
                 network_config_changed = true;
             }
 
             if network_config.loopback_ip_v6.is_none()
-                && let Some(loopback_ip_v6) =
-                    db::machine::allocate_loopback_ip_v6(&api.common_pools, &mut txn, &owner_id)
-                        .await?
+                && let Some(loopback_ip_v6) = db::machine::allocate_loopback_ip_v6(
+                    &api.common_pools,
+                    &mut txn,
+                    &owner_id,
+                    None,
+                )
+                .await?
             {
                 network_config.loopback_ip_v6 = Some(loopback_ip_v6);
                 network_config_changed = true;
@@ -556,6 +608,8 @@ pub(crate) async fn discover_machine(
                 Some(&api.common_pools),
                 &predicted_machine_id,
                 &machine_interface,
+                // Proactive host creation never carries a DPU loopback reservation.
+                None,
             )
             .await?;
 

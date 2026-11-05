@@ -457,6 +457,16 @@ impl MachineCreator {
 
         // Zero-dpu case: If the explored host had no DPUs, we can create the machine now
         if managed_host.explored_host.dpus.is_empty() {
+            if expected_machine.data.dpu_policy.expects_managed_dpus()
+                && !db::expected_dpu_loopback_reservation::find_for_machine(
+                    &mut txn,
+                    expected_machine.bmc_mac_address,
+                )
+                .await?
+                .is_empty()
+            {
+                return Err(SiteExplorerError::internal("DPU loopback declarations exist but discovery reported no DPUs; defer creation".to_string()));
+            }
             if let Some(machine_id) = self
                 .create_zero_dpu_machine(
                     &mut txn,
@@ -516,6 +526,46 @@ impl MachineCreator {
             });
         }
 
+        let reservations = if dpu_ids.is_empty() {
+            // Nic and Ignore retain declarations without allocating DPU loopbacks.
+            Vec::new()
+        } else {
+            db::expected_dpu_loopback_reservation::lock_for_machine(
+                &mut txn,
+                expected_machine.bmc_mac_address,
+            )
+            .await?;
+            db::expected_dpu_loopback_reservation::find_for_machine(
+                &mut txn,
+                expected_machine.bmc_mac_address,
+            )
+            .await?
+        };
+        let mut loopbacks_by_dpu = HashMap::new();
+        for reservation in reservations {
+            let matching = explored_host
+                .dpus
+                .iter()
+                .filter(|dpu| {
+                    dpu.os_mac_addresses()
+                        .any(|mac| mac == reservation.dpu_oob_net0_mac_address)
+                })
+                .collect::<Vec<_>>();
+            let [dpu] = matching.as_slice() else {
+                return Err(SiteExplorerError::internal(format!(
+                    "cannot resolve DPU loopback MAC {} unambiguously from discovery ({} matching DPUs); defer creation",
+                    reservation.dpu_oob_net0_mac_address,
+                    matching.len()
+                )));
+            };
+            let id = dpu.machine_id_if_valid_report()?;
+            if loopbacks_by_dpu.insert(id, reservation).is_some() {
+                return Err(SiteExplorerError::internal(format!(
+                    "multiple loopback MAC declarations resolve to DPU {id}; defer creation"
+                )));
+            }
+        }
+
         // Advisory-lock the admin segments, in the allocators' mode, before the
         // first machine-interface row write (`attach_dpu_to_host` allocates
         // each DPU-backed host link), so the allocator's own segment locks
@@ -528,8 +578,16 @@ impl MachineCreator {
         for (dpu_report, dpu_machine_id) in
             managed_host.explored_host.dpus.iter().zip(dpu_ids.iter())
         {
+            let reservation = loopbacks_by_dpu.get(dpu_machine_id);
+            let requested_loopback_v4 = reservation
+                .as_ref()
+                .and_then(|reservation| reservation.loopback_ipv4.map(std::net::IpAddr::V4));
+            let requested_loopback_v6 = reservation
+                .as_ref()
+                .and_then(|reservation| reservation.loopback_ipv6);
+
             let dpu_machine = self
-                .create_dpu(&mut txn, dpu_report)
+                .create_dpu(&mut txn, dpu_report, requested_loopback_v6)
                 .await?
                 .ok_or_else(|| {
                     SiteExplorerError::internal(format!(
@@ -547,7 +605,7 @@ impl MachineCreator {
             // machine group syncing in try_update_network_config keeps this
             // DPU verison bump in sync with the host-level version (and any
             // sibling DPUs already linked) network_config_version.
-            self.update_dpu_network_config(&mut txn, &dpu_machine)
+            self.update_dpu_network_config(&mut txn, &dpu_machine, requested_loopback_v4)
                 .await?;
         }
 
@@ -1175,8 +1233,12 @@ impl MachineCreator {
         &self,
         txn: &mut PgConnection,
         explored_dpu: &ExploredDpu,
+        requested_loopback_v6: Option<std::net::Ipv6Addr>,
     ) -> SiteExplorerResult<Option<AnyMachine>> {
-        if let Some(dpu_machine) = self.create_dpu_machine(txn, explored_dpu).await? {
+        if let Some(dpu_machine) = self
+            .create_dpu_machine(txn, explored_dpu, requested_loopback_v6)
+            .await?
+        {
             self.configure_dpu_interface(txn, explored_dpu).await?;
             let dpu_machine_id: &MachineId = explored_dpu.report.machine_id.as_ref().unwrap();
             let dpu_bmc_info = explored_dpu.bmc_info();
@@ -1226,18 +1288,7 @@ impl MachineCreator {
         explored_dpu: &ExploredDpu,
     ) -> SiteExplorerResult<bool> {
         let dpu_machine_id: &MachineId = explored_dpu.report.machine_id.as_ref().unwrap();
-        let oob_net0_mac = explored_dpu.report.systems.iter().find_map(|x| {
-            x.ethernet_interfaces.iter().find_map(|x| {
-                if x.id
-                    .as_ref()
-                    .is_some_and(|id| id.to_lowercase().contains("oob"))
-                {
-                    x.mac_address
-                } else {
-                    None
-                }
-            })
-        });
+        let oob_net0_mac = explored_dpu.os_mac_addresses().next();
 
         // If machine_interface exists for the DPU and machine_id is not updated, do it now.
         if let Some(oob_net0_mac) = oob_net0_mac {
@@ -1310,6 +1361,7 @@ impl MachineCreator {
         &self,
         txn: &mut PgConnection,
         explored_dpu: &ExploredDpu,
+        requested_loopback_v6: Option<std::net::Ipv6Addr>,
     ) -> SiteExplorerResult<Option<AnyMachine>> {
         let dpu_machine_id = explored_dpu.report.machine_id.as_ref().unwrap();
         match db::machine::find_one(&mut *txn, dpu_machine_id, MachineSearchConfig::default())
@@ -1317,13 +1369,14 @@ impl MachineCreator {
         {
             // Do nothing if machine exists. It'll be reprovisioned via redfish
             Some(_existing_machine) => Ok(None),
-            None => match db::machine::create(
+            None => match db::machine::create_with_requested_loopback(
                 txn,
                 Some(&self.common_pools),
                 dpu_machine_id,
                 ManagedHostState::Created,
                 None,
                 CURRENT_STATE_MODEL_VERSION,
+                requested_loopback_v6,
             )
             .await
             {
@@ -1425,13 +1478,18 @@ impl MachineCreator {
         &self,
         txn: &mut PgConnection,
         dpu_machine: &AnyMachine,
+        requested_loopback_v4: Option<std::net::IpAddr>,
     ) -> SiteExplorerResult<()> {
         let (mut network_config, version) = dpu_machine.network_config.clone().take();
         if network_config.loopback_ip.is_none() {
+            // The IPv4 loopback is allocated here rather than at insert, so the
+            // reservation's requested value is applied on this path. The IPv6
+            // reservation is applied at insert in `db::machine::create`.
             let loopback_ip = db::machine::allocate_loopback_ip(
                 &self.common_pools,
                 txn,
                 &dpu_machine.id.to_string(),
+                requested_loopback_v4,
             )
             .await?;
             network_config.loopback_ip = Some(loopback_ip);
@@ -1442,6 +1500,7 @@ impl MachineCreator {
                 &self.common_pools,
                 txn,
                 &dpu_machine.id.to_string(),
+                None,
             )
             .await?;
         }

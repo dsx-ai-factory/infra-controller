@@ -20,7 +20,7 @@ use ::rpc::admin_cli::OutputFormat;
 use clap::ValueEnum;
 use mac_address::MacAddress;
 use prettytable::{Table, row};
-use rpc::forge::ExpectedMachineRequest;
+use rpc::forge::{ExpectedInterfaceRole, ExpectedMachineRequest};
 
 use crate::async_write;
 use crate::errors::CarbideCliResult;
@@ -134,6 +134,7 @@ async fn convert_and_print_into_nice_table(
         "DPF Enabled",
         "Disable Lockdown",
         "DPU Policy",
+        "DPU Loopback Reservations",
     ]);
 
     for expected_machine in &expected_machines.expected_machines {
@@ -156,6 +157,19 @@ async fn convert_and_print_into_nice_table(
         let labels = crate::metadata::fmt_labels_as_kv_pairs(expected_machine.metadata.as_ref());
 
         let dpu_policy_display = dpu_policy_display(expected_machine.dpu_mode);
+        let loopback_reservations = expected_machine
+            .host_nics
+            .iter()
+            .filter(|interface| interface.role() == ExpectedInterfaceRole::DpuLoopback)
+            .filter_map(|interface| {
+                Some(format!(
+                    "{}: {}",
+                    interface.mac_address.as_deref()?,
+                    interface.fixed_ip.as_deref()?
+                ))
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
 
         table.add_row(row![
             expected_machine.chassis_serial_number,
@@ -190,6 +204,7 @@ async fn convert_and_print_into_nice_table(
                 .unwrap_or_default()
                 .to_string(),
             dpu_policy_display,
+            loopback_reservations,
         ]);
     }
 
