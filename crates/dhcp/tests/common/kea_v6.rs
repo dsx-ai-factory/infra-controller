@@ -69,6 +69,7 @@ pub(crate) struct Kea6Config {
     pub(crate) nico_pxe_service_url: Option<&'static str>,
     pub(crate) option_data: Vec<serde_json::Value>,
     pub(crate) ddns_port: Option<u16>,
+    pub(crate) ddns_replace_name: bool,
     pub(crate) pool_ddns_updates: Option<bool>,
     pub(crate) subnet_ddns_updates: Option<bool>,
     pub(crate) continue_after_store_failure: bool,
@@ -94,6 +95,7 @@ impl Default for Kea6Config {
             nico_pxe_service_url: None,
             option_data: Vec::new(),
             ddns_port: None,
+            ddns_replace_name: false,
             pool_ddns_updates: None,
             subnet_ddns_updates: None,
             continue_after_store_failure: false,
@@ -796,6 +798,9 @@ impl Kea6 {
         }
         if let Some(updates) = config.pool_ddns_updates {
             dhcp6["subnet6"][0]["pools"][0]["ddns-send-updates"] = json!(updates);
+        }
+        if config.ddns_replace_name {
+            dhcp6["ddns-replace-client-name"] = json!("always");
         }
         if let Some(updates) = config.subnet_ddns_updates {
             dhcp6["subnet6"][0]["ddns-send-updates"] = json!(updates);
