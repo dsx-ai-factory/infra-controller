@@ -981,7 +981,8 @@ service Forge {
   // Remove a SKU assignemnt from a machine.  Must be in the Ready or SkuVerifyFailed states.
   // The machine will move to the WaitingForSkuAssignment state.
   rpc RemoveSkuAssociation(RemoveSkuRequest) returns (google.protobuf.Empty);
-  // Removes an unused SKU
+  // Removes an unused SKU. If the initial lookup finds no match, a request
+  // containing exactly one nonempty SKU ID returns `NOT_FOUND`.
   rpc DeleteSku(SkuIdList) returns (google.protobuf.Empty);
   rpc GetAllSkuIds(google.protobuf.Empty) returns (SkuIdList);
   rpc FindSkusByIds(SkusByIdsRequest) returns (SkuList);
