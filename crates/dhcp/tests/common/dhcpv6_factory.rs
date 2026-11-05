@@ -411,6 +411,24 @@ impl DHCPv6Factory {
         Self::relay_wrap(message, true)
     }
 
+    /// Replace a packet's IA shape to test rejection before cached/native processing.
+    pub(crate) fn with_unsupported_ia_shape(packet: &[u8], duplicate_na: bool) -> Vec<u8> {
+        let payload = Self::relay_msg_payload(packet).expect("relay packet");
+        let mut message = Message::decode(&mut Decoder::new(payload)).unwrap();
+        if duplicate_na {
+            message.opts_mut().insert(DhcpOption::IANA(IANA {
+                id: 0x10000,
+                t1: 0,
+                t2: 0,
+                opts: Default::default(),
+            }));
+        } else {
+            message.opts_mut().remove(OptionCode::IANA);
+            Self::add_ia_pd(&mut message, 1);
+        }
+        Self::relay_wrap(message, true)
+    }
+
     /// Set the client's native D2 registration name for a lease exchange.
     pub(crate) fn with_fqdn(packet: &[u8], hostname: &str) -> Vec<u8> {
         let payload = Self::relay_msg_payload(packet).expect("relay packet");

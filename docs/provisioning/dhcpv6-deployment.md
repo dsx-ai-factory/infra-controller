@@ -107,14 +107,19 @@ The example enables address allocation, not HTTP boot. Refer to [Helm Values](#h
 ## Lease Handoff and Refusal
 
 Firmware and the installed OS can use different DUIDs or IAIDs for the same NIC.
-The hook redirects allocation to Core's IA_NA address. Replacing an assigned or
-reclaimed lease at that target requires a matching stored MAC and subnet. A
+The hook redirects allocation to Core's IA_NA address. Replacing an assigned,
+released, or reclaimed lease at that target requires a matching stored MAC and subnet. A
 foreign or unknown MAC, another subnet, or a declined target is refused.
 Ordinary SOLICIT preserves the old owner; REQUEST or jointly enabled Rapid
 Commit persists the replacement in one native update. A failed update leaves
 the old target available for retry. This handoff does not expire Core's
 assignment for the target address. Reclamation of another expired allocation
 candidate is a separate operation and can succeed before the target write fails.
+Firmware RELEASE ends the local Kea lease without expiring Core's assignment.
+Once Kea considers the released lease expired, the OS can reuse it without
+waiting for a background reclamation pass. Allocation-time retirement of that
+same NIC's selected released target also preserves Core's assignment; background
+reclamation retains the normal scoped expiry notification.
 
 Kea 3 enables multithreading by default; the repository chart explicitly disables
 it. For configurations that enable multithreading, the hook holds MAC and address guards
@@ -137,13 +142,27 @@ The receive-side drop sends no reply; refusal in the native existing-lease path
 can return an IA-scoped failure. Inspect the `reason` label on
 `carbide_dhcp_v6_requests_dropped_total` when diagnosing retries across boot stages.
 
+The IPv6 memfile writer closes and truncates a failed append to its previous
+offset before reopening it. Refused buffered rows cannot be replayed by a later
+append or graceful shutdown. If truncation fails, the stream stays closed and
+the error requires lease-file repair before restart. This is not a power-loss
+or cross-process transaction guarantee.
+
 The chart does not enable native D2 updates. If a custom configuration enables
 D2, successful replacement uses Kea 3's native chained request to remove the
 old target's DUID/FQDN ownership before adding the new identity. This applies
 when the hostname stays the same as well as when it changes. If the new lease
-does not request DNS updates, replacement queues only the old owner's removal.
+does not request DNS updates or its hostname is scrubbed to empty, replacement
+queues only the old owner's removal.
 Failed persistence queues no replacement cleanup. D2 delivery and DNS-server
 acceptance remain subject to Kea's configured queue, transport, and DNS policy.
+With D2 enabled, the hook rejects differing shared-network, subnet, or pool
+overrides of `ddns-send-updates`, `ddns-override-no-update`,
+`ddns-override-client-update`, `ddns-replace-client-name`, `ddns-generated-prefix`,
+`ddns-qualifying-suffix`, `hostname-char-set`, and `hostname-char-replacement`.
+Configure these policies globally so post-allocation FQDN processing cannot
+invalidate the handoff's cleanup decision. Identical scoped values are accepted;
+TTL and conflict-resolution settings retain native Kea behavior.
 
 ## Deployment Verification and Metrics
 

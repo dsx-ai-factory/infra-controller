@@ -1353,6 +1353,115 @@ fn stale_lease_end_messages_preserve_handoff_owner() -> Result<(), eyre::Report>
     Ok(())
 }
 
+// The Rust receive boundary must reject unsupported shapes even on cache hits,
+// before native per-IA allocation or the stale-owner guard can mutate a lease.
+#[test]
+fn unsupported_ia_shapes_do_not_reach_native_handoff() -> Result<(), eyre::Report> {
+    let idx = 0xc6;
+    let h = Harness::new_with_config(Kea6Config {
+        rapid_commit_v6: true,
+        kea_rapid_commit_v6: true,
+        ..Kea6Config::default()
+    });
+    let (server_id, address) = h.establish_lease(idx)?;
+    let original = h.read_leases()?;
+    let before = h.api_server.calls_for(ENDPOINT_DISCOVER_DHCP);
+    for (attempt, (packet, duplicate_na)) in [
+        (
+            DHCPv6Factory::request(idx, server_id.clone(), address),
+            true,
+        ),
+        (
+            DHCPv6Factory::solicit_with_rapid_commit_options(idx, 1),
+            true,
+        ),
+        (DHCPv6Factory::renew(idx, server_id, address), false),
+        (DHCPv6Factory::rebind(idx, address), false),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let packet = DHCPv6Factory::with_unsupported_ia_shape(&packet, duplicate_na);
+        assert!(send_and_recv_v6(&h.socket, packet)?.is_none());
+        assert!(wait_for_v6_drop_metric_at_least(
+            h.kea.metrics_endpoint(),
+            "unsupported_message",
+            (attempt + 1) as f64,
+            METRIC_TIMEOUT,
+        ));
+        assert_eq!(
+            v6_drop_metric_value(h.kea.metrics_endpoint(), "stale_lease_identity"),
+            0.0
+        );
+        assert_eq!(h.read_leases()?, original);
+        assert_assigned_leases(&h.kea.statistics()?, 1, 1);
+        assert_eq!(h.api_server.calls_for(ENDPOINT_DISCOVER_DHCP), before);
+    }
+    Ok(())
+}
+
+#[test]
+fn released_firmware_lease_hands_off_without_core_expiry() -> Result<(), eyre::Report> {
+    for hint in [false, true] {
+        let idx = 0xc5;
+        let mut h = Harness::new_with_config(Kea6Config {
+            address_pool: "::-ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff",
+            expired_leases_processing: Some(Kea6ExpiredLeasesProcessing {
+                reclaim_timer_wait_time: 3600,
+                flush_reclaimed_timer_wait_time: 3600,
+                hold_reclaimed_time: 3600,
+                max_reclaim_leases: 10,
+                max_reclaim_time: 100,
+                unwarned_reclaim_cycles: 1,
+            }),
+            ..Kea6Config::default()
+        });
+        let (server_id, address) = h.establish_lease(idx)?;
+        let release = send_and_recv_v6(
+            &h.socket,
+            DHCPv6Factory::release_with_hop_count(idx, server_id.clone(), address, 0),
+        )?
+        .expect("firmware release reply");
+        assert_eq!(release.msg_type(), v6::MessageType::Reply);
+        h.wait_for_no_active_lease(address, &DHCPv6Factory::duid_ll_hex(idx))?;
+        // Native expiry compares whole seconds with a strict inequality.
+        // Let the released zero-lifetime row become reusable before the OS boots.
+        std::thread::sleep(Duration::from_secs(1));
+        let released = h.read_leases()?;
+        assert_eq!(released.len(), 1);
+        assert_assigned_leases(&h.kea.statistics()?, 0, 0);
+        let duid = DHCPv6Factory::duid_en(27);
+        let offer = send_and_recv_v6(
+            &h.socket,
+            DHCPv6Factory::solicit_with_duid(idx, duid.clone(), true),
+        )?
+        .expect("OS offer after release");
+        assert_eq!(DHCPv6Factory::ia_addr(&offer), Some(address));
+        assert_eq!(
+            h.read_leases()?,
+            released,
+            "offer must preserve released row"
+        );
+        let request = if hint {
+            DHCPv6Factory::request_with_duid(idx, server_id, address, duid.clone(), true)
+        } else {
+            DHCPv6Factory::request_without_address_hint(idx, server_id, duid.clone())
+        };
+        let reply = send_and_recv_v6(&h.socket, request)?.expect("OS reply after release");
+        assert_eq!(DHCPv6Factory::ia_addr(&reply), Some(address));
+        h.wait_for_active_lease(address, &DHCPv6Factory::duid_hex(&duid))?;
+        assert_assigned_leases(&h.kea.statistics()?, 1, 1);
+        assert!(
+            h.api_server.expired_leases().is_empty(),
+            "handoff must preserve Core assignment"
+        );
+        h.kea.restart()?;
+        h.wait_for_active_lease(address, &DHCPv6Factory::duid_hex(&duid))?;
+        assert_assigned_leases(&h.kea.statistics()?, 1, 1);
+    }
+    Ok(())
+}
+
 #[test]
 fn handoff_outside_dummy_pool_preserves_assigned_count() -> Result<(), eyre::Report> {
     let idx = 0x64;
@@ -1888,10 +1997,10 @@ fn handoff_recovers_from_native_persistence_failure() -> Result<(), eyre::Report
                 i64::from(existing_target),
             );
         }
-        // Keep the storage fault through shutdown: std::ofstream may retry
-        // buffered bytes on close. Recover storage only in the new process.
-        h.kea.restart()?;
+        // Recover storage before shutdown: a refused row must not be replayed
+        // by the stream's close after its original append failed.
         h.kea.lease_io.release()?;
+        h.kea.restart()?;
         assert_eq!(
             h.active_lease(address, &DHCPv6Factory::duid_ll_hex(idx))?
                 .as_ref(),
@@ -2158,6 +2267,42 @@ fn incompatible_native_runtime_is_rejected_at_startup() -> Result<(), eyre::Repo
     Ok(())
 }
 
+// Final pool/subnet FQDN reprocessing must not change the policy after the
+// handoff decides between a chained update and removal-only cleanup.
+#[test]
+fn native_ddns_rejects_differing_scoped_policy() -> Result<(), eyre::Report> {
+    for (pool, subnet, d2_enabled, rejected) in [
+        (Some(false), None, true, true),
+        (None, Some(false), true, true),
+        (Some(true), None, true, false),
+        (Some(false), None, false, false),
+    ] {
+        let result = Kea6::start_with_config(
+            "http://127.0.0.1:1",
+            None,
+            Kea6Config {
+                ddns_port: d2_enabled.then_some(53001),
+                pool_ddns_updates: pool,
+                subnet_ddns_updates: subnet,
+                ..Kea6Config::default()
+            },
+        );
+        match result {
+            Ok(_) => assert!(!rejected, "unsafe DDNS policy must fail configuration"),
+            Err(error) => {
+                assert!(rejected, "supported policy must start: {error}");
+                assert!(
+                    error
+                        .to_string()
+                        .contains("requires uniform global DDNS policy"),
+                    "{error}"
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
 // Pause after the native existing-DUID lookup, before its guard/update. A
 // different relay MAC supplies the firmware DUID/IAID without an address hint.
 // Its stale snapshot must not overwrite a handoff completed during the pause.
@@ -2289,6 +2434,14 @@ fn failed_retirement_stops_expired_renewal_before_active_write() -> Result<(), e
         assert!(h.api_server.expired_leases().is_empty());
         // Active-row writes were allowed throughout; restore retirement now.
         h.kea.lease_io.release()?;
+        h.kea.restart()?;
+        assert_eq!(
+            h.read_leases()?,
+            original,
+            "refused retirement must not replay on close"
+        );
+        assert_assigned_leases(&h.kea.statistics()?, 1, 1);
+        assert!(h.api_server.expired_leases().is_empty());
         let renewed = send_and_recv_v6(&h.socket, request)?.expect("renewal retry");
         assert_eq!(DHCPv6Factory::ia_addr(&renewed), Some(address));
         assert_assigned_leases(&h.kea.statistics()?, 1, 1);
@@ -2314,11 +2467,16 @@ fn handoff_replaces_native_ddns_ownership_after_persistence() -> Result<(), eyre
         );
         Ok(serde_json::from_slice(&bytes[2..count])?)
     }
-    for (hostname, fail_first) in [
-        (Some("firmware.example.test."), false),
-        (Some("os.example.test."), false),
-        (Some("os.example.test."), true),
-        (None, false),
+    for (hostname, registered_name, fail_first) in [
+        (
+            Some("firmware.example.test."),
+            Some("firmware.example.test."),
+            false,
+        ),
+        (Some("os.example.test."), Some("os.example.test."), false),
+        (Some("os.example.test."), Some("os.example.test."), true),
+        (None, None, false),
+        (Some("___"), None, false),
     ] {
         let d2 = UdpSocket::bind("127.0.0.1:0")?;
         d2.set_read_timeout(Some(Duration::from_secs(2)))?;
@@ -2367,7 +2525,7 @@ fn handoff_replaces_native_ddns_ownership_after_persistence() -> Result<(), eyre
         assert_eq!(removal["dhcid"], old["dhcid"]);
         assert_eq!(removal["fqdn"], old["fqdn"]);
         assert_eq!(removal["ip-address"], address.to_string());
-        if let Some(hostname) = hostname {
+        if let Some(hostname) = registered_name {
             // Kea 3 chains the ADD in the REMOVE datagram so UDP cannot
             // reorder the ownership changes or deliver only the ADD.
             let addition = &removal["next-ncr"];

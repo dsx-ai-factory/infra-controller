@@ -1579,7 +1579,8 @@ int lease6_select(CalloutHandle &handle) try {
   const bool previous_assigned = previous && previous->state_ == Lease::STATE_DEFAULT;
   const bool same_owner = !previous || (selected_mac && previous_mac == canonical_mac(selected_mac) &&
                           previous->subnet_id_ == lease6->subnet_id_ &&
-                          (previous_assigned || previous->state_ == Lease::STATE_EXPIRED_RECLAIMED) &&
+                          (previous_assigned || previous->state_ == Lease::STATE_EXPIRED_RECLAIMED ||
+                           previous->state_ == Lease::STATE_RELEASED) &&
                           lease6->type_ == Lease::TYPE_NA);
   if (selected_mac) {
     machine_free_discovery_mac(selected_mac);
@@ -1800,18 +1801,28 @@ int lease6_expire(CalloutHandle &handle) {
       !own_lease6_address(handle, lease->addr_)) {
     return 0;
   }
-  const bool retire_owned = lease->type_ == Lease::TYPE_NA &&
-      lease->state_ == Lease::STATE_DEFAULT && !mac.empty();
+  const bool retire_owned = lease->type_ == Lease::TYPE_NA && !mac.empty() &&
+      (lease->state_ == Lease::STATE_DEFAULT || lease->state_ == Lease::STATE_RELEASED);
+  boost::shared_ptr<Machine> machine;
+  try {
+    handle.getContext("machine", machine);
+  } catch (const isc::hooks::NoSuchCalloutContext &) {
+  }
+  isc::asiolink::IOAddress selected_address("::");
+  const bool selected_target = machine &&
+      machine_ipv6_address(machine.get(), selected_address) && selected_address == lease->addr_;
+  bool released_handoff = false;
+  if (retire_owned && selected_target && lease->state_ == Lease::STATE_RELEASED) {
+    char *selected_mac = machine_get_discovery_mac(machine.get());
+    released_handoff = selected_mac && mac == canonical_mac(selected_mac);
+    if (selected_mac) {
+      machine_free_discovery_mac(selected_mac);
+    }
+  }
   // A redirected allocation may retain only a durably retired candidate.
   // Leave unsupported candidates to the background sweep instead of allowing
   // native allocation-time reclamation to count an unchanged row repeatedly.
   if (!retire_owned) {
-    boost::shared_ptr<Machine> machine;
-    try {
-      handle.getContext("machine", machine);
-    } catch (const isc::hooks::NoSuchCalloutContext &) {
-    }
-    isc::asiolink::IOAddress selected_address("::");
     if (machine && machine_ipv6_address(machine.get(), selected_address) &&
         selected_address != lease->addr_) {
       return 0;
@@ -1861,6 +1872,8 @@ int lease6_expire(CalloutHandle &handle) {
     // Keep native declined-lease recovery and unsupported lease types intact.
     handle.setStatus(CalloutHandle::NEXT_STEP_CONTINUE);
   }
-  return handle_carbide_lease6_end(handle, "lease6_expire");
+  // RELEASE already ended the firmware's local lease. Reusing its selected
+  // address for the same NIC must not deallocate the new Core assignment.
+  return released_handoff ? 0 : handle_carbide_lease6_end(handle, "lease6_expire");
 }
 }
