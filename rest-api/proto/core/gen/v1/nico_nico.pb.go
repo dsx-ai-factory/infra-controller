@@ -5285,8 +5285,8 @@ const (
 	ComponentPowerActionOperation_COMPONENT_POWER_ACTION_OPERATION_POWER_ON ComponentPowerActionOperation = 1
 	// Power off the component; graceful identifies the saved shutdown mode.
 	ComponentPowerActionOperation_COMPONENT_POWER_ACTION_OPERATION_POWER_OFF ComponentPowerActionOperation = 2
-	// Reset the component. The saved state cannot distinguish original restart
-	// and AC-cycle requests, so no original power-control variant is inferred.
+	// Restart the component. graceful=true identifies an explicit graceful host
+	// reboot. Legacy Reset records do not distinguish restart and AC-cycle requests.
 	ComponentPowerActionOperation_COMPONENT_POWER_ACTION_OPERATION_RESET ComponentPowerActionOperation = 3
 	// Reset a specific Redfish chassis through a compute tray's BMC.
 	ComponentPowerActionOperation_COMPONENT_POWER_ACTION_OPERATION_CHASSIS_RESET ComponentPowerActionOperation = 4
@@ -43005,14 +43005,15 @@ func (*MaintenanceActivityConfig_NvosUpdate) isMaintenanceActivityConfig_Activit
 
 // Scope of an on-demand rack maintenance request: which devices to include
 // and which activities to run. When all three device-id lists are empty the
-// full rack is maintained. When the activities list is empty all activities
-// are run.
+// full rack is maintained. Empty activities select all non-power activities;
+// compute resets require an explicit PowerSequenceActivity.
 type RackMaintenanceScope struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	MachineIds    []string               `protobuf:"bytes,1,rep,name=machine_ids,json=machineIds,proto3" json:"machine_ids,omitempty"`
 	SwitchIds     []string               `protobuf:"bytes,2,rep,name=switch_ids,json=switchIds,proto3" json:"switch_ids,omitempty"`
 	PowerShelfIds []string               `protobuf:"bytes,3,rep,name=power_shelf_ids,json=powerShelfIds,proto3" json:"power_shelf_ids,omitempty"`
-	// Which maintenance activities to run. Empty means all activities.
+	// Activities run in firmware, NVOS, power sequence, then NMX-C order.
+	// Empty selects all non-power activities; power sequence must be explicit.
 	Activities    []*MaintenanceActivityConfig `protobuf:"bytes,4,rep,name=activities,proto3" json:"activities,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -63648,8 +63649,9 @@ type ComponentPowerAction struct {
 	// Saved initiator, including an explicitly stored empty string. Absent only
 	// when legacy active maintenance has no admitted request metadata.
 	Initiator *string `protobuf:"bytes,4,opt,name=initiator,proto3,oneof" json:"initiator,omitempty"`
-	// Present exactly for PowerOff. False means forced power off; true means
-	// graceful shutdown. Legacy operations without this flag default to false.
+	// Present for PowerOff (false: forced off, true: graceful shutdown) and for
+	// explicit graceful host reboots (operation Reset, true). Absent for legacy
+	// Reset records whose original restart mode was not preserved.
 	Graceful *bool `protobuf:"varint,5,opt,name=graceful,proto3,oneof" json:"graceful,omitempty"`
 	// Present exactly for ChassisReset; the recorded Redfish chassis identifier.
 	ChassisId     *string `protobuf:"bytes,6,opt,name=chassis_id,json=chassisId,proto3,oneof" json:"chassis_id,omitempty"`

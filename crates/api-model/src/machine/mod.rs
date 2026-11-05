@@ -1932,6 +1932,23 @@ impl ManagedHostState {
         }
     }
 
+    /// Whether this state can hand control to a pending maintenance request.
+    /// Ready and Failed hosts can do so, as can boot configuration before writes
+    /// begin or after recovery has restored lockdown and parked in Failed.
+    /// Instance ownership and competing requests must be checked separately.
+    pub fn accepts_maintenance_request(&self) -> bool {
+        matches!(
+            self,
+            Self::Ready
+                | Self::Failed { .. }
+                | Self::BootConfiguring {
+                    boot_config_state: ReadyBootConfigState::Prepare
+                        | ReadyBootConfigState::Failed { .. },
+                    ..
+                }
+        )
+    }
+
     /// Starts `Maintenance` with the requested operation and saves the full
     /// request so completion can check whether it is still pending.
     pub fn maintenance_for_request(request: MachineMaintenanceRequest) -> Self {
@@ -2863,6 +2880,8 @@ pub enum MachineMaintenanceOperation {
     },
     /// Reset the host (restart / AC power cycle).
     Reset,
+    /// Gracefully reboot the host without falling back to a forced restart.
+    Reboot,
     /// Reset the identified Redfish chassis through the host BMC.
     ChassisReset { chassis_id: String },
 }
@@ -4405,6 +4424,31 @@ mod tests {
                     }),
             }
         );
+    }
+
+    #[test]
+    fn maintenance_reboot_preserves_legacy_reset_serialization() {
+        for (encoded, operation) in [
+            (
+                serde_json::json!({"operation": "reset"}),
+                MachineMaintenanceOperation::Reset,
+            ),
+            (
+                serde_json::json!({"operation": "reboot"}),
+                MachineMaintenanceOperation::Reboot,
+            ),
+        ] {
+            let wire = serde_json::json!({"state": "maintenance", "operation": encoded});
+            let state: ManagedHostState = serde_json::from_value(wire.clone()).unwrap();
+            assert_eq!(
+                state,
+                ManagedHostState::Maintenance {
+                    operation,
+                    request: None
+                }
+            );
+            assert_eq!(serde_json::to_value(state).unwrap(), wire);
+        }
     }
 
     #[test]
