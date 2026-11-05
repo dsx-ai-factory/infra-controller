@@ -577,19 +577,8 @@ impl LibvirtBackend {
         else {
             return Ok(());
         };
-        if cancel_pending_network {
-            self.virsh()
-                .execute(VirshCommand::BootDefault)
-                .await
-                .map_err(ActionError::Internal)?;
-        }
-        self.virsh()
-            .execute(VirshCommand::BootOnceMedia {
-                media_id: media_id.to_owned(),
-            })
-            .await
-            .map_err(ActionError::Internal)?;
-        // The selection is consumed by the next start or reset, whichever applies.
+        // Choose the power command before arming, so an unknown or unbootable
+        // state leaves no selection behind for a later reset to consume.
         let (command, boot) = match self.observe_power_state().await {
             Some(PowerState::On) => (VirshCommand::Reset, BootKind::Warm),
             Some(PowerState::Off) => (VirshCommand::Start, BootKind::Cold),
@@ -599,12 +588,45 @@ impl LibvirtBackend {
                 )));
             }
         };
-        self.virsh()
-            .execute(command)
-            .await
-            .map_err(ActionError::Internal)?;
+        if cancel_pending_network {
+            self.virsh()
+                .execute(VirshCommand::BootDefault)
+                .await
+                .map_err(ActionError::Internal)?;
+        }
+        // This start or reset consumes the selection. If arming or the power
+        // command fails, withdraw the selection (a failed arm may still have
+        // been recorded) and report the original error.
+        let armed = self
+            .virsh()
+            .execute(VirshCommand::BootOnceMedia {
+                media_id: media_id.to_owned(),
+            })
+            .await;
+        let booted = match armed {
+            Ok(_) => self.virsh().execute(command).await,
+            Err(error) => Err(error),
+        };
+        if let Err(error) = booted {
+            self.cancel_media_selection().await;
+            return Err(ActionError::Internal(error));
+        }
         self.boot_pending = Some(boot);
         Ok(())
+    }
+
+    /// Withdraws a selection whose start or reset failed, so no later power
+    /// request boots the medium without a new media boot request. vmctl's
+    /// `boot-default` clears only the pending selection; a start or restart it
+    /// already accepted keeps its own reserved boot source.
+    async fn cancel_media_selection(&self) {
+        if let Err(error) = self.virsh().execute(VirshCommand::BootDefault).await {
+            tracing::error!(
+                domain = %self.config.domain,
+                %error,
+                "could not cancel the one-time media boot selection after a failed boot"
+            );
+        }
     }
 
     async fn refresh(&mut self) {

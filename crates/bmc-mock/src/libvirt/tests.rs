@@ -192,3 +192,154 @@ async fn libvirt_manager_reset_to_defaults_restores_and_saves_factory_accounts()
     stopped.await.unwrap().unwrap();
     running.await.unwrap();
 }
+
+/// A virsh stand-in for vmctl's BMC shim. It records each command and keeps the
+/// pending selection in a file; marker files make individual commands fail.
+fn media_boot_backend(dir: &std::path::Path, power: &str, selection: &str) -> LibvirtBackend {
+    use std::os::unix::fs::PermissionsExt;
+
+    let virsh = dir.join("virsh");
+    std::fs::write(
+        &virsh,
+        r#"#!/bin/sh
+base=$(dirname "$0")
+printf '%s\n' "$3" >> "$base/log"
+fail() { if [ -e "$base/$1-fails" ]; then echo "$1 failed" >&2; exit 1; fi; }
+case "$3" in
+ domblklist) printf 'Type Device Target Source\nfile cdrom sdc vm-media://media-1\n';;
+ boot-selection) cat "$base/selection";;
+ domstate) fail domstate; cat "$base/power";;
+ boot-default) fail boot-default; printf '{"pending":{"boot_device":"disk"}}' > "$base/selection";;
+ boot-once-media) printf '{"pending":{"boot_device":"media","media_id":"%s"}}' "$5" > "$base/selection";;
+ start|reset) fail "$3";;
+ *) exit 1;;
+esac
+"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(&virsh, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::write(dir.join("power"), power).unwrap();
+    std::fs::write(dir.join("selection"), selection).unwrap();
+
+    let (domain, actor) = unstarted();
+    LibvirtBackend {
+        persistence: None,
+        persistence_retry: None,
+        config: Config {
+            virsh_path: virsh,
+            virtual_media_targets: BTreeMap::from([("ConfigCd".into(), "sdc".into())]),
+            ..actor.config
+        },
+        restore_boot_after_power_on: false,
+        system_state: None,
+        bmc_state: Arc::downgrade(&domain.state),
+        last_observed_power: None,
+        boot_pending: None,
+        initialized: actor.initialized,
+        applied_state: AppliedState::default(),
+        refresh_pending: actor.refresh_pending,
+        power_state: actor.power_state,
+    }
+}
+
+fn read(dir: &std::path::Path, file: &str) -> String {
+    std::fs::read_to_string(dir.join(file)).unwrap()
+}
+
+#[tokio::test]
+async fn media_boot_with_unknown_power_state_arms_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let network = r#"{"pending":{"boot_device":"network"}}"#;
+    let mut backend = media_boot_backend(dir.path(), "shut off", network);
+    std::fs::write(dir.path().join("domstate-fails"), "").unwrap();
+
+    let result = backend.boot_media_once("ConfigCd", "media-1").await;
+
+    assert!(
+        matches!(result, Err(ActionError::BadRequest(_))),
+        "{result:?}"
+    );
+    assert_eq!(
+        read(dir.path(), "log"),
+        "domblklist\nboot-selection\ndomstate\n"
+    );
+    assert_eq!(
+        read(dir.path(), "selection"),
+        network,
+        "neither the media nor the network selection changes"
+    );
+    assert!(backend.boot_pending.is_none());
+}
+
+#[tokio::test]
+async fn failed_media_boot_cancels_the_selection_and_keeps_the_power_error() {
+    for (power, command) in [("shut off", "start"), ("running", "reset")] {
+        for cancel_fails in [false, true] {
+            let case = format!("{command}, cancel fails: {cancel_fails}");
+            let dir = tempfile::tempdir().unwrap();
+            let mut backend = media_boot_backend(dir.path(), power, "{}");
+            std::fs::write(dir.path().join(format!("{command}-fails")), "").unwrap();
+            if cancel_fails {
+                std::fs::write(dir.path().join("boot-default-fails"), "").unwrap();
+            }
+
+            let result = backend.boot_media_once("ConfigCd", "media-1").await;
+
+            let Err(ActionError::Internal(error)) = result else {
+                panic!("{case}: {result:?}");
+            };
+            assert!(
+                error.to_string().contains(&format!("{command} failed")),
+                "{case}: {error}"
+            );
+            assert_eq!(
+                read(dir.path(), "log"),
+                format!(
+                    "domblklist\nboot-selection\ndomstate\nboot-once-media\n{command}\nboot-default\n"
+                ),
+                "{case}"
+            );
+            if !cancel_fails {
+                assert_eq!(
+                    read(dir.path(), "selection"),
+                    r#"{"pending":{"boot_device":"disk"}}"#,
+                    "{case}"
+                );
+            }
+            assert!(backend.boot_pending.is_none(), "{case}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn media_boot_cancels_pending_network_then_boots_without_cancelling_media() {
+    for (power, command, cold) in [("shut off", "start", true), ("running", "reset", false)] {
+        let dir = tempfile::tempdir().unwrap();
+        let mut backend = media_boot_backend(
+            dir.path(),
+            power,
+            r#"{"pending":{"boot_device":"network"}}"#,
+        );
+
+        backend
+            .boot_media_once("ConfigCd", "media-1")
+            .await
+            .unwrap();
+
+        assert_eq!(
+            read(dir.path(), "log"),
+            format!(
+                "domblklist\nboot-selection\ndomstate\nboot-default\nboot-once-media\n{command}\n"
+            )
+        );
+        assert_eq!(
+            read(dir.path(), "selection"),
+            r#"{"pending":{"boot_device":"media","media_id":"media-1"}}"#
+        );
+        assert!(
+            matches!(backend.boot_pending, Some(BootKind::Cold)) == cold
+                && matches!(backend.boot_pending, Some(BootKind::Warm)) != cold,
+            "{command}"
+        );
+    }
+}
