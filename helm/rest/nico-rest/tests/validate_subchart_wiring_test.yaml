@@ -171,3 +171,20 @@ tests:
     asserts:
       - failedTemplate:
           errorPattern: 'spiffe://nico.local/registration/sa/nico-rest-site-manager.*missing'
+
+  - it: validates an explicit allowlist against the client URI in a custom trust domain
+    set:
+      global.spiffe.trustDomain: example.test
+      nico-rest-cert-manager.authorization.allowedIdentities:
+        - spiffe://example.test/nico-rest/sa/nico-rest-site-manager
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: validates an explicit client URI against the allowlist in a custom trust domain
+    set:
+      global.spiffe.trustDomain: example.test
+      nico-rest-site-manager.clientCertificate.spiffeID: spiffe://example.test/nico-rest/sa/nico-rest-site-manager
+    asserts:
+      - hasDocuments:
+          count: 0

@@ -95,6 +95,8 @@ func (ca testAuthority) issuer(t *testing.T) CertificateIssuer {
 func TestServer_PKICloudCertificateHandler(t *testing.T) {
 	ca := newTestAuthority(t)
 	otherCA := newTestAuthority(t)
+	clientCAFile := filepath.Join(t.TempDir(), "client-ca.crt")
+	require.NoError(t, os.WriteFile(clientCAFile, otherCA.pem, 0600))
 	issuer := &recordingCertificateIssuer{CertificateIssuer: ca.issuer(t)}
 	logCtx, hook := core.WithTestingLogger(context.Background())
 	ctx, cancel := context.WithCancel(logCtx)
@@ -107,16 +109,19 @@ func TestServer_PKICloudCertificateHandler(t *testing.T) {
 	roots := x509.NewCertPool()
 	require.True(t, roots.AppendCertsFromPEM(ca.pem))
 	for _, tc := range []struct {
-		name                                 string
-		mode                                 string
-		uris                                 []string
-		noCert, wrongCA, expired, serverOnly bool
-		path                                 string
-		issuerErr                            error
-		status                               int
+		name                                     string
+		mode                                     string
+		uris                                     []string
+		noCert, otherSigner, expired, serverOnly bool
+		clientCAFile                             string
+		path                                     string
+		issuerErr                                error
+		status                                   int
 	}{
 		{name: "missing certificate", mode: authModeEnforce, noCert: true, status: 401},
-		{name: "untrusted signer", mode: authModeEnforce, wrongCA: true, uris: []string{siteManagerIdentity}, status: 401},
+		{name: "untrusted signer", mode: authModeEnforce, otherSigner: true, uris: []string{siteManagerIdentity}, status: 401},
+		{name: "dedicated client CA admits its identity", mode: authModeEnforce, clientCAFile: clientCAFile, otherSigner: true, uris: []string{siteManagerIdentity}, status: 200},
+		{name: "dedicated client CA excludes the signing CA", mode: authModeEnforce, clientCAFile: clientCAFile, uris: []string{siteManagerIdentity}, status: 401},
 		{name: "wrong identity", mode: authModeEnforce, uris: []string{"spiffe://nico.test/other/sa/nico-rest-site-manager"}, status: 403},
 		{name: "legacy DNS certificate cannot impersonate URI", mode: authModeEnforce, status: 401},
 		{name: "expired certificate", mode: authModeEnforce, expired: true, uris: []string{siteManagerIdentity}, status: 401},
@@ -132,13 +137,15 @@ func TestServer_PKICloudCertificateHandler(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			hook.Reset()
-			server.authorizer.mode = tc.mode
+			authorizer, err := newCertificateAuthorizer(ctx, Options{AuthorizationMode: tc.mode, AllowedIdentities: []string{siteManagerIdentity}, ClientCAFile: tc.clientCAFile}, issuer)
+			require.NoError(t, err)
+			server.authorizer = authorizer
 			issuer.requests = nil
 			issuer.err = tc.issuerErr
 			config := &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: roots, ServerName: "localhost"}
 			if !tc.noCert {
 				signer := ca
-				if tc.wrongCA {
+				if tc.otherSigner {
 					signer = otherCA
 				}
 				certificate := signer.clientCertificate(t, tc.uris, tc.expired, tc.serverOnly)
