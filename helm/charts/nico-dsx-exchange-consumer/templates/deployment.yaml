@@ -44,6 +44,15 @@ spec:
             - name: {{ $key }}
               value: {{ $value | quote }}
             {{- end }}
+            {{- if include "nico-dsx-exchange-consumer.credentialsEnabled" . }}
+            - name: CARBIDE_CREDENTIALS_FILE_ENABLED
+              value: "true"
+            - name: CARBIDE_CREDENTIALS_FILE_PATH
+              value: {{ include "nico-dsx-exchange-consumer.credentialsFilePath" . | quote }}
+            {{- end }}
+            {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
           ports:
             - name: metrics
               containerPort: {{ .Values.service.port }}
@@ -54,7 +63,25 @@ spec:
             - mountPath: "/var/run/secrets/spiffe.io"
               name: spiffe
               readOnly: true
+            {{- if include "nico-dsx-exchange-consumer.credentialsEnabled" . }}
+            - mountPath: {{ .Values.credentials.mountPath | quote }}
+              name: credentials
+              readOnly: true
+            {{- end }}
+            {{- with .Values.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
       volumes:
         - name: spiffe
           secret:
             secretName: {{ include "nico-dsx-exchange-consumer.name" . }}-certificate
+        {{- if include "nico-dsx-exchange-consumer.credentialsEnabled" . }}
+        # The whole Secret is mounted, not one key through subPath, so a
+        # rotated Secret reaches the file the watcher reads.
+        - name: credentials
+          secret:
+            secretName: {{ .Values.credentials.secretName | quote }}
+        {{- end }}
+        {{- with .Values.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
