@@ -23,8 +23,10 @@ const (
 	// RSAKeySize is the default key size for RSA keys
 	RSAKeySize = 2048
 	// DefaultCATTL is the default TTL for CA certificates (10 years)
-	DefaultCATTL      = 10 * 365 * 24 * time.Hour
-	maxCertificateTTL = 365 * 24
+	DefaultCATTL          = 10 * 365 * 24 * time.Hour
+	defaultCertificateTTL = 90 * 24
+	maxAppCertificateTTL  = 90 * 24
+	maxCertificateTTL     = 365 * 24
 )
 
 // CA represents a Certificate Authority

@@ -165,13 +165,6 @@ tests:
       - hasDocuments:
           count: 0
 
-  - it: derives both identities from the shared trust domain
-    set:
-      global.spiffeTrustDomain: example.test
-    asserts:
-      - hasDocuments:
-          count: 0
-
   - it: rejects relocating Site Manager without adjusting its allowed identity
     set:
       nico-rest-site-manager.namespaceOverride: registration

@@ -2,8 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
 global:
-  # -- Trust domain for generated workload SPIFFE identities.
-  spiffeTrustDomain: nico.local
+  spiffe:
+    # -- Trust domain for generated workload SPIFFE identities.
+    trustDomain: nico.local
   image:
     repository: ""
     tag: ""

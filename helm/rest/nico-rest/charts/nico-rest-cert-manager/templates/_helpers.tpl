@@ -53,6 +53,6 @@ not.
 {{- if .Values.authorization.allowedIdentities -}}
 {{- toYaml .Values.authorization.allowedIdentities -}}
 {{- else -}}
-{{- toYaml (list (printf "spiffe://%s/%s/sa/nico-rest-site-manager" (default "nico.local" .Values.global.spiffeTrustDomain) .Release.Namespace)) -}}
+{{- toYaml (list (printf "spiffe://%s/%s/sa/nico-rest-site-manager" (default "nico.local" (.Values.global.spiffe | default dict).trustDomain) .Release.Namespace)) -}}
 {{- end -}}
 {{- end -}}
