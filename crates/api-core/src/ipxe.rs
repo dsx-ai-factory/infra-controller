@@ -490,6 +490,7 @@ exit ||
             | ManagedHostState::HostInit { .. }
             | ManagedHostState::Decommissioning { .. }
             | ManagedHostState::BootConfiguring { .. }
+            | ManagedHostState::NicFirmwareUpdating { .. }
             | ManagedHostState::BomValidating { .. }
             | ManagedHostState::Measuring {
                 measuring_state: MeasuringState::WaitingForMeasurements,

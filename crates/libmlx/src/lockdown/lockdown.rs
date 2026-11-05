@@ -15,12 +15,19 @@
  * limitations under the License.
  */
 
+use std::time::Duration;
+
 use ::rpc::protos::mlx_device::{LockStatus as LockStatusPb, StatusReport as StatusReportPb};
 use chrono;
 use serde::{Deserialize, Serialize};
 
 use crate::lockdown::error::{MlxError, MlxResult};
 use crate::lockdown::runner::FlintRunner;
+use crate::runner::FirmwareToolExecutor;
+
+#[cfg(all(test, target_os = "linux"))]
+#[path = "bounded_tests.rs"]
+mod bounded_tests;
 
 // LockStatus represents the current lock status of a device.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -153,6 +160,75 @@ impl LockdownManager {
                 }
             }
         }
+    }
+
+    /// Query hardware access once through the supplied supervisor executor.
+    ///
+    /// `timeout` covers helper startup, command execution, and output collection;
+    /// each stream is capped at 1 MiB. Failure allows five seconds for cleanup
+    /// and five more for result delivery. Dropping the future requests cleanup
+    /// without waiting for confirmation. Linux is required. Use [`Self::with_runner`]
+    /// with [`FlintRunner::with_path`] to avoid a synchronous executable probe.
+    ///
+    /// Empty device IDs or IDs containing an ASCII space are rejected. Dry-run
+    /// returns [`MlxError::DryRun`] without execution. A successful query reports
+    /// Unlocked; a failed query reporting disabled access reports Locked. Other
+    /// failures remain errors. Supervisor failures preserve typed settlement
+    /// evidence in [`MlxError::CommandAttempt`]. No hardware exclusion is acquired;
+    /// the caller must hold it through the attempt and retain it if process
+    /// settlement is unknown. No failure authorizes a mutation or retry.
+    pub async fn get_status_bounded(
+        &self,
+        device_id: &str,
+        executor: &FirmwareToolExecutor,
+        timeout: Duration,
+    ) -> MlxResult<LockStatus> {
+        FlintRunner::validate_device_id(device_id)?;
+        self.runner
+            .query_device_bounded(device_id, executor, timeout)
+            .await
+    }
+
+    /// Lock hardware access once with a key of 1–16 bare ASCII hexadecimal digits.
+    ///
+    /// Deadline, cancellation, platform, exclusion, device validation, and
+    /// dry-run behavior follow [`Self::get_status_bounded`]. Returns an inferred
+    /// Locked status after success, not independent readback. An already-disabled
+    /// response remains [`MlxError::AlreadyLocked`], even with a failed exit.
+    /// Malformed keys fail before execution. Command arguments, tool output, and
+    /// arbitrary I/O text are removed from bounded-attempt errors before storage.
+    pub async fn lock_device_bounded(
+        &self,
+        device_id: &str,
+        key: &str,
+        executor: &FirmwareToolExecutor,
+        timeout: Duration,
+    ) -> MlxResult<LockStatus> {
+        FlintRunner::validate_device_id(device_id)?;
+        self.runner
+            .disable_hw_access_bounded(device_id, key, executor, timeout)
+            .await?;
+        Ok(LockStatus::Locked)
+    }
+
+    /// Unlock hardware access once with a key of 1–16 bare ASCII hexadecimal digits.
+    ///
+    /// Bounds, validation, exclusion, and credential redaction follow
+    /// [`Self::lock_device_bounded`]. Returns an inferred Unlocked status after
+    /// success, not independent readback. An already-enabled response remains
+    /// [`MlxError::AlreadyUnlocked`], even with a failed exit.
+    pub async fn unlock_device_bounded(
+        &self,
+        device_id: &str,
+        key: &str,
+        executor: &FirmwareToolExecutor,
+        timeout: Duration,
+    ) -> MlxResult<LockStatus> {
+        FlintRunner::validate_device_id(device_id)?;
+        self.runner
+            .enable_hw_access_bounded(device_id, key, executor, timeout)
+            .await?;
+        Ok(LockStatus::Unlocked)
     }
 
     /// set_device_key sets a new hardware access key for the device.

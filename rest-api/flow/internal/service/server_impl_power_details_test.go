@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net"
 	"os"
 	"strings"
 	"testing"
@@ -17,11 +16,8 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
-	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
-	"google.golang.org/grpc/test/bufconn"
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -813,7 +809,7 @@ func TestFlowServerImpl_GetTrayPowerDetails(t *testing.T) {
 				case test.invoke != nil:
 					response, err = test.invoke(t, f, ctx, request)
 				case test.transport:
-					response, err = powerDetailsRPCClient(t, f.server).GetTrayPowerDetails(ctx, request)
+					response, err = flowRPCClient(t, f.server).GetTrayPowerDetails(ctx, request)
 				default:
 					response, err = f.server.GetTrayPowerDetails(ctx, request)
 				}
@@ -1029,32 +1025,6 @@ func TestPowerReaderFromRegistry(t *testing.T) {
 			}
 		})
 	}
-}
-
-// powerDetailsRPCClient exercises the generated method registration on an
-// in-memory connection; no test listener or credentials are shared with a site.
-func powerDetailsRPCClient(t *testing.T, implementation *FlowServerImpl) pb.FlowClient {
-	t.Helper()
-	listener := bufconn.Listen(1024 * 1024)
-	server := grpc.NewServer()
-	pb.RegisterFlowServer(server, implementation)
-	finished := make(chan struct{})
-	go func() {
-		defer close(finished)
-		_ = server.Serve(listener)
-	}()
-	connection, err := grpc.NewClient("passthrough:///power-details",
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
-		grpc.WithContextDialer(func(context.Context, string) (net.Conn, error) { return listener.Dial() }),
-	)
-	require.NoError(t, err)
-	t.Cleanup(func() {
-		require.NoError(t, connection.Close())
-		server.Stop()
-		require.NoError(t, listener.Close())
-		<-finished
-	})
-	return pb.NewFlowClient(connection)
 }
 
 // TestBoundPowerDetailsResponse keeps primary tasks when dropping optional

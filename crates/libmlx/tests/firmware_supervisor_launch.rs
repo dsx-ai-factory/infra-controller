@@ -167,6 +167,7 @@ exec "$MLX_LAUNCH_SUPERVISOR" "$@"
 set -eu
 printf '%s\n' "$@" >> "$MLX_LAUNCH_FIXTURE/manager-args"
 if [ "$MLX_LAUNCH_CASE" = reject ]; then
+    printf '%s' "$$" > "$MLX_LAUNCH_FIXTURE/rejected-pid"
     printf 'scope creation denied by fixture\n' >&2
     exit 73
 fi
@@ -306,8 +307,29 @@ fn launcher_fixture() {
     runtime.block_on(async {
         timeout(TEST_TIMEOUT, async {
             if case == "reject" {
-                let error = connect_or_launch(DEVICE, &fixture_config(&fixture))
-                    .await
+                let config = fixture_config(&fixture);
+                let launching =
+                    tokio::spawn(async move { connect_or_launch(DEVICE, &config).await });
+                timeout(WATCHDOG, async {
+                    loop {
+                        if let Ok(pid) = fs::read_to_string(fixture.join("rejected-pid"))
+                            && !pid.is_empty()
+                            && !Path::new("/proc").join(pid).exists()
+                        {
+                            break;
+                        }
+                        sleep(Duration::from_millis(10)).await;
+                    }
+                })
+                .await
+                .expect("rejected launcher exited and was reaped before readiness");
+                // The child has exited and been reaped. Paused runtime time can
+                // now reach the readiness deadline without racing that exit.
+                tokio::time::pause();
+                let result = launching.await;
+                tokio::time::resume();
+                let error = result
+                    .expect("join rejected launch")
                     .expect_err("scope creation must fail");
                 assert!(matches!(error, SupervisorLaunchError::Exited { status, .. }
                     if status.code() == Some(73)));
@@ -370,9 +392,14 @@ fn launcher_fixture() {
                     );
                     assert_eq!(daemons.pids().unwrap().len(), 2);
                 } else {
-                    let error = first
-                        .await
-                        .unwrap()
+                    // The external helper stays at its real readiness gate.
+                    // Let paused runtime time reach the readiness deadline,
+                    // then resume before releasing the helper.
+                    tokio::time::pause();
+                    let result = first.await;
+                    tokio::time::resume();
+                    let error = result
+                        .expect("join readiness observer")
                         .expect_err("helper remains gated past readiness deadline");
                     assert!(matches!(
                         error,

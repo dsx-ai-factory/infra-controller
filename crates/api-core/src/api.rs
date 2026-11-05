@@ -156,6 +156,13 @@ impl Forge for Api {
         crate::handlers::rms::get_rms_version(self, request).await
     }
 
+    async fn get_rms_job_status(
+        &self,
+        request: Request<rpc::GetRmsJobStatusRequest>,
+    ) -> Result<Response<rpc::GetRmsJobStatusResponse>, Status> {
+        crate::handlers::rms::get_rms_job_status(self, request).await
+    }
+
     async fn create_domain(
         &self,
         request: Request<CreateDomainRequest>,
@@ -268,6 +275,20 @@ impl Forge for Api {
         request: Request<rpc::VpcsByIdsRequest>,
     ) -> Result<Response<rpc::VpcList>, Status> {
         crate::handlers::vpc::find_by_ids(self, request).await
+    }
+
+    async fn find_routing_profile_names(
+        &self,
+        request: Request<rpc::RoutingProfileSearchFilter>,
+    ) -> Result<Response<rpc::RoutingProfileNameList>, Status> {
+        crate::handlers::routing_profile::find_names(self, request)
+    }
+
+    async fn find_routing_profiles_by_names(
+        &self,
+        request: Request<rpc::RoutingProfilesByNamesRequest>,
+    ) -> Result<Response<rpc::NamedRoutingProfileList>, Status> {
+        crate::handlers::routing_profile::find_by_names(self, request)
     }
 
     async fn get_vpc_routing_state(
@@ -617,6 +638,60 @@ impl Forge for Api {
         request: Request<rpc::NetworkSegmentStateHistoriesRequest>,
     ) -> Result<Response<rpc::StateHistories>, Status> {
         crate::handlers::network_segment::find_state_histories(self, request).await
+    }
+
+    async fn find_external_validation_hold_ids(
+        &self,
+        _request: Request<rpc::ExternalValidationHoldSearchFilter>,
+    ) -> Result<Response<rpc::ExternalValidationHoldIdList>, Status> {
+        Err(Status::unimplemented(
+            "external validation holds are not implemented",
+        ))
+    }
+
+    async fn find_external_validation_holds_by_ids(
+        &self,
+        _request: Request<rpc::ExternalValidationHoldsByIdsRequest>,
+    ) -> Result<Response<rpc::ExternalValidationHoldList>, Status> {
+        Err(Status::unimplemented(
+            "external validation holds are not implemented",
+        ))
+    }
+
+    async fn start_external_validation(
+        &self,
+        _request: Request<rpc::StartExternalValidationRequest>,
+    ) -> Result<Response<rpc::StartExternalValidationResponse>, Status> {
+        Err(Status::unimplemented(
+            "external validation attempts are not implemented",
+        ))
+    }
+
+    async fn cancel_external_validation(
+        &self,
+        _request: Request<rpc::CancelExternalValidationRequest>,
+    ) -> Result<Response<rpc::ExternalValidationAttempt>, Status> {
+        Err(Status::unimplemented(
+            "external validation attempts are not implemented",
+        ))
+    }
+
+    async fn complete_external_validation(
+        &self,
+        _request: Request<rpc::CompleteExternalValidationRequest>,
+    ) -> Result<Response<rpc::ExternalValidationAttempt>, Status> {
+        Err(Status::unimplemented(
+            "external validation attempts are not implemented",
+        ))
+    }
+
+    async fn remove_external_validation_hold(
+        &self,
+        _request: Request<rpc::RemoveExternalValidationHoldRequest>,
+    ) -> Result<Response<()>, Status> {
+        Err(Status::unimplemented(
+            "external validation hold removal is not implemented",
+        ))
     }
 
     async fn allocate_instance(
@@ -1041,6 +1116,13 @@ impl Forge for Api {
         request: Request<::rpc::forge::MachinesByIdsRequest>,
     ) -> Result<Response<::rpc::MachineList>, Status> {
         crate::handlers::machine::find_machines_by_ids(self, request).await
+    }
+
+    async fn find_host_states_by_ids(
+        &self,
+        request: Request<rpc::HostStatesByIdsRequest>,
+    ) -> Result<Response<rpc::HostStateList>, Status> {
+        crate::handlers::host_state::find_host_states_by_ids(self, request).await
     }
 
     async fn find_machine_state_histories(
@@ -4031,6 +4113,20 @@ impl Forge for Api {
         request: Request<rpc::ComponentPowerControlRequest>,
     ) -> Result<Response<rpc::ComponentPowerControlResponse>, Status> {
         crate::handlers::component_manager::component_power_control(self, request).await
+    }
+
+    async fn component_reset(
+        &self,
+        request: Request<rpc::ComponentResetRequest>,
+    ) -> Result<Response<rpc::ComponentResetResponse>, Status> {
+        crate::handlers::component_manager::component_reset(self, request).await
+    }
+
+    async fn get_component_reset_status(
+        &self,
+        request: Request<rpc::GetComponentResetStatusRequest>,
+    ) -> Result<Response<rpc::GetComponentResetStatusResponse>, Status> {
+        crate::handlers::component_manager::get_component_reset_status(self, request).await
     }
 
     async fn component_configure_switch_certificate(

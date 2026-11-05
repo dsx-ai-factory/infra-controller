@@ -22,6 +22,28 @@ use serde::{Deserialize, Serialize};
 pub mod operation;
 pub mod result;
 
+/// Where an admitted NIC operation obtains its immutable artifacts.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FirmwareDeliveryMode {
+    /// Fetch anonymous HTTP(S) from the original source, without Core identity.
+    /// This is the compatibility default for operations saved before delivery
+    /// selection was introduced.
+    #[default]
+    Direct,
+    /// Fetch through the authenticated Core artifact endpoint. Cache errors
+    /// never authorize a request to the original source from the host.
+    SiteCache,
+}
+
+impl FirmwareDeliveryMode {
+    /// Whether serialization may omit this mode to preserve an older Direct
+    /// operation's immutable request fingerprint.
+    pub fn is_direct(&self) -> bool {
+        matches!(self, Self::Direct)
+    }
+}
+
 /// Identifies a firmware target by hardware identity and firmware version.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FirmwareSpec {

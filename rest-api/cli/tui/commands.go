@@ -213,7 +213,7 @@ func appendScopeFlags(s *Session, parts []string) []string {
 	switch resource {
 	case "vpc", "allocation", "ip-block", "operating-system", "ssh-key-group",
 		"network-security-group", "sku", "rack", "expected-machine", "instance-type",
-		"expected-rack", "expected-switch", "expected-power-shelf", "tray",
+		"expected-rack", "expected-rack-group", "expected-switch", "expected-power-shelf", "tray", "domain",
 		"dpu-extension-service", "infiniband-partition", "nvlink-logical-partition":
 		if scopeSiteID != "" {
 			out = append(out, "--site-id", scopeSiteID)

@@ -203,7 +203,7 @@ pub(crate) struct Args {
         long = "bmc-ip-address",
         value_name = "BMC_IP_ADDRESS",
         group = "group",
-        help = "Static BMC IP (updates pre-allocated machine_interface when safe, same as expected switches)"
+        help = "Static BMC IP (updates pre-allocated machine_interface when safe, same as expected switches). Must not be unspecified, multicast, or IPv4 limited broadcast, including the IPv4-mapped IPv6 form of each"
     )]
     pub(super) bmc_ip_address: Option<String>,
 

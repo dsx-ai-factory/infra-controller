@@ -642,7 +642,8 @@ pub struct CarbideConfig {
     #[serde(default)]
     pub machine_updater: MachineUpdater,
 
-    /// Maximum number of IDs accepted by `find_*_by_ids` APIs and
+    /// Maximum number of IDs accepted by `find_*_by_ids` APIs,
+    /// routing profile names accepted by `FindRoutingProfilesByNames`, and
     /// card selections accepted by `SetMachineNicFirmwareConfig`.
     /// Default is 100.
     #[serde(default = "default_max_find_by_ids")]
@@ -2028,16 +2029,15 @@ pub struct DpfConfig {
     /// Whether carbide automatically releases DPF maintenance holds for changed
     /// DPUDeployment-owned DPUService revisions whose upgrade policy enables NodeEffect.
     ///
-    /// This selects *who* opens an existing gate; it does not add one. NICo sets
-    /// `upgradePolicy.applyNodeEffect=false` for the DPU agent, DHCP server, FMDS, and OTel
-    /// Collector, so this setting does not gate those revisions. HBN, DTS, and extra services use
-    /// the gated default. Direct, detached DPUService objects do not use this setting.
+    /// This selects *who* opens an existing gate; it does not add one. NICo services,
+    /// HBN, DTS, and extra services use the gated default. Direct, detached DPUService
+    /// objects do not use this setting.
     ///
-    /// On by default. Setting it to false does not resume unchecked rollout: it
-    /// means the held DPUs wait for an operator to release them deliberately,
-    /// rather than for carbide to do it on the host's next idle sweep. Hosts
-    /// still awaiting reprovisioning, and hosts carrying a live tenant instance,
-    /// keep their hold either way.
+    /// Enabled by default. When disabled, service-update holds wait for deliberate
+    /// operator release. Provisioning still releases its own NodeEffect holds and
+    /// clears pending service-sync markers regardless of this setting. Automatic
+    /// service synchronization does not release holds for hosts awaiting
+    /// reprovisioning or carrying a live tenant instance.
     #[serde(default = "default_to_true")]
     pub dpu_service_sync_enabled: bool,
     /// Optional override for the Kubernetes `imagePullSecrets` entry used to pull service
@@ -4399,6 +4399,11 @@ pub struct DpuConfig {
     #[serde(default)]
     pub max_active_service_vpc_interfaces_per_dpu: u32,
 
+    /// Allows a tenant host interface and a service interface to use the same VPC (default false).
+    /// Existing overlapping bindings remain valid when this is false, but new overlap is rejected.
+    #[serde(default)]
+    pub allow_service_vpc_tenant_overlap: bool,
+
     /// Additional SF capacity that is not assigned to an HBN interface.
     #[serde(default)]
     pub additional_managed_sf: u32,
@@ -4455,6 +4460,8 @@ impl<'de> Deserialize<'de> for DpuConfig {
             #[serde(default)]
             max_active_service_vpc_interfaces_per_dpu: Option<u32>,
             #[serde(default)]
+            allow_service_vpc_tenant_overlap: Option<bool>,
+            #[serde(default)]
             additional_managed_sf: Option<u32>,
             #[serde(default)]
             restart_ovs_on_use_admin_network_change: Option<bool>,
@@ -4493,6 +4500,9 @@ impl<'de> Deserialize<'de> for DpuConfig {
             max_active_service_vpc_interfaces_per_dpu: partial
                 .max_active_service_vpc_interfaces_per_dpu
                 .unwrap_or(default.max_active_service_vpc_interfaces_per_dpu),
+            allow_service_vpc_tenant_overlap: partial
+                .allow_service_vpc_tenant_overlap
+                .unwrap_or(default.allow_service_vpc_tenant_overlap),
             additional_managed_sf: partial
                 .additional_managed_sf
                 .unwrap_or(default.additional_managed_sf),
@@ -4628,6 +4638,7 @@ impl Default for DpuConfig {
             num_of_vfs: DEFAULT_DPU_NUM_OF_VFS,
             service_vpc_slot_count: 0,
             max_active_service_vpc_interfaces_per_dpu: 0,
+            allow_service_vpc_tenant_overlap: false,
             additional_managed_sf: 0,
             restart_ovs_on_use_admin_network_change: false,
         }
@@ -6926,7 +6937,7 @@ path = "credentials.yaml"
         );
     }
 
-    /// Verifies omitted configuration retains shipping defaults, including disabled service-VPC counts.
+    /// Verifies omitted configuration retains shipping defaults so service-VPC admission stays restrictive.
     #[test]
     fn deserialize_min_config() {
         // The fixture omits the entire DPU configuration block.
@@ -6934,12 +6945,13 @@ path = "credentials.yaml"
             .merge(Toml::file(format!("{TEST_DATA_DIR}/min_config.toml")))
             .extract()
             .unwrap();
-        // An absent dpu_config block must not implicitly enable either service-VPC count.
+        // An absent dpu_config block must not enable service capacity or tenant overlap.
         assert_eq!(config.dpu_config.service_vpc_slot_count, 0);
         assert_eq!(
             config.dpu_config.max_active_service_vpc_interfaces_per_dpu,
             0
         );
+        assert!(!config.dpu_config.allow_service_vpc_tenant_overlap);
         assert_eq!(config.dpf.deployments.bf3.max_sf_per_pf, 126);
         assert_eq!(config.listen, "[::]:1081".parse().unwrap());
         assert_eq!(config.metrics_endpoint, None);
@@ -7285,6 +7297,7 @@ path = "credentials.yaml"
                 r#"{{ .Values.sshConsole.serviceName }}.{{ include "nico-api.namespace" . }}.svc.cluster.local:{{ .Values.sshConsole.port }}"#,
                 "ssh-console.nico-system.svc.cluster.local:1079",
             ),
+            ("{{ .Values.tracing.enabled }}", "false"),
             ("{{ . | quote }}", r#""/tmp/test.pem""#),
         ] {
             config = config.replace(template, rendered);
@@ -7296,7 +7309,11 @@ path = "credentials.yaml"
             .join("\n");
         assert!(
             !config.contains("{{"),
-            "all Helm template expressions must be rendered for this test"
+            "all Helm template expressions must be rendered for this test:\n\t{}",
+            config
+                .lines()
+                .filter(|line| line.contains("{{"))
+                .join("\n\t"),
         );
         config
     }
@@ -7315,7 +7332,7 @@ path = "credentials.yaml"
         .unwrap();
         let profiles = &config.rack_profiles.rack_profiles;
         assert_eq!(profiles.len(), 14);
-        for (id, family, topology, name, compute_vendor, power_vendor, power_count) in [
+        for (id, family, topology, name, compute_vendor, power_vendor) in [
             (
                 "VR_NVL72R1_C2G4_NVIDIA",
                 "vrnvl72",
@@ -7323,7 +7340,6 @@ path = "credentials.yaml"
                 None,
                 "NVIDIA",
                 "LiteOn",
-                4,
             ),
             (
                 "GB300_NVL72R1_C2G4_NVIDIA",
@@ -7332,7 +7348,6 @@ path = "credentials.yaml"
                 Some("GB300"),
                 "NVIDIA",
                 "LiteOn",
-                6,
             ),
             (
                 "GB300_NVL72R1_C2G4_LENOVO",
@@ -7341,7 +7356,6 @@ path = "credentials.yaml"
                 Some("GB300"),
                 "Lenovo",
                 "LiteOn",
-                6,
             ),
             (
                 "GB300_NVL72R1_C2G4_SMC",
@@ -7350,7 +7364,6 @@ path = "credentials.yaml"
                 Some("GB300"),
                 "Supermicro",
                 "Delta",
-                6,
             ),
             (
                 "GB200_NVL72R1_C2G4_NVIDIA",
@@ -7359,7 +7372,6 @@ path = "credentials.yaml"
                 Some("GB200"),
                 "NVIDIA",
                 "LiteOn",
-                8,
             ),
             (
                 "GB200_NVL72R1_C2G4_WIWYNN",
@@ -7368,10 +7380,9 @@ path = "credentials.yaml"
                 Some("GB200"),
                 "WIWYNN",
                 "LiteOn",
-                8,
             ),
         ] {
-            for (suffix, count) in [("", power_count), ("_NO_POWERSHELF", 0)] {
+            for suffix in ["", "_NO_POWERSHELF"] {
                 let key = format!("{id}{suffix}");
                 let profile = profiles
                     .get(&key)
@@ -7393,7 +7404,7 @@ path = "credentials.yaml"
                     Some(compute_vendor),
                     "{key}"
                 );
-                assert_eq!(caps.compute.count, 18, "{key}");
+                assert_eq!(caps.compute.count, 0, "{key}");
                 assert_eq!(caps.switch.vendor.as_deref(), Some("NVIDIA"), "{key}");
                 assert_eq!(caps.switch.count, 9, "{key}");
                 assert_eq!(
@@ -7401,12 +7412,12 @@ path = "credentials.yaml"
                     Some(power_vendor),
                     "{key}"
                 );
-                assert_eq!(caps.power_shelf.count, count, "{key}");
+                assert_eq!(caps.power_shelf.count, 0, "{key}");
             }
         }
-        for (id, family, vendor, power_count) in [
-            ("NVL72", "gb200", "NVIDIA", 8),
-            ("NVL72_GB300", "gb300", "Lenovo", 6),
+        for (id, family, vendor) in [
+            ("NVL72", "gb200", "NVIDIA"),
+            ("NVL72_GB300", "gb300", "Lenovo"),
         ] {
             let profile = &profiles[id];
             assert_eq!(profile.product_family.as_ref().unwrap().as_str(), family);
@@ -7414,14 +7425,14 @@ path = "credentials.yaml"
                 profile.rack_capabilities.compute.vendor.as_deref(),
                 Some(vendor)
             );
-            assert_eq!(profile.rack_capabilities.compute.count, 18);
+            assert_eq!(profile.rack_capabilities.compute.count, 0);
             assert_eq!(profile.rack_capabilities.switch.count, 9);
-            assert_eq!(profile.rack_capabilities.power_shelf.count, power_count);
+            assert_eq!(profile.rack_capabilities.power_shelf.count, 0);
         }
         let overridden: CarbideConfig = Figment::new()
             .merge(Toml::string(&source))
             .merge(Toml::string(
-                "[rack_profiles.GB200_NVL72R1_C2G4_WIWYNN.rack_capabilities.compute]\nvendor = \"WiWynn\"",
+                "[rack_profiles.GB200_NVL72R1_C2G4_WIWYNN.rack_capabilities.compute]\nvendor = \"WiWynn\"\ncount = 18\n[rack_profiles.GB200_NVL72R1_C2G4_WIWYNN.rack_capabilities.power_shelf]\ncount = 8",
             ))
             .extract()
             .unwrap();
@@ -8210,10 +8221,10 @@ underlay_ip_software_plane_id_bit_len = 7
         assert_eq!(config.astra.underlay_ip_software_plane_id_bit_len, 7);
     }
 
-    /// Verifies explicit service limits survive partial assembly so provisioning reserves the requested SFs.
+    /// Verifies explicit service-VPC settings survive partial assembly so admission uses operator intent.
     #[test]
     fn deserialize_dpu_config() {
-        // Override only the service limits and selected existing fields; firmware defaults remain available.
+        // Override only service settings and selected existing fields; firmware defaults remain available.
         let toml = r#"
 [dpu_config]
 bootstrap_ca_source = "embedded"
@@ -8221,6 +8232,7 @@ dpu_enable_secure_boot = true
 num_of_vfs = 64
 service_vpc_slot_count = 5
 max_active_service_vpc_interfaces_per_dpu = 5
+allow_service_vpc_tenant_overlap = true
 additional_managed_sf = 2
 "#;
 
@@ -8242,28 +8254,59 @@ additional_managed_sf = 2
             config.dpu_config.max_active_service_vpc_interfaces_per_dpu,
             5
         );
+        assert!(config.dpu_config.allow_service_vpc_tenant_overlap);
         assert_eq!(config.dpu_config.additional_managed_sf, 2);
         assert!(!config.dpu_config.dpu_models.is_empty());
     }
 
-    /// Verifies partial blocks keep independent zero defaults so generic headroom cannot enable admission.
+    /// Verifies partial DPU blocks keep service-VPC defaults independent so setting slots,
+    /// `additional_managed_sf`, or overlap cannot enable any omitted service-VPC setting.
     #[test]
     fn service_vpc_counts_default_independently() {
         value_scenarios!(
             run = |input| {
                 // Deserialize the partial block through the production default assembly.
                 let config: DpuConfig = toml::from_str(input).expect("valid partial DPU configuration");
-                (config.service_vpc_slot_count, config.max_active_service_vpc_interfaces_per_dpu)
+                (
+                    config.service_vpc_slot_count,
+                    config.max_active_service_vpc_interfaces_per_dpu,
+                    config.allow_service_vpc_tenant_overlap,
+                )
             };
             "partial service configuration" {
                 // An explicitly empty block retains both disabled counts.
-                "" => (0, 0),
+                "" => (0, 0, false),
                 // Generic capacity remains independent of service-VPC provisioning and admission.
-                "additional_managed_sf = 5" => (0, 0),
+                "additional_managed_sf = 5" => (0, 0, false),
                 // Slots may be provisioned before any endpoint admission is enabled.
-                "service_vpc_slot_count = 5" => (5, 0),
+                "service_vpc_slot_count = 5" => (5, 0, false),
+                // Explicit false retains the same restrictive overlap policy as omission.
+                "allow_service_vpc_tenant_overlap = false" => (0, 0, false),
+                // The overlap escape hatch is independent of physical service capacity.
+                "allow_service_vpc_tenant_overlap = true" => (0, 0, true),
             }
         );
+    }
+
+    /// Verifies the overlap setting accepts only TOML booleans because silently coercing another
+    /// type could enable tenant connectivity to a service VPC unexpectedly.
+    #[test]
+    fn service_vpc_overlap_rejects_non_boolean_values() {
+        let cases = [
+            // An integer must not be interpreted as a conventional zero/one boolean.
+            ("integer", "allow_service_vpc_tenant_overlap = 1"),
+            // A quoted value must not be interpreted by its textual boolean spelling.
+            ("string", "allow_service_vpc_tenant_overlap = \"false\""),
+            // A collection must fail instead of collapsing to an empty or truthy value.
+            ("array", "allow_service_vpc_tenant_overlap = []"),
+        ];
+
+        for (scenario, input) in cases {
+            assert!(
+                toml::from_str::<DpuConfig>(input).is_err(),
+                "{scenario} must fail DPU configuration parsing"
+            );
+        }
     }
 
     #[test]

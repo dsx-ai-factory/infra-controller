@@ -13,6 +13,8 @@ pub mod compute_tray_manager;
 pub mod config;
 pub mod core_compute_manager;
 pub mod error;
+pub mod firmware_inventory;
+pub mod firmware_jobs;
 pub mod mock;
 pub mod nsm;
 pub mod nv_switch_manager;

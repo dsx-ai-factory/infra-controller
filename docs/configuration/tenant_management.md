@@ -221,6 +221,9 @@ Error: API error 400: Tenant Account status is not Invited
 - Read a set of otherwise provider-only resources, including machines, machine health, SKUs, racks, trays, and expected machines, at the sites of a provider it holds a `Ready` tenant account with, wherever the capability is effective. A site override that disables it also removes these reads at that site.
 - Receive alternative VPC routing profiles from `tenant/current/routing-profile`.
 
+Attaching interfaces to another tenant's VPC is a separate capability. See
+[Granting Cross-Tenant Interface Creation](#granting-cross-tenant-interface-creation).
+
 A Provider Admin configures it per tenant account with the `siteCapabilities` field. This is
 the only supported way to grant it, and it applies to regular tenants as well as
 service-account orgs:
@@ -236,12 +239,15 @@ nicocli tenant-account update \
 - Exactly one entry must have an empty or omitted `siteIds`. That entry sets the account-level default.
 - Any further entry lists site IDs that override the default. Each site must already be associated with the tenant, which happens when the tenant's first allocation at that site is created.
 - No site ID may appear in more than one entry.
-- `targetedInstanceCreation` is required on every entry.
+- Every entry must set at least one capability: `targetedInstanceCreation`, `crossTenantInterfaceCreation`, or both.
+- A site entry may only set capabilities that the account-default entry also sets.
 - The request must not also carry `tenantContactId`, which is the invitation-acceptance field. Sending both returns HTTP 400.
 
-Updates use replace semantics. A per-site override whose site ID is omitted from a later
-payload is cleared. To leave the capability on everywhere except one site, send both
-entries together:
+Updates replace each capability on its own. For every capability set in the account-default
+entry, the default is replaced and any per-site override of that capability whose site ID is
+omitted from the payload is cleared. A capability left out of the account-default entry keeps
+its current default and site overrides. To leave the capability on everywhere except one
+site, send both entries together:
 
 ```json
 {
@@ -276,6 +282,58 @@ Do not read `capabilities.targetedInstanceCreation` from `nicocli tenant current
 
 Use `nicocli tenant-account list` instead.
 </Warning>
+
+### Granting Cross-Tenant Interface Creation
+
+`crossTenantInterfaceCreation` lets a tenant attach non-primary instance interfaces to
+another tenant's VPC or VPC prefix at the same site. The interface selects the VPC with
+`vpcId` or the VPC prefix with `vpcPrefixId` on instance create, batch create, or update. The
+caller must be a Tenant Admin, and the VPC must be a `Ready` FNN VPC. The VPC or VPC prefix ID
+comes from the owning tenant out of band, because the capability does not grant discovery of
+or CRUD access to VPCs or VPC prefixes owned by other Tenants.
+
+These rules still apply with the capability:
+
+- The primary VPC and the primary physical interface must belong to the instance's own tenant.
+- Subnets owned by another tenant are rejected.
+- Instance-level Network Security Group policy takes precedence on every interface, including cross-tenant ones.
+
+A Provider Admin sets it with the same `siteCapabilities` field, following the
+[payload rules](#payload-rules) and [resolution order](#how-the-effective-value-resolves)
+described for `targetedInstanceCreation`. The two capabilities are independent, so this
+request leaves `targetedInstanceCreation` unchanged:
+
+```bash
+nicocli tenant-account update \
+  --data '{"siteCapabilities":[{"siteIds":[],"crossTenantInterfaceCreation":true}]}' \
+  <account-id>
+```
+
+#### After revocation
+
+Revoking the capability does not detach existing cross-tenant interfaces. Only a new
+cross-tenant interface identity needs the capability. After revocation, these requests still
+succeed:
+
+- An instance update that does not include `interfaces`.
+- An `interfaces` replacement that keeps every existing cross-tenant interface unchanged.
+- An `interfaces` replacement that removes one or more cross-tenant interfaces, including removing one while keeping another.
+- Instance deletion.
+
+Adding a cross-tenant interface, or retargeting one to a different VPC or VPC prefix owned by
+another tenant, returns HTTP 403.
+
+#### Seeing cross-tenant interfaces
+
+[`GET /v2/org/{org}/nico/interface`](api:GET/v2/org/:org/nico/interface) lists the interfaces
+on the caller's instances, plus interfaces on other tenants' instances that select one of the
+caller's VPCs or VPC prefixes. Listing does not require either capability. Set
+`crossTenant=true` to return only interfaces whose instance and VPC have different owners. On
+those results, `instanceTenantId` and `vpcTenantId` name the two owners. Both are `null` when
+the owners match. Filter by either owner with the `instanceTenantId` or `vpcTenantId` query
+parameter. `includeRelation` expands the instance or VPC prefix, including another tenant's.
+
+A VPC cannot be deleted while another tenant's instance still has an interface on it.
 
 ## Instance Types
 
@@ -637,7 +695,7 @@ An instance in NICo is a bare-metal machine assigned to a tenant within a VPC. C
 | `--instance-type-id` | no | Pick from the pool of machines of this type (alternative to `--machine-id`) |
 | `--operating-system-id` | no | OS for PXE provisioning; see [Templated iPXE Operating Systems](templated-ipxe-operating-systems.md) |
 | `--allow-unhealthy-machine` | no | Override health checks |
-| `--ipxe-script` | no | Custom iPXE script |
+| `--ipxe-script` | no | Custom iPXE script that can use [iPXE script variables](../provisioning/ipxe-script-variables.md). |
 | `--user-data` | no | cloud-init style user data |
 | `--phone-home-enabled` | no | Whether to wait for the OS to phone home for `BootCompleted` |
 | `--network-security-group-id` | no | NSG to apply |
@@ -712,6 +770,44 @@ nicocli instance status-history <instance-id>
 ```
 
 The instance detail response is rich -- it includes `interfaces[]` with assigned IP addresses and VPC prefix info, `ipxeScript` showing the live boot script, `serialConsoleUrl` for console access, full machine and SKU metadata, and any active `deprecations[]` warnings. The API uses inline `deprecations[]` arrays to flag fields scheduled for removal -- watch for these in your responses.
+
+### Network settings in cloud-init user-data
+
+For tenant boots using NICo's NoCloud datasource, NICo extracts a top-level
+`network:` value from user data and serves it as the separate `network-config`
+document. In a `#cloud-config` block mapping, an unindented `network:` entry is
+also removed from the served `user-data` when it can be separated safely. The
+remaining YAML source is preserved. Layouts that cannot be safely rewritten
+remain in user-data, while network extraction is still attempted. These changes
+apply to the boot responses; the stored user data is unchanged.
+
+A `#cloud-config-archive` can carry the same settings inside its cloud-config
+parts. NICo supports static parts declared as `text/cloud-config`, parts beginning
+with a `#cloud-config` header, and untyped parts containing an unmarked YAML
+mapping or a mapping preceded by a comment starting with `#` and a space. Explicit MIME types take
+precedence over content headers. Header matching is case-insensitive and permits
+leading whitespace. Under the default merge rules, the last part defining
+`network` supplies the entire network configuration. NICo removes that key from
+each supported cloud-config part; a network-only part becomes an empty
+cloud-config mapping. Script parts with a `text/x-shellscript` type (including its
+frequency suffixes), untyped scripts beginning with `#!`, and parts explicitly
+typed as `text/cloud-boothook` are preserved. An untyped `#cloud-boothook` part is
+unsupported and causes the entire archive to use the fallback below. Phone-home
+settings and nested installer settings such as `autoinstall.network` are preserved.
+
+When an archive is split, its envelope is rendered as JSON, which is valid YAML.
+String-valued part metadata and the remaining embedded YAML strings are preserved,
+but envelope comments and formatting are not. Use quoted strings for filenames
+and other MIME header metadata to avoid YAML scalar interpretation differences.
+Unquoted metadata values can change meaning under cloud-init's YAML 1.1 rules
+when NICo rewrites the archive as JSON. An archive without network settings is
+served unchanged. Archives with custom merge rules, launch-index filters,
+templates, unsupported part types or layouts, malformed content, metadata that
+cannot survive JSON conversion (such as YAML tags), or references that prevent
+safe splitting are also served unchanged. In these archive fallback cases, the
+separate network response supplies NICo's default DHCPv4 and DHCPv6 configuration
+for interfaces matching `en*` and `eth*`. Do not rely on archive-contained static
+network settings when the archive requires one of these unsupported features.
 
 ### Phone-home
 
@@ -876,7 +972,7 @@ nicocli instance delete <instance-id>
 
 In TUI mode, `instance delete` prompts for confirmation before proceeding. Deletion triggers the full sanitization workflow: secure erase of NVMe storage, GPU and system memory wipe, TPM reset, re-attestation, and network isolation teardown. The machine returns to the available pool once sanitization completes.
 
-### Machine-Level Emergency Operations (gRPC Only)
+### Machine-Level Emergency Operations
 
 If a machine is stuck or unresponsive, operators can use `nico-admin-cli` for
 recovery. Choose the operation that matches the problem:

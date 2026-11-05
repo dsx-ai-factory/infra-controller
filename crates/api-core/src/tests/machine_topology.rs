@@ -83,7 +83,7 @@ async fn test_find_machine_ids_by_bmc_ips(db_pool: sqlx::PgPool) -> Result<(), e
     let (host_machine_id, _dpu_machine_id) = create_managed_host(&env).await.into();
     let host_machine = env.find_machine(&host_machine_id).await.remove(0);
 
-    let bmc_ip = host_machine.bmc_info.as_ref().unwrap().ip();
+    let bmc_ip = host_machine.bmc.as_ref().unwrap().ip();
     let bmc_interface = db::machine_interface_address::find_by_address(&env.pool, bmc_ip.parse()?)
         .await?
         .unwrap();

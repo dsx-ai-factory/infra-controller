@@ -31,8 +31,8 @@ use crate::actor::{Actor, ActorCallbacks, ActorMailbox, ActorResult, AlarmId};
 use crate::persistence::PersistenceError;
 use crate::redfish::computer_system::{SingleSystemState, SystemState};
 use crate::{
-    ActionError, BmcEvent, BmcState, BootOptionKind, Callbacks, ResourceResetType,
-    VirtualMediaUpdate, validate_power_reset,
+    ActionError, BmcEvent, BmcResetUpdate, BmcState, BootOptionKind, Callbacks, DeviceEffect,
+    ResourceResetType, VirtualMediaUpdate, validate_power_reset,
 };
 
 mod commands;
@@ -59,12 +59,7 @@ const VIRSH_CLEANUP_TIMEOUT: Duration = Duration::from_secs(5);
 const INITIALIZATION_WAIT: Duration = Duration::from_secs(40);
 
 /// Delay after each periodic observation; the actor retains at most one polling alarm.
-// Unit tests exercise polling and recovery without waiting for the production cadence.
-const POWER_POLL_INTERVAL: Duration = if cfg!(test) {
-    Duration::from_millis(20)
-} else {
-    Duration::from_secs(5)
-};
+const POWER_POLL_INTERVAL: Duration = Duration::from_secs(5);
 const PERSISTENCE_RETRY_INTERVAL: Duration = Duration::from_secs(1);
 
 #[derive(Debug)]
@@ -200,6 +195,10 @@ enum LibvirtMessage {
     },
     SetVirtualMedia {
         update: VirtualMediaUpdate,
+        reply: oneshot::Sender<Result<(), ActionError>>,
+    },
+    ResetBmcToDefaults {
+        update: BmcResetUpdate,
         reply: oneshot::Sender<Result<(), ActionError>>,
     },
     Refresh,
@@ -561,6 +560,16 @@ impl ActorCallbacks<LibvirtMessage> for LibvirtBackend {
                 reply.send(result).ok();
                 ActorResult::Noop
             }
+            LibvirtMessage::ResetBmcToDefaults { update, reply } => {
+                // The reset changes only BMC state, which is saved with the domain's. A
+                // libvirt-backed BMC serves no DHCP, so there is no recovery to admit.
+                let result = update.commit().await.map(drop);
+                if result.is_ok() {
+                    self.persist(mailbox);
+                }
+                reply.send(result).ok();
+                ActorResult::Noop
+            }
             LibvirtMessage::Stop(reply) => {
                 reply.send(self.save_state()).ok();
                 ActorResult::Stop
@@ -666,6 +675,22 @@ impl Callbacks for LibvirtCallbacks {
             .map_err(|err| ActionError::Internal(err.into()))
     }
 
+    /// A factory reset changes only BMC state; other effects are not modeled.
+    async fn device_effect(&self, effect: DeviceEffect) -> Result<(), ActionError> {
+        let DeviceEffect::ResetBmcToDefaults(update) = effect else {
+            return Err(ActionError::BadRequest(eyre::eyre!(
+                "bmc-mock: backend does not support device effect {effect:?}"
+            )));
+        };
+        let (reply, response) = oneshot::channel();
+        self.mailbox
+            .send(LibvirtMessage::ResetBmcToDefaults { update, reply })
+            .map_err(|error| ActionError::Internal(error.into()))?;
+        response
+            .await
+            .map_err(|error| ActionError::Internal(error.into()))?
+    }
+
     fn state_refresh_indication(&self) {
         if !self.refresh_pending.swap(true, Ordering::SeqCst)
             && let Err(error) = self.mailbox.send(LibvirtMessage::Refresh)
@@ -676,5 +701,8 @@ impl Callbacks for LibvirtCallbacks {
     }
 }
 
+// Do not generate executable stub scripts in tests. A parallel test can fork while
+// another thread holds a script open for writing; inherited descriptors can race
+// with exec and cause ETXTBSY (Text file busy) or other unexpected failures.
 #[cfg(test)]
 mod tests;

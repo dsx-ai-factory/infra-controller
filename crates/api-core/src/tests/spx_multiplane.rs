@@ -9,7 +9,7 @@ use rpc::forge;
 use rpc::forge::forge_server::Forge;
 use tonic::Request;
 
-use crate::cfg::file::EwEthersConfig;
+use crate::cfg::file::{EwEthersConfig, PartialMultiplane};
 use crate::tests::common::api_fixtures::{self, TestEnv, TestEnvOverrides, TestManagedHost};
 
 async fn fixture(pool: sqlx::PgPool) -> (TestEnv, TestManagedHost) {
@@ -21,6 +21,7 @@ async fn fixture_with_dpus(pool: sqlx::PgPool, count: usize) -> (TestEnv, TestMa
     config.ewethers_config = Some(EwEthersConfig {
         enabled: true,
         astra_enabled: true,
+        partial_multiplane: PartialMultiplane::Disabled,
         ..Default::default()
     });
     let env = api_fixtures::create_test_env_with_overrides(

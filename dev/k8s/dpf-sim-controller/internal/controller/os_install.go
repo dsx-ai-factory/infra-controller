@@ -5,6 +5,7 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -155,8 +156,8 @@ func (r *DPUDeviceReconciler) bfbImageURI(ctx context.Context, dpu *provisioning
 // move on. Otherwise the returned result says when to look again.
 //
 // A resource-version-guarded marker is saved before submission. The accepted
-// task path is kept in AnnSimBFBInstallTask. An uncached read can recover that
-// path after a lost patch response. A marker without a task path fails TaskLost,
+// task reference is kept in AnnSimBFBInstallTask. An uncached read can recover it
+// after a lost patch response. A marker without a task reference fails TaskLost,
 // since the BMC exposes no correlation key to prove which task was accepted.
 // The marker prevents a retry from submitting a second install. A SimpleUpdate the BMC
 // refuses, a task in Exception, and the phase timeout all move the DPU to Error,
@@ -206,7 +207,7 @@ func (r *DPUDeviceReconciler) osInstallStep(
 		*dpu = fresh
 		task = dpu.Annotations[carbide.AnnSimBFBInstallTask]
 		if task == "" {
-			return false, ctrl.Result{}, r.failOSInstall(ctx, dpu, "TaskLost", "BFB submission outcome is unknown: durable marker has no task path")
+			return false, ctrl.Result{}, r.failOSInstall(ctx, dpu, "TaskLost", "BFB submission outcome is unknown: durable marker has no task reference")
 		}
 	}
 
@@ -233,21 +234,29 @@ func (r *DPUDeviceReconciler) osInstallStep(
 		if err := r.setInstallAnnotation(ctx, dpu, carbide.AnnSimBFBInstallStarted, "true"); err != nil {
 			return false, ctrl.Result{}, err
 		}
-		task, err = bmc.SimpleUpdate(ctx, uri)
+		reference, err := bmc.SimpleUpdate(ctx, uri)
 		if errors.Is(err, redfish.ErrUpdateRejected) {
 			return false, ctrl.Result{}, r.failOSInstall(ctx, dpu, "FailToInstall", err.Error())
 		}
 		if err != nil {
 			return false, ctrl.Result{}, r.failOSInstall(ctx, dpu, "TaskLost", fmt.Sprintf("BFB submission outcome is unknown: %v", err))
 		}
-		l.Info("BFB install submitted", "dpu", dpu.Name, "bmc", baseURL, "task", task, "image", uri)
-		if err := r.setInstallAnnotation(ctx, dpu, carbide.AnnSimBFBInstallTask, task); err != nil {
+		encoded, err := json.Marshal(reference)
+		if err != nil {
+			return false, ctrl.Result{}, err
+		}
+		l.Info("BFB install submitted", "dpu", dpu.Name, "bmc", baseURL, "task", reference.Path, "kind", reference.Kind, "image", uri)
+		if err := r.setInstallAnnotation(ctx, dpu, carbide.AnnSimBFBInstallTask, string(encoded)); err != nil {
 			return false, ctrl.Result{}, err
 		}
 		return false, ctrl.Result{RequeueAfter: inst.PollInterval}, nil
 	}
 
-	t, err := bmc.GetTask(ctx, task)
+	reference, err := parseInstallTask(task)
+	if err != nil {
+		return false, ctrl.Result{}, r.failOSInstall(ctx, dpu, "TaskLost", fmt.Sprintf("invalid persisted install task: %v", err))
+	}
+	t, err := bmc.GetTask(ctx, reference)
 	if errors.Is(err, redfish.ErrTaskNotFound) {
 		msg := fmt.Sprintf("install task %s was lost: %v", task, err)
 		return false, ctrl.Result{}, r.failOSInstall(ctx, dpu, "TaskLost", msg)
@@ -266,6 +275,29 @@ func (r *DPUDeviceReconciler) osInstallStep(
 	}
 	l.V(1).Info("BFB install in progress", "dpu", dpu.Name, "task", task, "state", t.State, "percent", t.PercentComplete)
 	return false, ctrl.Result{RequeueAfter: inst.PollInterval}, nil
+}
+
+// parseInstallTask reads the JSON reference, or a legacy bare resource path.
+// Missing kind defaults to resource. Invalid JSON references cannot resubmit.
+func parseInstallTask(value string) (redfish.TaskReference, error) {
+	reference := redfish.TaskReference{Kind: redfish.TaskResource}
+	if strings.HasPrefix(strings.TrimSpace(value), "{") {
+		if err := json.Unmarshal([]byte(value), &reference); err != nil {
+			return redfish.TaskReference{}, fmt.Errorf("decode task reference: %w", err)
+		}
+		if !strings.HasPrefix(reference.Path, "/") {
+			return redfish.TaskReference{}, fmt.Errorf("task reference path %q must start with /", reference.Path)
+		}
+	} else {
+		reference.Path = value
+	}
+	if reference.Kind == "" {
+		reference.Kind = redfish.TaskResource
+	}
+	if reference.Path == "" || (reference.Kind != redfish.TaskResource && reference.Kind != redfish.TaskMonitor) {
+		return redfish.TaskReference{}, fmt.Errorf("invalid task reference path %q or kind %q", reference.Path, reference.Kind)
+	}
+	return reference, nil
 }
 
 // setInstallAnnotation uses the resource version so a stale claim or delayed

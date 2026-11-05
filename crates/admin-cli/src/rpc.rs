@@ -2386,6 +2386,7 @@ impl ApiClient {
                 labels,
             }),
             allow_unhealthy_machine: false,
+            external_validation_request_id: None,
         };
 
         tracing::trace!("{}", serde_json::to_string(&instance_request)?);

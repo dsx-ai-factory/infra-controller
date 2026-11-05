@@ -27,5 +27,7 @@ pub(in crate::tests) mod endpoint;
 pub(in crate::tests) mod network_segment;
 pub(in crate::tests) mod overlay_address;
 pub(in crate::tests) mod postgres;
+#[cfg(test)]
+pub(in crate::tests) mod resource_pool;
 pub(in crate::tests) mod rpc_builder;
 pub(in crate::tests) mod sqlx_fixtures;

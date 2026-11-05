@@ -16,7 +16,6 @@
  */
 use std::net::Ipv4Addr;
 use std::sync::Arc;
-use std::time::Duration;
 
 use bmc_mock::injection::InjectionStore;
 use bmc_mock::{ActionError, HostMachineInfo, ResourceResetType};
@@ -95,28 +94,14 @@ impl DeviceHandle {
         }
     }
 
-    pub async fn api_state(&self) -> eyre::Result<String> {
+    /// `is_up` reads the host's local up flag from its latest snapshot.
+    /// Returns an error for stopped actors, switches, or power shelves.
+    /// This does not read Core's lifecycle state.
+    pub fn is_up(&self) -> eyre::Result<bool> {
         match &self.0 {
-            DeviceHandleInner::Machine(handle) => handle.api_state().await,
+            DeviceHandleInner::Machine(handle) => handle.is_up(),
             DeviceHandleInner::Switch(_) | DeviceHandleInner::PowerShelf(_) => {
-                eyre::bail!("API machine state is unavailable for {}", self.kind())
-            }
-        }
-    }
-
-    pub async fn wait_until_machine_up_with_api_state(
-        &self,
-        state: &str,
-        timeout: Duration,
-    ) -> eyre::Result<()> {
-        match &self.0 {
-            DeviceHandleInner::Machine(handle) => {
-                handle
-                    .wait_until_machine_up_with_api_state(state, timeout)
-                    .await
-            }
-            DeviceHandleInner::Switch(_) | DeviceHandleInner::PowerShelf(_) => {
-                eyre::bail!("cannot wait for machine state on {}", self.kind())
+                eyre::bail!("cannot read host readiness on {}", self.kind())
             }
         }
     }
@@ -174,6 +159,16 @@ impl DeviceHandle {
         }
     }
 
+    /// Observes live BMC effects without contacting its leased address.
+    /// Returns None when the live BMC resource state is unavailable.
+    pub fn bmc_effect_snapshot(&self) -> Option<bmc_mock::persistence::BmcEffectSnapshot> {
+        match &self.0 {
+            DeviceHandleInner::Machine(handle) => handle.bmc_effect_snapshot(),
+            DeviceHandleInner::Switch(handle) => handle.bmc_effect_snapshot(),
+            DeviceHandleInner::PowerShelf(handle) => handle.bmc_effect_snapshot(),
+        }
+    }
+
     pub fn persisted(&self) -> PersistedDevice {
         match &self.0 {
             DeviceHandleInner::Machine(handle) => handle.persisted(),
@@ -186,6 +181,24 @@ impl DeviceHandle {
         match &self.0 {
             DeviceHandleInner::Machine(handle) => handle.dpus(),
             DeviceHandleInner::Switch(_) | DeviceHandleInner::PowerShelf(_) => &[],
+        }
+    }
+
+    /// Applied tray AC power drops in this actor's lifetime. Switches and power
+    /// shelves have no tray AC-reset effect and return `None`.
+    pub fn aux_power_cycle_generation(&self) -> Option<u64> {
+        match &self.0 {
+            DeviceHandleInner::Machine(handle) => Some(handle.aux_power_cycle_generation()),
+            DeviceHandleInner::Switch(_) | DeviceHandleInner::PowerShelf(_) => None,
+        }
+    }
+
+    /// Switch power drops caused by restart requests in this actor's lifetime.
+    /// Other device kinds return `None`.
+    pub fn switch_reboot_generation(&self) -> Option<u64> {
+        match &self.0 {
+            DeviceHandleInner::Switch(handle) => Some(handle.reboot_generation()),
+            DeviceHandleInner::Machine(_) | DeviceHandleInner::PowerShelf(_) => None,
         }
     }
 

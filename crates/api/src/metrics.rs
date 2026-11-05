@@ -53,6 +53,7 @@ pub(crate) fn setup_metrics(spancount_reader: Option<SpanCountReader>) -> eyre::
         .with_resource(service_telemetry_attributes)
         .with_view(admission_duration_histogram_view()?)
         .with_view(time_in_state_histogram_view()?)
+        .with_view(handler_latency_histogram_view()?)
         .with_view(retry_histogram_view("*_attempts_*")?)
         .with_view(retry_histogram_view("*_retries_*")?)
         .with_view(ApiMetricsEmitter::machine_reboot_duration_view()?)
@@ -61,6 +62,9 @@ pub(crate) fn setup_metrics(spancount_reader: Option<SpanCountReader>) -> eyre::
         )?)
         .with_view(carbide_site_explorer::site_explorer_latency_histogram_view(
             "carbide_endpoint_exploration_duration",
+        )?)
+        .with_view(carbide_site_explorer::site_explorer_latency_histogram_view(
+            "carbide_endpoint_exploration_step_latency",
         )?)
         .build();
     // After this call `global::meter()` will be available
@@ -106,6 +110,22 @@ fn time_in_state_histogram_view() -> carbide_metrics_utils::Result<OtelView> {
             boundaries: vec![
                 0.0, 5.0, 10.0, 25.0, 50.0, 75.0, 100.0, 250.0, 500.0, 750.0, 1000.0, 2500.0,
                 5000.0, 7500.0, 10000.0, 14400.0, 28800.0, 86400.0, 259200.0, 604800.0,
+            ],
+            record_min_max: true,
+        },
+    )
+}
+
+/// Keeps existing millisecond buckets and resolves handlers through the default
+/// three-minute handling budget, with headroom up to five minutes.
+fn handler_latency_histogram_view() -> carbide_metrics_utils::Result<OtelView> {
+    carbide_metrics_utils::new_view(
+        "carbide_*_handler_latency_in_state",
+        Some(opentelemetry_sdk::metrics::InstrumentKind::Histogram),
+        opentelemetry_sdk::metrics::Aggregation::ExplicitBucketHistogram {
+            boundaries: vec![
+                0.0, 5.0, 10.0, 25.0, 50.0, 75.0, 100.0, 250.0, 500.0, 750.0, 1000.0, 2500.0,
+                5000.0, 7500.0, 10000.0, 15000.0, 30000.0, 60000.0, 120000.0, 180000.0, 300000.0,
             ],
             record_min_max: true,
         },
@@ -232,6 +252,12 @@ mod tests {
                 )
                 .unwrap(),
             )
+            .with_view(
+                carbide_site_explorer::site_explorer_latency_histogram_view(
+                    "carbide_endpoint_exploration_step_latency",
+                )
+                .unwrap(),
+            )
             .build();
 
         let state = KeyValue::new("state", "mystate");
@@ -275,6 +301,44 @@ mod tests {
                 assert!(!encoded.contains(r#"mygauge{error="ErrC",state="mystate"} 1"#));
             }
         }
+    }
+
+    /// Exercise production view registration and Prometheus export for slow steps.
+    #[tokio::test]
+    async fn endpoint_exploration_step_latency_uses_extended_buckets() {
+        let metrics = setup_metrics(None).unwrap();
+        metrics
+            .meter
+            .f64_histogram("carbide_endpoint_exploration_step_latency")
+            .with_unit("ms")
+            .build()
+            .record(30_000.0, &[KeyValue::new("step", "redfish_explore")]);
+
+        let mut buffer = vec![];
+        TextEncoder::new()
+            .encode(&metrics.registry.gather(), &mut buffer)
+            .unwrap();
+        let encoded = String::from_utf8(buffer).unwrap();
+        check_values(
+            [
+                r#"bucket{step="redfish_explore",le="10000"} 0"#,
+                r#"bucket{step="redfish_explore",le="30000"} 1"#,
+                r#"bucket{step="redfish_explore",le="3600000"} 1"#,
+                r#"bucket{step="redfish_explore",le="+Inf"} 1"#,
+                r#"count{step="redfish_explore"} 1"#,
+                r#"sum{step="redfish_explore"} 30000"#,
+            ]
+            .map(|sample| Check {
+                scenario: sample,
+                input: sample,
+                expect: true,
+            }),
+            |sample| {
+                let expected =
+                    format!("carbide_endpoint_exploration_step_latency_milliseconds_{sample}");
+                encoded.lines().any(|line| line == expected)
+            },
+        );
     }
 
     #[test]
@@ -448,6 +512,77 @@ mod tests {
     }
 
     #[test]
+    fn handler_latency_histograms_resolve_slow_handlers() {
+        let default_buckets: Vec<_> = [
+            0.0, 5.0, 10.0, 25.0, 50.0, 75.0, 100.0, 250.0, 500.0, 750.0, 1000.0, 2500.0, 5000.0,
+            7500.0, 10000.0,
+        ]
+        .into_iter()
+        .map(|boundary| (boundary, u64::from(boundary >= 50.0)))
+        .collect();
+        let mut handler_buckets = default_buckets.clone();
+        handler_buckets.extend([
+            (15000.0, 1),
+            (30000.0, 2),
+            (60000.0, 2),
+            (120000.0, 2),
+            (180000.0, 3),
+            (300000.0, 4),
+        ]);
+
+        check_values(
+            [
+                Check {
+                    scenario: "handler latency covers slow calls and the handling budget",
+                    input: "carbide_power_shelves_handler_latency_in_state",
+                    expect: handler_buckets,
+                },
+                Check {
+                    scenario: "unrelated controller latency keeps default buckets",
+                    input: "carbide_power_shelves_iteration_latency",
+                    expect: default_buckets,
+                },
+            ],
+            |name| {
+                let registry = prometheus::Registry::new();
+                let exporter = opentelemetry_prometheus::exporter()
+                    .with_registry(registry.clone())
+                    .without_scope_info()
+                    .without_target_info()
+                    .build()
+                    .unwrap();
+                let provider = opentelemetry_sdk::metrics::MeterProviderBuilder::default()
+                    .with_reader(exporter)
+                    .with_view(handler_latency_histogram_view().unwrap())
+                    .build();
+                let histogram = provider
+                    .meter("test")
+                    .f64_histogram(name)
+                    .with_unit("ms")
+                    .build();
+                for milliseconds in [50.0, 20000.0, 180000.0, 240000.0] {
+                    histogram.record(milliseconds, &[]);
+                }
+
+                let families = registry.gather();
+                let exported_name = format!("{name}_milliseconds");
+                let family = families
+                    .iter()
+                    .find(|family| family.name() == exported_name)
+                    .unwrap();
+                let histogram = family.get_metric()[0].get_histogram();
+                assert_eq!(histogram.get_sample_count(), 4, "{name}: count");
+                assert_eq!(histogram.get_sample_sum(), 440050.0, "{name}: sum");
+                histogram
+                    .get_bucket()
+                    .iter()
+                    .map(|bucket| (bucket.upper_bound(), bucket.cumulative_count()))
+                    .collect::<Vec<_>>()
+            },
+        );
+    }
+
+    #[test]
     fn time_in_state_histograms_resolve_multi_day_dwells() {
         let registry = prometheus::Registry::new();
         let exporter = opentelemetry_prometheus::exporter()
@@ -459,6 +594,7 @@ mod tests {
         let provider = opentelemetry_sdk::metrics::MeterProviderBuilder::default()
             .with_reader(exporter)
             .with_view(time_in_state_histogram_view().unwrap())
+            .with_view(handler_latency_histogram_view().unwrap())
             .build();
         // Two days, past the last default boundary of 10000.
         provider

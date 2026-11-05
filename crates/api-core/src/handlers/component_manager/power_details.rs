@@ -17,16 +17,14 @@ use component_manager::core_compute_manager::CoreComputeTrayManager;
 use component_manager::error::ComponentManagerError;
 use component_manager::nv_switch_manager::SwitchEndpoint;
 use component_manager::power_shelf_manager::{PowerShelfEndpoint, PowerShelfVendor};
+use db::DbSessionGuard;
 use futures_util::{StreamExt, stream};
 use mac_address::MacAddress;
 use model::machine::PowerState;
 use model::machine::machine_search_config::MachineSearchConfig;
 use tonic::{Request, Response, Status};
 
-use super::{
-    fetch_compute_tray_bmc_credentials, fetch_powershelf_pmc_credentials,
-    fetch_switch_bmc_credentials, fetch_switch_nvos_credentials, is_rack_scale_server,
-};
+use super::{RackComponent, fetch_credentials, is_rack_scale_server};
 use crate::CarbideError;
 use crate::api::{Api, log_request_data};
 
@@ -63,76 +61,6 @@ enum PowerReadEndpoint {
 struct PendingDetails {
     details: rpc::ComponentPowerDetails,
     endpoint: Option<PowerReadEndpoint>,
-}
-
-/// `DbSessionGuard` owns a pooled connection until successful work explicitly
-/// returns it through `return_to_pool`. Dropping the guard before that discards
-/// the connection and immediately releases the local pool slot.
-///
-/// SQLx's normal cleanup can wait for a blocked query before rollback, so the
-/// guard also covers setup and network stalls that the statement cap cannot.
-struct DbSessionGuard {
-    connection: Option<sqlx::pool::PoolConnection<sqlx::Postgres>>,
-}
-
-impl DbSessionGuard {
-    /// Wraps the pooled connection before `BEGIN`, so failed or cancelled
-    /// transaction startup still releases its pool slot.
-    async fn acquire(pool: &sqlx::PgPool) -> Result<Self, db::DatabaseError> {
-        Ok(Self {
-            connection: Some(pool.acquire().await.map_err(db::DatabaseError::acquire)?),
-        })
-    }
-
-    /// Starts a consistent, read-only snapshot with a transaction-local server
-    /// limit of at most `SNAPSHOT_TIMEOUT` per subsequent statement. A shorter
-    /// operator setting remains in effect. The separate client deadline covers
-    /// acquisition and setup; the server limit does not cover those stages.
-    async fn begin(&mut self) -> Result<db::Transaction<'_>, db::DatabaseError> {
-        let connection = self
-            .connection
-            .as_deref_mut()
-            .expect("the snapshot retains its connection until return_to_pool consumes it");
-        let mut txn = db::Transaction::begin_inner(connection).await?;
-        // Policy, identity and maintenance must share a snapshot, without row locks.
-        sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
-            .execute(txn.as_pgconn())
-            .await
-            .map_err(|error| db::DatabaseError::query("set power details snapshot", error))?;
-
-        // `pg_settings` reports milliseconds. `NULLIF` turns a disabled (zero)
-        // timeout into NULL, which `LEAST` ignores when applying our cap. A
-        // shorter limit remains unchanged. The `true` argument makes this
-        // transaction-local, so the setting resets when the txn ends.
-        sqlx::query(
-            "SELECT set_config('statement_timeout', \
-                LEAST(NULLIF(setting::bigint, 0), $1::text::bigint)::text, true) \
-             FROM pg_settings WHERE name = 'statement_timeout'",
-        )
-        .bind(SNAPSHOT_TIMEOUT.as_millis().to_string())
-        .execute(txn.as_pgconn())
-        .await
-        .map_err(|error| db::DatabaseError::query("set power details statement timeout", error))?;
-        Ok(txn)
-    }
-
-    /// Returns a healthy connection through SQLx after its transaction commits.
-    fn return_to_pool(mut self) {
-        drop(self.connection.take());
-    }
-}
-
-impl Drop for DbSessionGuard {
-    fn drop(&mut self) {
-        if let Some(connection) = self.connection.take() {
-            // Detaching frees the local pool slot immediately. Closing the
-            // socket does not guarantee that PostgreSQL stops immediately;
-            // after snapshot setup, its statement timeout separately bounds
-            // each subsequent SQL statement. Discarded server sessions may
-            // briefly remain alongside replacements and exceed the pool limit.
-            drop(connection.detach());
-        }
-    }
 }
 
 /// Loads identity, policy and tracked maintenance in one snapshot, then releases
@@ -241,7 +169,9 @@ fn validate_ids<Id: Eq + Hash>(ids: &[Id]) -> Result<(), CarbideError> {
 /// one read-only transaction, releasing it before credentials or hardware I/O.
 async fn load_snapshot(api: &Api, target: Target) -> Result<Vec<PendingDetails>, CarbideError> {
     let mut connection = DbSessionGuard::acquire(api.pg_pool()).await?;
-    let mut txn = connection.begin().await?;
+    let mut txn = connection
+        .begin_read_only_snapshot(SNAPSHOT_TIMEOUT)
+        .await?;
     let entries = match target {
         Target::MachineIds(list) => {
             let machines = db::machine::find(
@@ -469,17 +399,12 @@ async fn read_actual(
         PowerReadEndpoint::Shelf(row) => row.pmc_mac,
     };
 
-    let credentials = match &endpoint {
-        PowerReadEndpoint::Compute { .. } => {
-            fetch_compute_tray_bmc_credentials(api.credential_manager.as_ref(), mac).await
-        }
-        PowerReadEndpoint::Switch(_) => {
-            fetch_switch_bmc_credentials(api.credential_manager.as_ref(), mac).await
-        }
-        PowerReadEndpoint::Shelf(_) => {
-            fetch_powershelf_pmc_credentials(api.credential_manager.as_ref(), mac).await
-        }
+    let credential_kind = match &endpoint {
+        PowerReadEndpoint::Compute { .. } => RackComponent::ComputeBmc,
+        PowerReadEndpoint::Switch(_) => RackComponent::SwitchBmc,
+        PowerReadEndpoint::Shelf(_) => RackComponent::PowerShelfPmc,
     };
+    let credentials = fetch_credentials(api, credential_kind, mac).await;
     // The caller's `timeout_at` polls ready results before checking expiry.
     // Check here so a late error cannot replace `DeadlineExceeded` and late
     // credentials cannot start another read.
@@ -515,8 +440,7 @@ async fn read_actual(
             let (Some(nvos_mac), Some(nvos_ip)) = (row.nvos_mac, row.nvos_ip) else {
                 return failed_observation(ErrorCode::EndpointUnavailable, Some(source));
             };
-            let nvos_credentials =
-                fetch_switch_nvos_credentials(api.credential_manager.as_ref(), mac).await;
+            let nvos_credentials = fetch_credentials(api, RackComponent::SwitchNvos, mac).await;
             // Apply the same guard before classifying the second credential lookup.
             if tokio::time::Instant::now() >= deadline {
                 return failed_observation(ErrorCode::DeadlineExceeded, Some(source));
@@ -685,66 +609,6 @@ mod tests {
     use carbide_uuid::switch::SwitchId;
 
     use super::*;
-
-    /// Snapshot setup must configure read-only, repeatable-read queries and the
-    /// server cap without extending a tighter operator limit or changing the
-    /// setting used by later pool borrowers.
-    #[crate::sqlx_test]
-    async fn snapshot_statement_timeout_is_capped_and_transaction_local(
-        pool: sqlx::PgPool,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut connection = DbSessionGuard::acquire(&pool).await?;
-        for (configured_ms, expected_ms) in [
-            // A disabled server timeout still needs the snapshot's limit.
-            (0, 5000_i64),
-            // A broader site limit must not extend snapshot SQL work.
-            (60000, 5000),
-            // Preserve an operator's stricter limit.
-            (1000, 1000),
-        ] {
-            sqlx::query("SELECT set_config('statement_timeout', $1, false)")
-                .bind(configured_ms.to_string())
-                .execute(
-                    connection
-                        .connection
-                        .as_deref_mut()
-                        .expect("snapshot lease"),
-                )
-                .await?;
-
-            let mut txn = connection.begin().await?;
-            let effective_ms: i64 = sqlx::query_scalar(
-                "SELECT setting::bigint FROM pg_settings WHERE name = 'statement_timeout'",
-            )
-            .fetch_one(txn.as_pgconn())
-            .await?;
-            assert_eq!(effective_ms, expected_ms, "configured {configured_ms}ms");
-            let (read_only, isolation): (String, String) = sqlx::query_as(
-                "SELECT current_setting('transaction_read_only'), \
-                        current_setting('transaction_isolation')",
-            )
-            .fetch_one(txn.as_pgconn())
-            .await?;
-            assert_eq!(read_only, "on");
-            assert_eq!(isolation, "repeatable read");
-            txn.commit().await?;
-
-            let restored_ms: i64 = sqlx::query_scalar(
-                "SELECT setting::bigint FROM pg_settings WHERE name = 'statement_timeout'",
-            )
-            .fetch_one(
-                connection
-                    .connection
-                    .as_deref_mut()
-                    .expect("snapshot lease"),
-            )
-            .await?;
-            assert_eq!(restored_ms, configured_ms, "configured {configured_ms}ms");
-        }
-        connection.return_to_pool();
-
-        Ok(())
-    }
 
     /// Keep invalid batches out of snapshot acquisition while preserving each
     /// typed target arm and the inclusive request-size boundary.

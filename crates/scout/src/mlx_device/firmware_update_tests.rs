@@ -12,8 +12,12 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use axum::Router;
+use axum::extract::Request;
+use axum::http::header;
+use axum::middleware::{Next, from_fn};
 use axum::response::Redirect;
 use axum::routing::get;
+use carbide_libmlx_model::device::identity::MlxDeviceSelector;
 use libmlx::firmware::config::{
     FirmwareFlasherProfile, FirmwareSpec, FirmwareUpdateContext, FlashOptions, FlashSpec,
 };
@@ -21,13 +25,20 @@ use libmlx::firmware::operation::{
     FirmwareOperation, FirmwareOperationPhase, FirmwareOperationState, FirmwareSupervisorClient,
     SupervisorConfig, SupervisorLaunchMode,
 };
+use rcgen::{
+    BasicConstraints, CertificateParams, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair,
+    KeyUsagePurpose, SanType,
+};
 use rpc::forge_agent_control_response as fac;
 use rpc::protos::mlx_device as pb;
+use rpc::protos::mlx_device::mlx_device_update_firmware_result::Result as FirmwareUpdateResult;
 use sha2::{Digest, Sha256};
 use tokio::net::TcpListener;
 use tokio::process::{Child, Command};
 use tokio::task::JoinSet;
 use tokio::time::{sleep, timeout};
+
+use crate::Options;
 
 const DEVICE: &str = "ffff:fe:1f.0";
 const SLOT: &str = "ffff:fe:1f";
@@ -36,15 +47,20 @@ const CONFIGURATION: &str = "checked device configuration";
 const WATCHDOG: Duration = Duration::from_secs(10);
 const TEST_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Scout preserves checked inputs and retry settings through real supervisor
-/// admission; a settled Verify failure retries without repeating the mutations.
+/// Scout preserves the observed instance, checked inputs, and retry settings
+/// through real supervisor admission; a settled Verify failure retries without
+/// repeating the mutations. A restarted supervisor can still return a retained
+/// receipt, but a replacement that lost its journal cannot admit the work again.
+/// Available Core credentials must never reach the Direct artifact origin.
 #[tokio::test]
 async fn checked_update_stages_owned_inputs_and_publishes_correlated_receipts() {
     timeout(TEST_TIMEOUT, async {
         let directory = private_fixture();
         let fixture = directory.path();
         fake_tools(fixture).await;
-        let (base_url, fetches, mut server) = artifact_server().await;
+        let core_options = core_options_with_usable_identity(fixture);
+        let authenticated_requests = Arc::new(AtomicUsize::new(0));
+        let (base_url, fetches, mut server) = artifact_server(authenticated_requests.clone()).await;
         let mut daemon = TestDaemon::start(fixture).await;
         let config = SupervisorConfig {
             state_directory: fixture.join("state"),
@@ -52,9 +68,21 @@ async fn checked_update_stages_owned_inputs_and_publishes_correlated_receipts() 
             launch_mode: SupervisorLaunchMode::Standalone,
         };
 
+        // Observing missing work names the serving instance without staging
+        // an image, probing the card, or claiming the host. Like a controller
+        // must, the test passes this value back on every later submission of
+        // the operation.
+        let mut task = update_task(&base_url);
+        let original_instance = observe_missing(&task, &config).await;
+        task.supervisor_instance_id = Some(original_instance.clone());
+        assert_eq!(fetches.load(Ordering::SeqCst), 0);
+        assert!(!fixture.join("queries").exists());
+        assert!(!fixture.join("mutations").exists());
+        assert!(!fixture.join("state/mutation.json").exists());
+
         // The image is correct, but a wrong configuration digest must stop
         // before either mutation. Checking only the image would miss this.
-        let mut rejected = update_task(&base_url);
+        let mut rejected = task.clone();
         rejected.operation_id = "bad-configuration".into();
         rejected
             .expected_digests
@@ -78,8 +106,9 @@ async fn checked_update_stages_owned_inputs_and_publishes_correlated_receipts() 
         assert_retained_inputs(fixture, &failed_record);
         assert_eq!(fetches.load(Ordering::SeqCst), 2);
 
-        let task = update_task(&base_url);
-        let accepted = deliver(&task, &config)
+        // Production supplies Core options for Direct too. A usable identity
+        // must stay out of both the helper's transport and its origin requests.
+        let accepted = deliver_with_core_options(&task, &config, Some(&core_options))
             .await
             .expect("admit checked firmware");
         assert!(matches!(
@@ -94,6 +123,16 @@ async fn checked_update_stages_owned_inputs_and_publishes_correlated_receipts() 
         assert_eq!(running.state, FirmwareOperationState::Running);
         assert_eq!(running.phase, Some(FirmwareOperationPhase::Burn));
         assert!(!running.report.flashed);
+        // Observation reads the receipt without querying the card mid-burn.
+        let queries = fs::read_to_string(fixture.join("queries")).unwrap();
+        assert_eq!(
+            observe(&task, &config).await,
+            FirmwareUpdateResult::Receipt(running.clone().into())
+        );
+        assert_eq!(
+            fs::read_to_string(fixture.join("queries")).unwrap(),
+            queries
+        );
         let claim: serde_json::Value =
             serde_json::from_slice(&fs::read(fixture.join("state/mutation.json")).unwrap())
                 .unwrap();
@@ -132,6 +171,11 @@ async fn checked_update_stages_owned_inputs_and_publishes_correlated_receipts() 
             );
         }
         assert_eq!(fetches.load(Ordering::SeqCst), 4);
+        assert_eq!(
+            authenticated_requests.load(Ordering::SeqCst),
+            0,
+            "Direct requests must omit Authorization and Proxy-Authorization"
+        );
         let mutations = fs::read_to_string(fixture.join("mutations")).unwrap();
         assert_eq!(mutations, "configure\nburn\n");
 
@@ -142,9 +186,28 @@ async fn checked_update_stages_owned_inputs_and_publishes_correlated_receipts() 
             .expect("stop artifact server");
         let mut conflicting = task.clone();
         conflicting.phase_id = "different-dispatch-phase".into();
+        // Reading must compare the saved request too; otherwise Scout could
+        // attach this different phase to the original burn's receipt.
+        let FirmwareUpdateResult::Error(conflict) = observe(&conflicting, &config).await else {
+            panic!("changed immutable context must conflict on observation");
+        };
+        assert_eq!(
+            conflict.code,
+            pb::MlxDeviceUpdateFirmwareErrorCode::Conflict as i32
+        );
         let conflict = deliver(&conflicting, &config)
             .await
-            .expect_err("changed work must use Submit, not a Get-first shortcut");
+            .expect_err("changed work cannot reuse an admitted ID");
+        assert_eq!(
+            conflict.code,
+            pb::MlxDeviceUpdateFirmwareErrorCode::Conflict as i32
+        );
+        // An unguarded update goes straight to submission, which compares the
+        // saved request the same way.
+        conflicting.supervisor_instance_id = None;
+        let conflict = deliver(&conflicting, &config)
+            .await
+            .expect_err("unguarded changed work cannot reuse an admitted ID");
         assert_eq!(
             conflict.code,
             pb::MlxDeviceUpdateFirmwareErrorCode::Conflict as i32
@@ -215,10 +278,19 @@ async fn checked_update_stages_owned_inputs_and_publishes_correlated_receipts() 
             fs::read_to_string(fixture.join("mutations")).unwrap(),
             completed_mutations
         );
-        // The restarted daemon must deserialize the same checked request and
-        // return its terminal receipt even though its source server is gone.
+        // The restarted daemon keeps its journal: it returns the terminal
+        // receipt to observation and to the guarded update without the source
+        // server or the card. Unknown work shows that it is a new instance.
         daemon.stop().await;
         daemon = TestDaemon::start(fixture).await;
+        let mut unknown = task.clone();
+        unknown.operation_id = "unadmitted-after-restart".into();
+        assert_ne!(observe_missing(&unknown, &config).await, original_instance);
+        let queries = fs::read_to_string(fixture.join("queries")).unwrap();
+        assert_eq!(
+            observe(&task, &config).await,
+            FirmwareUpdateResult::Receipt(complete.clone().into())
+        );
         let repeated = deliver(&task, &config)
             .await
             .expect("observe the completed request after supervisor restart");
@@ -237,28 +309,71 @@ async fn checked_update_stages_owned_inputs_and_publishes_correlated_receipts() 
         );
         assert!(!fixture.join("state/mutation.json").exists());
         assert_eq!(fetches.load(Ordering::SeqCst), 4);
+        assert_eq!(
+            fs::read_to_string(fixture.join("queries")).unwrap(),
+            queries
+        );
+        daemon.stop().await;
+
+        // Move only this stopped fixture's journal aside. The replacement has
+        // no receipt, so the guarded update reports that instead of burning.
+        fs::rename(fixture.join("state"), fixture.join("retained-state")).unwrap();
+        fs::create_dir(fixture.join("state")).unwrap();
+        fs::set_permissions(fixture.join("state"), fs::Permissions::from_mode(0o700)).unwrap();
+        daemon = TestDaemon::start(fixture).await;
+        let replacement_instance = observe_missing(&task, &config).await;
+        assert_ne!(replacement_instance, original_instance);
+        assert_eq!(
+            deliver_command(
+                &task.operation_id,
+                &task.phase_id,
+                fac::mlx_device_action::Command::UpdateFirmware(task.clone()),
+                &config,
+                None,
+            )
+            .await,
+            FirmwareUpdateResult::MissingReceipt(pb::FirmwareOperationMissingReceipt {
+                supervisor_instance_id: replacement_instance.clone(),
+            })
+        );
+        assert_eq!(observe_missing(&task, &config).await, replacement_instance);
+        assert!(!fixture.join("state/mutation.json").exists());
+        assert_eq!(fetches.load(Ordering::SeqCst), 4);
+        assert_eq!(
+            fs::read_to_string(fixture.join("queries")).unwrap(),
+            queries
+        );
+        assert_eq!(
+            fs::read_to_string(fixture.join("mutations")).unwrap(),
+            completed_mutations
+        );
         daemon.stop().await;
     })
     .await
     .expect("checked Scout update exceeded its independent watchdog");
 }
 
-/// Checked admission must reach the strict resolver and live PCI comparison
-/// before any mutation, retaining the inputs that were fully staged.
+/// Checked admission must reach the strict resolver and the live PCI and card
+/// comparisons before any mutation, retaining the inputs that were fully staged.
 #[tokio::test]
-async fn checked_update_rejects_redirects_and_mismatched_pci_before_mutation() {
+async fn checked_update_rejects_source_and_device_mismatches_before_mutation() {
     #[derive(Clone, Copy, Debug)]
     enum Rejection {
         Redirect,
         PciMismatch,
+        DeviceMismatch,
     }
 
-    for rejection in [Rejection::Redirect, Rejection::PciMismatch] {
+    for (rejection, diagnostic) in [
+        (Rejection::Redirect, "status=Some(307)"),
+        (Rejection::PciMismatch, "PCI address"),
+        (Rejection::DeviceMismatch, "base MAC"),
+    ] {
         timeout(TEST_TIMEOUT, async {
             let directory = private_fixture();
             let fixture = directory.path();
             fake_tools(fixture).await;
-            let (base_url, fetches, mut server) = artifact_server().await;
+            let (base_url, fetches, mut server) = artifact_server(Arc::default()).await;
             let mut task = update_task(&base_url);
             match rejection {
                 Rejection::Redirect => {
@@ -277,10 +392,23 @@ async fn checked_update_rejects_redirects_and_mismatched_pci_before_mutation() {
                     // query's reported PCI function differs from the request.
                     fs::write(fixture.join("mismatched-pci"), "mismatch").unwrap();
                 }
+                Rejection::DeviceMismatch => {
+                    // A replacement at the same address has the same part,
+                    // PSID, and image eligibility, but is not the expected card.
+                    task.expected_device =
+                        Some(MlxDeviceSelector::Mac("02:00:00:00:00:02".parse().unwrap()).into());
+                }
             }
             let expected_context = FirmwareUpdateContext {
+                delivery_mode: Default::default(),
                 phase_id: task.phase_id.clone(),
                 expected_digests: task.expected_digests.clone().unwrap().try_into().unwrap(),
+                expected_device: task
+                    .expected_device
+                    .clone()
+                    .map(TryInto::try_into)
+                    .transpose()
+                    .unwrap(),
             };
             let mut daemon = TestDaemon::start(fixture).await;
             let config = SupervisorConfig {
@@ -295,6 +423,10 @@ async fn checked_update_rejects_redirects_and_mismatched_pci_before_mutation() {
                 "{rejection:?}"
             );
             assert!(!failed.report.flashed, "{rejection:?}");
+            assert!(
+                failed.diagnostic.as_deref().unwrap().contains(diagnostic),
+                "{rejection:?}"
+            );
             let record = journal_record(fixture, &task.operation_id);
             assert_eq!(record["operation"], serde_json::to_value(&failed).unwrap());
             assert_eq!(record["mutation_started"], false);
@@ -306,13 +438,6 @@ async fn checked_update_rejects_redirects_and_mismatched_pci_before_mutation() {
             wait_for_claim_release(fixture).await;
             match rejection {
                 Rejection::Redirect => {
-                    assert!(
-                        failed
-                            .diagnostic
-                            .as_deref()
-                            .unwrap()
-                            .contains("status=Some(307)")
-                    );
                     assert_eq!(
                         fetches.load(Ordering::SeqCst),
                         0,
@@ -320,14 +445,7 @@ async fn checked_update_rejects_redirects_and_mismatched_pci_before_mutation() {
                     );
                     assert!(record["prepared_inputs"].is_null());
                 }
-                Rejection::PciMismatch => {
-                    assert!(
-                        failed
-                            .diagnostic
-                            .as_deref()
-                            .unwrap()
-                            .contains("PCI address")
-                    );
+                Rejection::PciMismatch | Rejection::DeviceMismatch => {
                     assert_eq!(fetches.load(Ordering::SeqCst), 2);
                     assert_retained_inputs(fixture, &record);
                 }
@@ -356,6 +474,52 @@ fn private_fixture() -> tempfile::TempDir {
         fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
     }
     directory
+}
+
+/// Supply fresh identity material Scout can load and use to mint a Core JWT.
+fn core_options_with_usable_identity(fixture: &Path) -> Options {
+    let ca_key = KeyPair::generate().expect("Core fixture CA key");
+    let mut ca_params = CertificateParams::default();
+    ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+    ca_params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
+    let ca = ca_params.self_signed(&ca_key).expect("Core fixture CA");
+    let issuer = Issuer::from_params(&ca_params, &ca_key);
+    let client_key = KeyPair::generate().expect("Core fixture client key");
+    let mut client_params = CertificateParams::default();
+    client_params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
+    client_params.subject_alt_names = vec![SanType::URI(
+        "spiffe://direct.test/machine/fm100ht038bg3qsho433vkg684heguv282qaggmrsh2ugn1qk096n2c6hcg"
+            .try_into()
+            .expect("Core fixture machine URI"),
+    )];
+    let client = client_params
+        .signed_by(&client_key, &issuer)
+        .expect("Core fixture client certificate");
+    let write = |name: &str, contents: &str| {
+        let path = fixture.join(name);
+        fs::write(&path, contents).expect("write Core identity fixture");
+        path.to_string_lossy().into_owned()
+    };
+    let mut options = <Options as clap::Parser>::parse_from([
+        "forge-scout",
+        "--api=https://core.example.test:1079",
+    ]);
+    options.root_ca = write("core-ca.pem", &ca.pem());
+    options.client_cert = write("core-client.pem", &client.pem());
+    options.client_key = write("core-client-key.pem", &client_key.serialize_pem());
+    let transport = crate::client::forge_client_config(&options);
+    assert!(transport.root_ca_is_usable());
+    assert!(transport.read_client_cert().is_some());
+    assert!(
+        transport
+            .node_token_provider
+            .as_ref()
+            .expect("Core node token provider")
+            .current()
+            .is_some(),
+        "Core identity must be able to mint the credential Direct must not send"
+    );
+    options
 }
 
 /// The normal test prerequisite builds this cross-package binary beside `deps`.
@@ -455,11 +619,12 @@ case "${0##*/}" in
     mlxfwmanager)
         [ "$#" -eq 4 ] && [ "$1" = --dev ] && [ "$2" = ffff:fe:1f.0 ] &&
             [ "$3" = --query-format ] && [ "$4" = xml ] || exit 40
+        printf 'query\n' >> "$FIXTURE/queries"
         version=1.0
         if [ -f "$FIXTURE/reset-complete" ]; then version=2.0; fi
         pci=ffff:fe:1f.0
         if [ -f "$FIXTURE/mismatched-pci" ]; then pci=ffff:fe:1e.0; fi
-        printf '<Devices><Device pciName="%s" type="BlueField3" partNumber="test-part" psid="test-psid"><Versions><FW current="%s"/></Versions></Device></Devices>' "$pci" "$version"
+        printf '<Devices><Device pciName="%s" type="BlueField3" partNumber="test-part" psid="test-psid"><Versions><FW current="%s"/></Versions><MACs Base_Mac="020000000001"/><GUIDs Base_Guid="0200000300000001"/></Device></Devices>' "$pci" "$version"
         ;;
     mlxconfig)
         [ "$#" -eq 5 ] && [ "$1" = -d ] && [ "$2" = ffff:fe:1f.0 ] &&
@@ -513,8 +678,10 @@ esac
     }
 }
 
-/// Count downloads so repeated delivery cannot silently restage immutable work.
-async fn artifact_server() -> (String, Arc<AtomicUsize>, JoinSet<std::io::Result<()>>) {
+/// Count downloads and credential-bearing requests at the actual Direct origin.
+async fn artifact_server(
+    authenticated_requests: Arc<AtomicUsize>,
+) -> (String, Arc<AtomicUsize>, JoinSet<std::io::Result<()>>) {
     let fetches = Arc::new(AtomicUsize::new(0));
     let app = Router::new()
         .route(
@@ -540,7 +707,18 @@ async fn artifact_server() -> (String, Arc<AtomicUsize>, JoinSet<std::io::Result
                     async { CONFIGURATION }
                 }
             }),
-        );
+        )
+        .layer(from_fn(move |request: Request, next: Next| {
+            let authenticated_requests = authenticated_requests.clone();
+            async move {
+                if request.headers().contains_key(header::AUTHORIZATION)
+                    || request.headers().contains_key(header::PROXY_AUTHORIZATION)
+                {
+                    authenticated_requests.fetch_add(1, Ordering::SeqCst);
+                }
+                next.run(request).await
+            }
+        }));
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let mut server = JoinSet::new();
@@ -573,6 +751,7 @@ fn update_task(base_url: &str) -> fac::MlxDeviceUpdateFirmware {
         },
     };
     fac::MlxDeviceUpdateFirmware {
+        delivery_mode: Default::default(),
         operation_id: "checked-update".into(),
         phase_id: "firmware-phase-1".into(),
         profile: Some(profile.into()),
@@ -580,14 +759,89 @@ fn update_task(base_url: &str) -> fac::MlxDeviceUpdateFirmware {
             image_sha256: hex::encode(Sha256::digest(IMAGE.as_bytes())),
             configuration_sha256: Some(hex::encode(Sha256::digest(CONFIGURATION.as_bytes()))),
         }),
+        supervisor_instance_id: None,
+        // The fake `mlxfwmanager` reports this base MAC for `DEVICE`.
+        expected_device: Some(MlxDeviceSelector::Mac("02:00:00:00:00:01".parse().unwrap()).into()),
     }
 }
 
-/// Every poll uses the production dispatcher and publisher, never direct Get.
+/// Deliver an update and decode its receipt or request error.
 async fn deliver(
     task: &fac::MlxDeviceUpdateFirmware,
     config: &SupervisorConfig,
 ) -> Result<FirmwareOperation, pb::MlxDeviceUpdateFirmwareError> {
+    deliver_with_core_options(task, config, None).await
+}
+
+/// Deliver checked work with the same optional Core settings production supplies.
+async fn deliver_with_core_options(
+    task: &fac::MlxDeviceUpdateFirmware,
+    config: &SupervisorConfig,
+    core_options: Option<&Options>,
+) -> Result<FirmwareOperation, pb::MlxDeviceUpdateFirmwareError> {
+    match deliver_command(
+        &task.operation_id,
+        &task.phase_id,
+        fac::mlx_device_action::Command::UpdateFirmware(task.clone()),
+        config,
+        core_options,
+    )
+    .await
+    {
+        FirmwareUpdateResult::Receipt(receipt) => {
+            assert_eq!(receipt.operation_id, task.operation_id);
+            Ok(receipt
+                .try_into()
+                .expect("supervisor receipt decodes as a typed operation"))
+        }
+        FirmwareUpdateResult::Error(error) => Err(error),
+        FirmwareUpdateResult::MissingReceipt(_) => {
+            panic!("this update must return a receipt or a request error")
+        }
+    }
+}
+
+/// Observe the update `task` describes, repeating its immutable inputs.
+async fn observe(
+    task: &fac::MlxDeviceUpdateFirmware,
+    config: &SupervisorConfig,
+) -> FirmwareUpdateResult {
+    deliver_command(
+        &task.operation_id,
+        &task.phase_id,
+        fac::mlx_device_action::Command::ObserveFirmwareUpdate(
+            fac::MlxDeviceObserveFirmwareUpdate {
+                delivery_mode: Default::default(),
+                operation_id: task.operation_id.clone(),
+                phase_id: task.phase_id.clone(),
+                profile: task.profile.clone(),
+                expected_digests: task.expected_digests.clone(),
+                expected_device: task.expected_device.clone(),
+            },
+        ),
+        config,
+        None,
+    )
+    .await
+}
+
+/// Observe work the serving supervisor has never seen and return its instance.
+async fn observe_missing(task: &fac::MlxDeviceUpdateFirmware, config: &SupervisorConfig) -> String {
+    let FirmwareUpdateResult::MissingReceipt(missing) = observe(task, config).await else {
+        panic!("unadmitted work must report the serving supervisor instance");
+    };
+    assert!(!missing.supervisor_instance_id.is_empty());
+    missing.supervisor_instance_id
+}
+
+/// Every command uses the production dispatcher and publisher, never direct RPCs.
+async fn deliver_command(
+    operation_id: &str,
+    phase_id: &str,
+    command: fac::mlx_device_action::Command,
+    config: &SupervisorConfig,
+    core_options: Option<&Options>,
+) -> FirmwareUpdateResult {
     let machine_id = "fm100ht038bg3qsho433vkg684heguv282qaggmrsh2ugn1qk096n2c6hcg"
         .parse()
         .unwrap();
@@ -596,11 +850,10 @@ async fn deliver(
         &machine_id,
         vec![fac::MlxDeviceAction {
             pci_name: DEVICE.into(),
-            command: Some(fac::mlx_device_action::Command::UpdateFirmware(
-                task.clone(),
-            )),
+            command: Some(command),
         }],
         Ok(config),
+        core_options,
         |_| panic!("generic firmware results must not enter Scout's legacy device discovery"),
         |request| {
             publication = Some(request);
@@ -624,21 +877,12 @@ async fn deliver(
             ..Default::default()
         }
     );
-    assert_eq!(result.operation_id, task.operation_id);
-    assert_eq!(result.phase_id, task.phase_id);
+    assert_eq!(result.operation_id, operation_id);
+    assert_eq!(result.phase_id, phase_id);
     assert_eq!(result.pci_name, DEVICE);
-    match result
+    result
         .result
         .expect("a published firmware result must be present")
-    {
-        pb::mlx_device_update_firmware_result::Result::Receipt(receipt) => {
-            assert_eq!(receipt.operation_id, task.operation_id);
-            Ok(receipt
-                .try_into()
-                .expect("supervisor receipt decodes as a typed operation"))
-        }
-        pb::mlx_device_update_firmware_result::Result::Error(error) => Err(error),
-    }
 }
 
 async fn poll_until(

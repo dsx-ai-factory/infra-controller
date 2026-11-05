@@ -36,9 +36,9 @@ use crate::mac_address_pool::{
 use crate::machine_info::DpuSettings;
 use crate::redfish::computer_system::SystemState;
 use crate::{
-    ActionError, BmcState, Callbacks, CombinedServer, DeviceEffect, DpuMachineInfo, HardwareType,
-    HostMachineInfo, ListenerOrAddress, MachineInfo, MachineRouterOptions, POWER_CYCLE_DELAY,
-    ResourceResetType,
+    ActionError, BmcState, Callbacks, CombinedServer, DeviceEffect, DpuMachineInfo,
+    EventServiceConfig, EventServiceOverride, HardwareType, HostMachineInfo, ListenerOrAddress,
+    MachineInfo, MachineRouterOptions, POWER_CYCLE_DELAY, ResourceResetType,
 };
 
 pub mod axum_http_client;
@@ -259,14 +259,6 @@ impl TestCallbacks {
 }
 
 impl Callbacks for TestCallbacks {
-    fn supports_bmc_factory_reset(&self) -> bool {
-        true
-    }
-
-    fn supports_aux_power_cycle(&self) -> bool {
-        true
-    }
-
     async fn computer_system_reset(
         &self,
         reset_type: ResourceResetType,
@@ -608,6 +600,22 @@ pub async fn dell_poweredge_r750_bmc() -> TestBmcHandle {
     .await
 }
 
+/// A Dell R750 router whose EventService uses `limits`, and its state.
+pub fn dell_poweredge_r750_router_with_event_limits(
+    limits: EventServiceConfig,
+) -> (Router, BmcState<TestCallbacks>) {
+    create_test_bmc(
+        &host_info(HardwareType::DellPowerEdgeR750),
+        TestBmcConfig::default(),
+        "test-host-id".to_string(),
+        false,
+        MachineRouterOptions {
+            event_service: EventServiceOverride::Limits(limits),
+            ..Default::default()
+        },
+    )
+}
+
 const TEST_DELL_STORAGE: &str = "/redfish/v1/Systems/System.Embedded.1/Storage";
 
 /// Builds a Dell PowerEdge R750 whose Storage collection lists `storages`.
@@ -728,6 +736,88 @@ pub async fn generic_ami_bmc() -> TestBmcHandle {
         MachineRouterOptions::default(),
     ))
     .await
+}
+
+/// A Giga Computing R263-ZG0 as the explorer sees it. Values come from a lab
+/// R263-ZG0 (AMI MegaRAC BMC 13.06.29, BIOS R23_F20).
+pub async fn giga_computing_ami_bmc() -> TestBmcHandle {
+    let (router, state) = create_test_bmc(
+        &host_info(HardwareType::GenericAmi),
+        TestBmcConfig::default(),
+        "test-host-id".to_string(),
+        false,
+        MachineRouterOptions::default(),
+    );
+    let get = |glob: &str| Selector::Path {
+        method: Some("GET".to_string()),
+        glob: glob.to_string(),
+    };
+    state.injection.put(vec![
+        Rule {
+            id: RuleId::from("giga-system-identity"),
+            selector: get("/redfish/v1/Systems/Self"),
+            action: Action::JsonMerge(serde_json::json!({
+                "Manufacturer": "Giga Computing",
+                "Model": "R263-ZG0-AAL2-000",
+                "SKU": "1786441451",
+            })),
+            remaining: None,
+        },
+        Rule {
+            id: RuleId::from("giga-chassis-identity"),
+            selector: get("/redfish/v1/Chassis/Self"),
+            action: Action::JsonMerge(serde_json::json!({
+                "ChassisType": "RackMount",
+                "Manufacturer": "Giga Computing",
+                "Model": "R263-ZG0-AAL2-000",
+            })),
+            remaining: None,
+        },
+        Rule {
+            // The configured state libredfish `machine_setup` leaves behind,
+            // as read from the lab box.
+            id: RuleId::from("giga-bios"),
+            selector: get("/redfish/v1/Systems/Self/Bios"),
+            action: Action::JsonMerge(serde_json::json!({
+                "Attributes": {
+                    "TER001": "Enabled",
+                    "TER010": "Enabled",
+                    "TER06B": "COM1/SOL",
+                    "TER021": "115200",
+                    "TER020": "115200",
+                    "TER012": "VT100Plus",
+                    "TER011": "VT-UTF8",
+                    "TER05D": "None",
+                    "CPU005": "Enabled",
+                    "PCIS007": "Enabled",
+                    "NWSK000": "Enabled",
+                    "NWSK001": "Disabled",
+                    "NWSK006": "Enabled",
+                    "NWSK002": "Disabled",
+                    "NWSK007": "Disabled",
+                    "GBT0183": "Disabled",
+                }
+            })),
+            remaining: None,
+        },
+        Rule {
+            // Factory-open host interface, as shipped.
+            id: RuleId::from("giga-host-interface"),
+            selector: get("/redfish/v1/Managers/Self/HostInterfaces/Self"),
+            action: Action::JsonMerge(serde_json::json!({
+                "InterfaceEnabled": true,
+                "AuthenticationModes": ["AuthNone"],
+                "AuthNoneRoleId": "HostInterfaceAdministrator",
+                "CredentialBootstrapping": {
+                    "EnableAfterReset": false,
+                    "Enabled": true,
+                    "RoleId": "HostInterfaceAdministrator",
+                },
+            })),
+            remaining: None,
+        },
+    ]);
+    test_bmc((router, state)).await
 }
 
 /// Build a router from the recorded GH200 system with swapped Managers order.

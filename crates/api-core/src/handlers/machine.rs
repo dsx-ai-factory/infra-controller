@@ -831,7 +831,7 @@ pub(crate) async fn admin_force_delete_machine(
         "Admin force-delete machine request",
     );
 
-    if machine.config.instance_type_id.is_some() {
+    if machine.config.instance_type_id.is_some() && !request.allow_delete_with_instance_type {
         return Err(CarbideError::FailedPrecondition(format!(
             "association with instance type must be removed before deleting machine {}",
             machine.id
@@ -841,7 +841,7 @@ pub(crate) async fn admin_force_delete_machine(
 
     // TODO: This should maybe just use the snapshot loading functionality that the
     // state controller will use - which already contains the combined state
-    let host_machine;
+    let mut host_machine;
     let dpu_machines;
     match machine.id.host_or_dpu_id() {
         HostOrDpuId::Dpu(dpu_machine_id) => {
@@ -875,6 +875,42 @@ pub(crate) async fn admin_force_delete_machine(
             host_machine = Some(machine.try_into().map_err(|error| {
                 CarbideError::internal(format!("invalid host machine: {error}"))
             })?);
+        }
+    }
+
+    if let Some(host_machine) = &mut host_machine {
+        let host_machine_id = host_machine.id;
+        *host_machine = db::machine::find_one(
+            &mut txn,
+            &host_machine_id,
+            MachineSearchConfig {
+                for_update: true,
+                ..MachineSearchConfig::default()
+            },
+        )
+        .await?
+        .ok_or_else(|| CarbideError::NotFoundError {
+            kind: "Machine",
+            id: host_machine_id.to_string(),
+        })?;
+
+        if host_machine.config.instance_type_id.is_some()
+            && !request.allow_delete_with_instance_type
+        {
+            return Err(CarbideError::FailedPrecondition(format!(
+                "association with instance type must be removed before deleting machine {}",
+                host_machine.id
+            ))
+            .into());
+        }
+
+        let instance_id = db::instance::find_id_by_machine_id(&mut txn, &host_machine.id).await?;
+        if instance_id.is_some() && !request.allow_delete_with_instance {
+            return Err(CarbideError::FailedPrecondition(format!(
+                "attached instance must be removed before deleting machine {}",
+                host_machine.id
+            ))
+            .into());
         }
     }
 
@@ -957,11 +993,10 @@ pub(crate) async fn admin_force_delete_machine(
         if let Some(instance_id) = instance_id {
             response.instance_id = instance_id.to_string();
 
-            // The Machine lock makes concurrent Instance allocation visible here.
-            // TODO(#6125): Endpoint publication must add an Instance-to-Machine
-            // eligibility fence before activation. Reconcile existing
-            // Machine-to-Instance writers first; its address-table and Instance
-            // locks alone do not participate in this Machine lock.
+            // The Machine lock makes concurrent Instance allocation visible because service-VPC
+            // activation takes the same lock before storing an attachment's service interfaces.
+            // TODO(#6133): Validate observed external cleanup before reclaiming the final
+            // attachment and allowing force deletion to advance.
             // Without explicit orphan consent, rejecting before commit rolls back ForceDeletion
             // and leaves endpoint cleanup owned by the retained Instance service attachments.
             if !request.allow_delete_with_orphaned_dpf_crds

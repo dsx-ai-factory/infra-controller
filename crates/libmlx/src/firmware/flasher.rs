@@ -22,6 +22,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use carbide_libmlx_model::device::identity::MlxDeviceSelector;
 use carbide_libmlx_model::firmware::result::FirmwareFlashReport;
 use tokio::sync::watch;
 use tokio::time::Instant;
@@ -32,12 +33,13 @@ use crate::device::discovery::{
 use crate::firmware::config::{
     FirmwareFlasherProfile, FirmwareSpec, FlashSpec, PostResetVerificationPolicy,
 };
+use crate::firmware::core_download::{CoreArtifactRole, CoreFirmwareDelivery};
 use crate::firmware::error::{
     AttemptError, FirmwareApplyError, FirmwareError, FirmwarePhase, FirmwareResult,
 };
 use crate::firmware::preflight::{
-    FirmwarePreflightError, LocalFirmwareFiles, check_hardware_identity, check_readable_file,
-    inspect_prepared_firmware_with_executor, is_usable_literal,
+    FirmwarePreflightError, LocalFirmwareFiles, check_expected_device, check_hardware_identity,
+    check_readable_file, inspect_prepared_firmware_with_executor, is_usable_literal,
 };
 use crate::firmware::reset::{DEFAULT_RESET_LEVEL, MlxFwResetRunner};
 use crate::firmware::source::FirmwareSource;
@@ -175,6 +177,8 @@ pub struct FirmwareFlasher {
     progress: Option<Arc<dyn FirmwareProgress>>,
     preparation_cancel: Option<(String, watch::Receiver<Option<String>>)>,
     checked_update: bool,
+    core_delivery: Option<CoreFirmwareDelivery>,
+    expected_device: Option<MlxDeviceSelector>,
 }
 
 impl FirmwareFlasher {
@@ -205,6 +209,8 @@ impl FirmwareFlasher {
             progress: None,
             preparation_cancel: None,
             checked_update: false,
+            core_delivery: None,
+            expected_device: None,
         })
     }
 
@@ -216,11 +222,24 @@ impl FirmwareFlasher {
         self
     }
 
-    /// Select the source and preflight policy for checked updates. The operation
-    /// owner verifies expected hashes in the durable `Prepared` callback.
+    /// `with_update_validation` selects the checked source and preflight policy.
+    /// The operation owner verifies hashes in the durable `Prepared` callback. A
+    /// supplied selector must match that preflight's live device before mutation.
     #[cfg(target_os = "linux")]
-    pub(super) fn with_update_validation(mut self) -> Self {
+    pub(super) fn with_update_validation(
+        mut self,
+        expected_device: Option<MlxDeviceSelector>,
+    ) -> Self {
         self.checked_update = true;
+        self.expected_device = expected_device;
+        self
+    }
+
+    /// Use the accepted operation's Core transport without replacing its frozen
+    /// source identity or the shared staging, hashing and preflight pipeline.
+    #[cfg(target_os = "linux")]
+    pub(super) fn with_core_delivery(mut self, delivery: CoreFirmwareDelivery) -> Self {
+        self.core_delivery = Some(delivery);
         self
     }
 
@@ -242,6 +261,44 @@ impl FirmwareFlasher {
     pub fn with_dry_run(mut self, dry_run: bool) -> Self {
         self.dry_run = dry_run;
         self
+    }
+
+    /// Remote sources resolve into this owned directory, while local sources return
+    /// their original path. Copy those local bytes too so later phases use the staged
+    /// input rather than a source the caller could replace between commands.
+    async fn stage_source(
+        &self,
+        source: &FirmwareSource,
+        directory: &Path,
+        role: CoreArtifactRole,
+    ) -> FirmwareResult<PathBuf> {
+        tokio::fs::create_dir(directory).await?;
+        let resolved = if let Some(delivery) = &self.core_delivery {
+            let FirmwareSource::Http {
+                url,
+                credentials: None,
+            } = source
+            else {
+                return Err(FirmwareError::ConfigError(
+                    "core delivery requires an anonymous HTTP(S) source identity".into(),
+                ));
+            };
+            delivery.resolve(url, directory, role).await?
+        } else if self.checked_update {
+            source.resolve_for_update(directory).await?
+        } else {
+            source.resolve(directory).await?
+        };
+        check_readable_file(&resolved).await?;
+        if resolved.parent() == Some(directory) {
+            return Ok(resolved);
+        }
+        let filename = resolved
+            .file_name()
+            .ok_or_else(|| FirmwareError::ConfigError("firmware source has no filename".into()))?;
+        let staged = directory.join(filename);
+        tokio::fs::copy(&resolved, &staged).await?;
+        Ok(staged)
     }
 
     /// `prepare` resolves both inputs into distinct owned directories before
@@ -270,10 +327,14 @@ impl FirmwareFlasher {
             retain: true,
         };
         let staging = async {
-            prepared.image = stage_source(&firmware, &prepared.image, self.checked_update).await?;
+            prepared.image = self
+                .stage_source(&firmware, &prepared.image, CoreArtifactRole::Image)
+                .await?;
             if let (Some(source), Some(directory)) = (configuration, &prepared.device_config) {
-                prepared.device_config =
-                    Some(stage_source(&source, directory, self.checked_update).await?);
+                prepared.device_config = Some(
+                    self.stage_source(&source, directory, CoreArtifactRole::Configuration)
+                        .await?,
+                );
             }
             check_readable_file(&prepared.image).await?;
             if let Some(configuration) = &prepared.device_config {
@@ -299,9 +360,11 @@ impl FirmwareFlasher {
         .await?;
         if self.checked_update {
             // Both hashes are durable before the shared read-only preflight.
-            // In addition to part/PSID, it checks the reported PCI function and
-            // requires a usable installed version before allowing mutation.
-            inspect_prepared_firmware_with_executor(
+            // In addition to part/PSID, preflight checks the reported PCI function
+            // and requires a usable installed version. Then compare any saved
+            // card selector with that same live report before mutation, while
+            // admission still holds the host claim.
+            let inspection = inspect_prepared_firmware_with_executor(
                 &self.device_id,
                 &self.firmware_spec,
                 LocalFirmwareFiles {
@@ -311,6 +374,9 @@ impl FirmwareFlasher {
                 &self.executor,
             )
             .await?;
+            if let Some(expected_device) = &self.expected_device {
+                check_expected_device(&inspection.device, expected_device)?;
+            }
         }
         prepared.retain = false;
         Ok(prepared)
@@ -762,32 +828,6 @@ impl FirmwareFlasher {
         }
         Ok(())
     }
-}
-
-// Remote sources resolve into this owned directory, while local sources return
-// their original path. Copy those local bytes too so later phases use the staged
-// input rather than a source the caller could replace between commands.
-async fn stage_source(
-    source: &FirmwareSource,
-    directory: &Path,
-    checked_update: bool,
-) -> FirmwareResult<PathBuf> {
-    tokio::fs::create_dir(directory).await?;
-    let resolved = if checked_update {
-        source.resolve_for_update(directory).await?
-    } else {
-        source.resolve(directory).await?
-    };
-    check_readable_file(&resolved).await?;
-    if resolved.parent() == Some(directory) {
-        return Ok(resolved);
-    }
-    let filename = resolved
-        .file_name()
-        .ok_or_else(|| FirmwareError::ConfigError("firmware source has no filename".into()))?;
-    let staged = directory.join(filename);
-    tokio::fs::copy(&resolved, &staged).await?;
-    Ok(staged)
 }
 
 #[cfg(test)]
@@ -2245,6 +2285,8 @@ esac
             progress: None,
             preparation_cancel: None,
             checked_update: false,
+            core_delivery: None,
+            expected_device: None,
         }
         .with_dry_run(true)
     }

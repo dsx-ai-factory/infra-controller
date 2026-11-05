@@ -408,7 +408,7 @@ role_separator = {cert_authorization_keyid_format_role_separator:?}
 # user = "user"                     # User to authenticate as when ssh-console connects to BMC
 # password = "password"             # Password to use when ssh-console connects to BMC
 # ssh_key_path = "/path/to/ssh_key" # Path to an SSH key to use when ssh-console connects to BMC (optional, overrides password.)
-# bmc_vendor = "dell"               # Vendor for this BMC, determines connection behavior (currently supported: "dell", "lenovo", "hpe", "supermicro", "lenovo_ami", "dpu", "nvidia_viking")
+# bmc_vendor = "dell"               # Vendor for this BMC, determines connection behavior (currently supported: "dell", "lenovo", "hpe", "supermicro", "lenovo_ami", "dpu", "nvidia_viking", "giga_computing")
 #
 # # [[bmcs]]
 # # ... more bmcs sections can define more than one

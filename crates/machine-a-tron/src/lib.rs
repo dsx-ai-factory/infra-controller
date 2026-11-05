@@ -15,7 +15,6 @@
  * limitations under the License.
  */
 pub mod api_client;
-pub mod api_throttler;
 mod bmc_mock_wrapper;
 mod config;
 mod console_output;
@@ -51,6 +50,9 @@ mod tenant_network;
 use std::time::{Duration, Instant};
 
 pub use bmc_mock_wrapper::BmcMockRegistry;
+
+#[cfg(test)]
+mod bmc_reset_actor_tests;
 pub use config::{
     DhcpType, LenovoGb300RackConfig, LogFormat, MachineATronArgs, MachineATronConfig,
     MachineATronContext, MachineConfig, PersistedDevice, PersistedDpuMachine, RackConfig,

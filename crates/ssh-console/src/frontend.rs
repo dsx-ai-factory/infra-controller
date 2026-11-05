@@ -26,7 +26,7 @@ use rpc::forge::ValidateTenantPublicKeyRequest;
 use rpc::forge_api_client::ForgeApiClient;
 use russh::keys::ssh_key::AuthorizedKeys;
 use russh::keys::{Certificate, PublicKey, PublicKeyBase64};
-use russh::server::{Auth, ChannelOpenHandle, Msg, Session};
+use russh::server::{Auth, ChannelOpenHandle, Msg, Session, VerifiedPublicKey};
 use russh::{Channel, ChannelId, ChannelMsg, MethodKind, MethodSet, Pty};
 use tokio::sync::oneshot;
 use tonic::Code;
@@ -174,6 +174,11 @@ impl Drop for Handler {
 impl russh::server::Handler for Handler {
     type Error = HandlerError;
 
+    #[tracing::instrument(
+        name = "ssh_console_channel_open",
+        skip_all,
+        fields(peer_address = %self.peer_addr, machine = tracing::field::Empty)
+    )]
     async fn channel_open_session(
         &mut self,
         channel: Channel<Msg>,
@@ -187,6 +192,7 @@ impl russh::server::Handler for Handler {
                 method: "channel_open_session",
             });
         };
+        tracing::Span::current().record("machine", machine.as_str());
 
         // fetch the BMC connection
         let channel_id = channel.id();
@@ -235,6 +241,11 @@ impl russh::server::Handler for Handler {
         })
     }
 
+    #[tracing::instrument(
+        name = "ssh_console_auth_certificate",
+        skip_all,
+        fields(peer_address = %self.peer_addr, machine = %machine_string)
+    )]
     async fn auth_openssh_certificate(
         &mut self,
         machine_string: &str,
@@ -314,12 +325,18 @@ impl russh::server::Handler for Handler {
         Ok(Auth::Accept)
     }
 
+    #[tracing::instrument(
+        name = "ssh_console_auth_publickey",
+        skip_all,
+        fields(peer_address = %self.peer_addr, machine = %machine_string)
+    )]
     async fn auth_publickey(
         &mut self,
         machine_string: &str,
-        public_key: &PublicKey,
+        public_key: VerifiedPublicKey<'_>,
     ) -> Result<Auth, Self::Error> {
         use HandlerError::*;
+        let public_key = public_key.public_key;
         tracing::trace!(peer_address = self.peer_addr, "auth_publickey");
 
         // Authentication flow:
@@ -436,6 +453,11 @@ impl russh::server::Handler for Handler {
         Ok(())
     }
 
+    #[tracing::instrument(
+        name = "ssh_console_shell_request",
+        skip_all,
+        fields(peer_address = %self.peer_addr, machine = tracing::field::Empty)
+    )]
     async fn shell_request(
         &mut self,
         channel_id: ChannelId,
@@ -464,6 +486,7 @@ impl russh::server::Handler for Handler {
             return Ok(());
         };
         let machine_id = client_state.bmc_connection.machine_id;
+        tracing::Span::current().record("machine", tracing::field::display(machine_id));
         let Some(from_bmc_rx) = client_state
             .bmc_connection
             .to_frontend_msg_weak_tx
@@ -517,6 +540,11 @@ impl russh::server::Handler for Handler {
         Ok(())
     }
 
+    #[tracing::instrument(
+        name = "ssh_console_exec_request",
+        skip_all,
+        fields(peer_address = %self.peer_addr)
+    )]
     async fn exec_request(
         &mut self,
         channel_id: ChannelId,

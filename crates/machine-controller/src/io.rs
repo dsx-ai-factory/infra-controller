@@ -23,6 +23,7 @@ use db::{self, ConditionalWrite, ControllerStateNotCurrent, DatabaseError};
 use model::StateSla;
 use model::controller_outcome::PersistentStateHandlerOutcome;
 use model::dpa_interface::DpaSearchConfig;
+use model::machine::nic_firmware::NicFirmwarePhase;
 use model::machine::slas::MachineSlaConfig;
 use model::machine::{
     self, AttestationMode, ConfigureAstraState, DecommissioningState, DpuDiscoveringState,
@@ -177,6 +178,7 @@ impl StateControllerIO for MachineStateControllerIO {
                 MachineState::Discovered { .. } => "discovered",
                 MachineState::WaitingForLockdown { .. } => "waitingforlockdown",
                 MachineState::EnableIpmiOverLan => "enableipmioverlan",
+                MachineState::DisableOnboardNics { .. } => "disableonboardnics",
                 MachineState::Measuring { .. } => "machinestatemeasuring",
                 MachineState::SpdmMeasuring { .. } => "machinestatespdmmeasuring",
             }
@@ -311,6 +313,18 @@ impl StateControllerIO for MachineStateControllerIO {
                 ("hostnotready", machine_state_name(machine_state))
             }
             ManagedHostState::Ready => ("ready", ""),
+            ManagedHostState::NicFirmwareUpdating { operation } => (
+                "nicfirmwareupdating",
+                match operation.phase {
+                    NicFirmwarePhase::ObservingSupervisor { .. } => "observingsupervisor",
+                    NicFirmwarePhase::Unlocking { .. } => "unlocking",
+                    NicFirmwarePhase::UpdatingFirmware { .. } => "updatingfirmware",
+                    NicFirmwarePhase::Rebooting { .. } => "rebooting",
+                    NicFirmwarePhase::Reobserving { .. } => "reobserving",
+                    NicFirmwarePhase::RestoringLockdown { .. } => "restoringlockdown",
+                    NicFirmwarePhase::Failed { .. } => "failed",
+                },
+            ),
             ManagedHostState::Decommissioning {
                 decommissioning_state,
             } => match decommissioning_state {
@@ -356,6 +370,7 @@ impl StateControllerIO for MachineStateControllerIO {
                     MachineMaintenanceOperation::PowerOn => "power_on",
                     MachineMaintenanceOperation::PowerOff { .. } => "power_off",
                     MachineMaintenanceOperation::Reset => "reset",
+                    MachineMaintenanceOperation::Reboot => "reboot",
                     MachineMaintenanceOperation::ChassisReset { .. } => "chassis_reset",
                 };
                 ("maintenance", op)
@@ -437,6 +452,13 @@ impl StateControllerIO for MachineStateControllerIO {
                 boot_config_state: ReadyBootConfigState::Failed { .. },
                 ..
             } => Some("boot_config_convergence_failed"),
+            ManagedHostState::NicFirmwareUpdating {
+                operation:
+                    model::machine::nic_firmware::NicFirmwareOperation {
+                        phase: NicFirmwarePhase::Failed { .. },
+                        ..
+                    },
+            } => Some("nic_firmware_convergence_failed"),
             _ => None,
         }
     }
@@ -458,6 +480,7 @@ impl StateControllerIO for MachineStateControllerIO {
 
 #[cfg(test)]
 mod tests {
+    use carbide_test_support::{Check, check_values};
     use model::machine_boot_interface::MachineBootInterfaceTarget;
 
     use super::*;
@@ -478,6 +501,42 @@ mod tests {
         assert_eq!(
             <MachineStateControllerIO as StateControllerIO>::manual_intervention_reason(&state),
             Some("boot_config_convergence_failed"),
+        );
+    }
+
+    #[test]
+    fn nic_firmware_metric_and_intervention_labels_are_bounded() {
+        // Actual metric labels exclude per-card diagnostics; pending execution
+        // is classified by its handler error, not a manual-intervention label.
+        check_values(
+            [
+                Check {
+                    scenario: "safe restored failure",
+                    input: NicFirmwarePhase::Failed {
+                        reason: "card-specific failure".into(),
+                    },
+                    expect: (
+                        ("nicfirmwareupdating", "failed"),
+                        Some("nic_firmware_convergence_failed"),
+                    ),
+                },
+                Check {
+                    scenario: "pending firmware execution",
+                    input: NicFirmwarePhase::UpdatingFirmware { target_index: 0 },
+                    expect: (("nicfirmwareupdating", "updatingfirmware"), None),
+                },
+            ],
+            |phase| {
+                let mut operation = model::test_support::nic_firmware::operation();
+                operation.phase = phase;
+                let state = ManagedHostState::NicFirmwareUpdating { operation };
+                (
+                    <MachineStateControllerIO as StateControllerIO>::metric_state_names(&state),
+                    <MachineStateControllerIO as StateControllerIO>::manual_intervention_reason(
+                        &state,
+                    ),
+                )
+            },
         );
     }
 }

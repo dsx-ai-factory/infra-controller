@@ -14,7 +14,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::ops::DerefMut;
 use std::time::SystemTime;
 
@@ -23,12 +23,14 @@ use ::rpc::forge::{
     InstanceDpuExtensionServiceConfig, InstanceDpuExtensionServicesConfig,
     ManagedHostNetworkConfigRequest, ManagedHostNetworkStatusRequest,
 };
+use carbide_dpf::DpuDeploymentType;
 use carbide_instrument::testing::MetricsCapture;
 use carbide_network::ip::IdentifyAddressFamily;
 use carbide_secrets::credentials::{BgpCredentialType, CredentialKey, Credentials};
-use carbide_uuid::machine::{AsMachineId, DpuMachineId};
+use carbide_uuid::instance::InstanceId;
+use carbide_uuid::machine::{AsMachineId, DpuMachineId, StableHostMachineId};
 use carbide_uuid::network::NetworkSegmentId;
-use carbide_uuid::vpc::VpcId;
+use carbide_uuid::vpc::{VpcId, VpcPrefixId};
 use common::api_fixtures::network_segment::{
     FIXTURE_TENANT_NETWORK_SEGMENT_GATEWAYS, FIXTURE_UNDERLAY_NETWORK_SEGMENT_GATEWAY,
     create_tenant_network_segment, create_underlay_network_segment,
@@ -37,18 +39,87 @@ use common::api_fixtures::{self, create_managed_host, dpu, network_configured_wi
 use config_version::ConfigVersion;
 use db::ConditionalWrite;
 use db::machine::AdminNetworkChangeNotPending;
+use ipnetwork::IpNetwork;
+use mac_address::MacAddress;
 use model::expected_machine::{ExpectedInterface, ExpectedInterfaceRole};
+use model::instance::config::network::InstanceServiceInterfaceConfig;
 use model::machine::network::ManagedHostQuarantineMode;
+use model::resource_pool::{OwnerType, ResourcePoolEntryState};
 use rpc::Metadata;
 use rpc::forge::forge_server::Forge;
 
 use crate::cfg::file::{
-    AdminFnnConfig, FnnConfig, FnnRoutingProfileConfig, PrefixFilterPolicyEntry, RouteTargetConfig,
+    AdminFnnConfig, DpfBlueFieldSoftwareConfig, DpfDeploymentConfig, FnnConfig,
+    FnnRoutingProfileConfig, PrefixFilterPolicyEntry, RouteTargetConfig,
 };
+use crate::network_segment::allocate::PrefixAllocator;
 use crate::tests::common;
 use crate::tests::common::api_fixtures::TestEnvOverrides;
 use crate::tests::common::api_fixtures::site_explorer::MockExploredHost;
-use crate::tests::common::rpc_builder::{DhcpDiscovery, VpcCreationRequest};
+use crate::tests::common::rpc_builder::{DhcpDiscovery, VpcCreationRequest, VpcUpdateRequest};
+
+/// Builds a nonempty IPv4 ingress rule so response tests can distinguish instance, initial VPC, and updated VPC policy.
+fn service_vpc_nsg_rule(
+    id: &str,
+    source_prefix: &str,
+) -> rpc::forge::NetworkSecurityGroupRuleAttributes {
+    rpc::forge::NetworkSecurityGroupRuleAttributes {
+        id: Some(id.to_string()),
+        direction: rpc::forge::NetworkSecurityGroupRuleDirection::NsgRuleDirectionIngress.into(),
+        ipv6: false,
+        src_port_start: None,
+        src_port_end: None,
+        dst_port_start: None,
+        dst_port_end: None,
+        protocol: rpc::forge::NetworkSecurityGroupRuleProtocol::NsgRuleProtoTcp.into(),
+        action: rpc::forge::NetworkSecurityGroupRuleAction::NsgRuleActionPermit.into(),
+        priority: 1_000,
+        source_net: Some(
+            rpc::forge::network_security_group_rule_attributes::SourceNet::SrcPrefix(
+                source_prefix.to_string(),
+            ),
+        ),
+        destination_net: Some(
+            rpc::forge::network_security_group_rule_attributes::DestinationNet::DstPrefix(
+                "0.0.0.0/0".to_string(),
+            ),
+        ),
+    }
+}
+
+/// Replaces only persisted `service_interfaces` while checking `network_config_version` so missing-reference
+/// tests retain host interfaces and reject writes after a concurrent version change.
+async fn replace_service_vpc_endpoints(
+    env: &api_fixtures::TestEnv,
+    instance_id: InstanceId,
+    endpoints: &[InstanceServiceInterfaceConfig],
+) {
+    // Replace only `service_interfaces` using the persisted `network_config_version`.
+    let mut txn = env.db_txn().await;
+    let stored = db::instance::find_by_id(txn.as_mut(), instance_id)
+        .await
+        .unwrap()
+        .expect("fixture instance remains persisted");
+    let mut network = stored.config.network;
+    network.service_interfaces = endpoints.to_vec();
+    db::instance::update_network_config(
+        txn.as_mut(),
+        instance_id,
+        stored.network_config_version,
+        &network,
+        false,
+    )
+    .await
+    .unwrap();
+    txn.commit().await.unwrap();
+
+    // Reload committed `service_interfaces` so an ineffective fixture write cannot satisfy a missing-reference test.
+    let persisted = db::instance::find_by_id(&env.pool, instance_id)
+        .await
+        .unwrap()
+        .expect("fixture instance remains persisted");
+    assert_eq!(persisted.config.network.service_interfaces, endpoints);
+}
 
 async fn set_use_admin_network_changed(
     env: &api_fixtures::TestEnv,
@@ -471,6 +542,372 @@ async fn test_static_assignment_rechecks_sibling_after_waiting(
     Ok(())
 }
 
+/// Configures service slots, one optional BF4 deployment, FNN loopbacks, IPv6 deny prefixes, and site prefixes
+/// so response tests can select deployment configuration and render IPv4 and IPv6 service interfaces.
+async fn create_service_vpc_test_env(
+    pool: sqlx::PgPool,
+    slot_count: u32,
+    use_vpc_vrf_loopback: bool,
+    configured_bf4_deployment: Option<DpuDeploymentType>,
+) -> api_fixtures::TestEnv {
+    let mut config = api_fixtures::get_config();
+    config.dpu_config.service_vpc_slot_count = slot_count;
+    config.site_global_vpc_vni = None;
+    config.deny_prefixes = vec!["2001:db8:ffff::/64".parse().unwrap()];
+    // Supply only the selected BF4 entry so inventory tests cannot borrow another deployment's configuration.
+    let bf4_deployment = |name: &str| DpfDeploymentConfig {
+        bfb_url: None,
+        bluefield_software: Some(DpfBlueFieldSoftwareConfig {
+            os_iso: format!("http://example.com/{name}.iso"),
+            pldm_fw_bundle: BTreeMap::from([(
+                "test-psid".to_string(),
+                format!("http://example.com/{name}.pldm"),
+            )]),
+        }),
+        flavor_name: format!("test-{name}-flavor"),
+        deployment_name: format!("test-{name}"),
+        node_label_key: format!("test.nvidia.com/{name}"),
+        ..Default::default()
+    };
+    config.dpf.deployment_scoped_service_interfaces =
+        configured_bf4_deployment == Some(DpuDeploymentType::Bf4Astra);
+    config.dpf.deployments.bf4_generic = (configured_bf4_deployment
+        == Some(DpuDeploymentType::Bf4Generic))
+    .then(|| bf4_deployment("bf4-generic"));
+    config.dpf.deployments.bf4_astra = (configured_bf4_deployment
+        == Some(DpuDeploymentType::Bf4Astra))
+    .then(|| bf4_deployment("bf4-astra"));
+    let mut site_prefixes = api_fixtures::TEST_SITE_PREFIXES.to_vec();
+    site_prefixes.push("2001:db8::/32".parse().unwrap());
+    let mut overrides = TestEnvOverrides::with_config(config).with_fnn_config(None);
+    overrides.site_prefixes = Some(site_prefixes);
+    let fnn = overrides.fnn_config.as_mut().unwrap();
+    fnn.use_vpc_vrf_loopback = use_vpc_vrf_loopback;
+    // Give the service VPC a wire-visible profile difference from the host VPC.
+    fnn.routing_profiles
+        .get_mut("EXTERNAL")
+        .unwrap()
+        .leak_tenant_host_routes_to_underlay = Some(true);
+    api_fixtures::create_test_env_with_overrides(pool, overrides).await
+}
+
+/// Persists the DPU product name used by deployment classification so inventory tests can select or withhold that evidence.
+async fn set_dpu_product_name(
+    env: &api_fixtures::TestEnv,
+    dpu_id: DpuMachineId,
+    product_name: &str,
+) {
+    let mut txn = env.db_txn().await;
+    let dpu = db::machine::find_one(txn.as_mut(), &dpu_id, Default::default())
+        .await
+        .unwrap()
+        .expect("fixture DPU remains persisted");
+    let mut hardware_info = dpu
+        .status
+        .hardware_info
+        .expect("the fixture DPU includes hardware information");
+    hardware_info
+        .dmi_data
+        .as_mut()
+        .expect("the fixture DPU includes DMI information")
+        .product_name = product_name.to_string();
+
+    // Reopen topology ingestion before publishing the updated DMI product name.
+    db::machine_topology::set_topology_update_needed(txn.as_mut(), &dpu.id, true)
+        .await
+        .unwrap();
+    db::machine_topology::create_or_update(txn.as_mut(), &dpu.id, &hardware_info)
+        .await
+        .unwrap();
+    txn.commit().await.unwrap();
+}
+
+/// Marks a fixture host as DPF-ingested so inventory tests exercise the persisted provisioning classification.
+async fn mark_host_dpf_ingested(env: &api_fixtures::TestEnv, host_id: StableHostMachineId) {
+    // Persist `dpf.used_for_ingestion` before checking service-slot classification.
+    let mut txn = env.db_txn().await;
+    db::machine::mark_machine_ingestion_done_with_dpf(txn.as_mut(), &host_id)
+        .await
+        .unwrap();
+    txn.commit().await.unwrap();
+
+    // Reload the host so an ineffective fixture write cannot satisfy an inventory test.
+    let host = db::machine::find_one(&mut env.db_reader(), &host_id, Default::default())
+        .await
+        .unwrap()
+        .expect("fixture host remains persisted");
+    assert!(host.config.dpf.used_for_ingestion);
+}
+
+/// Persists a generated service segment and returns its endpoint record so response tests do not depend on the activation handler.
+#[allow(clippy::too_many_arguments)]
+async fn create_service_vpc_endpoint(
+    env: &api_fixtures::TestEnv,
+    vpc_id: VpcId,
+    vpc_prefix: IpNetwork,
+    link_prefix: IpNetwork,
+    dpu_id: DpuMachineId,
+    attachment_id: uuid::Uuid,
+    interface_ordinal: u32,
+    slot_index: u32,
+    mac_address: MacAddress,
+) -> InstanceServiceInterfaceConfig {
+    let vpc_prefix_id = VpcPrefixId::new();
+
+    // Create the selected VPC prefix through the public API before allocating its exact linknet.
+    env.api
+        .create_vpc_prefix(tonic::Request::new(rpc::forge::VpcPrefixCreationRequest {
+            id: Some(vpc_prefix_id),
+            prefix: String::new(),
+            vpc_id: Some(vpc_id),
+            config: Some(rpc::forge::VpcPrefixConfig {
+                prefix: vpc_prefix.to_string(),
+            }),
+            metadata: Some(Metadata {
+                name: format!("service VPC prefix {vpc_prefix}"),
+                ..Default::default()
+            }),
+            site_prefix_id: None,
+        }))
+        .await
+        .unwrap();
+
+    // Use the production allocator to preserve Ready state, MTU, gateway, and reservation rules.
+    let mut txn = env.db_txn().await;
+    let allocator =
+        PrefixAllocator::new(vpc_prefix_id, vpc_prefix, None, link_prefix.prefix()).unwrap();
+    let (network_segment_id, _) = allocator
+        .allocate_network_segment_for_prefix(txn.as_mut(), vpc_id, link_prefix)
+        .await
+        .unwrap();
+    let segment = db::network_segment::find_by(
+        txn.as_mut(),
+        db::ObjectColumnFilter::One(db::network_segment::IdColumn, &network_segment_id),
+        Default::default(),
+    )
+    .await
+    .unwrap()
+    .pop()
+    .expect("generated service segment is persisted");
+    let network_prefix_id = segment
+        .prefixes
+        .iter()
+        .find(|prefix| prefix.prefix == link_prefix)
+        .map(|prefix| prefix.id)
+        .expect("generated service segment contains its exact link prefix");
+    txn.commit().await.unwrap();
+
+    InstanceServiceInterfaceConfig {
+        attachment_id,
+        interface_ordinal,
+        dpu_id,
+        slot_index,
+        vpc_id,
+        vpc_prefix_id,
+        network_segment_id,
+        network_prefix_id,
+        link_prefix,
+        mac_address,
+        internal_uuid: uuid::Uuid::new_v4(),
+    }
+}
+
+/// Keeps the allocated host and committed IPv4/IPv6 endpoint records together for independent response tests.
+struct ServiceVpcEndpointFixture {
+    tenant: rpc::forge::Tenant,
+    managed_host: api_fixtures::TestManagedHost,
+    instance_id: InstanceId,
+    service_vpc_id: VpcId,
+    service_vni: u32,
+    instance_network_security_group: rpc::forge::NetworkSecurityGroup,
+    ipv4_endpoint: InstanceServiceInterfaceConfig,
+    ipv6_endpoint: InstanceServiceInterfaceConfig,
+    ipv4_service_id: carbide_uuid::extension_service::ExtensionServiceId,
+    ipv6_service_id: carbide_uuid::extension_service::ExtensionServiceId,
+}
+
+/// Creates a two-DPU instance with one IPv4 and one IPv6 endpoint in a service VPC distinct from its host VPC.
+/// The separate host/service routing profiles and nonempty instance NSG let tests detect host policy leaking into service configuration.
+/// Callers must configure FNN and at least two service slots.
+async fn create_service_vpc_endpoint_fixture(
+    env: &api_fixtures::TestEnv,
+) -> ServiceVpcEndpointFixture {
+    // Create one tenant with distinct host and service VPCs.
+    let tenant = env
+        .api
+        .create_tenant(tonic::Request::new(rpc::forge::CreateTenantRequest {
+            organization_id: "service-vpc-projection".to_string(),
+            routing_profile_type: Some("INTERNAL".to_string()),
+            metadata: Some(Metadata {
+                name: "service-vpc-projection".to_string(),
+                ..Default::default()
+            }),
+        }))
+        .await
+        .unwrap()
+        .into_inner()
+        .tenant
+        .unwrap();
+    let host_segment_id = env
+        .create_vpc_and_tenant_segment_with_vpc_details(
+            VpcCreationRequest::builder(tenant.organization_id.as_str())
+                .metadata(Metadata {
+                    name: "host primary VPC".to_string(),
+                    ..Default::default()
+                })
+                .network_virtualization_type(rpc::forge::VpcVirtualizationType::Fnn as i32)
+                .routing_profile_type("INTERNAL".to_string())
+                .rpc(),
+        )
+        .await;
+    // Use a wire-visible EXTERNAL profile so service routing cannot be mistaken for host policy.
+    let service_vpc = env
+        .api
+        .create_vpc(tonic::Request::new(
+            VpcCreationRequest::builder(tenant.organization_id.as_str())
+                .metadata(Metadata {
+                    name: "selected service VPC".to_string(),
+                    ..Default::default()
+                })
+                .network_virtualization_type(rpc::forge::VpcVirtualizationType::Fnn as i32)
+                .routing_profile_type("EXTERNAL".to_string())
+                .rpc(),
+        ))
+        .await
+        .unwrap()
+        .into_inner();
+    let service_vpc_id = service_vpc.id.expect("created service VPC has an ID");
+    let service_vni = service_vpc
+        .status
+        .expect("created service VPC has status")
+        .vni
+        .expect("created service VPC has a VNI");
+
+    // Give the host interface a distinct nonempty instance policy before allocation.
+    let instance_network_security_group = env
+        .api
+        .create_network_security_group(tonic::Request::new(
+            rpc::forge::CreateNetworkSecurityGroupRequest {
+                id: None,
+                tenant_organization_id: tenant.organization_id.clone(),
+                metadata: Some(Metadata {
+                    name: "instance policy".to_string(),
+                    ..Default::default()
+                }),
+                network_security_group_attributes: Some(
+                    rpc::forge::NetworkSecurityGroupAttributes {
+                        rules: vec![service_vpc_nsg_rule("instance-rule", "10.0.0.0/8")],
+                        stateful_egress: false,
+                    },
+                ),
+            },
+        ))
+        .await
+        .unwrap()
+        .into_inner()
+        .network_security_group
+        .expect("created instance NSG is returned");
+
+    // Allocate the host on another VPC, then commit one endpoint per DPU and address family.
+    let managed_host = api_fixtures::create_managed_host_multi_dpu(env, 2).await;
+    mark_host_dpf_ingested(env, managed_host.id).await;
+    let instance_id = managed_host
+        .instance_builer(env)
+        .tenant_org(tenant.organization_id.clone())
+        .config(rpc::forge::InstanceConfig {
+            os: Some(api_fixtures::instance::default_os_config()),
+            network: Some(api_fixtures::instance::single_interface_network_config(
+                host_segment_id,
+            )),
+            network_security_group_id: Some(instance_network_security_group.id.clone()),
+            ..Default::default()
+        })
+        .build()
+        .await
+        .id;
+    let ipv4_attachment_id = uuid::Uuid::new_v4();
+    let ipv6_attachment_id = uuid::Uuid::new_v4();
+    let ipv4_endpoint = create_service_vpc_endpoint(
+        env,
+        service_vpc_id,
+        "192.2.4.0/24".parse().unwrap(),
+        "192.2.4.0/31".parse().unwrap(),
+        managed_host.dpu_ids[0],
+        ipv4_attachment_id,
+        0,
+        0,
+        MacAddress::new([0x02, 0, 0, 0, 0, 0x41]),
+    )
+    .await;
+    let ipv6_endpoint = create_service_vpc_endpoint(
+        env,
+        service_vpc_id,
+        "2001:db8:200::/64".parse().unwrap(),
+        "2001:db8:200::/127".parse().unwrap(),
+        managed_host.dpu_ids[1],
+        ipv6_attachment_id,
+        0,
+        1,
+        MacAddress::new([0x02, 0, 0, 0, 0, 0x42]),
+    )
+    .await;
+    let ipv4_service_id = api_fixtures::instance::persist_service_vpc_attachment(
+        env,
+        instance_id,
+        tenant.organization_id.clone(),
+        vec![ipv4_endpoint.clone()],
+    )
+    .await;
+    let ipv6_service_id = api_fixtures::instance::persist_service_vpc_attachment(
+        env,
+        instance_id,
+        tenant.organization_id.clone(),
+        vec![ipv6_endpoint.clone()],
+    )
+    .await;
+
+    ServiceVpcEndpointFixture {
+        tenant,
+        managed_host,
+        instance_id,
+        service_vpc_id,
+        service_vni,
+        instance_network_security_group,
+        ipv4_endpoint,
+        ipv6_endpoint,
+        ipv4_service_id,
+        ipv6_service_id,
+    }
+}
+
+/// Changes the persisted host network mode so one test can prove the primary-Admin exception and fresh Tenant restoration.
+async fn set_host_use_admin_network(
+    env: &api_fixtures::TestEnv,
+    host_id: StableHostMachineId,
+    use_admin_network: bool,
+) {
+    // Change only `use_admin_network` through the current config version to preserve optimistic concurrency.
+    let mut txn = env.db_txn().await;
+    let host = db::machine::find_one(txn.as_mut(), &host_id, Default::default())
+        .await
+        .unwrap()
+        .expect("fixture host remains persisted");
+    let mut network_config = host.network_config.value;
+    network_config.use_admin_network = Some(use_admin_network);
+    assert_eq!(
+        db::machine::try_update_network_config(
+            txn.as_mut(),
+            &host_id,
+            host.network_config.version,
+            &network_config,
+        )
+        .await
+        .unwrap(),
+        ConditionalWrite::Applied(())
+    );
+    txn.commit().await.unwrap();
+}
+
 #[crate::sqlx_test]
 async fn test_clear_use_admin_network_changed_requires_pending_version(pool: sqlx::PgPool) {
     let env = api_fixtures::create_test_env(pool).await;
@@ -553,6 +990,259 @@ async fn test_clear_use_admin_network_changed_requires_pending_version(pool: sql
     }
 }
 
+/// Verifies successful responses for known DPUs carry inventory while unsupported or unresolved deployments never advertise invented slots.
+/// This prevents DPU agents from creating listeners that persisted provisioning evidence cannot support.
+#[crate::sqlx_test]
+async fn service_vpc_inventory_is_present_without_an_instance(pool: sqlx::PgPool) {
+    let env =
+        create_service_vpc_test_env(pool, 2, false, Some(DpuDeploymentType::Bf4Generic)).await;
+
+    // Create a non-DPF host and clear its persisted DPU product name.
+    let non_dpf_host = create_managed_host(&env).await;
+    set_dpu_product_name(&env, non_dpf_host.dpu().id, "").await;
+    let non_dpf_response = env
+        .api
+        .get_managed_host_network_config(tonic::Request::new(ManagedHostNetworkConfigRequest {
+            dpu_machine_id: Some(non_dpf_host.dpu().id),
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+    // A non-DPF host without product evidence still has a known empty inventory.
+    assert!(
+        non_dpf_response
+            .service_vpc_slot_inventory
+            .expect("known target always carries slot inventory")
+            .slots
+            .is_empty()
+    );
+
+    // Fetch before marking DPF ingestion to compare inventory without changing `managed_host_config_version`.
+    let dpf_host = api_fixtures::create_managed_host_multi_dpu(&env, 2).await;
+    let before_ingestion = env
+        .api
+        .get_managed_host_network_config(tonic::Request::new(ManagedHostNetworkConfigRequest {
+            dpu_machine_id: Some(dpf_host.dpu().id),
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+    let unchanged_version = before_ingestion.managed_host_config_version;
+    assert!(
+        before_ingestion
+            .service_vpc_slot_inventory
+            .expect("non-DPF target carries known inventory")
+            .slots
+            .is_empty()
+    );
+
+    // Mark the host DPF-ingested and fetch again without assigning an instance or VPC.
+    mark_host_dpf_ingested(&env, dpf_host.id).await;
+    let dpf_response = env
+        .api
+        .get_managed_host_network_config(tonic::Request::new(ManagedHostNetworkConfigRequest {
+            dpu_machine_id: Some(dpf_host.dpu().id),
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(dpf_response.managed_host_config_version, unchanged_version);
+
+    // Names and indices come from ServiceVpcSlots rather than a second naming formula.
+    let inventory = dpf_response
+        .service_vpc_slot_inventory
+        .expect("DPF target carries configured inventory");
+    assert_eq!(
+        inventory.slots,
+        vec![
+            rpc::forge::ServiceVpcSlot {
+                slot_index: 0,
+                hbn_interface_name: "iface_svc_0".to_string(),
+            },
+            rpc::forge::ServiceVpcSlot {
+                slot_index: 1,
+                hbn_interface_name: "iface_svc_1".to_string(),
+            },
+        ]
+    );
+    assert!(dpf_response.service_interfaces.is_empty());
+
+    // A secondary DPU without an instance remains on Admin while retaining fixed inventory.
+    let secondary_response = env
+        .api
+        .get_managed_host_network_config(tonic::Request::new(ManagedHostNetworkConfigRequest {
+            dpu_machine_id: Some(dpf_host.dpu_ids[1]),
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(secondary_response.instance_id.is_none());
+    assert!(secondary_response.use_admin_network);
+    assert!(secondary_response.service_interfaces.is_empty());
+    assert_eq!(
+        secondary_response
+            .service_vpc_slot_inventory
+            .expect("secondary DPU retains configured inventory without an instance")
+            .slots,
+        inventory.slots
+    );
+
+    // BF4 without a CX9 declaration selects BF4 Generic and retains the configured inventory.
+    set_dpu_product_name(&env, dpf_host.dpu().id, "BlueField-4 SmartNIC Main Card").await;
+    let bf4_generic_response = env
+        .api
+        .get_managed_host_network_config(tonic::Request::new(ManagedHostNetworkConfigRequest {
+            dpu_machine_id: Some(dpf_host.dpu().id),
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(
+        bf4_generic_response
+            .service_vpc_slot_inventory
+            .expect("BF4 Generic carries configured inventory")
+            .slots,
+        inventory.slots
+    );
+
+    // Removing the persisted product name makes deployment classification unknown rather than zero-capacity.
+    set_dpu_product_name(&env, dpf_host.dpu().id, "").await;
+    let unresolved = env
+        .api
+        .get_managed_host_network_config(tonic::Request::new(ManagedHostNetworkConfigRequest {
+            dpu_machine_id: Some(dpf_host.dpu().id),
+        }))
+        .await
+        .expect_err("missing DPU product evidence must not become zero capacity");
+    assert_eq!(unresolved.code(), tonic::Code::FailedPrecondition);
+    assert!(unresolved.message().contains("product name is absent"));
+
+    // BF4 Astra must not borrow the configured BF4 Generic deployment.
+    let astra_host = super::instance::create_bf4_astra_host(&env, 0x61).await;
+    let unconfigured_astra = env
+        .api
+        .get_managed_host_network_config(tonic::Request::new(ManagedHostNetworkConfigRequest {
+            dpu_machine_id: Some(astra_host.dpu().id),
+        }))
+        .await
+        .expect_err("unconfigured BF4 Astra must not borrow BF4 Generic inventory");
+    assert_eq!(unconfigured_astra.code(), tonic::Code::FailedPrecondition);
+    assert!(
+        unconfigured_astra
+            .message()
+            .contains("no DPUDeployment is configured for Bf4Astra")
+    );
+}
+
+/// Verifies BF4 Generic cannot borrow Astra configuration while configured Astra returns its known empty inventory.
+/// This prevents the configured service-VPC slot count from advertising listeners that provisioning never configured on that DPU.
+#[crate::sqlx_test]
+async fn service_vpc_inventory_rejects_unconfigured_bf4_deployment(pool: sqlx::PgPool) {
+    // Retain global capacity with only the BF4 Astra deployment configured.
+    let env = create_service_vpc_test_env(pool, 2, false, Some(DpuDeploymentType::Bf4Astra)).await;
+
+    // Set the host's `dpf.used_for_ingestion` marker and the DPU's BF4 Generic product name.
+    let managed_host = create_managed_host(&env).await;
+    mark_host_dpf_ingested(&env, managed_host.id).await;
+    set_dpu_product_name(
+        &env,
+        managed_host.dpu().id,
+        "BlueField-4 SmartNIC Main Card",
+    )
+    .await;
+
+    // The missing deployment entry must withhold invented listener inventory.
+    let error = env
+        .api
+        .get_managed_host_network_config(tonic::Request::new(ManagedHostNetworkConfigRequest {
+            dpu_machine_id: Some(managed_host.dpu().id),
+        }))
+        .await
+        .expect_err("unconfigured BF4 Generic must not inherit BF3 slots");
+    assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+    assert!(
+        error
+            .message()
+            .contains("no DPUDeployment is configured for Bf4Generic")
+    );
+
+    // The configured Astra class remains a known excluded platform with empty inventory.
+    let astra_host = super::instance::create_bf4_astra_host(&env, 0x62).await;
+    let astra_response = env
+        .api
+        .get_managed_host_network_config(tonic::Request::new(ManagedHostNetworkConfigRequest {
+            dpu_machine_id: Some(astra_host.dpu().id),
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(
+        astra_response
+            .service_vpc_slot_inventory
+            .expect("configured Astra carries known inventory")
+            .slots
+            .is_empty()
+    );
+}
+
+/// Verifies zero service capacity remains known and empty after an ingested Astra host's expected-machine declaration is erased.
+/// This keeps service-slot classification from withholding host networking when no service slots are configured.
+#[crate::sqlx_test]
+async fn service_vpc_configured_zero_is_known_empty(pool: sqlx::PgPool) {
+    // Configure zero slots and only Astra so erasing CX9 evidence would select an unconfigured Generic deployment.
+    let env = create_service_vpc_test_env(pool, 0, false, Some(DpuDeploymentType::Bf4Astra)).await;
+    let managed_host = super::instance::create_bf4_astra_host(&env, 0x63).await;
+
+    // Fetch the ingested DPU before removing its expected-machine declaration.
+    let response = env
+        .api
+        .get_managed_host_network_config(tonic::Request::new(ManagedHostNetworkConfigRequest {
+            dpu_machine_id: Some(managed_host.dpu().id),
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(
+        response
+            .service_vpc_slot_inventory
+            .expect("configured zero remains known inventory")
+            .slots
+            .is_empty()
+    );
+
+    // Erase declarations through the same API used by expected-machines erase.
+    env.api
+        .delete_all_expected_machines(tonic::Request::new(()))
+        .await
+        .expect("expected-machine erase succeeds after ingestion");
+
+    // Reload declarations to verify the erase committed before fetching network configuration.
+    let erased = env
+        .api
+        .get_all_expected_machines(tonic::Request::new(()))
+        .await
+        .expect("expected-machine declarations remain readable")
+        .into_inner();
+    assert!(erased.expected_machines.is_empty());
+
+    // Fetch again to prove declaration removal does not withhold host networking at zero capacity.
+    let after_erase = env
+        .api
+        .get_managed_host_network_config(tonic::Request::new(ManagedHostNetworkConfigRequest {
+            dpu_machine_id: Some(managed_host.dpu().id),
+        }))
+        .await
+        .expect("zero service capacity does not require an expected-machine declaration")
+        .into_inner();
+    assert!(
+        after_erase
+            .service_vpc_slot_inventory
+            .expect("configured zero remains known inventory after erase")
+            .slots
+            .is_empty()
+    );
+}
+
 #[crate::sqlx_test]
 // This test verifies parity between `addresses` and the compatibility fields,
 // plus presence-bearing site policy carried in the same response.
@@ -578,6 +1268,10 @@ async fn test_managed_host_network_config(pool: sqlx::PgPool) {
         .unwrap()
         .into_inner();
 
+    assert!(
+        response.instance.is_none(),
+        "a host without an instance must omit the nested instance"
+    );
     assert!(
         response
             .managed_host_config
@@ -1551,6 +2245,37 @@ async fn test_managed_host_network_config_does_not_clear_use_admin_network_chang
 }
 
 #[crate::sqlx_test]
+async fn test_record_dpu_network_status_requires_existing_dpu(pool: sqlx::PgPool) {
+    let env = api_fixtures::create_test_env(pool).await;
+    let dpu_machine_id: DpuMachineId =
+        "fm100dskla0ihp0pn4tv7v1js2k2mo37sl0jjr8141okqg8pjpdpfihaa80"
+            .parse()
+            .unwrap();
+
+    let error = env
+        .api
+        .record_dpu_network_status(tonic::Request::new(DpuNetworkStatus {
+            dpu_machine_id: Some(dpu_machine_id),
+            dpu_agent_version: Some(dpu::TEST_DPU_AGENT_VERSION.to_string()),
+            observed_at: Some(SystemTime::now().into()),
+            network_config_version: Some(ConfigVersion::initial().version_string()),
+            dpu_health: Some(rpc::health::HealthReport {
+                source: "forge-dpu-agent".to_string(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }))
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.code(), tonic::Code::NotFound);
+    assert_eq!(
+        error.message(),
+        format!("machine not found: {dpu_machine_id}")
+    );
+}
+
+#[crate::sqlx_test]
 async fn test_record_dpu_network_status_clears_use_admin_network_changed_for_matching_version(
     pool: sqlx::PgPool,
 ) {
@@ -1670,6 +2395,7 @@ async fn test_record_dpu_network_status_counts_failed_host_wakeup(pool: sqlx::Pg
     let env = api_fixtures::create_test_env(pool.clone()).await;
     let mh = create_managed_host(&env).await;
     let dpu_machine_id = mh.dpu().id;
+    let network_config_version = "V2-T1".to_string();
 
     // Remove the state-handler queue table so the host wakeup enqueue fails
     // while the status report itself stays healthy.
@@ -1681,12 +2407,19 @@ async fn test_record_dpu_network_status_counts_failed_host_wakeup(pool: sqlx::Pg
     let metrics = MetricsCapture::start();
     // A never-before-observed network config version registers as a change,
     // which is what prompts the host state-handler wakeup.
-    record_dpu_network_status(
-        &env,
-        dpu_machine_id,
-        Some("wakeup-probe-version".to_string()),
-    )
-    .await;
+    record_dpu_network_status(&env, dpu_machine_id, Some(network_config_version.clone())).await;
+
+    assert_eq!(
+        metrics.counter_delta(
+            "carbide_state_handler_wakeup_failures_total",
+            &[("trigger", "dpu_network_status")],
+        ),
+        1.0
+    );
+
+    // The first report committed despite the failed wakeup. Its versions
+    // now match, so another report must not enqueue another host wakeup.
+    record_dpu_network_status(&env, dpu_machine_id, Some(network_config_version)).await;
 
     assert_eq!(
         metrics.counter_delta(
@@ -2134,6 +2867,1752 @@ async fn test_managed_host_network_config_includes_per_vpc_routing_profiles(pool
     );
 }
 
+/// Verifies each DPU receives its local IPv4 or IPv6 endpoint with the selected VPC's routing and peering configuration.
+/// This keeps service networking independent of the host VPC while preserving public host interfaces and service-only FNN settings.
+#[crate::sqlx_test]
+async fn service_vpc_endpoints_use_local_selected_vpc_state(pool: sqlx::PgPool) {
+    // Box this test's future to reduce the stack frames reserved by the SQLx runner.
+    Box::pin(async move {
+        let env = create_service_vpc_test_env(pool, 2, true, None).await;
+        let ServiceVpcEndpointFixture {
+            tenant,
+            managed_host,
+            service_vpc_id,
+            service_vni,
+            ipv4_endpoint,
+            ipv6_endpoint,
+            ipv4_service_id,
+            ipv6_service_id,
+            ..
+        } = create_service_vpc_endpoint_fixture(&env).await;
+
+        // Create a peer with a distinct advertised prefix to identify the selected service VPC.
+        let peer_vpc = env
+            .api
+            .create_vpc(tonic::Request::new(
+                VpcCreationRequest::builder(tenant.organization_id.as_str())
+                    .metadata(Metadata {
+                        name: "service peer VPC".to_string(),
+                        ..Default::default()
+                    })
+                    .network_virtualization_type(rpc::forge::VpcVirtualizationType::Fnn as i32)
+                    .routing_profile_type("INTERNAL".to_string())
+                    .rpc(),
+            ))
+            .await
+            .unwrap()
+            .into_inner();
+        let peer_vpc_id = peer_vpc.id.expect("created peer VPC has an ID");
+        let peer_vni = peer_vpc
+            .status
+            .expect("created peer VPC has status")
+            .vni
+            .expect("created peer VPC has a VNI");
+
+        // Give the peer one advertised prefix and activate peering before rendering endpoints.
+        env.api
+            .create_vpc_prefix(tonic::Request::new(rpc::forge::VpcPrefixCreationRequest {
+                id: None,
+                prefix: String::new(),
+                vpc_id: Some(peer_vpc_id),
+                config: Some(rpc::forge::VpcPrefixConfig {
+                    prefix: "192.3.4.0/24".to_string(),
+                }),
+                metadata: Some(Metadata {
+                    name: "service peer prefix".to_string(),
+                    ..Default::default()
+                }),
+                site_prefix_id: None,
+            }))
+            .await
+            .unwrap();
+        env.api
+            .create_vpc_peering(tonic::Request::new(rpc::forge::VpcPeeringCreationRequest {
+                vpc_id: Some(service_vpc_id),
+                peer_vpc_id: Some(peer_vpc_id),
+                id: None,
+            }))
+            .await
+            .unwrap();
+
+        // Read the secondary DPU's allocated ASN for the response-wide FNN assertions below.
+        let secondary_dpu_asn = {
+            let mut txn = env.db_txn().await;
+            let asn = managed_host
+                .dpu_n(1)
+                .db_machine(&mut txn)
+                .await
+                .asn
+                .expect("FNN fixture DPU has an ASN");
+            txn.commit().await.unwrap();
+            asn
+        };
+        // Fetch both DPU views; the secondary remains on Admin without a host interface.
+        let initial_primary_response = env
+            .api
+            .get_managed_host_network_config(tonic::Request::new(ManagedHostNetworkConfigRequest {
+                dpu_machine_id: Some(managed_host.dpu_ids[0]),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        let secondary_response = env
+            .api
+            .get_managed_host_network_config(tonic::Request::new(ManagedHostNetworkConfigRequest {
+                dpu_machine_id: Some(managed_host.dpu_ids[1]),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(!initial_primary_response.use_admin_network);
+        assert!(secondary_response.use_admin_network);
+
+        // A service-only Admin response still carries the response-wide FNN settings.
+        assert_eq!(
+            secondary_response.network_virtualization_type,
+            Some(rpc::forge::VpcVirtualizationType::Fnn as i32)
+        );
+        assert_eq!(secondary_response.asn, secondary_dpu_asn);
+        assert!(secondary_response.site_fabric_null_routes.is_some());
+        assert_eq!(
+            secondary_response.deny_prefixes,
+            vec!["2001:db8:ffff::/64".to_string()]
+        );
+        let [primary_service] = initial_primary_response.service_interfaces.as_slice() else {
+            panic!("primary DPU must receive only its local endpoint")
+        };
+        let [secondary_service] = secondary_response.service_interfaces.as_slice() else {
+            panic!("secondary DPU must receive only its local endpoint")
+        };
+
+        // Each response must preserve its local endpoint's service ID, attachment ID, ordinal, slot,
+        // selected VPC, link prefix, MAC address, and internal UUID.
+        assert_eq!(primary_service.service_id, ipv4_service_id.to_string());
+        assert_eq!(
+            primary_service.attachment_id,
+            Some(ipv4_endpoint.attachment_id.into())
+        );
+        assert_eq!(primary_service.interface_ordinal, 0);
+        assert_eq!(primary_service.slot_index, 0);
+        assert_eq!(primary_service.vpc_id, Some(service_vpc_id));
+        assert_eq!(
+            primary_service.link_prefix,
+            ipv4_endpoint.link_prefix.to_string()
+        );
+        assert_eq!(
+            primary_service.mac_address,
+            ipv4_endpoint.mac_address.to_string()
+        );
+        assert_eq!(
+            primary_service.internal_uuid,
+            Some(ipv4_endpoint.internal_uuid.into())
+        );
+        assert_eq!(secondary_service.service_id, ipv6_service_id.to_string());
+        assert_eq!(
+            secondary_service.attachment_id,
+            Some(ipv6_endpoint.attachment_id.into())
+        );
+        assert_eq!(secondary_service.interface_ordinal, 0);
+        assert_eq!(secondary_service.slot_index, 1);
+        assert_eq!(secondary_service.vpc_id, Some(service_vpc_id));
+        assert_eq!(
+            secondary_service.link_prefix,
+            ipv6_endpoint.link_prefix.to_string()
+        );
+        assert_eq!(
+            secondary_service.mac_address,
+            ipv6_endpoint.mac_address.to_string()
+        );
+        assert_eq!(
+            secondary_service.internal_uuid,
+            Some(ipv6_endpoint.internal_uuid.into())
+        );
+
+        // Both families carry the selected VPC's exact routing policy and distinct DPU loopbacks.
+        let primary_service_loopback = primary_service
+            .tenant_vrf_loopback_ip
+            .as_deref()
+            .expect("primary service interface carries its tenant VRF loopback");
+        let secondary_service_loopback = secondary_service
+            .tenant_vrf_loopback_ip
+            .as_deref()
+            .expect("secondary service interface carries its tenant VRF loopback");
+        assert_ne!(primary_service_loopback, secondary_service_loopback);
+        for service_interface in [primary_service, secondary_service] {
+            assert_eq!(service_interface.vpc_vni, service_vni);
+            assert_eq!(service_interface.mtu, Some(9000));
+            assert!(
+                service_interface
+                    .vpc_routing_profile
+                    .as_ref()
+                    .is_some_and(|profile| profile.leak_tenant_host_routes_to_underlay)
+            );
+            assert!(service_interface.interface_routing_profile.is_none());
+            let mut service_vpc_prefixes = service_interface.vpc_prefixes.clone();
+            service_vpc_prefixes.sort_unstable();
+            assert_eq!(
+                service_vpc_prefixes,
+                vec!["192.2.4.0/24".to_string(), "2001:db8:200::/64".to_string()]
+            );
+            assert_eq!(service_interface.vpc_peer_prefixes, vec!["192.3.4.0/24"]);
+            assert_eq!(service_interface.vpc_peer_vnis, vec![peer_vni]);
+        }
+
+        // The service VPC must remain independent of the consumer's host-facing VPC.
+        assert_ne!(
+            initial_primary_response.tenant_interfaces[0].vpc_vni,
+            primary_service.vpc_vni
+        );
+        assert_eq!(initial_primary_response.tenant_interfaces.len(), 1);
+        assert!(secondary_response.tenant_interfaces.is_empty());
+
+        // Service endpoints must not change the host-facing public interface cardinality.
+        let public_instance = initial_primary_response
+            .instance
+            .as_ref()
+            .expect("response retains the public instance");
+        assert_eq!(
+            public_instance
+                .config
+                .as_ref()
+                .and_then(|config| config.network.as_ref())
+                .expect("public instance config retains host networking")
+                .interfaces
+                .len(),
+            1
+        );
+        assert_eq!(
+            public_instance
+                .status
+                .as_ref()
+                .and_then(|status| status.network.as_ref())
+                .expect("public instance status retains host networking")
+                .interfaces
+                .len(),
+            1
+        );
+
+        // Server-owned service-interface `internal_uuid` values must not leak through the public instance view.
+        let public_instance = serde_json::to_string(public_instance).unwrap();
+        assert!(!public_instance.contains(&ipv4_endpoint.internal_uuid.to_string()));
+        assert!(!public_instance.contains(&ipv6_endpoint.internal_uuid.to_string()));
+    })
+    .await;
+}
+
+/// Verifies absent, populated, updated, and empty VPC NSGs reach service interfaces without changing the instance network version.
+/// A conflicting instance NSG remains on the host interface and never supplies service policy.
+#[crate::sqlx_test]
+async fn service_vpc_endpoints_refresh_only_selected_vpc_nsg(pool: sqlx::PgPool) {
+    // Box this test's future to reduce the stack frames reserved by the SQLx runner.
+    Box::pin(async move {
+        let env = create_service_vpc_test_env(pool, 2, true, None).await;
+        let ServiceVpcEndpointFixture {
+            tenant,
+            managed_host,
+            instance_id,
+            service_vpc_id,
+            instance_network_security_group,
+            ..
+        } = create_service_vpc_endpoint_fixture(&env).await;
+
+        // Capture the stored instance network version before changing VPC policy.
+        let persisted_network_version = db::instance::find_by_id(&env.pool, instance_id)
+            .await
+            .unwrap()
+            .expect("fixture instance remains persisted")
+            .network_config_version;
+
+        // An absent service-VPC NSG must remain absent even when the instance has a nonempty NSG.
+        let response_without_vpc_policy = env
+            .api
+            .get_managed_host_network_config(tonic::Request::new(ManagedHostNetworkConfigRequest {
+                dpu_machine_id: Some(managed_host.dpu_ids[0]),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        let [service_without_vpc_policy] =
+            response_without_vpc_policy.service_interfaces.as_slice()
+        else {
+            panic!("primary DPU must retain its service endpoint without VPC policy")
+        };
+        assert!(service_without_vpc_policy.network_security_group.is_none());
+
+        // Attach a VPC-only NSG after endpoint persistence to prove policy does not need an instance `network_config_version` increment.
+        let network_security_group = env
+            .api
+            .create_network_security_group(tonic::Request::new(
+                rpc::forge::CreateNetworkSecurityGroupRequest {
+                    id: None,
+                    tenant_organization_id: tenant.organization_id.clone(),
+                    metadata: Some(Metadata {
+                        name: "service VPC policy".to_string(),
+                        ..Default::default()
+                    }),
+                    network_security_group_attributes: Some(
+                        rpc::forge::NetworkSecurityGroupAttributes {
+                            rules: vec![service_vpc_nsg_rule("service-rule-v1", "192.0.2.0/24")],
+                            stateful_egress: true, // Provides a wire-visible VPC policy value.
+                        },
+                    ),
+                },
+            ))
+            .await
+            .unwrap()
+            .into_inner()
+            .network_security_group
+            .expect("created NSG is returned");
+        env.api
+            .update_vpc(
+                VpcUpdateRequest::builder()
+                    .id(service_vpc_id)
+                    .metadata(Metadata {
+                        name: "selected service VPC".to_string(),
+                        ..Default::default()
+                    })
+                    .network_security_group_id(network_security_group.id.clone())
+                    .tonic_request(),
+            )
+            .await
+            .unwrap();
+
+        // Fetch both DPU views; the secondary remains on Admin without a host interface.
+        let initial_primary_response = env
+            .api
+            .get_managed_host_network_config(tonic::Request::new(ManagedHostNetworkConfigRequest {
+                dpu_machine_id: Some(managed_host.dpu_ids[0]),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        let secondary_response = env
+            .api
+            .get_managed_host_network_config(tonic::Request::new(ManagedHostNetworkConfigRequest {
+                dpu_machine_id: Some(managed_host.dpu_ids[1]),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        // Both DPUs must use the VPC NSG rather than the instance NSG.
+        for service_interface in [
+            &initial_primary_response.service_interfaces[0],
+            &secondary_response.service_interfaces[0],
+        ] {
+            assert_eq!(
+                service_interface
+                    .network_security_group
+                    .as_ref()
+                    .map(|group| group.id.as_str()),
+                Some(network_security_group.id.as_str())
+            );
+            assert_eq!(
+                service_interface
+                    .network_security_group
+                    .as_ref()
+                    .map(|group| group.source),
+                Some(i32::from(
+                    rpc::forge::NetworkSecurityGroupSource::NsgSourceVpc
+                ))
+            );
+            assert!(
+                service_interface
+                    .network_security_group
+                    .as_ref()
+                    .is_some_and(|group| group.stateful_egress)
+            );
+        }
+
+        // Host and service interfaces select their independently configured policy sources.
+        let initial_service_policy = initial_primary_response.service_interfaces[0]
+            .network_security_group
+            .as_ref()
+            .expect("service interface carries VPC policy");
+        assert_eq!(
+            initial_service_policy.version,
+            network_security_group.version
+        );
+        assert_eq!(
+            initial_service_policy.rules[0]
+                .rule
+                .as_ref()
+                .and_then(|rule| rule.id.as_deref()),
+            Some("service-rule-v1")
+        );
+        let host_policy = initial_primary_response.tenant_interfaces[0]
+            .network_security_group
+            .as_ref()
+            .expect("host interface carries instance policy");
+        assert_eq!(host_policy.id, instance_network_security_group.id);
+        assert_eq!(
+            host_policy.source,
+            i32::from(rpc::forge::NetworkSecurityGroupSource::NsgSourceInstance)
+        );
+        assert_eq!(
+            host_policy.rules[0]
+                .rule
+                .as_ref()
+                .and_then(|rule| rule.id.as_deref()),
+            Some("instance-rule")
+        );
+
+        // Update only the selected service VPC policy, leaving the instance network version untouched.
+        let updated_network_security_group = env
+            .api
+            .update_network_security_group(tonic::Request::new(
+                rpc::forge::UpdateNetworkSecurityGroupRequest {
+                    id: network_security_group.id.clone(),
+                    tenant_organization_id: tenant.organization_id.clone(),
+                    metadata: network_security_group.metadata.clone(),
+                    network_security_group_attributes: Some(
+                        rpc::forge::NetworkSecurityGroupAttributes {
+                            rules: vec![service_vpc_nsg_rule("service-rule-v2", "198.51.100.0/24")],
+                            stateful_egress: true,
+                        },
+                    ),
+                    if_version_match: Some(network_security_group.version.clone()),
+                },
+            ))
+            .await
+            .unwrap()
+            .into_inner()
+            .network_security_group
+            .expect("updated service VPC NSG is returned");
+        let primary_response = env
+            .api
+            .get_managed_host_network_config(tonic::Request::new(ManagedHostNetworkConfigRequest {
+                dpu_machine_id: Some(managed_host.dpu_ids[0]),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        let updated_service_policy = primary_response.service_interfaces[0]
+            .network_security_group
+            .as_ref()
+            .expect("fresh response carries updated VPC policy");
+        assert_eq!(
+            updated_service_policy.version,
+            updated_network_security_group.version
+        );
+        assert_eq!(
+            updated_service_policy.rules[0]
+                .rule
+                .as_ref()
+                .and_then(|rule| rule.id.as_deref()),
+            Some("service-rule-v2")
+        );
+
+        // Empty VPC rules must retain a present VPC NSG rather than falling back to instance policy.
+        let empty_network_security_group = env
+            .api
+            .update_network_security_group(tonic::Request::new(
+                rpc::forge::UpdateNetworkSecurityGroupRequest {
+                    id: network_security_group.id.clone(),
+                    tenant_organization_id: tenant.organization_id.clone(),
+                    metadata: network_security_group.metadata.clone(),
+                    network_security_group_attributes: Some(
+                        rpc::forge::NetworkSecurityGroupAttributes {
+                            rules: vec![],
+                            stateful_egress: true,
+                        },
+                    ),
+                    if_version_match: Some(updated_network_security_group.version.clone()),
+                },
+            ))
+            .await
+            .unwrap()
+            .into_inner()
+            .network_security_group
+            .expect("updated empty VPC NSG is returned");
+        let response_with_empty_vpc_policy = env
+            .api
+            .get_managed_host_network_config(tonic::Request::new(ManagedHostNetworkConfigRequest {
+                dpu_machine_id: Some(managed_host.dpu_ids[0]),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        let [service_with_empty_vpc_policy] =
+            response_with_empty_vpc_policy.service_interfaces.as_slice()
+        else {
+            panic!("primary DPU must retain its service endpoint with empty VPC policy")
+        };
+        let empty_service_policy = service_with_empty_vpc_policy
+            .network_security_group
+            .as_ref()
+            .expect("empty VPC NSG remains present");
+        assert_eq!(empty_service_policy.id, network_security_group.id);
+        assert_eq!(
+            empty_service_policy.version,
+            empty_network_security_group.version
+        );
+        assert_eq!(
+            empty_service_policy.source,
+            i32::from(rpc::forge::NetworkSecurityGroupSource::NsgSourceVpc)
+        );
+        assert!(empty_service_policy.rules.is_empty());
+        assert!(empty_service_policy.stateful_egress);
+
+        // Fresh VPC policy appears without mutating the instance network version.
+        assert_eq!(
+            db::instance::find_by_id(&env.pool, instance_id)
+                .await
+                .unwrap()
+                .expect("fixture instance remains persisted")
+                .network_config_version,
+            persisted_network_version
+        );
+    })
+    .await;
+}
+
+/// Verifies stored Admin mode suppresses primary service interfaces while secondary services and fixed slot inventories remain available.
+/// Restoring Tenant mode includes primary services with a newer managed_host_config_version so agents receive the changed configuration.
+#[crate::sqlx_test]
+async fn service_vpc_endpoints_follow_host_network_mode(pool: sqlx::PgPool) {
+    // Box this test's future to reduce the stack frames reserved by the SQLx runner.
+    Box::pin(async move {
+        let env = create_service_vpc_test_env(pool, 2, true, None).await;
+        let ServiceVpcEndpointFixture { managed_host, .. } =
+            create_service_vpc_endpoint_fixture(&env).await;
+
+        // Primary Admin omits routed service ports, while the secondary Admin response keeps its port.
+        set_host_use_admin_network(&env, managed_host.id, true).await;
+        let primary_admin = env
+            .api
+            .get_managed_host_network_config(tonic::Request::new(ManagedHostNetworkConfigRequest {
+                dpu_machine_id: Some(managed_host.dpu_ids[0]),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        let secondary_admin = env
+            .api
+            .get_managed_host_network_config(tonic::Request::new(ManagedHostNetworkConfigRequest {
+                dpu_machine_id: Some(managed_host.dpu_ids[1]),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(primary_admin.use_admin_network);
+        assert!(primary_admin.service_interfaces.is_empty());
+        assert_eq!(
+            primary_admin
+                .service_vpc_slot_inventory
+                .expect("Admin response retains fixed inventory")
+                .slots
+                .len(),
+            2
+        );
+        assert_eq!(secondary_admin.service_interfaces.len(), 1);
+        assert_eq!(
+            secondary_admin
+                .service_vpc_slot_inventory
+                .expect("secondary Admin response retains fixed inventory")
+                .slots
+                .len(),
+            2
+        );
+
+        // Returning to Tenant publishes the primary endpoint under a newer host network version.
+        set_host_use_admin_network(&env, managed_host.id, false).await;
+        let fresh_tenant = env
+            .api
+            .get_managed_host_network_config(tonic::Request::new(ManagedHostNetworkConfigRequest {
+                dpu_machine_id: Some(managed_host.dpu_ids[0]),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(fresh_tenant.service_interfaces.len(), 1);
+        assert_ne!(
+            fresh_tenant.managed_host_config_version,
+            primary_admin.managed_host_config_version
+        );
+    })
+    .await;
+}
+
+/// Verifies missing VNI, segment, or VPC-prefix data and incompatible MTU or address reservations reject the network-config request.
+/// Both link families must retain their HBN and service addresses before an agent receives networking.
+#[crate::sqlx_test]
+async fn service_vpc_endpoints_reject_invalid_retained_networks(pool: sqlx::PgPool) {
+    // Box this test's future to reduce the stack frames reserved by the SQLx runner.
+    Box::pin(async move {
+        let env = create_service_vpc_test_env(pool, 2, true, None).await;
+        let ServiceVpcEndpointFixture {
+            managed_host,
+            instance_id,
+            service_vpc_id,
+            service_vni,
+            ipv4_endpoint,
+            ipv6_endpoint,
+            ..
+        } = create_service_vpc_endpoint_fixture(&env).await;
+
+        // A missing selected-VPC VNI withholds the successful payload instead of emitting zero.
+        sqlx::query("UPDATE vpcs SET status = $1 WHERE id = $2")
+            .bind(sqlx::types::Json(model::vpc::VpcStatus { vni: None }))
+            .bind(service_vpc_id)
+            .execute(&env.pool)
+            .await
+            .unwrap();
+        let missing_vni = env
+            .api
+            .get_managed_host_network_config(tonic::Request::new(ManagedHostNetworkConfigRequest {
+                dpu_machine_id: Some(managed_host.dpu_ids[0]),
+            }))
+            .await
+            .expect_err("service VPC without a VNI must not produce networking");
+        assert_eq!(missing_vni.code(), tonic::Code::FailedPrecondition);
+        assert!(missing_vni.message().contains("has no allocated VNI"));
+
+        // Restore the selected VPC's `status.vni` before the remaining validation checks.
+        sqlx::query("UPDATE vpcs SET status = $1 WHERE id = $2")
+            .bind(sqlx::types::Json(model::vpc::VpcStatus {
+                vni: Some(
+                    i32::try_from(service_vni)
+                        .expect("fixture VNI fits the database representation"),
+                ),
+            }))
+            .bind(service_vpc_id)
+            .execute(&env.pool)
+            .await
+            .unwrap();
+        let restored_status: sqlx::types::Json<model::vpc::VpcStatus> =
+            sqlx::query_scalar("SELECT status FROM vpcs WHERE id = $1")
+                .bind(service_vpc_id)
+                .fetch_one(&env.pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            restored_status.0.vni,
+            Some(i32::try_from(service_vni).expect("fixture VNI fits the database representation"))
+        );
+
+        // A missing generated segment must withhold the response instead of emitting partial service-interface configuration.
+        let mut endpoint_with_missing_segment = ipv4_endpoint.clone();
+        endpoint_with_missing_segment.network_segment_id = NetworkSegmentId::new();
+        replace_service_vpc_endpoints(
+            &env,
+            instance_id,
+            &[endpoint_with_missing_segment, ipv6_endpoint.clone()],
+        )
+        .await;
+        let missing_segment = env
+            .api
+            .get_managed_host_network_config(tonic::Request::new(ManagedHostNetworkConfigRequest {
+                dpu_machine_id: Some(managed_host.dpu_ids[0]),
+            }))
+            .await
+            .expect_err(
+                "service endpoint without its generated segment must not produce networking",
+            );
+        assert_eq!(missing_segment.code(), tonic::Code::FailedPrecondition);
+        assert!(
+            missing_segment
+                .message()
+                .contains("references missing network segment")
+        );
+        // Restore the generated segment reference before testing a missing selected-VPC prefix.
+        replace_service_vpc_endpoints(
+            &env,
+            instance_id,
+            &[ipv4_endpoint.clone(), ipv6_endpoint.clone()],
+        )
+        .await;
+
+        // A missing selected-VPC prefix must withhold the response instead of emitting inconsistent policy.
+        sqlx::query("UPDATE network_vpc_prefixes SET deleted = NOW() WHERE id = $1")
+            .bind(ipv4_endpoint.vpc_prefix_id)
+            .execute(&env.pool)
+            .await
+            .unwrap();
+        let missing_prefix = env
+            .api
+            .get_managed_host_network_config(tonic::Request::new(ManagedHostNetworkConfigRequest {
+                dpu_machine_id: Some(managed_host.dpu_ids[0]),
+            }))
+            .await
+            .expect_err(
+                "service endpoint without its selected-VPC prefix must not produce networking",
+            );
+        assert_eq!(missing_prefix.code(), tonic::Code::FailedPrecondition);
+        assert!(
+            missing_prefix
+                .message()
+                .contains("references missing VPC prefix")
+        );
+
+        // Restore the endpoint's active VPC prefix before validating incompatible segments.
+        sqlx::query("UPDATE network_vpc_prefixes SET deleted = NULL WHERE id = $1")
+            .bind(ipv4_endpoint.vpc_prefix_id)
+            .execute(&env.pool)
+            .await
+            .unwrap();
+        let mut txn = env.db_txn().await;
+        assert!(
+            db::vpc_prefix::find_by_vpc(txn.as_mut(), service_vpc_id)
+                .await
+                .unwrap()
+                .iter()
+                .any(|prefix| prefix.id == ipv4_endpoint.vpc_prefix_id)
+        );
+        txn.commit().await.unwrap();
+
+        // Inject one schema-permitted incompatibility at a time to exercise retained-segment validation.
+        let incompatible_segments = [
+            // A retained lower MTU must not bypass the fixed service-interface MTU contract.
+            (
+                "incorrect MTU",
+                &ipv4_endpoint,
+                1500,
+                Some(ipv4_endpoint.link_prefix.network()),
+                0,
+                "incompatible VPC, MTU, lifecycle, or readiness state",
+            ),
+            // IPv4 must reserve base+0 through its gateway rather than consuming the service address.
+            (
+                "incorrect IPv4 gateway",
+                &ipv4_endpoint,
+                9000,
+                Some(ipv4_endpoint.link_prefix.broadcast()),
+                0,
+                "does not preserve HBN base+0",
+            ),
+            // IPv6 must reserve base+0 explicitly because it has no gateway.
+            (
+                "missing IPv6 reservation",
+                &ipv6_endpoint,
+                9000,
+                None,
+                0,
+                "does not preserve HBN base+0",
+            ),
+        ];
+        for (scenario, endpoint, mtu, gateway, num_reserved, diagnostic) in incompatible_segments {
+            // Save `mtu`, `gateway`, and `num_reserved` so each case can restore the original segment and prefix.
+            let original: (i32, Option<std::net::IpAddr>, i32) = sqlx::query_as(
+                "SELECT ns.mtu, np.gateway, np.num_reserved
+             FROM network_segments ns
+             JOIN network_prefixes np ON np.segment_id = ns.id
+             WHERE ns.id = $1 AND np.id = $2",
+            )
+            .bind(endpoint.network_segment_id)
+            .bind(endpoint.network_prefix_id)
+            .fetch_one(&env.pool)
+            .await
+            .unwrap();
+            // Persist this case's incompatible MTU or address reservation before testing response validation.
+            let mut txn = env.db_txn().await;
+            sqlx::query("UPDATE network_segments SET mtu = $1 WHERE id = $2")
+                .bind(mtu)
+                .bind(endpoint.network_segment_id)
+                .execute(txn.as_mut())
+                .await
+                .unwrap();
+            sqlx::query(
+                "UPDATE network_prefixes SET gateway = $1, num_reserved = $2 WHERE id = $3",
+            )
+            .bind(gateway)
+            .bind(num_reserved)
+            .bind(endpoint.network_prefix_id)
+            .execute(txn.as_mut())
+            .await
+            .unwrap();
+            txn.commit().await.unwrap();
+
+            // The receiving DPU must reject the incompatible retained segment.
+            let error = env
+                .api
+                .get_managed_host_network_config(tonic::Request::new(
+                    ManagedHostNetworkConfigRequest {
+                        dpu_machine_id: Some(endpoint.dpu_id),
+                    },
+                ))
+                .await
+                .expect_err(scenario);
+            assert_eq!(error.code(), tonic::Code::FailedPrecondition, "{scenario}");
+            assert!(error.message().contains(diagnostic), "{scenario}: {error}");
+
+            // Restore both records before the next validation case.
+            let mut txn = env.db_txn().await;
+            sqlx::query("UPDATE network_segments SET mtu = $1 WHERE id = $2")
+                .bind(original.0)
+                .bind(endpoint.network_segment_id)
+                .execute(txn.as_mut())
+                .await
+                .unwrap();
+            sqlx::query(
+                "UPDATE network_prefixes SET gateway = $1, num_reserved = $2 WHERE id = $3",
+            )
+            .bind(original.1)
+            .bind(original.2)
+            .bind(endpoint.network_prefix_id)
+            .execute(txn.as_mut())
+            .await
+            .unwrap();
+            txn.commit().await.unwrap();
+            let restored: (i32, Option<std::net::IpAddr>, i32) = sqlx::query_as(
+                "SELECT ns.mtu, np.gateway, np.num_reserved
+             FROM network_segments ns
+             JOIN network_prefixes np ON np.segment_id = ns.id
+             WHERE ns.id = $1 AND np.id = $2",
+            )
+            .bind(endpoint.network_segment_id)
+            .bind(endpoint.network_prefix_id)
+            .fetch_one(&env.pool)
+            .await
+            .unwrap();
+            assert_eq!(restored, original, "{scenario}");
+        }
+    })
+    .await;
+}
+
+/// Verifies deleted instances and terminating attachments are omitted from DPU service configuration while their endpoint and allocation records remain stored.
+/// Configuration reads must leave those records available for later cleanup.
+#[crate::sqlx_test]
+async fn service_vpc_endpoint_filtering_preserves_allocations(pool: sqlx::PgPool) {
+    // Box this test's future to reduce the stack frames reserved by the SQLx runner.
+    Box::pin(async move {
+        let env = create_service_vpc_test_env(pool, 2, true, None).await;
+        let ServiceVpcEndpointFixture {
+            managed_host,
+            instance_id,
+            service_vpc_id,
+            ipv4_endpoint,
+            ipv6_endpoint,
+            ..
+        } = create_service_vpc_endpoint_fixture(&env).await;
+
+        // Fetch both active endpoints to allocate the loopbacks whose retention is checked below.
+        for dpu_id in &managed_host.dpu_ids {
+            let response = env
+                .api
+                .get_managed_host_network_config(tonic::Request::new(
+                    ManagedHostNetworkConfigRequest {
+                        dpu_machine_id: Some(*dpu_id),
+                    },
+                ))
+                .await
+                .unwrap()
+                .into_inner();
+            assert_eq!(response.service_interfaces.len(), 1);
+        }
+
+        // Seed the secondary service address because both lifecycle checks suppress this endpoint.
+        sqlx::query(
+            "INSERT INTO instance_addresses
+            (instance_id, address, prefix, segment_id, vpc_id)
+         VALUES ($1, $2, $3, $4, $5)",
+        )
+        .bind(instance_id)
+        .bind(ipv6_endpoint.link_prefix.broadcast())
+        .bind(ipv6_endpoint.link_prefix)
+        .bind(ipv6_endpoint.network_segment_id)
+        .bind(ipv6_endpoint.vpc_id)
+        .execute(&env.pool)
+        .await
+        .unwrap();
+
+        // Reload the committed service address allocation before either lifecycle filter runs.
+        let service_allocations_before_filtering =
+            db::instance_address::find_by_segment_id(&env.pool, &ipv6_endpoint.network_segment_id)
+                .await
+                .unwrap();
+
+        // Deleted-instance filtering removes desired networking while retaining endpoint records for cleanup.
+        sqlx::query("UPDATE instances SET deleted = NOW() WHERE id = $1")
+            .bind(instance_id)
+            .execute(&env.pool)
+            .await
+            .unwrap();
+        let deleted_instance_response = env
+            .api
+            .get_managed_host_network_config(tonic::Request::new(ManagedHostNetworkConfigRequest {
+                dpu_machine_id: Some(managed_host.dpu_ids[1]),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(deleted_instance_response.service_interfaces.is_empty());
+        let service_allocations_after_deletion =
+            db::instance_address::find_by_segment_id(&env.pool, &ipv6_endpoint.network_segment_id)
+                .await
+                .unwrap();
+        assert_eq!(
+            db::instance::find_by_id(&env.pool, instance_id)
+                .await
+                .unwrap()
+                .expect("deleted instance remains available for cleanup")
+                .config
+                .network
+                .service_interfaces,
+            vec![ipv4_endpoint.clone(), ipv6_endpoint.clone()]
+        );
+
+        // Restore the instance so the terminating-attachment path remains independently reachable.
+        sqlx::query("UPDATE instances SET deleted = NULL WHERE id = $1")
+            .bind(instance_id)
+            .execute(&env.pool)
+            .await
+            .unwrap();
+
+        // Mark the attachment terminating and prove its service interface disappears without deleting its service address allocation.
+        let mut txn = env.db_txn().await;
+        let stored = db::instance::find_by_id(txn.as_mut(), instance_id)
+            .await
+            .unwrap()
+            .expect("fixture instance remains persisted");
+        let current_services = stored.config.extension_services.clone();
+        let mut terminating_services = current_services.clone();
+        terminating_services
+            .service_configs
+            .iter_mut()
+            .find(|config| config.id == Some(ipv6_endpoint.attachment_id))
+            .expect("secondary attachment remains persisted")
+            .removed = Some(chrono::Utc::now());
+        assert_eq!(
+            db::instance::update_extension_services_config(
+                txn.as_mut(),
+                instance_id,
+                stored.extension_services_config_version,
+                &current_services,
+                &terminating_services,
+                false,
+            )
+            .await
+            .unwrap(),
+            ConditionalWrite::Applied(())
+        );
+        txn.commit().await.unwrap();
+        let terminated_response = env
+            .api
+            .get_managed_host_network_config(tonic::Request::new(ManagedHostNetworkConfigRequest {
+                dpu_machine_id: Some(managed_host.dpu_ids[1]),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(terminated_response.service_interfaces.is_empty());
+        let service_allocations_after_termination =
+            db::instance_address::find_by_segment_id(&env.pool, &ipv6_endpoint.network_segment_id)
+                .await
+                .unwrap();
+        assert_eq!(
+            terminated_response
+                .service_vpc_slot_inventory
+                .as_ref()
+                .expect("terminated secondary response retains fixed inventory")
+                .slots
+                .len(),
+            2
+        );
+        let retained = db::instance::find_by_id(&env.pool, instance_id)
+            .await
+            .unwrap()
+            .expect("terminating instance remains persisted");
+        assert!(
+            retained
+                .config
+                .extension_services
+                .service_configs
+                .iter()
+                .find(|config| config.id == Some(ipv6_endpoint.attachment_id))
+                .expect("secondary attachment remains persisted")
+                .removed
+                .is_some()
+        );
+        assert_eq!(
+            retained.config.network.service_interfaces,
+            vec![ipv4_endpoint.clone(), ipv6_endpoint.clone()]
+        );
+
+        // Compare the persisted service address allocation at each stage so filtering cannot silently release the address.
+        for (scenario, allocations) in [
+            // A real allocation must exist before the later observations can prove retention.
+            ("before filtering", service_allocations_before_filtering),
+            // Deleted instances retain service addresses until cleanup completes.
+            ("deleted instance", service_allocations_after_deletion),
+            // Attachment termination independently retains the same service address.
+            (
+                "terminating attachment",
+                service_allocations_after_termination,
+            ),
+        ] {
+            assert_eq!(
+                allocations
+                    .iter()
+                    .map(|allocation| (
+                        allocation.instance_id,
+                        allocation.segment_id,
+                        allocation.vpc_id,
+                        allocation.address,
+                        allocation.prefix,
+                    ))
+                    .collect::<Vec<_>>(),
+                vec![(
+                    instance_id,
+                    ipv6_endpoint.network_segment_id,
+                    ipv6_endpoint.vpc_id,
+                    ipv6_endpoint.link_prefix.broadcast(),
+                    ipv6_endpoint.link_prefix,
+                )],
+                "{scenario}"
+            );
+        }
+
+        // Generated segments, network prefixes, VPC prefixes, and VPC/DPU loopback rows remain
+        // reloadable after the deletion and termination rendering checks.
+        let mut txn = env.db_txn().await;
+        let retained_vpc_prefixes = db::vpc_prefix::find_by_vpc(txn.as_mut(), service_vpc_id)
+            .await
+            .unwrap();
+        for endpoint in [&ipv4_endpoint, &ipv6_endpoint] {
+            let segment = db::network_segment::find_by(
+                txn.as_mut(),
+                db::ObjectColumnFilter::One(
+                    db::network_segment::IdColumn,
+                    &endpoint.network_segment_id,
+                ),
+                Default::default(),
+            )
+            .await
+            .unwrap()
+            .pop()
+            .expect("generated endpoint segment remains persisted");
+            assert!(segment.prefixes.iter().any(|prefix| {
+                prefix.id == endpoint.network_prefix_id && prefix.prefix == endpoint.link_prefix
+            }));
+            assert!(
+                retained_vpc_prefixes
+                    .iter()
+                    .any(|prefix| prefix.id == endpoint.vpc_prefix_id)
+            );
+            assert!(
+                db::vpc_dpu_loopback::find(txn.as_mut(), &endpoint.dpu_id, &endpoint.vpc_id)
+                    .await
+                    .unwrap()
+                    .is_some()
+            );
+        }
+        txn.commit().await.unwrap();
+    })
+    .await;
+}
+
+/// Verifies a host interface and two service attachments selecting the same VPC reuse one per-VPC, per-DPU tenant VRF loopback.
+/// This prevents host and service interfaces from allocating different tenant VRF loopback addresses or losing another attachment's endpoint during termination.
+#[crate::sqlx_test]
+async fn service_vpc_endpoint_reuses_host_vpc_loopback(pool: sqlx::PgPool) {
+    let env = create_service_vpc_test_env(pool, 1, true, None).await;
+
+    // Allocate the host on the same FNN VPC later selected by its service endpoint.
+    let tenant = env
+        .api
+        .create_tenant(tonic::Request::new(rpc::forge::CreateTenantRequest {
+            organization_id: "service-vpc-loopback".to_string(),
+            routing_profile_type: Some("INTERNAL".to_string()),
+            metadata: Some(Metadata {
+                name: "service-vpc-loopback".to_string(),
+                ..Default::default()
+            }),
+        }))
+        .await
+        .unwrap()
+        .into_inner()
+        .tenant
+        .unwrap();
+    let host_segment_id = env
+        .create_vpc_and_tenant_segment_with_vpc_details(
+            VpcCreationRequest::builder(tenant.organization_id.as_str())
+                .metadata(Metadata {
+                    name: "shared host and service VPC".to_string(),
+                    ..Default::default()
+                })
+                .network_virtualization_type(rpc::forge::VpcVirtualizationType::Fnn as i32)
+                .routing_profile_type("INTERNAL".to_string())
+                .rpc(),
+        )
+        .await;
+    let mut txn = env.db_txn().await;
+    let shared_vpc_id = db::vpc::find_by_segment(txn.as_mut(), host_segment_id)
+        .await
+        .unwrap()
+        .expect("host segment belongs to a VPC")
+        .id;
+    txn.commit().await.unwrap();
+    let managed_host = create_managed_host(&env).await;
+    mark_host_dpf_ingested(&env, managed_host.id).await;
+    let (instance, _) = managed_host
+        .instance_builer(&env)
+        .tenant_org(tenant.organization_id.clone())
+        .single_interface_network_config(host_segment_id)
+        .build_and_return()
+        .await;
+    let first_attachment_id = uuid::Uuid::new_v4();
+    let first_endpoint = create_service_vpc_endpoint(
+        &env,
+        shared_vpc_id,
+        "192.1.4.0/25".parse().unwrap(),
+        "192.1.4.0/31".parse().unwrap(),
+        managed_host.dpu().id,
+        first_attachment_id,
+        0,
+        0,
+        MacAddress::new([0x02, 0, 0, 0, 0, 0x51]),
+    )
+    .await;
+    let second_attachment_id = uuid::Uuid::new_v4();
+    // Reuse slot 0 with a different attachment and link prefix to exercise independent attachment termination.
+    let second_endpoint = create_service_vpc_endpoint(
+        &env,
+        shared_vpc_id,
+        "192.1.4.128/25".parse().unwrap(),
+        "192.1.4.128/31".parse().unwrap(),
+        managed_host.dpu().id,
+        second_attachment_id,
+        0,
+        0,
+        MacAddress::new([0x02, 0, 0, 0, 0, 0x52]),
+    )
+    .await;
+    let first_service_id = api_fixtures::instance::persist_service_vpc_attachment(
+        &env,
+        instance.id,
+        tenant.organization_id.clone(),
+        vec![first_endpoint.clone()],
+    )
+    .await;
+    let second_service_id = api_fixtures::instance::persist_service_vpc_attachment(
+        &env,
+        instance.id,
+        tenant.organization_id,
+        vec![second_endpoint.clone()],
+    )
+    .await;
+
+    // Fetch once so host rendering loads the durable loopback into the request cache for both service attachments to reuse.
+    let response = env
+        .api
+        .get_managed_host_network_config(tonic::Request::new(ManagedHostNetworkConfigRequest {
+            dpu_machine_id: Some(managed_host.dpu().id),
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+    let host_loopback = response.tenant_interfaces[0]
+        .addresses
+        .iter()
+        .find(|address| address.address_family() == rpc::forge::AddressFamily::V4)
+        .and_then(|address| address.tenant_vrf_loopback_ip.as_ref())
+        .expect("host IPv4 address carries its tenant VRF loopback");
+    assert_eq!(response.service_interfaces.len(), 2);
+    let first_service = response
+        .service_interfaces
+        .iter()
+        .find(|interface| interface.attachment_id == Some(first_attachment_id.into()))
+        .expect("first service attachment is rendered");
+    let second_service = response
+        .service_interfaces
+        .iter()
+        .find(|interface| interface.attachment_id == Some(second_attachment_id.into()))
+        .expect("second service attachment is rendered");
+    assert_eq!(first_service.service_id, first_service_id.to_string());
+    assert_eq!(second_service.service_id, second_service_id.to_string());
+    assert_eq!(first_service.slot_index, 0);
+    assert_eq!(second_service.slot_index, 0);
+    assert_eq!(
+        first_service.link_prefix,
+        first_endpoint.link_prefix.to_string()
+    );
+    assert_eq!(
+        second_service.link_prefix,
+        second_endpoint.link_prefix.to_string()
+    );
+    let first_service_loopback = first_service
+        .tenant_vrf_loopback_ip
+        .as_ref()
+        .expect("first service interface carries its tenant VRF loopback");
+    let second_service_loopback = second_service
+        .tenant_vrf_loopback_ip
+        .as_ref()
+        .expect("second service interface carries its tenant VRF loopback");
+    assert_eq!(first_service_loopback, host_loopback);
+    assert_eq!(second_service_loopback, host_loopback);
+
+    // The shared wire value must be the single durable allocation for this DPU and VPC.
+    let mut txn = env.db_txn().await;
+    let persisted =
+        db::vpc_dpu_loopback::find(txn.as_mut(), &managed_host.dpu().id, &shared_vpc_id)
+            .await
+            .unwrap()
+            .expect("shared tenant VRF loopback is persisted");
+    assert_eq!(persisted.loopback_ip.to_string(), *host_loopback);
+    let allocation_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM vpc_dpu_loopbacks WHERE dpu_id = $1 AND vpc_id = $2",
+    )
+    .bind(managed_host.dpu().id)
+    .bind(shared_vpc_id)
+    .fetch_one(txn.as_mut())
+    .await
+    .unwrap();
+    assert_eq!(allocation_count, 1);
+    txn.commit().await.unwrap();
+
+    // Terminate only the first attachment while the second still uses the same slot and VPC.
+    let mut txn = env.db_txn().await;
+    let stored = db::instance::find_by_id(txn.as_mut(), instance.id)
+        .await
+        .unwrap()
+        .expect("fixture instance remains persisted");
+    let current_services = stored.config.extension_services.clone();
+    let mut terminating_services = current_services.clone();
+    terminating_services
+        .service_configs
+        .iter_mut()
+        .find(|config| config.id == Some(first_attachment_id))
+        .expect("first attachment remains persisted")
+        .removed = Some(chrono::Utc::now());
+    assert_eq!(
+        db::instance::update_extension_services_config(
+            txn.as_mut(),
+            instance.id,
+            stored.extension_services_config_version,
+            &current_services,
+            &terminating_services,
+            false,
+        )
+        .await
+        .unwrap(),
+        ConditionalWrite::Applied(())
+    );
+    txn.commit().await.unwrap();
+
+    // The surviving attachment must retain its endpoint and shared loopback.
+    let after_termination = env
+        .api
+        .get_managed_host_network_config(tonic::Request::new(ManagedHostNetworkConfigRequest {
+            dpu_machine_id: Some(managed_host.dpu().id),
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+    let [surviving_service] = after_termination.service_interfaces.as_slice() else {
+        panic!("terminating one attachment must preserve the other endpoint")
+    };
+    assert_eq!(surviving_service, second_service);
+
+    // Reload both attachment records and the durable loopback after rendering the survivor.
+    let retained = db::instance::find_by_id(&env.pool, instance.id)
+        .await
+        .unwrap()
+        .expect("fixture instance remains persisted");
+    assert_eq!(retained.config.extension_services, terminating_services);
+    assert_eq!(
+        retained.config.network.service_interfaces,
+        vec![first_endpoint, second_endpoint]
+    );
+    let mut txn = env.db_txn().await;
+    let retained_loopback =
+        db::vpc_dpu_loopback::find(txn.as_mut(), &managed_host.dpu().id, &shared_vpc_id)
+            .await
+            .unwrap()
+            .expect("surviving attachment retains the shared loopback");
+    assert_eq!(retained_loopback.loopback_ip, persisted.loopback_ip);
+    txn.commit().await.unwrap();
+}
+
+/// Verifies a committed service endpoint renders without a tenant VRF loopback when allocation is disabled.
+/// This prevents service rendering from allocating an address despite the site's loopback setting.
+#[crate::sqlx_test]
+async fn service_only_vpc_without_loopbacks_does_not_allocate(pool: sqlx::PgPool) {
+    let env = create_service_vpc_test_env(pool, 1, false, None).await;
+
+    // Create a tenant and FNN VPC before assigning a host interface to the primary DPU.
+    let tenant = env
+        .api
+        .create_tenant(tonic::Request::new(rpc::forge::CreateTenantRequest {
+            organization_id: "service-vpc-loopback-disabled".to_string(),
+            routing_profile_type: Some("INTERNAL".to_string()),
+            metadata: Some(Metadata {
+                name: "service-vpc-loopback-disabled".to_string(),
+                ..Default::default()
+            }),
+        }))
+        .await
+        .unwrap()
+        .into_inner()
+        .tenant
+        .unwrap();
+    let host_segment_id = env
+        .create_vpc_and_tenant_segment_with_vpc_details(
+            VpcCreationRequest::builder(tenant.organization_id.as_str())
+                .metadata(Metadata {
+                    name: "service VPC without loopbacks".to_string(),
+                    ..Default::default()
+                })
+                .network_virtualization_type(rpc::forge::VpcVirtualizationType::Fnn as i32)
+                .routing_profile_type("INTERNAL".to_string())
+                .rpc(),
+        )
+        .await;
+    let mut txn = env.db_txn().await;
+    let vpc_id = db::vpc::find_by_segment(txn.as_mut(), host_segment_id)
+        .await
+        .unwrap()
+        .expect("host segment belongs to a VPC")
+        .id;
+    txn.commit().await.unwrap();
+    let managed_host = api_fixtures::create_managed_host_multi_dpu(&env, 2).await;
+    mark_host_dpf_ingested(&env, managed_host.id).await;
+    let (instance, _) = managed_host
+        .instance_builer(&env)
+        .tenant_org(tenant.organization_id.clone())
+        .single_interface_network_config(host_segment_id)
+        .build_and_return()
+        .await;
+
+    // Commit one service endpoint on the secondary DPU, which has no host interface.
+    let endpoint = create_service_vpc_endpoint(
+        &env,
+        vpc_id,
+        "192.7.4.0/24".parse().unwrap(),
+        "192.7.4.0/31".parse().unwrap(),
+        managed_host.dpu_ids[1],
+        uuid::Uuid::new_v4(),
+        0,
+        0,
+        MacAddress::new([0x02, 0, 0, 0, 0, 0x71]),
+    )
+    .await;
+    api_fixtures::instance::persist_service_vpc_attachment(
+        &env,
+        instance.id,
+        tenant.organization_id,
+        vec![endpoint.clone()],
+    )
+    .await;
+    let mut txn = env.db_txn().await;
+    assert!(
+        db::vpc_dpu_loopback::find(txn.as_mut(), &endpoint.dpu_id, &vpc_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    txn.commit().await.unwrap();
+
+    // Successful rendering must retain the endpoint while omitting its tenant VRF loopback.
+    let response = env
+        .api
+        .get_managed_host_network_config(tonic::Request::new(ManagedHostNetworkConfigRequest {
+            dpu_machine_id: Some(endpoint.dpu_id),
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(response.tenant_interfaces.is_empty());
+    let [service] = response.service_interfaces.as_slice() else {
+        panic!("disabled loopbacks must not suppress the service endpoint")
+    };
+    assert_eq!(service.internal_uuid, Some(endpoint.internal_uuid.into()));
+    assert!(service.tenant_vrf_loopback_ip.is_none());
+
+    // Reload the durable allocation after rendering to detect an unwanted side effect.
+    let mut txn = env.db_txn().await;
+    assert!(
+        db::vpc_dpu_loopback::find(txn.as_mut(), &endpoint.dpu_id, &vpc_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    txn.commit().await.unwrap();
+}
+
+/// Verifies two local service VPCs retain distinct policy and loopbacks, and a later endpoint failure rolls back earlier allocations.
+/// This prevents per-request VPC caches from crossing VPCs and failed responses from consuming durable loopback resources.
+#[crate::sqlx_test]
+async fn service_vpc_local_vpcs_preserve_policy_and_rollback(pool: sqlx::PgPool) {
+    let env = create_service_vpc_test_env(pool, 2, true, None).await;
+
+    // Allocate the host before committing any service endpoints on its secondary DPU.
+    let tenant = env
+        .api
+        .create_tenant(tonic::Request::new(rpc::forge::CreateTenantRequest {
+            organization_id: "service-vpc-local-vpcs".to_string(),
+            routing_profile_type: Some("INTERNAL".to_string()),
+            metadata: Some(Metadata {
+                name: "service-vpc-local-vpcs".to_string(),
+                ..Default::default()
+            }),
+        }))
+        .await
+        .unwrap()
+        .into_inner()
+        .tenant
+        .unwrap();
+    let host_segment_id = env
+        .create_vpc_and_tenant_segment_with_vpc_details(
+            VpcCreationRequest::builder(tenant.organization_id.as_str())
+                .metadata(Metadata {
+                    name: "host VPC for local service VPCs".to_string(),
+                    ..Default::default()
+                })
+                .network_virtualization_type(rpc::forge::VpcVirtualizationType::Fnn as i32)
+                .routing_profile_type("INTERNAL".to_string())
+                .rpc(),
+        )
+        .await;
+    let managed_host = api_fixtures::create_managed_host_multi_dpu(&env, 2).await;
+    mark_host_dpf_ingested(&env, managed_host.id).await;
+    let (instance, _) = managed_host
+        .instance_builer(&env)
+        .tenant_org(tenant.organization_id.clone())
+        .single_interface_network_config(host_segment_id)
+        .build_and_return()
+        .await;
+
+    // Give each local service VPC distinct prefixes, routing policy, and a nonempty NSG.
+    let selected_vpcs = [
+        // The first endpoint selects INTERNAL policy, keeping its routing profile distinct from the EXTERNAL endpoint's.
+        ("192.8.4.0/24", "192.8.4.0/31", "INTERNAL", false),
+        // EXTERNAL policy makes an incorrectly reused VPC configuration observable.
+        ("192.9.4.0/24", "192.9.4.0/31", "EXTERNAL", true),
+    ];
+    let mut endpoints = Vec::new();
+    let mut expected_policies = Vec::new();
+    for (slot_index, (prefix, link_prefix, profile, leak_host_routes)) in
+        selected_vpcs.into_iter().enumerate()
+    {
+        let vpc = env
+            .api
+            .create_vpc(tonic::Request::new(
+                VpcCreationRequest::builder(tenant.organization_id.as_str())
+                    .metadata(Metadata {
+                        name: format!("local service VPC {slot_index}"),
+                        ..Default::default()
+                    })
+                    .network_virtualization_type(rpc::forge::VpcVirtualizationType::Fnn as i32)
+                    .routing_profile_type(profile.to_string())
+                    .rpc(),
+            ))
+            .await
+            .unwrap()
+            .into_inner();
+        let vpc_id = vpc.id.expect("created service VPC has an ID");
+        let vni = vpc
+            .status
+            .as_ref()
+            .and_then(|status| status.vni)
+            .expect("created service VPC has a VNI");
+        let rule_id = format!("local-service-rule-{slot_index}");
+        let policy = env
+            .api
+            .create_network_security_group(tonic::Request::new(
+                rpc::forge::CreateNetworkSecurityGroupRequest {
+                    id: None,
+                    tenant_organization_id: tenant.organization_id.clone(),
+                    metadata: Some(Metadata {
+                        name: format!("local service policy {slot_index}"),
+                        ..Default::default()
+                    }),
+                    network_security_group_attributes: Some(
+                        rpc::forge::NetworkSecurityGroupAttributes {
+                            rules: vec![service_vpc_nsg_rule(&rule_id, prefix)],
+                            stateful_egress: true,
+                        },
+                    ),
+                },
+            ))
+            .await
+            .unwrap()
+            .into_inner()
+            .network_security_group
+            .expect("created service VPC NSG is returned");
+        env.api
+            .update_vpc(
+                VpcUpdateRequest::builder()
+                    .id(vpc_id)
+                    .metadata(vpc.metadata.expect("created service VPC has metadata"))
+                    .network_security_group_id(policy.id.clone())
+                    .tonic_request(),
+            )
+            .await
+            .unwrap();
+        let endpoint = create_service_vpc_endpoint(
+            &env,
+            vpc_id,
+            prefix.parse().unwrap(),
+            link_prefix.parse().unwrap(),
+            managed_host.dpu_ids[1],
+            uuid::Uuid::new_v4(),
+            0,
+            u32::try_from(slot_index).unwrap(),
+            MacAddress::new([0x02, 0, 0, 0, 0, 0x81 + slot_index as u8]),
+        )
+        .await;
+        api_fixtures::instance::persist_service_vpc_attachment(
+            &env,
+            instance.id,
+            tenant.organization_id.clone(),
+            vec![endpoint.clone()],
+        )
+        .await;
+        endpoints.push(endpoint);
+        expected_policies.push((vni, prefix, policy, rule_id, leak_host_routes));
+    }
+    // Persist both endpoints in creation order so the later prefix failure follows the first loopback allocation.
+    replace_service_vpc_endpoints(&env, instance.id, &endpoints).await;
+
+    // Hide only the later endpoint's VPC prefix while preserving its endpoint/network-prefix IDs.
+    sqlx::query("UPDATE network_vpc_prefixes SET deleted = NOW() WHERE id = $1")
+        .bind(endpoints[1].vpc_prefix_id)
+        .execute(&env.pool)
+        .await
+        .unwrap();
+    let pool_name = env.common_pools.ethernet.pool_vpc_dpu_loopback_ip.name();
+    let pool_before: Vec<serde_json::Value> = sqlx::query_scalar(
+        "SELECT to_jsonb(entry) FROM resource_pool entry WHERE name = $1 ORDER BY id",
+    )
+    .bind(pool_name)
+    .fetch_all(&env.pool)
+    .await
+    .unwrap();
+    let allocations_before: Vec<serde_json::Value> = sqlx::query_scalar(
+        "SELECT to_jsonb(allocation) FROM resource_pool_allocations allocation
+         WHERE pool_name = $1 ORDER BY allocation_id",
+    )
+    .bind(pool_name)
+    .fetch_all(&env.pool)
+    .await
+    .unwrap();
+    let mut txn = env.db_txn().await;
+    for endpoint in &endpoints {
+        assert!(
+            db::vpc_dpu_loopback::find(txn.as_mut(), &endpoint.dpu_id, &endpoint.vpc_id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+    txn.commit().await.unwrap();
+
+    // The second endpoint's diagnostic proves rendering progressed beyond the first allocation.
+    let error = env
+        .api
+        .get_managed_host_network_config(tonic::Request::new(ManagedHostNetworkConfigRequest {
+            dpu_machine_id: Some(managed_host.dpu_ids[1]),
+        }))
+        .await
+        .expect_err("later endpoint failure must withhold the entire response");
+    assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+    assert!(error.message().contains(&format!(
+        "service interface {} references missing VPC prefix {}",
+        endpoints[1].internal_uuid, endpoints[1].vpc_prefix_id
+    )));
+
+    // Reload the loopback pool, allocation records, and VPC/DPU loopback rows to prove the failed response left no allocation changes.
+    let pool_after: Vec<serde_json::Value> = sqlx::query_scalar(
+        "SELECT to_jsonb(entry) FROM resource_pool entry WHERE name = $1 ORDER BY id",
+    )
+    .bind(pool_name)
+    .fetch_all(&env.pool)
+    .await
+    .unwrap();
+    let allocations_after: Vec<serde_json::Value> = sqlx::query_scalar(
+        "SELECT to_jsonb(allocation) FROM resource_pool_allocations allocation
+         WHERE pool_name = $1 ORDER BY allocation_id",
+    )
+    .bind(pool_name)
+    .fetch_all(&env.pool)
+    .await
+    .unwrap();
+    assert_eq!(pool_after, pool_before);
+    assert_eq!(allocations_after, allocations_before);
+    let mut txn = env.db_txn().await;
+    for endpoint in &endpoints {
+        assert!(
+            db::vpc_dpu_loopback::find(txn.as_mut(), &endpoint.dpu_id, &endpoint.vpc_id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+    txn.commit().await.unwrap();
+
+    // Restore the later prefix before retrying both independently selected VPCs.
+    sqlx::query("UPDATE network_vpc_prefixes SET deleted = NULL WHERE id = $1")
+        .bind(endpoints[1].vpc_prefix_id)
+        .execute(&env.pool)
+        .await
+        .unwrap();
+    let response = env
+        .api
+        .get_managed_host_network_config(tonic::Request::new(ManagedHostNetworkConfigRequest {
+            dpu_machine_id: Some(managed_host.dpu_ids[1]),
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(response.service_interfaces.len(), 2);
+    assert!(response.tenant_interfaces.is_empty());
+
+    // Each endpoint must retain its own VNI, prefixes, NSG, routing profile, and durable loopback.
+    let mut loopbacks = Vec::new();
+    let mut txn = env.db_txn().await;
+    for (endpoint, (vni, prefix, policy, rule_id, leak_host_routes)) in
+        endpoints.iter().zip(&expected_policies)
+    {
+        let service = response
+            .service_interfaces
+            .iter()
+            .find(|service| service.attachment_id == Some(endpoint.attachment_id.into()))
+            .expect("each local attachment is rendered");
+        assert_eq!(service.vpc_id, Some(endpoint.vpc_id));
+        assert_eq!(service.vpc_vni, *vni);
+        assert_eq!(service.vpc_prefixes, vec![prefix.to_string()]);
+        let service_policy = service
+            .network_security_group
+            .as_ref()
+            .expect("each selected VPC retains its NSG");
+        assert_eq!(service_policy.id, policy.id);
+        assert_eq!(service_policy.version, policy.version);
+        assert_eq!(service_policy.rules.len(), 1);
+        assert_eq!(
+            service_policy.rules[0]
+                .rule
+                .as_ref()
+                .and_then(|rule| rule.id.as_deref()),
+            Some(rule_id.as_str())
+        );
+        assert_eq!(
+            service
+                .vpc_routing_profile
+                .as_ref()
+                .expect("FNN service retains its VPC routing profile")
+                .leak_tenant_host_routes_to_underlay,
+            *leak_host_routes
+        );
+        let durable_loopback =
+            db::vpc_dpu_loopback::find(txn.as_mut(), &endpoint.dpu_id, &endpoint.vpc_id)
+                .await
+                .unwrap()
+                .expect("each local VPC persists its own loopback");
+        assert_eq!(
+            service.tenant_vrf_loopback_ip.as_deref(),
+            Some(durable_loopback.loopback_ip.to_string().as_str())
+        );
+        loopbacks.push(durable_loopback.loopback_ip);
+    }
+    assert_ne!(expected_policies[0].0, expected_policies[1].0);
+    assert_ne!(loopbacks[0], loopbacks[1]);
+    txn.commit().await.unwrap();
+}
+
+/// Verifies a service-only DPU returns resource exhaustion when its selected VPC cannot allocate a tenant VRF loopback.
+/// This prevents a successful response from publishing a service interface without its required durable loopback allocation.
+#[crate::sqlx_test]
+async fn service_only_vpc_loopback_exhaustion_withholds_response(pool: sqlx::PgPool) {
+    let env = create_service_vpc_test_env(pool, 1, true, None).await;
+
+    // Create one FNN VPC shared by the host interface and a service endpoint on the secondary DPU.
+    let tenant = env
+        .api
+        .create_tenant(tonic::Request::new(rpc::forge::CreateTenantRequest {
+            organization_id: "service-vpc-loopback-exhaustion".to_string(),
+            routing_profile_type: Some("INTERNAL".to_string()),
+            metadata: Some(Metadata {
+                name: "service-vpc-loopback-exhaustion".to_string(),
+                ..Default::default()
+            }),
+        }))
+        .await
+        .unwrap()
+        .into_inner()
+        .tenant
+        .unwrap();
+    let host_segment_id = env
+        .create_vpc_and_tenant_segment_with_vpc_details(
+            VpcCreationRequest::builder(tenant.organization_id.as_str())
+                .metadata(Metadata {
+                    name: "exhausted service loopback VPC".to_string(),
+                    ..Default::default()
+                })
+                .network_virtualization_type(rpc::forge::VpcVirtualizationType::Fnn as i32)
+                .routing_profile_type("INTERNAL".to_string())
+                .rpc(),
+        )
+        .await;
+    let mut txn = env.db_txn().await;
+    let shared_vpc_id = db::vpc::find_by_segment(txn.as_mut(), host_segment_id)
+        .await
+        .unwrap()
+        .expect("host segment belongs to a VPC")
+        .id;
+    txn.commit().await.unwrap();
+    let managed_host = api_fixtures::create_managed_host_multi_dpu(&env, 2).await;
+    mark_host_dpf_ingested(&env, managed_host.id).await;
+    let (instance, _) = managed_host
+        .instance_builer(&env)
+        .tenant_org(tenant.organization_id.clone())
+        .single_interface_network_config(host_segment_id)
+        .build_and_return()
+        .await;
+    let attachment_id = uuid::Uuid::new_v4();
+    let endpoint = create_service_vpc_endpoint(
+        &env,
+        shared_vpc_id,
+        "192.6.4.0/24".parse().unwrap(),
+        "192.6.4.0/31".parse().unwrap(),
+        managed_host.dpu_ids[1],
+        attachment_id,
+        0,
+        0,
+        MacAddress::new([0x02, 0, 0, 0, 0, 0x61]),
+    )
+    .await;
+    api_fixtures::instance::persist_service_vpc_attachment(
+        &env,
+        instance.id,
+        tenant.organization_id,
+        vec![endpoint],
+    )
+    .await;
+
+    // Occupy every configured loopback value so the service-only DPU reaches the allocator's exhaustion path.
+    let exhausted_entries =
+        sqlx::query("UPDATE resource_pool SET state = $1, allocated = NOW() WHERE name = $2")
+            .bind(sqlx::types::Json(ResourcePoolEntryState::Allocated {
+                owner: "service-loopback-exhaustion".to_string(),
+                owner_type: OwnerType::Machine.to_string(),
+            }))
+            .bind(env.common_pools.ethernet.pool_vpc_dpu_loopback_ip.name())
+            .execute(&env.pool)
+            .await
+            .unwrap()
+            .rows_affected();
+    assert!(exhausted_entries > 0);
+
+    // The secondary DPU must receive an error and no durable VPC loopback row.
+    let error = env
+        .api
+        .get_managed_host_network_config(tonic::Request::new(ManagedHostNetworkConfigRequest {
+            dpu_machine_id: Some(managed_host.dpu_ids[1]),
+        }))
+        .await
+        .expect_err("exhausted tenant VRF loopback pool must withhold service networking");
+    assert_eq!(error.code(), tonic::Code::ResourceExhausted);
+    let mut txn = env.db_txn().await;
+    assert!(
+        db::vpc_dpu_loopback::find(txn.as_mut(), &managed_host.dpu_ids[1], &shared_vpc_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    txn.commit().await.unwrap();
+}
+
 /// Verifies tenant-interface rendering rejects a retained negative VPC VNI so
 /// managed-host configuration cannot publish its wrapped unsigned value.
 #[crate::sqlx_test]
@@ -2177,7 +4656,7 @@ async fn test_managed_host_network_config_rejects_negative_tenant_vni(pool: sqlx
     assert_eq!(error.code(), tonic::Code::Internal);
     assert_eq!(
         error.message(),
-        format!("internal error: VPC attached to segment {segment_id} has a negative VNI")
+        format!("internal error: VPC {} has a negative VNI", vpc.id)
     );
 }
 

@@ -59,6 +59,7 @@ PostgreSQL container. Its defaults are `postgres:14.4-alpine` on port `30432`.
 | `test-api`, `test-auth`, `test-db`, `test-flow`, `test-ipam`, `test-nvswitch-manager`, `test-powershelf-manager`, `test-workflow` | Call `ensure-postgres` before testing their packages |
 | `test-site-agent` | Starts mock Core/Flow gRPC servers; tests only `site-agent/pkg/components/...` with `CGO_ENABLED=1` and `-race` |
 | `test-common`, `test-cert-manager`, `test-site-manager`, `test-site-workflow`, `test-proto`, `test-sdk-simple`, `test-mcp` | Other package targets; see `Makefile` for their scope |
+| `test-cli-commands` | Tests the public CLI commands in `cli/pkg`; the interactive TUI in `cli/tui` is outside this target |
 | `test` | Runs its listed targets, not every package; CLI and the nested standard-SDK module are outside this target |
 
 Without mock servers, site-agent component tests retry on a `40s` backoff until

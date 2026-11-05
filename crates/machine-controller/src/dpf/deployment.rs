@@ -57,6 +57,14 @@ impl DeploymentReadConnection {
     }
 
     async fn begin(&mut self) -> Result<db::Transaction<'_>, db::DatabaseError> {
+        self.begin_with_timeout(REPROVISION_COMPATIBILITY_TIMEOUT)
+            .await
+    }
+
+    async fn begin_with_timeout(
+        &mut self,
+        statement_timeout: Duration,
+    ) -> Result<db::Transaction<'_>, db::DatabaseError> {
         let connection = self
             .connection
             .as_deref_mut()
@@ -68,7 +76,7 @@ impl DeploymentReadConnection {
             LEAST(NULLIF(setting::bigint, 0), $1::text::bigint)::text, true) \
             FROM pg_settings WHERE name = 'statement_timeout'";
         sqlx::query(query)
-            .bind(REPROVISION_COMPATIBILITY_TIMEOUT.as_millis().to_string())
+            .bind(statement_timeout.as_millis().to_string())
             .execute(txn.as_pgconn())
             .await
             .map_err(|error| db::DatabaseError::query(query, error))?;
@@ -361,10 +369,73 @@ pub(crate) fn consistent_deployment_type(
 
 #[cfg(test)]
 mod tests {
+    use carbide_test_harness::prelude::{sqlx_test, sqlx_testing};
     use carbide_test_support::{Check, check_values};
     use model::hardware_info::DpuData;
 
     use super::*;
+
+    /// Check the production setting without waiting for it, then exercise the
+    /// same SQL with a short cap. PostgreSQL must cancel the statement itself,
+    /// including when the operator has disabled its default deadline.
+    #[sqlx_test]
+    async fn deployment_reads_bound_server_work_and_preserve_operator_limits(
+        pool: PgPool,
+    ) -> eyre::Result<()> {
+        let mut connection = DeploymentReadConnection::acquire(&pool).await?;
+        sqlx::query("SET statement_timeout = 0")
+            .execute(connection.connection.as_deref_mut().unwrap())
+            .await?;
+        let mut txn = connection.begin().await?;
+        let production_timeout: String = sqlx::query_scalar("SHOW statement_timeout")
+            .fetch_one(txn.as_pgconn())
+            .await?;
+        assert_eq!(production_timeout, "30s");
+        txn.commit().await?;
+        let restored_timeout: String = sqlx::query_scalar("SHOW statement_timeout")
+            .fetch_one(connection.connection.as_deref_mut().unwrap())
+            .await?;
+        assert_eq!(restored_timeout, "0");
+
+        for (scenario, operator_timeout, expected_timeout) in [
+            ("install a limit when disabled", "0", "250ms"),
+            ("bound a longer operator limit", "5s", "250ms"),
+            ("preserve a shorter operator limit", "100ms", "100ms"),
+        ] {
+            sqlx::query("SELECT set_config('statement_timeout', $1, false)")
+                .bind(operator_timeout)
+                .execute(connection.connection.as_deref_mut().unwrap())
+                .await?;
+            let mut txn = connection
+                .begin_with_timeout(Duration::from_millis(250))
+                .await?;
+            let configured_timeout: String = sqlx::query_scalar("SHOW statement_timeout")
+                .fetch_one(txn.as_pgconn())
+                .await?;
+            assert_eq!(configured_timeout, expected_timeout, "{scenario}");
+            let error = tokio::time::timeout(
+                Duration::from_secs(2),
+                sqlx::query("SELECT pg_sleep(1)").execute(txn.as_pgconn()),
+            )
+            .await?
+            .expect_err(scenario);
+            assert_eq!(
+                error
+                    .as_database_error()
+                    .and_then(|error| error.code())
+                    .as_deref(),
+                Some("57014"),
+                "{scenario}: PostgreSQL must cancel the statement: {error}",
+            );
+            txn.rollback().await?;
+            let restored_timeout: String = sqlx::query_scalar("SHOW statement_timeout")
+                .fetch_one(connection.connection.as_deref_mut().unwrap())
+                .await?;
+            assert_eq!(restored_timeout, operator_timeout, "{scenario}");
+        }
+        connection.return_to_pool();
+        Ok(())
+    }
 
     fn hardware_info(part_number: &str) -> HardwareInfo {
         HardwareInfo {

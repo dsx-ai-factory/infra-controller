@@ -5,14 +5,17 @@ package cli
 
 import (
 	"bytes"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/NVIDIA/infra-controller/rest-api/openapi"
@@ -20,6 +23,29 @@ import (
 	"github.com/stretchr/testify/require"
 	cli "github.com/urfave/cli/v2"
 )
+
+func captureStdout(t *testing.T, run func()) string {
+	t.Helper()
+
+	previousStdout := os.Stdout
+	reader, writer, err := os.Pipe()
+	require.NoError(t, err)
+	os.Stdout = writer
+	t.Cleanup(func() {
+		os.Stdout = previousStdout
+		_ = writer.Close()
+		_ = reader.Close()
+	})
+
+	run()
+	require.NoError(t, writer.Close())
+	os.Stdout = previousStdout
+
+	output, err := io.ReadAll(reader)
+	require.NoError(t, err)
+	require.NoError(t, reader.Close())
+	return string(output)
+}
 
 func TestToKebab(t *testing.T) {
 	tests := []struct {
@@ -1501,6 +1527,159 @@ func TestNewApp_ListAllEmptyCollectionOutputsArray(t *testing.T) {
 	assert.JSONEq(t, `[]`, string(output))
 }
 
+func TestNewApp_VpcPeeringList(t *testing.T) {
+	const response = `[
+		{
+			"id": "peering-id",
+			"vpc1Id": "vpc1-id",
+			"vpc1": {"name": "Application VPC"},
+			"vpc2Id": "vpc2-id",
+			"vpc2": {"name": "Storage VPC"}
+		},
+		{
+			"id": "orphan-peering-id",
+			"vpc1Id": "vpc3-id",
+			"vpc1": {"name": "Edge VPC"},
+			"vpc2Id": "vpc4-id"
+		}
+	]`
+	pagedPeering := func(id string) map[string]interface{} {
+		return map[string]interface{}{
+			"id":     id,
+			"vpc1Id": "vpc1-id",
+			"vpc1":   map[string]string{"name": "Application VPC"},
+			"vpc2Id": "vpc2-id",
+			"vpc2":   map[string]string{"name": "Storage VPC"},
+		}
+	}
+	firstPage := make([]map[string]interface{}, 100)
+	for i := range firstPage {
+		firstPage[i] = pagedPeering(fmt.Sprintf("peering-%d", i))
+	}
+	firstPageBody, err := json.Marshal(firstPage)
+	require.NoError(t, err)
+	secondPageBody, err := json.Marshal([]map[string]interface{}{pagedPeering("last-peering")})
+	require.NoError(t, err)
+
+	tests := []struct {
+		name          string
+		flags         []string
+		pages         []string
+		wantRelations []string
+		wantTable     string
+		wantJSON      bool
+		wantYAML      bool
+	}{
+		{
+			name:          "defaults to table and requests both VPC relations",
+			pages:         []string{response},
+			wantRelations: []string{"Vpc1", "Vpc2"},
+			wantTable: "" +
+				"ID                 VPC1 Name        VPC1 ID  VPC2 Name    VPC2 ID\n" +
+				"peering-id         Application VPC  vpc1-id  Storage VPC  vpc2-id\n" +
+				"orphan-peering-id  Edge VPC         vpc3-id               vpc4-id\n",
+		},
+		{
+			name:     "JSON remains available without relation expansion",
+			flags:    []string{"--output", "json"},
+			pages:    []string{response},
+			wantJSON: true,
+		},
+		{
+			name:     "YAML remains available without relation expansion",
+			flags:    []string{"--output", "yaml"},
+			pages:    []string{response},
+			wantYAML: true,
+		},
+		{
+			name:          "all keeps relations across pages",
+			flags:         []string{"--all", "--include-relation", "Site"},
+			pages:         []string{string(firstPageBody), string(secondPageBody)},
+			wantRelations: []string{"Site", "Vpc1", "Vpc2"},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var requests []url.Values
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+				requests = append(requests, request.URL.Query())
+				page := test.pages[min(len(requests), len(test.pages))-1]
+				w.Header().Set("Content-Type", "application/json")
+				_, writeErr := w.Write([]byte(page))
+				assert.NoError(t, writeErr)
+			}))
+			t.Cleanup(server.Close)
+
+			app, err := NewApp(openapi.Spec)
+			require.NoError(t, err)
+
+			args := []string{
+				"nicocli",
+				"--base-url", server.URL,
+				"--org", "test-org",
+				"--api-name", "nico",
+				"--token", "test-token",
+				"vpc-peering", "list",
+			}
+			args = append(args, test.flags...)
+			var runErr error
+			output := captureStdout(t, func() {
+				runErr = app.Run(args)
+			})
+			require.NoError(t, runErr)
+			require.Len(t, requests, len(test.pages))
+			for index, query := range requests {
+				assert.Equal(t, test.wantRelations, query["includeRelation"])
+				if len(test.pages) > 1 {
+					assert.Equal(t, fmt.Sprint(index+1), query.Get("pageNumber"))
+					assert.Equal(t, "100", query.Get("pageSize"))
+				}
+			}
+			if test.wantTable != "" {
+				assert.Equal(t, test.wantTable, output)
+			}
+			if test.wantJSON {
+				assert.JSONEq(t, response, output)
+			}
+			if test.wantYAML {
+				assert.Contains(t, output, "id: peering-id")
+				assert.Contains(t, output, "name: Application VPC")
+				assert.Contains(t, output, "name: Storage VPC")
+			}
+		})
+	}
+}
+
+func TestAddDefaultTableRelations(t *testing.T) {
+	tests := []struct {
+		name        string
+		operationID string
+		queryParams url.Values
+		want        []string
+	}{
+		{
+			name:        "adds mapped relations without duplicates",
+			operationID: vpcPeeringListOperationID,
+			queryParams: url.Values{"includeRelation": {"Site", "Vpc1"}},
+			want:        []string{"Site", "Vpc1", "Vpc2"},
+		},
+		{
+			name:        "leaves operations without relation defaults unchanged",
+			operationID: "get-all-site",
+			queryParams: url.Values{"includeRelation": {"Tenant"}},
+			want:        []string{"Tenant"},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			addDefaultTableRelations(test.queryParams, test.operationID)
+			assert.Equal(t, test.want, test.queryParams["includeRelation"])
+		})
+	}
+}
+
 func TestNewApp_MachineValidationCommandSurface(t *testing.T) {
 	app, err := NewApp(openapi.Spec)
 	require.NoError(t, err)
@@ -1650,6 +1829,95 @@ func TestNewApp_MachineValidationReadCommandsExecuteRESTRequests(t *testing.T) {
 			assert.Equal(t, http.MethodGet, method)
 			assert.Equal(t, tt.expectedPath, path)
 			assert.Equal(t, "Bearer test-token", authorization)
+		})
+	}
+}
+
+// TestNewApp keeps the generated power-state command separate
+// from the existing mutation alias, so inspecting power cannot change it.
+func TestNewApp(t *testing.T) {
+	clearAllNicoEnv(t)
+	previousConfigPath := configOverridePath
+	SetConfigPath(filepath.Join(t.TempDir(), "config.yaml"))
+	t.Cleanup(func() { SetConfigPath(previousConfigPath) })
+
+	const siteID = "550e8400-e29b-41d4-a716-446655440000"
+	const trayID = "aa:bb:cc:dd:ee:ff"
+	tests := []struct {
+		name      string
+		command   []string
+		args      []string
+		method    string
+		wantQuery string
+		wantBody  string
+	}{
+		{
+			// The OpenAPI getter must produce an executable command with a
+			// site selector in the query, without a mutation request body.
+			name:      "read power state",
+			command:   []string{"tray", "power-state", "get"},
+			args:      []string{"--site-id", siteID, trayID},
+			method:    http.MethodGet,
+			wantQuery: "siteId=" + siteID,
+		},
+		{
+			// Adding a getter at the same REST path must preserve the
+			// existing power command's PATCH method and body flags.
+			name:     "change power",
+			command:  []string{"tray", "power"},
+			args:     []string{"--site-id", siteID, "--state", "On", trayID},
+			method:   http.MethodPatch,
+			wantBody: `{"siteId":"550e8400-e29b-41d4-a716-446655440000","state":"On"}`,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var requestCount atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+				assert.Equal(t, test.method, request.Method)
+				assert.Equal(t, "/v2/org/test-org/nico/tray/"+trayID+"/power", request.URL.Path)
+				assert.Equal(t, test.wantQuery, request.URL.RawQuery)
+				body, err := io.ReadAll(request.Body)
+				assert.NoError(t, err)
+				if test.wantBody == "" {
+					assert.Empty(t, body)
+				} else {
+					assert.JSONEq(t, test.wantBody, string(body))
+				}
+				requestCount.Add(1)
+				w.Header().Set("Content-Type", "application/json")
+				_, err = w.Write([]byte(`{}`))
+				assert.NoError(t, err)
+			}))
+			t.Cleanup(server.Close)
+
+			app, err := NewApp(openapi.Spec)
+			require.NoError(t, err)
+			children := app.Commands
+			var command *cli.Command
+			for _, name := range test.command {
+				command = nil
+				for _, candidate := range children {
+					if candidate.HasName(name) {
+						command = candidate
+						break
+					}
+				}
+				require.NotNilf(t, command, "missing command %q", name)
+				children = command.Subcommands
+			}
+			require.NotNil(t, command.Action, "the command must execute, not only appear in help")
+
+			args := []string{
+				"nicocli", "--base-url", server.URL, "--org", "test-org", "--token", "test-token",
+			}
+			args = append(args, test.command...)
+			args = append(args, test.args...)
+			err = app.Run(args)
+
+			require.NoError(t, err)
+			assert.EqualValues(t, 1, requestCount.Load(), "each command must send exactly one request")
 		})
 	}
 }

@@ -14,6 +14,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+use carbide_uuid::DbTable;
 use chrono::{DateTime, Utc};
 use model::storage::{OsImage, OsImageAttributes, OsImageStatus};
 use model::tenant::TenantOrganizationId;
@@ -27,23 +28,23 @@ pub async fn list(
     tenant_organization_id: Option<TenantOrganizationId>,
 ) -> Result<Vec<OsImage>, DatabaseError> {
     if let Some(tenant_organization_id) = tenant_organization_id {
-        let query = "SELECT l.id, l.name, l.description, l.source_url, l.digest,
-                l.organization_id, l.auth_type, l.auth_token, l.rootfs_id, l.rootfs_label,
-                l.boot_disk, l.bootfs_id, l.efifs_id, l.capacity, l.status, l.status_message,
-                l.created_at, l.modified_at
-            from os_images l WHERE l.organization_id=$1";
-        sqlx::query_as(query)
+        let query = format!(
+            "SELECT {} FROM {} WHERE l.organization_id=$1",
+            OsImage::db_aliased_columns(),
+            OsImage::db_aliased_table(),
+        );
+        sqlx::query_as(sqlx::AssertSqlSafe(query))
             .bind(tenant_organization_id.to_string())
             .fetch_all(txn)
             .await
             .map_err(|e| DatabaseError::new("os_images All", e))
     } else {
-        let query = "SELECT l.id, l.name, l.description, l.source_url, l.digest,
-                l.organization_id, l.auth_type, l.auth_token, l.rootfs_id, l.rootfs_label,
-                l.boot_disk, l.bootfs_id, l.efifs_id, l.capacity, l.status, l.status_message,
-                l.created_at, l.modified_at
-            from os_images l";
-        sqlx::query_as(query)
+        let query = format!(
+            "SELECT {} FROM {}",
+            OsImage::db_aliased_columns(),
+            OsImage::db_aliased_table(),
+        );
+        sqlx::query_as(sqlx::AssertSqlSafe(query))
             .fetch_all(txn)
             .await
             .map_err(|e| DatabaseError::new("os_images All", e))
@@ -51,12 +52,12 @@ pub async fn list(
 }
 
 pub async fn get(txn: &mut PgConnection, os_image_id: Uuid) -> Result<OsImage, DatabaseError> {
-    let query = "SELECT l.id, l.name, l.description, l.source_url, l.digest,
-            l.organization_id, l.auth_type, l.auth_token, l.rootfs_id, l.rootfs_label,
-            l.boot_disk, l.bootfs_id, l.efifs_id, l.capacity, l.status, l.status_message,
-            l.created_at, l.modified_at
-        from os_images l WHERE l.id = $1";
-    sqlx::query_as(query)
+    let query = format!(
+        "SELECT {} FROM {} WHERE l.id = $1",
+        OsImage::db_aliased_columns(),
+        OsImage::db_aliased_table(),
+    );
+    sqlx::query_as(sqlx::AssertSqlSafe(query))
         .bind(os_image_id)
         .fetch_one(txn)
         .await
@@ -111,11 +112,12 @@ async fn persist(
     update: bool,
 ) -> Result<OsImage, DatabaseError> {
     let os_image = if update {
-        let query = "UPDATE os_images SET name = $1, description = $2, auth_type = $3, auth_token = $4, rootfs_id = $5, rootfs_label = $6, boot_disk = $7, bootfs_id = $8, efifs_id = $9, modified_at = $10, status = $11, status_message = $12 WHERE id = $13
-            RETURNING id, name, description, source_url, digest, organization_id,
-                auth_type, auth_token, rootfs_id, rootfs_label, boot_disk, bootfs_id,
-                efifs_id, capacity, status, status_message, created_at, modified_at";
-        sqlx::query_as(query)
+        let query = format!(
+            "UPDATE os_images SET name = $1, description = $2, auth_type = $3, auth_token = $4, rootfs_id = $5, rootfs_label = $6, boot_disk = $7, bootfs_id = $8, efifs_id = $9, modified_at = $10, status = $11, status_message = $12 WHERE id = $13
+            RETURNING {}",
+            OsImage::db_table_columns(),
+        );
+        sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
             .bind(&value.attributes.name)
             .bind(&value.attributes.description)
             .bind(&value.attributes.auth_type)
@@ -131,17 +133,18 @@ async fn persist(
             .bind(value.attributes.id)
             .fetch_one(txn)
             .await
-            .map_err(|e| DatabaseError::query(query, e))?
+            .map_err(|e| DatabaseError::query(&query, e))?
     } else {
         let capacity = match value.attributes.capacity {
             Some(x) => x as i64,
             None => 0,
         };
-        let query = "INSERT INTO os_images(id, name, description, source_url, digest, organization_id, auth_type, auth_token, rootfs_id, rootfs_label, boot_disk, bootfs_id, efifs_id, capacity, status, status_message, created_at, modified_at) VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
-            RETURNING id, name, description, source_url, digest, organization_id,
-                auth_type, auth_token, rootfs_id, rootfs_label, boot_disk, bootfs_id,
-                efifs_id, capacity, status, status_message, created_at, modified_at";
-        sqlx::query_as(query)
+        let query = format!(
+            "INSERT INTO os_images(id, name, description, source_url, digest, organization_id, auth_type, auth_token, rootfs_id, rootfs_label, boot_disk, bootfs_id, efifs_id, capacity, status, status_message, created_at, modified_at) VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
+            RETURNING {}",
+            OsImage::db_table_columns(),
+        );
+        sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
             .bind(value.attributes.id)
             .bind(&value.attributes.name)
             .bind(&value.attributes.description)
@@ -162,7 +165,7 @@ async fn persist(
             .bind(&value.modified_at)
             .fetch_one(txn)
             .await
-            .map_err(|e| DatabaseError::query(query, e))?
+            .map_err(|e| DatabaseError::query(&query, e))?
     };
     Ok(os_image)
 }

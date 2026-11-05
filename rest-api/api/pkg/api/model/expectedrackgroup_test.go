@@ -52,19 +52,25 @@ func TestAPIExpectedRackGroupCreateRequest_Validate(t *testing.T) {
 		request := APIExpectedRackGroupCreateRequest{
 			SiteID: rackGroupTestSiteID, RackGroupID: "group", Topology: "gb200_nvl72r1_c2g4",
 		}
-		require.ErrorContains(t, request.Validate(), "protocol")
+		require.NoError(t, request.Validate())
 	})
 
 	cases := append(rackGroupValidationCases(),
 		rackGroupValidationCase{name: "omitted optional fields"},
+		rackGroupValidationCase{name: "empty protocol", request: APIExpectedRackGroupUpdateRequest{Protocol: cutil.GetPtr("")}, wantErr: true},
+		rackGroupValidationCase{name: "blank protocol", request: APIExpectedRackGroupUpdateRequest{Protocol: cutil.GetPtr(" ")}, wantErr: true},
+		rackGroupValidationCase{name: "protocol too long", request: APIExpectedRackGroupUpdateRequest{Protocol: cutil.GetPtr(strings.Repeat("p", 129))}, wantErr: true},
 		rackGroupValidationCase{name: "blank identity", request: APIExpectedRackGroupUpdateRequest{RackGroupID: cutil.GetPtr(" ")}, wantErr: true},
 	)
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			request := APIExpectedRackGroupCreateRequest{
-				SiteID: rackGroupTestSiteID, RackGroupID: "group", Topology: "gb200_nvl72r1_c2g4", Protocol: "NVLINK_V6",
+				SiteID: rackGroupTestSiteID, RackGroupID: "group", Topology: "gb200_nvl72r1_c2g4", Protocol: cutil.GetPtr("NVLINK_V6"),
 				Racks: tc.request.Racks,
 				Name:  tc.request.Name, Description: tc.request.Description, Labels: tc.request.Labels,
+			}
+			if tc.request.Protocol != nil {
+				request.Protocol = tc.request.Protocol
 			}
 			if tc.request.RackGroupID != nil {
 				request.RackGroupID = *tc.request.RackGroupID

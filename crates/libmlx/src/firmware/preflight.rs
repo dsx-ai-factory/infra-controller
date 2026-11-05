@@ -24,6 +24,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use carbide_libmlx_model::device::identity::MlxDeviceSelector;
 use carbide_libmlx_model::device::info::MlxDeviceInfo;
 use thiserror::Error;
 
@@ -89,7 +90,7 @@ pub enum FirmwarePreflightError {
     /// Returned device identity does not match the requested target.
     #[error("device {field} does not match: expected {expected:?}, observed {observed:?}")]
     IdentityMismatch {
-        /// Identity field that failed: PCI address, part number, or PSID.
+        /// Identity field that failed: PCI address, part number, PSID, base MAC, or base GUID.
         field: &'static str,
         /// Requested identity value.
         expected: String,
@@ -209,6 +210,30 @@ pub(super) fn check_hardware_identity(
         }
     }
     Ok(())
+}
+
+/// Compare the frozen card selector with the existing pre-mutation query.
+/// A replacement with the same part number and PSID must not inherit this work.
+pub(super) fn check_expected_device(
+    device: &MlxDeviceInfo,
+    expected: &MlxDeviceSelector,
+) -> Result<(), FirmwarePreflightError> {
+    if expected.matches(device) {
+        return Ok(());
+    }
+    let (field, expected, observed) = match expected {
+        MlxDeviceSelector::Mac(mac) => (
+            "base MAC",
+            mac.to_string(),
+            device.base_mac.map(|mac| mac.to_string()),
+        ),
+        MlxDeviceSelector::Guid(guid) => ("base GUID", guid.clone(), device.base_guid.clone()),
+    };
+    Err(FirmwarePreflightError::IdentityMismatch {
+        field,
+        expected,
+        observed,
+    })
 }
 
 async fn inspect_with_program(
@@ -334,6 +359,53 @@ mod tests {
             fw_version_current: Some("32.43.1014".into()),
             ..MlxDeviceInfo::create_test_device()
         }
+    }
+
+    /// A GUID can identify a card without a MAC, but mismatched or missing
+    /// selector fields must preserve exact diagnostic evidence for the caller.
+    #[test]
+    fn expected_device_preserves_guid_and_missing_mac_evidence() {
+        use MlxDeviceSelector::{Guid, Mac};
+        use carbide_test_support::Outcome::{FailsWith, Yields};
+        use carbide_test_support::scenarios;
+
+        scenarios!(
+            run = |(selector, device): (MlxDeviceSelector, MlxDeviceInfo)| {
+                // Dropping the reported GUID, changing the diagnostic field,
+                // or accepting a mismatch must fail these exact comparisons.
+                check_expected_device(&device, &selector).map_err(|error| match error {
+                    FirmwarePreflightError::IdentityMismatch { field, expected, observed } => {
+                        (field, expected, observed)
+                    }
+                    other => panic!("unexpected preflight error: {other}"),
+                })
+            };
+            "an exact GUID does not require a MAC" {
+                (
+                    Guid("opaque-Base_Guid".into()),
+                    MlxDeviceInfo {
+                        base_guid: Some("opaque-Base_Guid".into()),
+                        base_mac: None,
+                        ..device()
+                    }
+                ) => Yields(()),
+            }
+            "a GUID mismatch preserves the reported spelling" {
+                (
+                    Guid("opaque-Base_Guid".into()),
+                    MlxDeviceInfo {
+                        base_guid: Some("opaque-base_guid".into()),
+                        ..device()
+                    }
+                ) => FailsWith(("base GUID", "opaque-Base_Guid".into(), Some("opaque-base_guid".into()))),
+            }
+            "an absent MAC remains absent instead of falling back to the GUID" {
+                (
+                    Mac("02:00:00:00:00:01".parse().unwrap()),
+                    MlxDeviceInfo { base_mac: None, ..device() }
+                ) => FailsWith(("base MAC", "02:00:00:00:00:01".into(), None)),
+            }
+        );
     }
 
     /// Identity and known firmware are prerequisites; both upgrades and downgrades

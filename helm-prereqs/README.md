@@ -13,6 +13,8 @@ export NICO_DPF_DPU_INTERFACE=<control-plane-nic>     # NIC facing the DPUs
 export NICO_DPF_DPU_CLUSTER_VIP=<free-routable-ip>    # DPU cluster control-plane VIP
 # Optional: seed the watched version-0 credential Secret before Core starts.
 # export NICO_DPF_BMC_ROOT_PASSWORD=<existing-site-wide-password>
+# Optional: KMIP KEK provider client material (ca.pem, client.pem, client.key).
+# export NICO_KMIP_CLIENT_DIR=/path/to/kmip-client
 
 ./setup.sh        # interactive - prompts before deploying Core and REST
 ./setup.sh -y     # non-interactive - deploys everything (DPF included)
@@ -138,6 +140,12 @@ config it edits.
    `NICO_RMS_IMAGE_REPO` only for a mirrored or self-built image (the default
    NGC image is entitlement-gated).
 
+10. **KMIP KEK provider (opt-in).** To wrap the credential store's keys with a
+    key held in a KMIP server instead of Vault Transit, export
+    `NICO_KMIP_CLIENT_DIR`, mount the Secret it creates, and declare the
+    provider in the site config. Refer to
+    [Opting in to the KMIP KEK provider](#opting-in-to-the-kmip-kek-provider).
+
 ### Building the RMS image
 
 The default `rms-api` image on NGC is entitlement-gated. Most sites build it
@@ -197,6 +205,7 @@ The tables below summarize the keys that must be set per site.
 | `NICO_DPF_DPU_CLUSTER_VIP` | Unless `--skip-dpf` | Floating IP the DPUs use to reach their (Kamaji) control plane. |
 | `NICO_DPF_BMC_ROOT_PASSWORD` | No (DPF only) | Existing site-wide BMC password used to seed `nico-system/nico-bmc-v0-credentials` after Core deployment is accepted and before Core starts. setup.sh stores username `admin`, mounts the Secret as the authoritative version-0 credential source, and unsets the variable before invoking child tools. A DPF-enabled rerun reuses the Secret and rejects a different value rather than changing a credential managed hardware may use. Declining Core deployment leaves the Secret untouched. A later non-DPF Core deployment preserves this configuration only when the installed release already uses it; a stray Secret is not adopted. Using the variable with `--skip-core` or `--skip-dpf` is an error. Not needed when `siteCredentials` renders the credential file, and not usable with it: setup fails when the Core values already name a different `existingSecret`. Refer to [Site Credentials Secret](#site-credentials-secret). |
 | `NICO_DPF_METALLB_POOL` | No | MetalLB address pool used to advertise the DPU cluster VIP. When unset, the VIP LoadBalancer Service is skipped — the VIP must then be routable from the DPUs by other means. |
+| `NICO_KMIP_CLIENT_DIR` | No | Directory holding `ca.pem`, `client.pem`, and `client.key` for the opt-in KMIP KEK provider. When set, `setup.sh` creates or updates the `nico-system/nico-kmip-client` Secret from them before Phase 6 and refuses to overwrite a Secret it did not create. An error with `--skip-core`. Refer to [Opting in to the KMIP KEK provider](#opting-in-to-the-kmip-kek-provider). |
 | `NICO_DPF_IMAGE_REPO` | No | DPF operator image repository. Defaults to the public `nvcr.io/nvidia/doca/dpf-system`. Point at your own registry (mirror or self-built) to match where you push Core/REST images. See [DPF images and registries](#dpf-images-and-registries). |
 | `NICO_DPF_IMAGE_TAG` | No | DPF operator image tag. Defaults to `v26.4.0`, the release the doca-platform submodule is pinned to. Set separately when your self-built image uses a different tag than the chart version. |
 | `NICO_DPF_IMAGE_PULL_SECRET` | No | Pull secret for the DPF operator/DOCA images. Unset by default — the GA `nvidia/doca` images are public and pull anonymously. Set only for a private DPF/DOCA registry or mirror. |
@@ -329,6 +338,7 @@ VIP requirements below apply to enabled external `LoadBalancer` Services.
 | `nico-dhcp.config.kea.hookParameters.nameservers` | `"REPLACE_WITH_NICO_DNS_VIP"` (chart default) | **Yes** | Comma-separated IPv4 addresses advertised to DHCP clients as DNS resolvers in option 6. The placeholder name and chart comment refer to `nico-dns`, but this setting requires a recursive resolver. Set it to the VIP of Unbound or another recursive resolver that can resolve site, infrastructure, and external names. Do not use a `nico-dns` VIP, which serves authoritative zones only. |
 | `nico-dhcp.config.kea.hookParameters.ntpServer` | `"REPLACE_WITH_NICO_NTP_VIPS"` (chart default) | **Yes** | Comma-separated IPs advertised to DHCP clients as their NTP servers. Must include one `nico-ntp.externalService.perPodAnnotations` VIP per configured replica. |
 | `nico-dhcp.config.kea.hookParameters.provisioningServer` | `"REPLACE_WITH_NICO_PXE_VIP"` (chart default) | **Yes** | IP advertised as the PXE / provisioning server. Must be the `nico-pxe` VIP. |
+| `nico-api.extraVolumes` / `nico-api.extraVolumeMounts` | omitted | No | Extra Pod volumes and `nico-api` container mounts, such as the Secret holding the KMIP client TLS material. Refer to [Opting in to the KMIP KEK provider](#opting-in-to-the-kmip-kek-provider). |
 
 ### `values/nico-rest.yaml`
 
@@ -400,6 +410,111 @@ warnings (malformed image references and unexpected HTTP responses remain
 errors, as does a missing `curl` when validation is required), and an
 unreachable registry host skips the image checks entirely
 (air-gapped/preloaded installs).
+
+## Opting in to the KMIP KEK provider
+
+`nico-api` can wrap the data-encryption keys of its PostgreSQL credential store
+with a key held in a KMIP server instead of Vault Transit. The server-side
+steps (creating the non-exportable key and the client identity), the startup
+checks, and the operating guidance are on the
+[KMIP KEK Provider](https://docs.nvidia.com/infra-controller/documentation/configuration-day-1/kmip-kek-provider)
+page. This section covers what the installer needs: one environment variable,
+two chart values, and a TOML block in the site config.
+
+1. **Export the client material directory.** Put the CA bundle, the client
+   certificate chain, and the client key that the KMIP server issued for
+   `nico-api` in one directory under exactly these names, and export it:
+
+   ```bash
+   export NICO_KMIP_CLIENT_DIR=/path/to/kmip-client   # holds ca.pem, client.pem, client.key
+   ```
+
+   When you confirm the Core deployment (or immediately, with `-y`), and before Phase 6
+   installs it, `setup.sh` creates the Secret `nico-kmip-client` in
+   `nico-system` from the three files and labels it
+   `app.kubernetes.io/managed-by: helm-prereqs`. A declined deployment leaves
+   the Secret untouched. A rerun with renewed files
+   updates the Secret, and `nico-api` reads the files again on its next
+   connection, so a renewed certificate needs no restart. A Secret of that name
+   without the label is yours, and `setup.sh` stops rather than overwrite it.
+   Leave the variable unset to manage the Secret yourself, for example through
+   the External Secrets Operator; any Secret name then works. The variable is
+   an error with `--skip-core`.
+
+2. **Mount the Secret into `nico-api`.** Add the chart's `extraVolumes` and
+   `extraVolumeMounts` to the Core values (`values/nico-core.yaml` or your
+   `--core-values` file):
+
+   ```yaml
+   nico-api:
+     extraVolumes:
+       - name: kmip-client
+         secret:
+           secretName: nico-kmip-client
+           defaultMode: 0400
+     extraVolumeMounts:
+       - name: kmip-client
+         mountPath: /etc/nico/kmip
+         readOnly: true
+   ```
+
+   `defaultMode: 0400` keeps the client key readable by root only, the user
+   `nico-api` runs as in the release image and the chart. Remove it before
+   running `nico-api` as a non-root user: a root-owned `0400` file is
+   unreadable to any other user.
+
+3. **Declare the provider in the site config.** Add the `[secrets]` tables to
+   `nico-api.siteConfig.nicoApiSiteConfig`, with the TLS paths under the mount
+   above. Every field is described in
+   [Configure the Provider](https://docs.nvidia.com/infra-controller/documentation/configuration-day-1/kmip-kek-provider#configure-the-provider)
+   on the feature page.
+
+   ```toml
+   [secrets]
+   backends = ["postgres"]
+   writer = "postgres"
+
+   [secrets.kms]
+   active = "hsm"
+
+   [secrets.kms.providers.hsm]
+   type = "kmip"
+   endpoint = "kms.example.com:5696"
+   ca_bundle = "/etc/nico/kmip/ca.pem"
+   client_cert = "/etc/nico/kmip/client.pem"
+   client_key = "/etc/nico/kmip/client.key"
+   keys = { "site-kek-1" = "f0a1c2d3-5e6f-4a7b-8c9d-0e1f2a3b4c5d" }
+
+   [secrets.routing]
+   "/" = "site-kek-1"
+   ```
+
+Preflight checks the three pieces together: the directory holds the three
+files; each `ca_bundle`, `client_cert`, and `client_key` path lies under an
+`extraVolumeMounts` mount whose `extraVolumes` entry is a Secret; and that
+Secret exists in `nico-system` with every key the paths and the volume's
+`items` need, unless it is the `nico-kmip-client` Secret that `setup.sh` is
+about to create, which may only exist if `setup.sh` created it. A path under
+one of the chart's own mounts, such as the site CA at
+`/var/run/secrets/nico-roots/ca.crt`, needs no extra volume and is accepted as
+is. A missing piece
+is a preflight error naming the provider table and field; a mount that is not
+backed by a Secret, or a `NICO_KMIP_CLIENT_DIR` that no provider or mount uses,
+is a warning. The check parses the site TOML with Python's `tomllib` whenever
+the site config mentions KMIP, so such a site needs Python 3.11 or later, or
+the `tomli` package, in the `python3` environment that already provides PyYAML;
+without either, preflight warns that it could not look for a `kmip` provider,
+or fails when `NICO_KMIP_CLIENT_DIR` is set, since that opt-in must be checked.
+
+Each `setup.sh` run is one `nico-api` rollout. A site that already stores
+credentials under Vault Transit keeps both providers configured and moves in
+the two rollouts described in
+[Migrating from Transit](https://docs.nvidia.com/infra-controller/documentation/configuration-day-1/kmip-kek-provider#migrating-from-transit):
+one run that adds the `kmip` provider and its mount while `active` and
+`[secrets.routing]` stay on Transit, and a second run that makes the KMIP
+provider `active` and routes every prefix to its `kek_id`, followed by
+`nico-admin-cli secrets re-wrap`. A new site, as in the example above, needs
+one run.
 
 ## Upgrading deployments that bundled PSM and NSM
 

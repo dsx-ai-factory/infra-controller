@@ -2750,6 +2750,100 @@ pub(in crate::tests) mod tests {
     }
 
     #[crate::sqlx_test]
+    async fn test_delete_sku_errors_and_committed_deletion(
+        pool: sqlx::PgPool,
+    ) -> Result<(), eyre::Error> {
+        use carbide_test_support::Outcome::FailsWith;
+        use carbide_test_support::{Case, check_cases_async};
+        use rpc::forge::SkuIdList;
+        use rpc::forge::forge_server::Forge;
+
+        let env =
+            create_test_env_with_overrides(pool.clone(), TestEnvOverrides::no_network_segments())
+                .await;
+        let api = &env.api;
+        let sku: Sku = serde_json::from_str::<rpc::forge::Sku>(FULL_SKU_DATA)?.into();
+        let mut txn = pool.begin().await?;
+        db::sku::create(&mut txn, &sku).await?;
+        txn.commit().await?;
+
+        check_cases_async(
+            [
+                Case {
+                    scenario: "one nonempty missing ID",
+                    input: vec!["missing-sku"],
+                    expect: FailsWith((
+                        tonic::Code::NotFound,
+                        "SKU not found: missing-sku".to_string(),
+                        Some("NICO-API-404".to_string()),
+                    )),
+                },
+                Case {
+                    scenario: "no IDs",
+                    input: vec![],
+                    expect: FailsWith((
+                        tonic::Code::InvalidArgument,
+                        "the SKU  does not exist".to_string(),
+                        Some("NICO-API-400".to_string()),
+                    )),
+                },
+                Case {
+                    scenario: "one empty ID",
+                    input: vec![""],
+                    expect: FailsWith((
+                        tonic::Code::InvalidArgument,
+                        "the SKU  does not exist".to_string(),
+                        Some("NICO-API-400".to_string()),
+                    )),
+                },
+                Case {
+                    scenario: "multiple missing IDs",
+                    input: vec!["missing-sku", "other-missing-sku"],
+                    expect: FailsWith((
+                        tonic::Code::InvalidArgument,
+                        "the SKU missing-sku does not exist".to_string(),
+                        Some("NICO-API-400".to_string()),
+                    )),
+                },
+            ],
+            |ids| async move {
+                api.delete_sku(tonic::Request::new(SkuIdList {
+                    ids: ids.into_iter().map(str::to_string).collect(),
+                }))
+                .await
+                .map(tonic::Response::into_inner)
+                .map_err(|error| {
+                    (
+                        error.code(),
+                        error.message().to_string(),
+                        error
+                            .metadata()
+                            .get("nico-error-code")
+                            .and_then(|value| value.to_str().ok())
+                            .map(str::to_string),
+                    )
+                })
+            },
+        )
+        .await;
+
+        api.delete_sku(tonic::Request::new(SkuIdList {
+            ids: vec![sku.id.clone()],
+        }))
+        .await?;
+
+        let mut connection = pool.acquire().await?;
+        assert!(
+            db::sku::find(&mut connection, std::slice::from_ref(&sku.id))
+                .await?
+                .is_empty(),
+            "successful handler deletion must be committed"
+        );
+
+        Ok(())
+    }
+
+    #[crate::sqlx_test]
     async fn test_delete_sku_in_use_reports_correct_machine_count(
         pool: sqlx::PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {

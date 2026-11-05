@@ -105,6 +105,11 @@ pub struct MockRmsApi {
     batch_get_node_device_info_calls: Mutex<Vec<rms::BatchGetNodeDeviceInfoRequest>>,
 
     // Node firmware calls.
+    batch_get_firmware_inventory_responses:
+        Mutex<VecDeque<Result<rms::BatchGetFirmwareInventoryResponse, RackManagerError>>>,
+    batch_get_firmware_inventory_calls: Mutex<Vec<rms::BatchGetFirmwareInventoryRequest>>,
+    blocked_firmware_inventory_read: Mutex<Option<BlockedRmsRequest>>,
+
     get_node_firmware_inventory_responses:
         Mutex<VecDeque<Result<rms::GetNodeFirmwareInventoryResponse, RackManagerError>>>,
     get_node_firmware_inventory_calls: Mutex<Vec<rms::GetNodeFirmwareInventoryRequest>>,
@@ -194,7 +199,7 @@ pub struct MockRmsApi {
     get_firmware_job_status_responses:
         Mutex<VecDeque<Result<rms::GetFirmwareJobStatusResponse, RackManagerError>>>,
     get_firmware_job_status_calls: Mutex<Vec<rms::GetFirmwareJobStatusRequest>>,
-    blocked_firmware_status: Mutex<Option<BlockedRmsRequest>>,
+    blocked_firmware_status: Mutex<VecDeque<BlockedRmsRequest>>,
 
     // Switch firmware calls.
     list_switch_firmware_responses:
@@ -295,6 +300,9 @@ impl MockRmsApi {
             list_node_device_info_by_node_type_calls: Default::default(),
             batch_get_node_device_info_responses: Default::default(),
             batch_get_node_device_info_calls: Default::default(),
+            batch_get_firmware_inventory_responses: Default::default(),
+            batch_get_firmware_inventory_calls: Default::default(),
+            blocked_firmware_inventory_read: Default::default(),
             get_node_firmware_inventory_responses: Default::default(),
             get_node_firmware_inventory_calls: Default::default(),
             get_rack_firmware_inventory_responses: Default::default(),
@@ -459,17 +467,39 @@ impl MockRmsApi {
     pub async fn block_next_get_firmware_job_status(
         &self,
     ) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
-        let (entered, arrival) = oneshot::channel();
-        let (release, resume) = oneshot::channel();
-        let mut blocked = self.blocked_firmware_status.lock().await;
+        self.block_next_firmware_job_status_requests(1)
+            .await
+            .pop()
+            .expect("one firmware status gate was requested")
+    }
 
+    /// Arms `count` firmware-status gates in request order. Each arrival is sent
+    /// after request recording and before its queued response is consumed.
+    /// Gates are consumed in call order; responses are taken in resume order.
+    /// Dropping a request leaves its queued response for a later call. A new
+    /// set can be armed once every previous call has taken its gate, even while
+    /// those calls are paused. A zero count arms no gates.
+    ///
+    /// # Panics
+    ///
+    /// Panics if any firmware status gate is already armed.
+    pub async fn block_next_firmware_job_status_requests(
+        &self,
+        count: usize,
+    ) -> Vec<(oneshot::Receiver<()>, oneshot::Sender<()>)> {
+        let mut blocked = self.blocked_firmware_status.lock().await;
         assert!(
-            blocked.is_none(),
+            blocked.is_empty(),
             "a firmware status blocker is already armed"
         );
-
-        *blocked = Some(BlockedRmsRequest { entered, resume });
-        (arrival, release)
+        (0..count)
+            .map(|_| {
+                let (entered, arrival) = oneshot::channel();
+                let (release, resume) = oneshot::channel();
+                blocked.push_back(BlockedRmsRequest { entered, resume });
+                (arrival, release)
+            })
+            .collect()
     }
 
     // Inventory
@@ -541,6 +571,46 @@ impl MockRmsApi {
     );
 
     // Node firmware
+    /// Queues one batch firmware response for the next read to consume.
+    pub async fn enqueue_batch_get_firmware_inventory(
+        &self,
+        response: Result<rms::BatchGetFirmwareInventoryResponse, RackManagerError>,
+    ) {
+        self.batch_get_firmware_inventory_responses
+            .lock()
+            .await
+            .push_back(response);
+    }
+
+    /// Returns caller-supplied descriptors recorded by batch firmware reads.
+    pub async fn batch_get_firmware_inventory_calls(
+        &self,
+    ) -> Vec<rms::BatchGetFirmwareInventoryRequest> {
+        self.batch_get_firmware_inventory_calls.lock().await.clone()
+    }
+
+    /// Pauses the next batch firmware read after recording it, before consuming
+    /// its queued response. The receiver signals arrival; sending or dropping
+    /// the sender releases the read. A closed sender after arrival proves the
+    /// owned read was dropped. Another blocker can be armed after arrival.
+    ///
+    /// # Panics
+    ///
+    /// Panics if an earlier blocker has not been taken by a read.
+    pub async fn block_next_batch_get_firmware_inventory(
+        &self,
+    ) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
+        let (entered, arrival) = oneshot::channel();
+        let (release, resume) = oneshot::channel();
+        let mut blocked = self.blocked_firmware_inventory_read.lock().await;
+        assert!(
+            blocked.is_none(),
+            "a firmware inventory blocker is already armed"
+        );
+        *blocked = Some(BlockedRmsRequest { entered, resume });
+        (arrival, release)
+    }
+
     impl_enqueue_inspect!(
         enqueue_get_node_firmware_inventory,
         get_node_firmware_inventory_calls,
@@ -1305,9 +1375,18 @@ impl RmsApi for MockRmsApi {
 
     async fn batch_get_firmware_inventory(
         &self,
-        _cmd: rms::BatchGetFirmwareInventoryRequest,
+        cmd: rms::BatchGetFirmwareInventoryRequest,
     ) -> Result<rms::BatchGetFirmwareInventoryResponse, RackManagerError> {
-        Err(tonic::Status::unimplemented("batch_get_firmware_inventory is not implemented").into())
+        self.batch_get_firmware_inventory_calls
+            .lock()
+            .await
+            .push(cmd);
+        let blocked = self.blocked_firmware_inventory_read.lock().await.take();
+        if let Some(blocked) = blocked {
+            blocked.entered.send(()).ok();
+            blocked.resume.await.ok();
+        }
+        pop_or_err(&mut self.batch_get_firmware_inventory_responses.lock().await)
     }
 
     async fn compare_firmware_object(
@@ -1468,7 +1547,7 @@ impl RmsApi for MockRmsApi {
     ) -> Result<rms::GetFirmwareJobStatusResponse, RackManagerError> {
         self.get_firmware_job_status_calls.lock().await.push(cmd);
 
-        let blocked = self.blocked_firmware_status.lock().await.take();
+        let blocked = self.blocked_firmware_status.lock().await.pop_front();
 
         if let Some(blocked) = blocked {
             blocked.entered.send(()).ok();
