@@ -11548,8 +11548,16 @@ message UpdateOperatingSystemRequest {
   optional string ipxe_script = 20;
   optional common.IpxeTemplateId ipxe_template_id = 22;
   optional IpxeTemplateParameters ipxe_template_parameters = 23;
+  // Omitted lists keep their stored values; present lists replace them, including empty lists.
+  // Caller-supplied cached_url values are ignored. An unchanged template, parameter list,
+  // and artifact definition (including cache_strategy) retain the site's stored cached URLs.
+  // Changing that definition clears the cached URLs and recomputes readiness: an uncached
+  // CACHED_ONLY artifact makes the OS PROVISIONING; otherwise it is READY.
+  // Use UpdateOperatingSystemCachableIpxeTemplateArtifacts to set or clear cached URLs.
   optional IpxeTemplateArtifacts ipxe_template_artifacts = 24;
-  optional string ipxe_template_definition_hash = 25; // if provided, used as-is; otherwise recomputed
+  // If provided, used as-is. Otherwise validate the effective definition and recompute
+  // its hash. Correcting a stored hash alone does not invalidate unchanged artifacts.
+  optional string ipxe_template_definition_hash = 25;
 }
 
 message DeleteOperatingSystemRequest {
