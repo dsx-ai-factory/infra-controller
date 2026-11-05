@@ -26126,8 +26126,7 @@ components:
             the Instance Type's InfiniBand capabilities; if the Instance Type has none, the Machine's
             capabilities are used instead. Missing capabilities or invalid selectors return 400. Final Site
             validation remains authoritative because persisted inventory can lag behind the Site. Each
-            `device`, `deviceInstance`, and `isPhysical` combination may appear only once; a physical and
-            a virtual interface with the same device and deviceInstance are permitted. An unchanged
+            `device`, `deviceInstance`, and `isPhysical` combination may appear only once. An unchanged
             complete Ready list preserves existing assignments without inserting replacement Pending rows.
             Removing interfaces from a running Instance immediately detaches the corresponding InfiniBand
             partitions.
