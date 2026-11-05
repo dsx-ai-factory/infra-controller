@@ -219,8 +219,8 @@ func (c *recordingForgeClient) FindSwitchesByIds(
 			switches = append(switches, &corev1.Switch{
 				Id:              &corev1.SwitchId{Id: id},
 				RackId:          &corev1.RackId{Id: "rack-" + id},
-				ControllerState: "state-" + id,
-				NvosInfo:        &corev1.SwitchNvosInfo{Ip: &nvosIP},
+				ControllerState: "state-" + id,                       //nolint:staticcheck // Exercise the legacy Core response fields still read by batch conversion.
+				NvosInfo:        &corev1.SwitchNvosInfo{Ip: &nvosIP}, //nolint:staticcheck // Preserve coverage for Core responses without the replacement status fields.
 				BmcInfo:         &corev1.BmcInfo{Mac: &bmcMAC},
 				Status:          &corev1.SwitchStatus{Health: &corev1.HealthReport{Source: "health-" + id}},
 			})
@@ -259,7 +259,7 @@ func (c *recordingForgeClient) FindPowerShelvesByIds(
 			shelves = append(shelves, &corev1.PowerShelf{
 				Id:              &corev1.PowerShelfId{Id: id},
 				RackId:          &corev1.RackId{Id: "rack-" + id},
-				ControllerState: "state-" + id,
+				ControllerState: "state-" + id, //nolint:staticcheck // Exercise the legacy Core field still read by batch conversion.
 				BmcInfo:         &corev1.BmcInfo{Mac: &bmcMAC},
 				Status:          &corev1.PowerShelfStatus{Health: &corev1.HealthReport{Source: "health-" + id}},
 			})

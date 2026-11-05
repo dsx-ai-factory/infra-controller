@@ -15,6 +15,10 @@ NICo extends the concept of an *NVLink Partition* with the *NVLink Logical Parti
 NVLink Partitioning is supported for GB200, GB300, and Vera Rubin (VR) compute nodes.
 </Note>
 
+<Warning title="Important">
+Tenants cannot use multi-instance NVLink partitioning (GPUs on more than one Instance sharing an NVLink Partition) unless they first create an NVLink Logical Partition. NICo removes the NMX-C default partition. GPUs that are not assigned to an NVLink Logical Partition are placed in a per-tray default partition, so they can share memory only with other GPUs in the same compute tray. Refer to [Creating a NVLink Logical Partition](#creating-a-nvlink-logical-partition) for more details.
+</Warning>
+
 ## Operations: Who Does What
 
 NVLink operations are split between operator site setup against NMX-C and
@@ -41,6 +45,8 @@ The tenant rows are the REST / `nicocli` flow described next.
 ### Creating a NVLink Logical Partition
 
 NICo users can create NVLink Logical Partitions and plan GPU assignments using NVLink Interfaces for Instances (as described in steps **1-2**). NICo can also automatically generate NVLink Interfaces and assign them to Instances (as described in step **3**).
+
+Both methods require step **1** for multi-instance NVLink partitioning because each one assigns GPUs by referencing an existing NVLink Logical Partition ID.
 
 In general, the steps are:
 
@@ -133,6 +139,13 @@ Each reconciliation pass does the following:
    alerts block normal allocation while they remain in aggregate host health.
    See the linked probe contract for recovery, hardware replacement, manual
    removal, and allocation exceptions.
+1. Raises or clears the per-rack
+   [`NmxcUnreachable`](../architecture/health/health_probe_ids.md#nmxcunreachable)
+   health report. A rack whose NMX-C could not be used for
+   `nvlink_config.partition_monitor_unreachable_alert_after` consecutive passes
+   (default `3`) gets a `Hardware` alert naming the endpoint and the failing
+   step; the first pass that reaches NMX-C again clears it. The alert does not
+   block allocations.
 1. Compares observed state against desired state.
 1. Issues create / update / remove operations to the fabric-management
    service to converge it onto desired state.
@@ -226,8 +239,58 @@ deletion is rejected if any instance still references the Logical
 Partition.
 
 When a host is force-deleted, the instance running on it is implicitly
-released and the above cleanup path runs. Operators do not need to detach
-NVLink configuration manually before force-deleting.
+released. The monitor only removes GPUs from partitions for hosts that NICo
+still manages, so it removes them once the host is rediscovered. If the
+host's compute tray is physically moved or replaced instead, isolate the tray
+first, as described in
+[Moving or Replacing a Compute Tray](#moving-or-replacing-a-compute-tray).
+
+### Moving or Replacing a Compute Tray
+
+Remove a compute tray's GPUs from every NVLink partition before the tray leaves
+its slot. NMX-C tracks partition membership by GPU UID and by slot location. If
+a tray is moved or replaced while its GPUs are still in a partition, NMX-C keeps
+the old UIDs as members but gives the slot's membership to the GPUs installed
+next. It then rejects every create, add, and remove request that would reconcile
+the two. The only known recovery is an NMX-C factory reset, which disrupts every
+tray in the NVLink domain.
+
+1. Mark the host with the `compute-tray-due-for-swap` template:
+
+   ```bash
+   nico-admin-cli machine health-report add <machine-id> \
+     --template compute-tray-due-for-swap --message "<ticket>"
+   ```
+
+   The template blocks new allocations and carries the
+   [`IsolateFromNvLinkPartitions`](../architecture/health/health_alert_classifications.md#isolatefromnvlinkpartitions)
+   classification. On its next pass, the monitor removes every GPU on the host
+   from every NVLink partition, tenant or tray default, and keeps them out while
+   the mark remains. It does so even if the host has an instance, which cuts
+   that instance's NVLink connectivity to the rest of its partition.
+
+1. Wait until the monitor reports `NvlinkIsolated` under the `nvlink-isolation`
+   health report source:
+
+   ```bash
+   nico-admin-cli -f json machine health-report show <machine-id> \
+     | jq -r '.[].report | select(.source == "nvlink-isolation") | (.successes[]?.id, .alerts[]?.message)'
+   ```
+
+   `NvlinkIsolated` means NMX-C lists none of the host's GPUs in any partition.
+   Any other output, including no output, means the tray must stay in its slot:
+   a message names the GPUs still in a partition or states that isolation
+   cannot be confirmed, and no output means the monitor has not checked the host
+   since it was marked. For details, see
+   [NVLink isolation health probe identifiers](../architecture/health/health_probe_ids.md#nvlink-isolation-health-probe-identifiers).
+
+1. Keep the mark until the tray is out of its slot, and force-delete the host
+   only after that. Force-deletion removes the mark, and while the tray is
+   still installed, Site Explorer can rediscover it as an unmarked host whose
+   GPUs the monitor returns to `tray_partition_<slot>`.
+
+Removing the tray and ingesting its replacement follow the site's hardware
+replacement process.
 
 ### Configuring NMX-C-based NVLink Partitioning
 
@@ -247,6 +310,9 @@ described below do not fit the site, under `[nvlink_config]`:
 [nvlink_config]
 enabled = true
 monitor_run_interval = "60s"
+# Consecutive passes a rack's NMX-C must be unusable before its
+# NmxcUnreachable alert is raised; the first reachable pass clears it.
+partition_monitor_unreachable_alert_after = 3
 
 # TLS material for NMX-C. The CA path defaults when nico-api finds a
 # ca.crt (see below); otherwise set it, because the certificate monitor

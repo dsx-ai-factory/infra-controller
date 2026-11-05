@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -8,6 +9,9 @@ use carbide_redfish::libredfish::RedfishClientPool;
 use carbide_redfish::libredfish::conv::IntoModel;
 use carbide_secrets::credentials::Credentials;
 use futures_util::{StreamExt, stream};
+use libredfish::model::ODataId;
+use libredfish::model::software_inventory::SoftwareInventory;
+use mac_address::MacAddress;
 use model::component_manager::{ComputeTrayComponent, PowerAction};
 use tokio::time::{Instant, timeout_at};
 
@@ -17,6 +21,10 @@ use crate::compute_tray_manager::{
     ComputeTrayVendor,
 };
 use crate::error::ComponentManagerError;
+use crate::firmware_inventory::{
+    ComponentFirmwareInventoryResult, FirmwareComponent, FirmwareInventoryEntry,
+    FirmwareInventorySource, FirmwareReadError,
+};
 
 /// `CoreComputeTrayManager` uses NICo-core's Redfish stack for power control
 /// and observations. Each power-read request allows at most eight active BMCs
@@ -24,8 +32,9 @@ use crate::error::ComponentManagerError;
 /// Queued endpoints expire without being read; completed observations remain
 /// in input order, and duplicate endpoints are read separately. The request
 /// owns its futures, so dropping it cancels unfinished setup and reads.
-/// Firmware operations are not supported. The pool must support direct
-/// authentication with endpoint credentials.
+/// Firmware inventory reads use the same pool and direct endpoint credentials;
+/// the pool must support direct authentication. Firmware updates, update status,
+/// and bundle listing remain unsupported. See `get_firmware_inventory` for its bounds.
 pub struct CoreComputeTrayManager {
     redfish_pool: Arc<dyn RedfishClientPool>,
 }
@@ -38,6 +47,23 @@ const POWER_READ_TIMEOUT: Duration = Duration::from_secs(10);
 const POWER_READ_CONCURRENCY: usize = 8;
 const POWER_READ_TIMEOUT_ERROR: &str = "redfish power read deadline exceeded";
 
+// Firmware inventories require one collection read plus one read per member.
+// Four endpoint reads with four members each cap this request at 16 simultaneous
+// member reads. Repeated endpoints have independent admission slots.
+const FIRMWARE_ENDPOINT_CONCURRENCY: usize = 4;
+const FIRMWARE_MEMBER_CONCURRENCY: usize = 4;
+// Member fan-out needs more time than a power read, but must still finish before
+// the transport's own timeout. This is a partial-observation budget: slow or
+// queued work expires while completed members remain useful.
+const FIRMWARE_READ_TIMEOUT: Duration = Duration::from_secs(30);
+const FIRMWARE_ENDPOINT_LIMIT: usize = 64;
+// Pinned libredfish hardware fixtures contain up to 106 entries and 136-byte
+// text fields. Leave growth room while bounding retained data and follow-up I/O.
+const FIRMWARE_MEMBER_LIMIT: usize = 256;
+const FIRMWARE_TEXT_LIMIT: usize = 1024;
+const FIRMWARE_INVENTORY_TEXT_LIMIT: usize = 64 * 1024;
+const FIRMWARE_INVENTORY_URI: &str = "/redfish/v1/UpdateService/FirmwareInventory";
+
 impl std::fmt::Debug for CoreComputeTrayManager {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("CoreComputeTrayManager").finish()
@@ -48,6 +74,232 @@ impl CoreComputeTrayManager {
     pub fn new(redfish_pool: Arc<dyn RedfishClientPool>) -> Self {
         Self { redfish_pool }
     }
+
+    /// Reads one BMC's collection before admitting bounded member requests.
+    /// Keeping a result for each member makes partial failures visible without
+    /// replacing healthy observations or inventing a successful empty inventory.
+    #[tracing::instrument(skip_all, fields(
+        bmc_ip_address = %endpoint.bmc_ip,
+        bmc_mac_address = %endpoint.bmc_mac,
+    ))]
+    async fn read_firmware_inventory(
+        &self,
+        endpoint: &ComputeTrayEndpoint,
+        deadline: Instant,
+    ) -> Result<Vec<FirmwareInventoryEntry>, FirmwareReadError> {
+        let Credentials::UsernamePassword { username, password } = &endpoint.bmc_credentials;
+        let client = firmware_read_before_deadline(
+            deadline,
+            self.redfish_pool.create_client(
+                &endpoint.bmc_ip.to_string(),
+                Some(443),
+                carbide_redfish::libredfish::RedfishAuth::Direct(
+                    username.clone(),
+                    password.clone(),
+                ),
+                map_vendor(endpoint.vendor),
+            ),
+        )
+        .await?;
+        // get_software_inventories discards pagination/count metadata and skips
+        // malformed links. The decorated raw GET retains that evidence so we
+        // can reject an incomplete collection before requesting its members.
+        let collection = ODataId {
+            odata_id: FIRMWARE_INVENTORY_URI.into(),
+        };
+        let ids = {
+            let resource =
+                firmware_read_before_deadline(deadline, client.get_resource(collection)).await?;
+            firmware_inventory_ids(resource.raw.get(), endpoint.bmc_ip, endpoint.bmc_mac)?
+        };
+        if Instant::now() >= deadline {
+            return Err(FirmwareReadError::DeadlineExceeded);
+        }
+        let mut text_bytes: usize = ids.iter().map(String::len).sum();
+
+        let reads = stream::iter(0..ids.len())
+            .map(|index| {
+                let client = client.as_ref();
+                let id = &ids[index];
+                async move {
+                    let firmware = firmware_read_before_deadline(deadline, client.get_firmware(id))
+                        .await
+                        .and_then(firmware_component);
+                    (index, firmware)
+                }
+            })
+            .buffer_unordered(FIRMWARE_MEMBER_CONCURRENCY);
+        futures_util::pin_mut!(reads);
+        let mut entries: Vec<_> = ids
+            .iter()
+            .map(|id| FirmwareInventoryEntry {
+                inventory_id: Some(id.clone()),
+                firmware: Err(FirmwareReadError::DeadlineExceeded),
+            })
+            .collect();
+        while let Some((index, firmware)) = reads.next().await {
+            entries[index].firmware = firmware;
+        }
+
+        // Apply the total in collection order, so completion timing never decides
+        // which metadata fits. An oversized member keeps its ID and an error.
+        for entry in &mut entries {
+            if let Ok(firmware) = &entry.firmware {
+                let size = firmware.id.as_ref().map_or(0, String::len)
+                    + firmware.resource_uri.as_ref().map_or(0, String::len)
+                    + firmware.name.as_ref().map_or(0, String::len)
+                    + firmware.update_target.as_ref().map_or(0, String::len)
+                    + firmware.description.as_ref().map_or(0, String::len)
+                    + firmware.version.as_ref().map_or(0, String::len)
+                    + firmware.release_date.as_ref().map_or(0, String::len);
+                if text_bytes + size > FIRMWARE_INVENTORY_TEXT_LIMIT {
+                    entry.firmware = Err(FirmwareReadError::LimitExceeded);
+                } else {
+                    text_bytes += size;
+                }
+            }
+        }
+        Ok(entries)
+    }
+}
+
+/// Accepts one complete collection, retaining lookup order and repeated members.
+/// Continuation or inconsistent metadata is unavailable evidence, not an empty
+/// inventory or a successful prefix. Only canonical child URIs that libredfish's
+/// member lookup can reproduce are accepted; other links must not select a
+/// different resource merely because their last segment matches.
+/// Rejections log a fixed reason and endpoint, never response or parser text.
+fn firmware_inventory_ids(
+    raw: &str,
+    bmc_ip: IpAddr,
+    bmc_mac: MacAddress,
+) -> Result<Vec<String>, FirmwareReadError> {
+    let reject = |reason: &'static str, error: FirmwareReadError| {
+        tracing::warn!(
+            bmc_ip_address = %bmc_ip,
+            bmc_mac_address = %bmc_mac,
+            reason,
+            "firmware inventory collection rejected"
+        );
+        error
+    };
+    // The resource already contains valid JSON, but materializing its object can
+    // still fail (for example at the decoder's recursion limit).
+    let collection: serde_json::Value = serde_json::from_str(raw)
+        .map_err(|_| reject("collection_decode_failed", FirmwareReadError::ReadFailed))?;
+    let collection = collection
+        .as_object()
+        .ok_or_else(|| reject("collection_not_object", FirmwareReadError::ReadFailed))?;
+    if collection.contains_key("Members@odata.nextLink")
+        || collection.contains_key("@odata.nextLink")
+    {
+        return Err(reject(
+            "continuation_unsupported",
+            FirmwareReadError::ReadFailed,
+        ));
+    }
+    let members = collection
+        .get("Members")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| reject("members_missing", FirmwareReadError::ReadFailed))?;
+    if collection
+        .get("Members@odata.count")
+        .and_then(serde_json::Value::as_u64)
+        != Some(members.len() as u64)
+    {
+        return Err(reject(
+            "member_count_invalid",
+            FirmwareReadError::ReadFailed,
+        ));
+    }
+    if members.len() > FIRMWARE_MEMBER_LIMIT {
+        return Err(reject(
+            "member_count_limit",
+            FirmwareReadError::LimitExceeded,
+        ));
+    }
+    let mut lookup_bytes = 0;
+    let mut ids = Vec::with_capacity(members.len());
+    for member in members {
+        let id = member
+            .get("@odata.id")
+            .and_then(serde_json::Value::as_str)
+            .and_then(|uri| uri.strip_prefix(FIRMWARE_INVENTORY_URI))
+            .and_then(|suffix| suffix.strip_prefix('/'))
+            .filter(|id| {
+                // Accept literal path-segment characters, including Dell's
+                // colon-bearing IDs. Encoded or navigational forms cannot be
+                // faithfully reconstructed by the string-based member API.
+                !id.is_empty()
+                    && *id != "."
+                    && *id != ".."
+                    && id.bytes().all(|byte| {
+                        byte.is_ascii_alphanumeric() || b"-._~!$&'()*+,;=:@".contains(&byte)
+                    })
+            })
+            .ok_or_else(|| reject("member_uri_invalid", FirmwareReadError::ReadFailed))?;
+        if id.len() > FIRMWARE_TEXT_LIMIT {
+            return Err(reject("member_id_limit", FirmwareReadError::LimitExceeded));
+        }
+        lookup_bytes += id.len();
+        if lookup_bytes > FIRMWARE_INVENTORY_TEXT_LIMIT {
+            return Err(reject(
+                "lookup_text_limit",
+                FirmwareReadError::LimitExceeded,
+            ));
+        }
+        ids.push(id.to_owned());
+    }
+    Ok(ids)
+}
+
+/// Checks both sides of a firmware I/O attempt because Tokio may poll a ready
+/// result before its expired timer. Queued attempts must never start after expiry.
+async fn firmware_read_before_deadline<T, E>(
+    deadline: Instant,
+    read: impl std::future::Future<Output = Result<T, E>>,
+) -> Result<T, FirmwareReadError> {
+    if Instant::now() >= deadline {
+        return Err(FirmwareReadError::DeadlineExceeded);
+    }
+    let result = timeout_at(deadline, read).await;
+    if Instant::now() >= deadline {
+        return Err(FirmwareReadError::DeadlineExceeded);
+    }
+    match result {
+        Ok(Ok(value)) => Ok(value),
+        // Keep dependency error bodies out of observations. The decorated
+        // Redfish client retains its existing diagnostic handling.
+        Ok(Err(_)) => Err(FirmwareReadError::ReadFailed),
+        Err(_) => Err(FirmwareReadError::DeadlineExceeded),
+    }
+}
+
+/// Retains the backend's metadata, including any vendor version normalization.
+/// Oversized text makes this member unavailable instead of clipping its values.
+fn firmware_component(value: SoftwareInventory) -> Result<FirmwareComponent, FirmwareReadError> {
+    if [
+        Some(value.id.as_str()),
+        Some(value.odata.odata_id.as_str()),
+        value.description.as_deref(),
+        value.version.as_deref(),
+        value.release_date.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .any(|text| text.len() > FIRMWARE_TEXT_LIMIT)
+    {
+        return Err(FirmwareReadError::LimitExceeded);
+    }
+    Ok(FirmwareComponent {
+        id: Some(value.id),
+        resource_uri: Some(value.odata.odata_id),
+        name: None,
+        update_target: None,
+        description: value.description,
+        version: value.version,
+        release_date: value.release_date,
+    })
 }
 
 fn map_vendor(vendor: ComputeTrayVendor) -> Option<libredfish::model::service_root::RedfishVendor> {
@@ -76,6 +328,62 @@ fn map_power_action(action: PowerAction) -> libredfish::SystemPowerControl {
 impl crate::compute_tray_manager::ComputeTrayManager for CoreComputeTrayManager {
     fn power_state_source(&self) -> Option<crate::component_common::PowerStateSource> {
         Some(crate::component_common::PowerStateSource::Redfish)
+    }
+
+    fn firmware_inventory_source(&self) -> Option<FirmwareInventorySource> {
+        Some(FirmwareInventorySource::Redfish)
+    }
+
+    /// Rejects more than 64 endpoints with `ComponentManagerError::InvalidArgument`
+    /// before I/O. Accepted calls allow four concurrent endpoint reads, each with
+    /// four member reads (16 simultaneous member reads). Repeated endpoints use
+    /// separate slots. Endpoints are admitted in caller order; slow early
+    /// endpoints can consume the budget before later ones start, so callers may
+    /// split larger batches. One 30-second budget covers queueing, setup, listing
+    /// and member reads; it does not guarantee a complete batch.
+    /// Each inventory allows 256 members, 1 KiB per field and 64 KiB of retained
+    /// text. Oversized collections fail whole; oversized members retain their
+    /// lookup ID with `LimitExceeded`. Incomplete or malformed collections fail
+    /// with `ReadFailed` before member reads. Collections require an exact member
+    /// count and canonical child links, with no continuation. Versions retain
+    /// vendor normalization; this reader does not shorten them. Limits apply
+    /// after HTTP decoding and do not bound transport buffering.
+    ///
+    /// Endpoint and member order, including repeats, matches the caller/listing.
+    /// Completed members survive peer failures or expiry. Dropping this future
+    /// drops all unfinished reads. The reader spawns no tasks of its own and
+    /// performs no mutations; the shared HTTP pool retains its own lifecycle.
+    async fn get_firmware_inventory(
+        &self,
+        endpoints: &[ComputeTrayEndpoint],
+    ) -> Result<Vec<ComponentFirmwareInventoryResult>, ComponentManagerError> {
+        if endpoints.len() > FIRMWARE_ENDPOINT_LIMIT {
+            return Err(ComponentManagerError::InvalidArgument(format!(
+                "firmware inventory accepts at most {FIRMWARE_ENDPOINT_LIMIT} endpoints"
+            )));
+        }
+        let deadline = Instant::now() + FIRMWARE_READ_TIMEOUT;
+        let reads = stream::iter(0..endpoints.len())
+            .map(|index| async move {
+                (
+                    index,
+                    self.read_firmware_inventory(&endpoints[index], deadline)
+                        .await,
+                )
+            })
+            .buffer_unordered(FIRMWARE_ENDPOINT_CONCURRENCY);
+        futures_util::pin_mut!(reads);
+        let mut results: Vec<_> = endpoints
+            .iter()
+            .map(|endpoint| ComponentFirmwareInventoryResult {
+                mac_address: endpoint.bmc_mac,
+                inventory: Err(FirmwareReadError::DeadlineExceeded),
+            })
+            .collect();
+        while let Some((index, inventory)) = reads.next().await {
+            results[index].inventory = inventory;
+        }
+        Ok(results)
     }
 
     fn name(&self) -> &str {
@@ -226,6 +534,8 @@ impl crate::compute_tray_manager::ComputeTrayManager for CoreComputeTrayManager 
 
 #[cfg(test)]
 mod tests {
+    mod firmware;
+
     use std::collections::HashMap;
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -268,35 +578,37 @@ mod tests {
         PowerRead,
     }
 
-    /// `PowerReadTestGates` pauses selected hosts at one stage of a test read.
-    /// Each registered receiver is consumed by the first wait for that host.
+    /// `ComputeReadTestGates` pauses selected hosts or firmware inventory members.
+    /// Each registered receiver is consumed by the first wait for that key.
     /// Once consumed, it belongs to the waiting future, so cancelling that
     /// future closes its sender. Gates never reached remain in `waiters`.
     #[derive(Default)]
-    struct PowerReadTestGates {
+    struct ComputeReadTestGates {
         /// Registered gates that no call has reached yet.
         waiters: Mutex<HashMap<String, oneshot::Receiver<()>>>,
         /// Cumulative reached gates; excludes ungated calls and never decrements.
         started: AtomicUsize,
     }
 
-    impl PowerReadTestGates {
+    impl ComputeReadTestGates {
         /// `block` registers a gate for the next wait on this host, replacing
         /// any prior gate. Keep the returned sender alive until releasing the
         /// gate or cancelling the request, or a waiting future will panic.
         fn block(&self, endpoint: &ComputeTrayEndpoint) -> oneshot::Sender<()> {
+            self.block_key(endpoint.bmc_ip.to_string())
+        }
+
+        /// Registers a host or host/member gate for the next matching read.
+        fn block_key(&self, key: String) -> oneshot::Sender<()> {
             let (sender, receiver) = oneshot::channel();
-            self.waiters
-                .lock()
-                .unwrap()
-                .insert(endpoint.bmc_ip.to_string(), receiver);
+            self.waiters.lock().unwrap().insert(key, receiver);
             sender
         }
 
         /// `wait` consumes a registered gate and waits for the test to release
-        /// it. Hosts without a registered gate continue immediately.
-        async fn wait(&self, host: &str) {
-            let waiter = self.waiters.lock().unwrap().remove(host);
+        /// it. Keys without a registered gate continue immediately.
+        async fn wait(&self, key: &str) {
+            let waiter = self.waiters.lock().unwrap().remove(key);
             if let Some(waiter) = waiter {
                 self.started.fetch_add(1, Ordering::Relaxed);
                 waiter
@@ -306,32 +618,34 @@ mod tests {
         }
     }
 
-    /// `PowerReadTestPool` checks endpoint credentials, port, and vendor before
+    /// `ComputeReadTestPool` checks endpoint credentials, port, and vendor before
     /// forwarding client creation to `RedfishSim`. Separate setup and read
     /// gates let tests stop either phase without relying on wall-clock delays.
-    struct PowerReadTestPool {
+    struct ComputeReadTestPool {
         sim: RedfishSim,
         endpoints: HashMap<String, ComputeTrayEndpoint>,
-        setup_gates: PowerReadTestGates,
-        read_gates: Arc<PowerReadTestGates>,
+        setup_gates: ComputeReadTestGates,
+        read_gates: Arc<ComputeReadTestGates>,
+        firmware: Arc<FirmwareReadTestData>,
     }
 
-    /// `power_read_test_pool` records expected endpoints and starts with no
+    /// `compute_read_test_pool` records expected endpoints and starts with no
     /// blocked hosts; each test registers only the gates it needs.
-    fn power_read_test_pool(endpoints: &[ComputeTrayEndpoint]) -> Arc<PowerReadTestPool> {
-        Arc::new(PowerReadTestPool {
+    fn compute_read_test_pool(endpoints: &[ComputeTrayEndpoint]) -> Arc<ComputeReadTestPool> {
+        Arc::new(ComputeReadTestPool {
             sim: RedfishSim::default(),
             endpoints: endpoints
                 .iter()
                 .map(|endpoint| (endpoint.bmc_ip.to_string(), endpoint.clone()))
                 .collect(),
-            setup_gates: PowerReadTestGates::default(),
-            read_gates: Arc::new(PowerReadTestGates::default()),
+            setup_gates: ComputeReadTestGates::default(),
+            read_gates: Arc::new(ComputeReadTestGates::default()),
+            firmware: Arc::new(FirmwareReadTestData::default()),
         })
     }
 
     #[async_trait::async_trait]
-    impl RedfishClientPool for PowerReadTestPool {
+    impl RedfishClientPool for ComputeReadTestPool {
         /// `create_client` validates the request before waiting at the setup
         /// gate, then wraps the simulator client with its separate read gate.
         async fn create_client(
@@ -353,10 +667,11 @@ mod tests {
 
             self.setup_gates.wait(host).await;
             let inner = self.sim.create_client(host, port, auth, vendor).await?;
-            Ok(Box::new(PowerReadTestClient {
+            Ok(Box::new(ComputeReadTestClient {
                 inner,
                 gates: self.read_gates.clone(),
                 host: host.to_owned(),
+                firmware: self.firmware.clone(),
             }))
         }
 
@@ -365,16 +680,30 @@ mod tests {
         }
     }
 
-    /// `PowerReadTestClient` pauses power reads before they reach the simulator.
-    /// Power commands still reach `RedfishSim`, so the tests can detect an
-    /// accidental mutation through its recorded actions.
-    struct PowerReadTestClient {
+    /// `ComputeReadTestClient` gates power and firmware reads before they reach
+    /// the simulator. Power commands still reach `RedfishSim`, so tests can
+    /// detect accidental writes through its recorded actions. Unimplemented
+    /// mutation methods reach the simulator's panicking `std_redfish` stub.
+    struct ComputeReadTestClient {
         inner: Box<dyn Redfish>,
-        gates: Arc<PowerReadTestGates>,
+        gates: Arc<ComputeReadTestGates>,
         host: String,
+        firmware: Arc<FirmwareReadTestData>,
     }
 
-    impl Redfish for PowerReadTestClient {
+    /// Firmware overrides extend the pool that checks endpoint credentials.
+    /// Members are keyed by host and lookup ID; member gates use `host/id`.
+    /// Raw collections and members without overrides come from the simulator.
+    #[derive(Default)]
+    struct FirmwareReadTestData {
+        members: Mutex<HashMap<(String, String), Result<SoftwareInventory, String>>>,
+        list_gates: ComputeReadTestGates,
+        member_gates: ComputeReadTestGates,
+        list_calls: AtomicUsize,
+        member_calls: Mutex<Vec<(String, String)>>,
+    }
+
+    impl Redfish for ComputeReadTestClient {
         fn std_redfish(&self) -> &libredfish::standard::RedfishStandard {
             self.inner.std_redfish()
         }
@@ -387,6 +716,50 @@ mod tests {
             Box::pin(async move {
                 self.gates.wait(&self.host).await;
                 self.inner.get_power_state().await
+            })
+        }
+
+        /// Records collection admission and waits at this host's list gate
+        /// before reading the simulator's raw resource, including collection metadata.
+        fn get_resource<'a>(
+            &'a self,
+            id: ODataId,
+        ) -> RedfishFuture<'a, Result<libredfish::model::resource::Resource, RedfishError>>
+        {
+            Box::pin(async move {
+                self.firmware.list_calls.fetch_add(1, Ordering::Relaxed);
+                self.firmware.list_gates.wait(&self.host).await;
+                self.inner.get_resource(id).await
+            })
+        }
+
+        /// Records each requested member, then consumes that member's gate
+        /// before returning its override or the simulator metadata.
+        fn get_firmware<'a>(
+            &'a self,
+            id: &'a str,
+        ) -> RedfishFuture<'a, Result<SoftwareInventory, RedfishError>> {
+            Box::pin(async move {
+                self.firmware
+                    .member_calls
+                    .lock()
+                    .unwrap()
+                    .push((self.host.clone(), id.to_owned()));
+                self.firmware
+                    .member_gates
+                    .wait(&format!("{}/{id}", self.host))
+                    .await;
+                let member = self
+                    .firmware
+                    .members
+                    .lock()
+                    .unwrap()
+                    .get(&(self.host.clone(), id.to_owned()))
+                    .cloned();
+                match member {
+                    Some(result) => result.map_err(|error| RedfishError::GenericError { error }),
+                    None => self.inner.get_firmware(id).await,
+                }
             })
         }
 
@@ -418,7 +791,7 @@ mod tests {
         // Repeat one endpoint to catch accidental deduplication of results.
         let mut endpoints: Vec<_> = (1..=7).map(test_compute_tray_endpoint).collect();
         endpoints.push(endpoints[0].clone());
-        let pool = power_read_test_pool(&endpoints);
+        let pool = compute_read_test_pool(&endpoints);
         let manager = CoreComputeTrayManager::new(pool.clone());
         assert!(manager.get_power_state(&[]).await.unwrap().is_empty());
 
@@ -477,7 +850,7 @@ mod tests {
             (PowerReadPhase::PowerRead, "redfish power read failed:"),
         ] {
             let endpoints = [test_compute_tray_endpoint(1), test_compute_tray_endpoint(2)];
-            let pool = power_read_test_pool(&endpoints);
+            let pool = compute_read_test_pool(&endpoints);
             let healthy_setup = pool.setup_gates.block(&endpoints[1]);
             pool.sim
                 .set_power_state(&endpoints[1].bmc_ip.to_string(), RedfishPowerState::Off);
@@ -537,7 +910,7 @@ mod tests {
         // Complete one observation immediately and another after six seconds,
         // while the remaining devices stay blocked or queued.
         let endpoints: Vec<_> = (0..11).map(test_compute_tray_endpoint).collect();
-        let pool = power_read_test_pool(&endpoints);
+        let pool = compute_read_test_pool(&endpoints);
         pool.sim
             .set_power_state(&endpoints[0].bmc_ip.to_string(), RedfishPowerState::On);
         pool.sim
@@ -621,7 +994,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn setup_finishing_at_deadline_does_not_start_a_power_read() {
         let endpoints = [test_compute_tray_endpoint(1)];
-        let pool = power_read_test_pool(&endpoints);
+        let pool = compute_read_test_pool(&endpoints);
         let setup = pool.setup_gates.block(&endpoints[0]);
         let read = pool.read_gates.block(&endpoints[0]);
         let manager = CoreComputeTrayManager::new(pool.clone());
@@ -662,7 +1035,7 @@ mod tests {
             // Block nine devices at the selected phase so one stays queued
             // behind the eight active requests.
             let endpoints: Vec<_> = (0..9).map(test_compute_tray_endpoint).collect();
-            let pool = power_read_test_pool(&endpoints);
+            let pool = compute_read_test_pool(&endpoints);
             let gates = match phase {
                 PowerReadPhase::ClientCreation => &pool.setup_gates,
                 PowerReadPhase::PowerRead => pool.read_gates.as_ref(),

@@ -45,7 +45,7 @@ issuers:
 
 siteManager:
   enabled: false
-  svcEndpoint: "https://sitemgr.nico-rest-site-manager:8100/v1/site"
+  svcEndpoint: "https://nico-rest-site-manager:8100/v1/site"
 
 metrics:
   enabled: true

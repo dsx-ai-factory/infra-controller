@@ -306,6 +306,7 @@ mod tests {
             psid: Some("psid".into()),
             device_description: None,
             part_number: Some("part".into()),
+            fw_version_running: None,
             fw_version_current: None,
             pxe_version_current: None,
             uefi_version_current: None,
@@ -656,6 +657,7 @@ mod tests {
                 command: Some(fac::mlx_device_action::Command::Lockdown(task)),
             }],
             Ok(config),
+            None,
             |_| panic!("lockdown commands never use the legacy discovery"),
             |request| {
                 published = Some(request);

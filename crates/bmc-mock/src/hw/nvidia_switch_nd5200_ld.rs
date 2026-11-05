@@ -35,6 +35,15 @@ pub(crate) struct NvidiaSwitchNd5200Ld<'a> {
 }
 
 impl NvidiaSwitchNd5200Ld<'_> {
+    pub(crate) fn service_root_config(&self) -> redfish::service_root::Config {
+        redfish::service_root::Config {
+            vendor: redfish::oem::BmcVendor::Nvidia(redfish::oem::NvidiaNamestyle::Uppercase),
+            product: Some("P3809"),
+            redfish_version: "1.17.0",
+            advertises_computer_systems: true,
+        }
+    }
+
     pub(crate) fn event_service_config(&self) -> Option<crate::EventServiceConfig> {
         Some(crate::EventServiceConfig::default())
     }
@@ -97,7 +106,7 @@ impl NvidiaSwitchNd5200Ld<'_> {
         let system_id = "System_0";
 
         redfish::computer_system::Config {
-            systems: vec![redfish::computer_system::SingleSystemConfig {
+            systems: Some(vec![redfish::computer_system::SingleSystemConfig {
                 id: Cow::Borrowed(system_id),
                 manufacturer: None,
                 model: None,
@@ -117,7 +126,7 @@ impl NvidiaSwitchNd5200Ld<'_> {
                 base_bios: None,
                 serial_console: None,
                 secure_boot_available: false,
-            }],
+            }]),
         }
     }
 

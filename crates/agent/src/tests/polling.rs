@@ -43,6 +43,8 @@ struct FetchState {
     request_count: AtomicUsize,
     failed_requests: Vec<usize>,
     invalid_metadata_requests: Vec<usize>,
+    invalid_service_requests: Vec<usize>,
+    include_service_networking: bool,
     third_response_gate: Option<Arc<Notify>>,
 }
 
@@ -64,6 +66,8 @@ fn config_fetch_waits_after_success_failure_and_slow_response() {
                 request_count: AtomicUsize::new(0),
                 failed_requests: vec![2],
                 invalid_metadata_requests: vec![],
+                invalid_service_requests: vec![],
+                include_service_networking: false,
                 third_response_gate: Some(third_response_gate.clone()),
             });
             let (address, server) = run_server(state).await;
@@ -141,6 +145,56 @@ fn config_fetch_waits_after_success_failure_and_slow_response() {
     assert!(failure_gap.unwrap().as_secs_f64() >= delay);
 }
 
+/// Verifies an invalid service `link_prefix` preserves the accepted cached response until a valid
+/// retry arrives, protecting DHCP and HBN consumers from an invalid point-to-point link.
+#[tokio::test]
+async fn malformed_service_response_preserves_last_accepted_configuration() {
+    // Serve a valid response, one malformed retry, then a gated recovery response.
+    let (requests, mut request_times) = mpsc::channel(4);
+    let third_response_gate = Arc::new(Notify::new());
+    let state = Arc::new(FetchState {
+        requests,
+        request_count: AtomicUsize::new(0),
+        failed_requests: vec![],
+        invalid_metadata_requests: vec![],
+        invalid_service_requests: vec![2], // Corrupt only the second response's service link.
+        include_service_networking: true,
+        third_response_gate: Some(third_response_gate.clone()),
+    });
+    let (address, server) = run_server(state).await;
+
+    // Accept the first valid service response before the second malformed response.
+    let fetcher = PeriodicConfigFetcher::new(fetcher_config(address, FETCH_INTERVAL)).await;
+    let reader = fetcher.reader();
+    request_times
+        .try_recv()
+        .expect("initial service response completed");
+    assert_eq!(
+        reader.net_conf_read().unwrap().service_interfaces[0].link_prefix,
+        "192.0.2.10/31"
+    );
+
+    // Request three starts only after request two is rejected, then waits so it cannot repair the cache yet.
+    next_request(&mut request_times).await;
+    next_request(&mut request_times).await;
+
+    // The accepted configuration version and service link survive the malformed response.
+    let retained = reader.net_conf_read().unwrap();
+    assert_eq!(retained.managed_host_config_version, "initial");
+    assert_eq!(retained.service_interfaces[0].link_prefix, "192.0.2.10/31");
+
+    // Release the valid retry and wait for the next interval to prove cache replacement recovered.
+    third_response_gate.notify_one();
+    next_request(&mut request_times).await;
+    let recovered = reader.net_conf_read().unwrap();
+    assert_eq!(recovered.managed_host_config_version, "recovered");
+    assert_eq!(recovered.service_interfaces[0].link_prefix, "192.0.2.10/31");
+
+    drop(fetcher);
+    server.abort();
+    server.await.expect_err("mock server was aborted");
+}
+
 #[tokio::test]
 async fn dropping_config_fetcher_releases_state_before_next_interval() {
     let (requests, _request_times) = mpsc::channel(4);
@@ -149,6 +203,8 @@ async fn dropping_config_fetcher_releases_state_before_next_interval() {
         request_count: AtomicUsize::new(0),
         failed_requests: vec![],
         invalid_metadata_requests: vec![],
+        invalid_service_requests: vec![],
+        include_service_networking: false,
         third_response_gate: None,
     });
     let (address, server) = run_server(state).await;
@@ -179,6 +235,8 @@ async fn failed_initial_fetch_retries_before_host_id_lookup_expires() {
         request_count: AtomicUsize::new(0),
         failed_requests: vec![1],
         invalid_metadata_requests: vec![],
+        invalid_service_requests: vec![],
+        include_service_networking: false,
         third_response_gate: None,
     });
     let (address, server) = run_server(state.clone()).await;
@@ -225,6 +283,8 @@ async fn failed_startup_retry_returns_to_periodic_waits() {
         request_count: AtomicUsize::new(0),
         failed_requests: vec![1, 2],
         invalid_metadata_requests: vec![],
+        invalid_service_requests: vec![],
+        include_service_networking: false,
         third_response_gate: None,
     });
     let (address, server) = run_server(state).await;
@@ -257,6 +317,8 @@ fn failed_initial_metadata_conversion_retries_once_before_periodic_waits() {
                 request_count: AtomicUsize::new(0),
                 failed_requests: vec![],
                 invalid_metadata_requests: vec![1, 2],
+                invalid_service_requests: vec![],
+                include_service_networking: false,
                 third_response_gate: Some(third_response_gate.clone()),
             });
             let (address, server) = run_server(state).await;
@@ -359,6 +421,7 @@ fn fetcher_config(address: SocketAddr, interval: Duration) -> PeriodicConfigFetc
     }
 }
 
+#[allow(deprecated)]
 async fn fetch_config(State(state): State<Arc<FetchState>>) -> axum::response::Response {
     let count = state.request_count.fetch_add(1, Ordering::Relaxed) + 1;
     state.requests.send(Instant::now()).await.unwrap();
@@ -380,7 +443,7 @@ async fn fetch_config(State(state): State<Arc<FetchState>>) -> axum::response::R
         tokio::time::sleep(SLOW_RESPONSE).await;
     }
     let name = if count == 1 { "initial" } else { "recovered" };
-    common::respond(forge::ManagedHostNetworkConfigResponse {
+    let mut response = forge::ManagedHostNetworkConfigResponse {
         managed_host_config_version: name.into(),
         host_interface_id: Some(HOST_INTERFACE_ID.into()),
         instance: Some(rpc::Instance {
@@ -400,6 +463,53 @@ async fn fetch_config(State(state): State<Arc<FetchState>>) -> axum::response::R
             ..Default::default()
         }),
         ..Default::default()
-    })
-    .into_response()
+    };
+    // Match the host and service VPC fields to isolate the selected request's service-link change.
+    if state.include_service_networking {
+        let invalid_service = state.invalid_service_requests.contains(&count);
+        response.network_virtualization_type = Some(forge::VpcVirtualizationType::Fnn.into());
+        response.vpc_peer_vnis_authoritative = true;
+        response.tenant_interfaces = vec![forge::FlatInterfaceConfig {
+            function_type: forge::InterfaceFunctionType::Physical.into(),
+            vpc_vni: 10_001,
+            vpc_prefixes: vec!["192.0.2.0/24".to_string()],
+            tenant_vrf_loopback_ip: Some("198.51.100.10".to_string()),
+            vpc_routing_profile: Some(forge::RoutingProfile::default()),
+            ..Default::default()
+        }];
+        response.service_vpc_slot_inventory = Some(forge::ServiceVpcSlotInventory {
+            slots: vec![forge::ServiceVpcSlot {
+                slot_index: 0,
+                hbn_interface_name: "iface_svc_0".to_string(),
+            }],
+        });
+        response.service_interfaces = vec![forge::ManagedHostServiceInterfaceConfig {
+            service_id: "10000000-0000-0000-0000-000000000001".to_string(),
+            attachment_id: Some(rpc::common::Uuid {
+                value: "20000000-0000-0000-0000-000000000001".to_string(),
+            }),
+            interface_ordinal: 0,
+            slot_index: 0,
+            vpc_id: Some("30000000-0000-0000-0000-000000000001".parse().unwrap()),
+            vpc_vni: 10_001,
+            vpc_prefixes: vec!["192.0.2.0/24".to_string()],
+            vpc_peer_prefixes: vec![],
+            vpc_peer_vnis: vec![],
+            vpc_routing_profile: Some(forge::RoutingProfile::default()),
+            interface_routing_profile: None,
+            network_security_group: None,
+            mtu: Some(9_000),
+            link_prefix: if invalid_service {
+                "192.0.2.8/30".to_string() // Isolate the required /31 contract with an invalid link.
+            } else {
+                "192.0.2.10/31".to_string()
+            },
+            mac_address: "02:00:00:00:00:01".to_string(),
+            internal_uuid: Some(rpc::common::Uuid {
+                value: "40000000-0000-0000-0000-000000000001".to_string(),
+            }),
+            tenant_vrf_loopback_ip: Some("198.51.100.10".to_string()),
+        }];
+    }
+    common::respond(response).into_response()
 }

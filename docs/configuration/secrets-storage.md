@@ -194,7 +194,7 @@ You can also shadow-write before step 3: `writer = "postgres"` while `backends` 
 
 Three caveats before writes move off Vault:
 
-- `dsx-exchange-consumer` builds its own read chain (environment, file, Vault) for the MQTT credential at `mqtt/dsx-exchange-consumer/auth` and cannot read Postgres. Supply that credential through its environment or file source before it changes. `bmc-proxy` needs no change: it fetches BMC credentials from `nico-api` over gRPC and caches them for up to an hour.
+- `dsx-exchange-consumer` reads the MQTT credential at `mqtt/dsx-exchange-consumer/auth` through its own chain (environment, file, then Vault) and cannot read Postgres. Supply that credential through its environment or file source before it changes; refer to [DSX Exchange Consumer Credential](credential-sources.md#dsx-exchange-consumer-credential). `bmc-proxy` needs no change and takes no Vault settings: it fetches BMC credentials from `nico-api` over gRPC and caches them for up to an hour.
 - During a rolling update, replicas still on the old config keep writing to their own writer until they terminate, so finish each step's rollout before starting the next. Keep autonomous credential rotation off until the whole fleet runs one config: `bmc_rotation_enabled` and `uefi_rotation_enabled` in the site config default to `false`. Two writers are not gated by them: the `nico-admin-cli credential rotate` commands, and site-explorer, which records BMC root credentials during ingestion through the configured writer.
 - With `ufm_source = "local"` in `[credentials]`, the import skips the `ufm/` subtree. With `bmc_site_wide_root_source = "local"`, it skips only the unversioned `machines/bmc/site/root` path and still imports versioned and per-device BMC credentials.
 

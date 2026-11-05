@@ -898,6 +898,10 @@ func (bcih BatchCreateInstanceHandler) Handle(c echo.Context) error {
 					fmt.Sprintf("DPU Extension Service: %s does not belong to Site where Instances are being created", desID.String()), nil)
 			}
 
+			if des.DeploymentType == cdbm.DpuExtensionServiceDeploymentTypeBaseline {
+				return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Baseline DPU Extension Services cannot be attached to Instances", nil)
+			}
+
 			// Validate version is in active versions list
 			versionFound := false
 			requestedVersion := apiRequest.DpuExtensionServiceDeployments[i].Version
@@ -2054,10 +2058,11 @@ func allocateMachinesForBatch(
 
 	// Get all available Machines for the Instance Type
 	filterInput := cdbm.MachineFilterInput{
-		InstanceTypeIDs: []uuid.UUID{instancetype.ID},
-		IsAssigned:      cutil.GetPtr(false),
-		Statuses:        []string{cdbm.MachineStatusReady},
-		Labels:          machineLabelSelector,
+		InstanceTypeIDs:               []uuid.UUID{instancetype.ID},
+		IsAssigned:                    cutil.GetPtr(false),
+		Statuses:                      []string{cdbm.MachineStatusReady},
+		Labels:                        machineLabelSelector,
+		ExcludeForceDeletionRequested: true,
 	}
 	machines, _, err := mcDAO.GetAll(ctx, tx, filterInput, cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)}, nil)
 	if err != nil {
@@ -2179,7 +2184,7 @@ func allocateMachinesForBatch(
 				return common.ErrMachineUnavailable
 			}
 
-			if umc.IsAssigned {
+			if umc.IsAssigned || umc.IsForceDeletionQuarantined() {
 				return common.ErrMachineUnavailable
 			}
 

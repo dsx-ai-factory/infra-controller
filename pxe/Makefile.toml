@@ -14,6 +14,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
+# See skip_git_env_info in the root Makefile.toml.
+[config]
+skip_git_env_info = true
+
 [env]
 REPO_ROOT = { script = [
   "dirname $(cargo locate-project --message-format plain --workspace)",
@@ -135,8 +139,14 @@ dependencies = [
   "mkosi-clean-qcow-imager-aarch64",
 ]
 
+[tasks.test-scout-loader-storage]
+description = "Tests Scout rootfs image storage setup and failure handling"
+command = "python3"
+args = ["-B", "${REPO_ROOT}/pxe/tests/test_scout_loader_storage.py"]
+
 [tasks.stage-scout-loader-rclocal]
 description = "Copies the Scout loader helpers to the scout loader profile directories"
+dependencies = ["test-scout-loader-storage"]
 script = '''
   set -e
 

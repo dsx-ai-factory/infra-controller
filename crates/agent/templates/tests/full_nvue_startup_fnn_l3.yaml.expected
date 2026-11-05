@@ -414,7 +414,7 @@
               to-evpn:
                 route-target:
                   11414:10101: {}
-                  11415:200: {} 
+                  11415:200: {}
                   77415:800: {}
             route-import:
               from-evpn:

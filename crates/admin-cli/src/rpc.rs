@@ -1666,6 +1666,7 @@ impl ApiClient {
                 svi_ip: None,
                 free_ip_count_v2: None,
                 free_ip_count_saturated: false,
+                dhcpv6_link_address: None,
             }],
             segment_type: NetworkSegmentType::Tenant as i32,
             id: Some(id),
@@ -1751,6 +1752,7 @@ impl ApiClient {
                 svi_ip: None,
                 free_ip_count_v2: None,
                 free_ip_count_saturated: false,
+                dhcpv6_link_address: None,
             }],
             segment_type: NetworkSegmentType::HostInband as i32,
             id: Some(id),
@@ -2386,6 +2388,7 @@ impl ApiClient {
                 labels,
             }),
             allow_unhealthy_machine: false,
+            external_validation_request_id: None,
         };
 
         tracing::trace!("{}", serde_json::to_string(&instance_request)?);

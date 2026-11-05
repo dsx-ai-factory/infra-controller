@@ -10,6 +10,13 @@ ENV CARGO_NET_GIT_FETCH_WITH_CLI=true
 ENV CARGO_TARGET_DIR=/cargo-target
 ENV CARGO_PROFILE_DEV_DEBUG=line-tables-only
 ENV CARGO_PROFILE_RELEASE_DEBUG=line-tables-only
+# Release images receive this from CI (dev/docker/Dockerfile.release-*). The
+# DPF DPUServiceTemplates nico-api writes at startup embed it as the services'
+# Helm chart version, which the DPF CRDs require to be a non-empty semver tag.
+# A static value keeps the Docker layer cache stable; nothing resolves the
+# chart under the Tilt DPF simulator.
+ARG CARBIDE_BUILD_HELM_VERSION=0.0.0-tilt
+ENV CARBIDE_BUILD_HELM_VERSION=$CARBIDE_BUILD_HELM_VERSION
 
 WORKDIR /workspace
 COPY . .

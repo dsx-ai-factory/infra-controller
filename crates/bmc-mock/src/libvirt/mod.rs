@@ -31,8 +31,8 @@ use crate::actor::{Actor, ActorCallbacks, ActorMailbox, ActorResult, AlarmId};
 use crate::persistence::PersistenceError;
 use crate::redfish::computer_system::{SingleSystemState, SystemState};
 use crate::{
-    ActionError, BmcEvent, BmcState, BootOptionKind, Callbacks, ResourceResetType,
-    VirtualMediaUpdate, validate_power_reset,
+    ActionError, BmcEvent, BmcResetUpdate, BmcState, BootOptionKind, Callbacks, DeviceEffect,
+    ResourceResetType, VirtualMediaUpdate, validate_power_reset,
 };
 
 mod commands;
@@ -195,6 +195,10 @@ enum LibvirtMessage {
     },
     SetVirtualMedia {
         update: VirtualMediaUpdate,
+        reply: oneshot::Sender<Result<(), ActionError>>,
+    },
+    ResetBmcToDefaults {
+        update: BmcResetUpdate,
         reply: oneshot::Sender<Result<(), ActionError>>,
     },
     Refresh,
@@ -556,6 +560,16 @@ impl ActorCallbacks<LibvirtMessage> for LibvirtBackend {
                 reply.send(result).ok();
                 ActorResult::Noop
             }
+            LibvirtMessage::ResetBmcToDefaults { update, reply } => {
+                // The reset changes only BMC state, which is saved with the domain's. A
+                // libvirt-backed BMC serves no DHCP, so there is no recovery to admit.
+                let result = update.commit().await.map(drop);
+                if result.is_ok() {
+                    self.persist(mailbox);
+                }
+                reply.send(result).ok();
+                ActorResult::Noop
+            }
             LibvirtMessage::Stop(reply) => {
                 reply.send(self.save_state()).ok();
                 ActorResult::Stop
@@ -584,8 +598,15 @@ impl ActorCallbacks<LibvirtMessage> for LibvirtBackend {
                         .cycling = true;
                     self.publish_power_state(PowerState::Off);
                 }
-                if let Err(error) = self.send_power_command(reset_type).await {
-                    tracing::error!(domain = %self.config.domain, ?reset_type, %error, "libvirt power command failed");
+                match self.send_power_command(reset_type).await {
+                    Ok(()) => {
+                        if let Some(state) = self.bmc_state.upgrade() {
+                            state.record_power_command_completed(reset_type);
+                        }
+                    }
+                    Err(error) => {
+                        tracing::error!(domain = %self.config.domain, ?reset_type, %error, "libvirt power command failed");
+                    }
                 }
                 self.refresh_power_state().await;
                 self.power_state
@@ -659,6 +680,22 @@ impl Callbacks for LibvirtCallbacks {
         self.mailbox
             .send(LibvirtMessage::SendPowerCommand { reset_type })
             .map_err(|err| ActionError::Internal(err.into()))
+    }
+
+    /// A factory reset changes only BMC state; other effects are not modeled.
+    async fn device_effect(&self, effect: DeviceEffect) -> Result<(), ActionError> {
+        let DeviceEffect::ResetBmcToDefaults(update) = effect else {
+            return Err(ActionError::BadRequest(eyre::eyre!(
+                "bmc-mock: backend does not support device effect {effect:?}"
+            )));
+        };
+        let (reply, response) = oneshot::channel();
+        self.mailbox
+            .send(LibvirtMessage::ResetBmcToDefaults { update, reply })
+            .map_err(|error| ActionError::Internal(error.into()))?;
+        response
+            .await
+            .map_err(|error| ActionError::Internal(error.into()))?
     }
 
     fn state_refresh_indication(&self) {

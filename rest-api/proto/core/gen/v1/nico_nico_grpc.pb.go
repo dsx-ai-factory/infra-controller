@@ -25,6 +25,7 @@ const _ = grpc.SupportPackageIsVersion9
 const (
 	Forge_Version_FullMethodName                                            = "/forge.Forge/Version"
 	Forge_GetRmsVersion_FullMethodName                                      = "/forge.Forge/GetRmsVersion"
+	Forge_GetRmsJobStatus_FullMethodName                                    = "/forge.Forge/GetRmsJobStatus"
 	Forge_StreamConsoleLogs_FullMethodName                                  = "/forge.Forge/StreamConsoleLogs"
 	Forge_CreateDomain_FullMethodName                                       = "/forge.Forge/CreateDomain"
 	Forge_UpdateDomain_FullMethodName                                       = "/forge.Forge/UpdateDomain"
@@ -66,6 +67,7 @@ const (
 	Forge_FindNetworkSegmentIds_FullMethodName                              = "/forge.Forge/FindNetworkSegmentIds"
 	Forge_FindNetworkSegmentsByIds_FullMethodName                           = "/forge.Forge/FindNetworkSegmentsByIds"
 	Forge_CreateNetworkSegment_FullMethodName                               = "/forge.Forge/CreateNetworkSegment"
+	Forge_AddNetworkSegmentPrefix_FullMethodName                            = "/forge.Forge/AddNetworkSegmentPrefix"
 	Forge_AttachNetworkSegmentToVpc_FullMethodName                          = "/forge.Forge/AttachNetworkSegmentToVpc"
 	Forge_DeleteNetworkSegment_FullMethodName                               = "/forge.Forge/DeleteNetworkSegment"
 	Forge_NetworkSegmentsForVpc_FullMethodName                              = "/forge.Forge/NetworkSegmentsForVpc"
@@ -556,6 +558,8 @@ const (
 	Forge_ReleaseDPUServiceSyncHold_FullMethodName                          = "/forge.Forge/ReleaseDPUServiceSyncHold"
 	Forge_ComponentPowerControl_FullMethodName                              = "/forge.Forge/ComponentPowerControl"
 	Forge_GetComponentPowerDetails_FullMethodName                           = "/forge.Forge/GetComponentPowerDetails"
+	Forge_ComponentReset_FullMethodName                                     = "/forge.Forge/ComponentReset"
+	Forge_GetComponentResetStatus_FullMethodName                            = "/forge.Forge/GetComponentResetStatus"
 	Forge_ComponentConfigureSwitchCertificate_FullMethodName                = "/forge.Forge/ComponentConfigureSwitchCertificate"
 	Forge_GetComponentInventory_FullMethodName                              = "/forge.Forge/GetComponentInventory"
 	Forge_UpdateComponentFirmware_FullMethodName                            = "/forge.Forge/UpdateComponentFirmware"
@@ -572,6 +576,12 @@ const (
 	Forge_ReWrapSecrets_FullMethodName                                      = "/forge.Forge/ReWrapSecrets"
 	Forge_FindRoutingProfileNames_FullMethodName                            = "/forge.Forge/FindRoutingProfileNames"
 	Forge_FindRoutingProfilesByNames_FullMethodName                         = "/forge.Forge/FindRoutingProfilesByNames"
+	Forge_FindExternalValidationHoldIds_FullMethodName                      = "/forge.Forge/FindExternalValidationHoldIds"
+	Forge_FindExternalValidationHoldsByIds_FullMethodName                   = "/forge.Forge/FindExternalValidationHoldsByIds"
+	Forge_StartExternalValidation_FullMethodName                            = "/forge.Forge/StartExternalValidation"
+	Forge_CancelExternalValidation_FullMethodName                           = "/forge.Forge/CancelExternalValidation"
+	Forge_CompleteExternalValidation_FullMethodName                         = "/forge.Forge/CompleteExternalValidation"
+	Forge_RemoveExternalValidationHold_FullMethodName                       = "/forge.Forge/RemoveExternalValidationHold"
 )
 
 // ForgeClient is the client API for Forge service.
@@ -586,6 +596,8 @@ type ForgeClient interface {
 	// the RBAC middleware rejects unknown RPC names with HTTP 403 before gRPC
 	// dispatch, so Unimplemented is never reached on those servers.
 	GetRmsVersion(ctx context.Context, in *GetRmsVersionRequest, opts ...grpc.CallOption) (*GetRmsVersionResponse, error)
+	// Admin-only inspection of backend jobs; normal component callers query by device.
+	GetRmsJobStatus(ctx context.Context, in *GetRmsJobStatusRequest, opts ...grpc.CallOption) (*GetRmsJobStatusResponse, error)
 	// Stream recent and live machine console output.
 	StreamConsoleLogs(ctx context.Context, in *StreamConsoleLogsRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[ConsoleLogLine], error)
 	// Domain
@@ -656,6 +668,20 @@ type ForgeClient interface {
 	FindNetworkSegmentIds(ctx context.Context, in *NetworkSegmentSearchFilter, opts ...grpc.CallOption) (*NetworkSegmentIdList, error)
 	FindNetworkSegmentsByIds(ctx context.Context, in *NetworkSegmentsByIdsRequest, opts ...grpc.CallOption) (*NetworkSegmentList, error)
 	CreateNetworkSegment(ctx context.Context, in *NetworkSegmentCreationRequest, opts ...grpc.CallOption) (*NetworkSegment, error)
+	// Admin-only: append the missing family to a live, Ready, unattached Underlay
+	// segment with one prefix. Matching any stored same-family prefix and settings
+	// returns the current segment without a write; different same-family settings
+	// fail with FAILED_PRECONDITION. Existing prefixes, IDs, addresses, policy and
+	// lifecycle are unchanged; the stored initial network_def is not modified.
+	// Existing SLAAC inference policy also applies to the added prefix.
+	// Invalid input, overlap with any NetworkPrefix or VPC-scoped VpcPrefix, and
+	// reused relay selectors return INVALID_ARGUMENT. A global VpcPrefix parent
+	// may overlap an unattached Underlay, as with initial network creation.
+	// Unknown segment IDs return NOT_FOUND; unsupported targets return
+	// FAILED_PRECONDITION. Success commits the prefix, version and reverse zone
+	// together; a zone is created only for zone-boundary-aligned prefixes.
+	// It does not configure site routing, router advertisements or DHCP relays.
+	AddNetworkSegmentPrefix(ctx context.Context, in *AddNetworkSegmentPrefixRequest, opts ...grpc.CallOption) (*NetworkSegment, error)
 	AttachNetworkSegmentToVpc(ctx context.Context, in *AttachNetworkSegmentToVpcRequest, opts ...grpc.CallOption) (*NetworkSegment, error)
 	DeleteNetworkSegment(ctx context.Context, in *NetworkSegmentDeletionRequest, opts ...grpc.CallOption) (*NetworkSegmentDeletionResult, error)
 	// TODO: This functionality should get integrated into NetworkSegmentSearchFilter
@@ -890,6 +916,9 @@ type ForgeClient interface {
 	UpdateMachineHardwareInfo(ctx context.Context, in *UpdateMachineHardwareInfoRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	// Force deletes a Machine and the associated DPU from NICo databases,
 	// with the intention of rediscovering the host later on.
+	// The attached-Instance override removes the attached Instance control-plane
+	// record without first requesting a graceful workload shutdown. Force-delete
+	// cleanup may forcibly restart the host.
 	// By default, cleanup does not wait for DPU network acknowledgement. Set
 	// wait_for_instance_dpu to request Admin networking when an Instance exists
 	// and retain the records until every attached DPU acknowledges it. While
@@ -1375,7 +1404,8 @@ type ForgeClient interface {
 	// Remove a SKU assignemnt from a machine.  Must be in the Ready or SkuVerifyFailed states.
 	// The machine will move to the WaitingForSkuAssignment state.
 	RemoveSkuAssociation(ctx context.Context, in *RemoveSkuRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
-	// Removes an unused SKU
+	// Removes an unused SKU. If the initial lookup finds no match, a request
+	// containing exactly one nonempty SKU ID returns `NOT_FOUND`.
 	DeleteSku(ctx context.Context, in *SkuIdList, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	GetAllSkuIds(ctx context.Context, in *emptypb.Empty, opts ...grpc.CallOption) (*SkuIdList, error)
 	FindSkusByIds(ctx context.Context, in *SkusByIdsRequest, opts ...grpc.CallOption) (*SkuList, error)
@@ -1645,6 +1675,18 @@ type ForgeClient interface {
 	// read budgets, whose expiry reports ReadFailed. This method never registers
 	// devices, writes policy, or submits power operations.
 	GetComponentPowerDetails(ctx context.Context, in *GetComponentPowerDetailsRequest, opts ...grpc.CallOption) (*GetComponentPowerDetailsResponse, error)
+	// Dispatch a reset directly, without scheduling state-controller maintenance.
+	// Valid devices proceed even when other targets cannot be resolved or accepted.
+	// Only SDN factory reset is implemented; it disrupts fabric traffic and restores
+	// SDN defaults without reinstalling NVOS. SUCCESS means accepted and tracked,
+	// not completed. A submission error may follow dispatch: do not automatically resubmit.
+	ComponentReset(ctx context.Context, in *ComponentResetRequest, opts ...grpc.CallOption) (*ComponentResetResponse, error)
+	// Observe the latest successfully recorded accepted reset for each device/action.
+	// A failed or unknown submission attempt may leave an earlier reference in place.
+	// References survive NICo restarts, but RMS job state may be lost on restart.
+	// Missing/unobservable jobs never imply completion. Terminal observations are
+	// not persisted.
+	GetComponentResetStatus(ctx context.Context, in *GetComponentResetStatusRequest, opts ...grpc.CallOption) (*GetComponentResetStatusResponse, error)
 	ComponentConfigureSwitchCertificate(ctx context.Context, in *ComponentConfigureSwitchCertificateRequest, opts ...grpc.CallOption) (*ComponentConfigureSwitchCertificateResponse, error)
 	GetComponentInventory(ctx context.Context, in *GetComponentInventoryRequest, opts ...grpc.CallOption) (*GetComponentInventoryResponse, error)
 	UpdateComponentFirmware(ctx context.Context, in *UpdateComponentFirmwareRequest, opts ...grpc.CallOption) (*UpdateComponentFirmwareResponse, error)
@@ -1675,6 +1717,33 @@ type ForgeClient interface {
 	// Each call reads this server's loaded configuration, without a snapshot
 	// guarantee across list and fetch calls or between server replicas.
 	FindRoutingProfilesByNames(ctx context.Context, in *RoutingProfilesByNamesRequest, opts ...grpc.CallOption) (*NamedRoutingProfileList, error)
+	// External-validation contract only: these methods are not implemented until
+	// durable holds and attempts are delivered. With internal RBAC enabled, the
+	// explicit empty grants deny callers with an AuthContext before dispatch
+	// (PERMISSION_DENIED). Missing AuthContext is also rejected before dispatch;
+	// no gRPC wire status for that branch is promised here. With RBAC bypassed,
+	// the stubs return UNIMPLEMENTED. Runtime implementation must grant SiteAgent
+	// all six RPCs, including removal: REST calls Core as that service. REST
+	// authorizes the end user's role and Tenant scope, and audits the end user;
+	// Core authorizes/audits the service caller and checks resource/policy bindings.
+	// Core cannot infer a Provider Admin role from the SiteAgent identity. Direct
+	// Core callers need explicit method/site permissions. Request IDs grant none.
+	// Returns all matching hold IDs (active by default) in (created_at, hold_id)
+	// order. Fetch their current state in max_find_by_ids-bounded batches.
+	FindExternalValidationHoldIds(ctx context.Context, in *ExternalValidationHoldSearchFilter, opts ...grpc.CallOption) (*ExternalValidationHoldIdList, error)
+	// Fetches current holds, including Satisfied, with an optional tenant filter.
+	FindExternalValidationHoldsByIds(ctx context.Context, in *ExternalValidationHoldsByIdsRequest, opts ...grpc.CallOption) (*ExternalValidationHoldList, error)
+	// Atomically opens one attempt or replays the attempt identified by the key.
+	StartExternalValidation(ctx context.Context, in *StartExternalValidationRequest, opts ...grpc.CallOption) (*StartExternalValidationResponse, error)
+	// Cancels only a NotStarted allocation; Creating or Created must be reconciled.
+	CancelExternalValidation(ctx context.Context, in *CancelExternalValidationRequest, opts ...grpc.CallOption) (*ExternalValidationAttempt, error)
+	// Records a result for the bound instance; never clears the hold immediately.
+	CompleteExternalValidation(ctx context.Context, in *CompleteExternalValidationRequest, opts ...grpc.CallOption) (*ExternalValidationAttempt, error)
+	// Privileged audited recovery, fenced by the expected hold ID. For REST calls,
+	// REST enforces Provider Admin authorization; Core sees the SiteAgent caller.
+	// Unresolved allocation or cleanup returns FAILED_PRECONDITION. Successful
+	// removal atomically closes/fences any attempt and removes the matching gate.
+	RemoveExternalValidationHold(ctx context.Context, in *RemoveExternalValidationHoldRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
 }
 
 type forgeClient struct {
@@ -1699,6 +1768,16 @@ func (c *forgeClient) GetRmsVersion(ctx context.Context, in *GetRmsVersionReques
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(GetRmsVersionResponse)
 	err := c.cc.Invoke(ctx, Forge_GetRmsVersion_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *forgeClient) GetRmsJobStatus(ctx context.Context, in *GetRmsJobStatusRequest, opts ...grpc.CallOption) (*GetRmsJobStatusResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetRmsJobStatusResponse)
+	err := c.cc.Invoke(ctx, Forge_GetRmsJobStatus_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -2122,6 +2201,16 @@ func (c *forgeClient) CreateNetworkSegment(ctx context.Context, in *NetworkSegme
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(NetworkSegment)
 	err := c.cc.Invoke(ctx, Forge_CreateNetworkSegment_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *forgeClient) AddNetworkSegmentPrefix(ctx context.Context, in *AddNetworkSegmentPrefixRequest, opts ...grpc.CallOption) (*NetworkSegment, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(NetworkSegment)
+	err := c.cc.Invoke(ctx, Forge_AddNetworkSegmentPrefix_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -7034,6 +7123,26 @@ func (c *forgeClient) GetComponentPowerDetails(ctx context.Context, in *GetCompo
 	return out, nil
 }
 
+func (c *forgeClient) ComponentReset(ctx context.Context, in *ComponentResetRequest, opts ...grpc.CallOption) (*ComponentResetResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ComponentResetResponse)
+	err := c.cc.Invoke(ctx, Forge_ComponentReset_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *forgeClient) GetComponentResetStatus(ctx context.Context, in *GetComponentResetStatusRequest, opts ...grpc.CallOption) (*GetComponentResetStatusResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetComponentResetStatusResponse)
+	err := c.cc.Invoke(ctx, Forge_GetComponentResetStatus_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *forgeClient) ComponentConfigureSwitchCertificate(ctx context.Context, in *ComponentConfigureSwitchCertificateRequest, opts ...grpc.CallOption) (*ComponentConfigureSwitchCertificateResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(ComponentConfigureSwitchCertificateResponse)
@@ -7194,6 +7303,66 @@ func (c *forgeClient) FindRoutingProfilesByNames(ctx context.Context, in *Routin
 	return out, nil
 }
 
+func (c *forgeClient) FindExternalValidationHoldIds(ctx context.Context, in *ExternalValidationHoldSearchFilter, opts ...grpc.CallOption) (*ExternalValidationHoldIdList, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ExternalValidationHoldIdList)
+	err := c.cc.Invoke(ctx, Forge_FindExternalValidationHoldIds_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *forgeClient) FindExternalValidationHoldsByIds(ctx context.Context, in *ExternalValidationHoldsByIdsRequest, opts ...grpc.CallOption) (*ExternalValidationHoldList, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ExternalValidationHoldList)
+	err := c.cc.Invoke(ctx, Forge_FindExternalValidationHoldsByIds_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *forgeClient) StartExternalValidation(ctx context.Context, in *StartExternalValidationRequest, opts ...grpc.CallOption) (*StartExternalValidationResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(StartExternalValidationResponse)
+	err := c.cc.Invoke(ctx, Forge_StartExternalValidation_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *forgeClient) CancelExternalValidation(ctx context.Context, in *CancelExternalValidationRequest, opts ...grpc.CallOption) (*ExternalValidationAttempt, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ExternalValidationAttempt)
+	err := c.cc.Invoke(ctx, Forge_CancelExternalValidation_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *forgeClient) CompleteExternalValidation(ctx context.Context, in *CompleteExternalValidationRequest, opts ...grpc.CallOption) (*ExternalValidationAttempt, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ExternalValidationAttempt)
+	err := c.cc.Invoke(ctx, Forge_CompleteExternalValidation_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *forgeClient) RemoveExternalValidationHold(ctx context.Context, in *RemoveExternalValidationHoldRequest, opts ...grpc.CallOption) (*emptypb.Empty, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(emptypb.Empty)
+	err := c.cc.Invoke(ctx, Forge_RemoveExternalValidationHold_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // ForgeServer is the server API for Forge service.
 // All implementations should embed UnimplementedForgeServer
 // for forward compatibility.
@@ -7206,6 +7375,8 @@ type ForgeServer interface {
 	// the RBAC middleware rejects unknown RPC names with HTTP 403 before gRPC
 	// dispatch, so Unimplemented is never reached on those servers.
 	GetRmsVersion(context.Context, *GetRmsVersionRequest) (*GetRmsVersionResponse, error)
+	// Admin-only inspection of backend jobs; normal component callers query by device.
+	GetRmsJobStatus(context.Context, *GetRmsJobStatusRequest) (*GetRmsJobStatusResponse, error)
 	// Stream recent and live machine console output.
 	StreamConsoleLogs(*StreamConsoleLogsRequest, grpc.ServerStreamingServer[ConsoleLogLine]) error
 	// Domain
@@ -7276,6 +7447,20 @@ type ForgeServer interface {
 	FindNetworkSegmentIds(context.Context, *NetworkSegmentSearchFilter) (*NetworkSegmentIdList, error)
 	FindNetworkSegmentsByIds(context.Context, *NetworkSegmentsByIdsRequest) (*NetworkSegmentList, error)
 	CreateNetworkSegment(context.Context, *NetworkSegmentCreationRequest) (*NetworkSegment, error)
+	// Admin-only: append the missing family to a live, Ready, unattached Underlay
+	// segment with one prefix. Matching any stored same-family prefix and settings
+	// returns the current segment without a write; different same-family settings
+	// fail with FAILED_PRECONDITION. Existing prefixes, IDs, addresses, policy and
+	// lifecycle are unchanged; the stored initial network_def is not modified.
+	// Existing SLAAC inference policy also applies to the added prefix.
+	// Invalid input, overlap with any NetworkPrefix or VPC-scoped VpcPrefix, and
+	// reused relay selectors return INVALID_ARGUMENT. A global VpcPrefix parent
+	// may overlap an unattached Underlay, as with initial network creation.
+	// Unknown segment IDs return NOT_FOUND; unsupported targets return
+	// FAILED_PRECONDITION. Success commits the prefix, version and reverse zone
+	// together; a zone is created only for zone-boundary-aligned prefixes.
+	// It does not configure site routing, router advertisements or DHCP relays.
+	AddNetworkSegmentPrefix(context.Context, *AddNetworkSegmentPrefixRequest) (*NetworkSegment, error)
 	AttachNetworkSegmentToVpc(context.Context, *AttachNetworkSegmentToVpcRequest) (*NetworkSegment, error)
 	DeleteNetworkSegment(context.Context, *NetworkSegmentDeletionRequest) (*NetworkSegmentDeletionResult, error)
 	// TODO: This functionality should get integrated into NetworkSegmentSearchFilter
@@ -7510,6 +7695,9 @@ type ForgeServer interface {
 	UpdateMachineHardwareInfo(context.Context, *UpdateMachineHardwareInfoRequest) (*emptypb.Empty, error)
 	// Force deletes a Machine and the associated DPU from NICo databases,
 	// with the intention of rediscovering the host later on.
+	// The attached-Instance override removes the attached Instance control-plane
+	// record without first requesting a graceful workload shutdown. Force-delete
+	// cleanup may forcibly restart the host.
 	// By default, cleanup does not wait for DPU network acknowledgement. Set
 	// wait_for_instance_dpu to request Admin networking when an Instance exists
 	// and retain the records until every attached DPU acknowledges it. While
@@ -7995,7 +8183,8 @@ type ForgeServer interface {
 	// Remove a SKU assignemnt from a machine.  Must be in the Ready or SkuVerifyFailed states.
 	// The machine will move to the WaitingForSkuAssignment state.
 	RemoveSkuAssociation(context.Context, *RemoveSkuRequest) (*emptypb.Empty, error)
-	// Removes an unused SKU
+	// Removes an unused SKU. If the initial lookup finds no match, a request
+	// containing exactly one nonempty SKU ID returns `NOT_FOUND`.
 	DeleteSku(context.Context, *SkuIdList) (*emptypb.Empty, error)
 	GetAllSkuIds(context.Context, *emptypb.Empty) (*SkuIdList, error)
 	FindSkusByIds(context.Context, *SkusByIdsRequest) (*SkuList, error)
@@ -8265,6 +8454,18 @@ type ForgeServer interface {
 	// read budgets, whose expiry reports ReadFailed. This method never registers
 	// devices, writes policy, or submits power operations.
 	GetComponentPowerDetails(context.Context, *GetComponentPowerDetailsRequest) (*GetComponentPowerDetailsResponse, error)
+	// Dispatch a reset directly, without scheduling state-controller maintenance.
+	// Valid devices proceed even when other targets cannot be resolved or accepted.
+	// Only SDN factory reset is implemented; it disrupts fabric traffic and restores
+	// SDN defaults without reinstalling NVOS. SUCCESS means accepted and tracked,
+	// not completed. A submission error may follow dispatch: do not automatically resubmit.
+	ComponentReset(context.Context, *ComponentResetRequest) (*ComponentResetResponse, error)
+	// Observe the latest successfully recorded accepted reset for each device/action.
+	// A failed or unknown submission attempt may leave an earlier reference in place.
+	// References survive NICo restarts, but RMS job state may be lost on restart.
+	// Missing/unobservable jobs never imply completion. Terminal observations are
+	// not persisted.
+	GetComponentResetStatus(context.Context, *GetComponentResetStatusRequest) (*GetComponentResetStatusResponse, error)
 	ComponentConfigureSwitchCertificate(context.Context, *ComponentConfigureSwitchCertificateRequest) (*ComponentConfigureSwitchCertificateResponse, error)
 	GetComponentInventory(context.Context, *GetComponentInventoryRequest) (*GetComponentInventoryResponse, error)
 	UpdateComponentFirmware(context.Context, *UpdateComponentFirmwareRequest) (*UpdateComponentFirmwareResponse, error)
@@ -8295,6 +8496,33 @@ type ForgeServer interface {
 	// Each call reads this server's loaded configuration, without a snapshot
 	// guarantee across list and fetch calls or between server replicas.
 	FindRoutingProfilesByNames(context.Context, *RoutingProfilesByNamesRequest) (*NamedRoutingProfileList, error)
+	// External-validation contract only: these methods are not implemented until
+	// durable holds and attempts are delivered. With internal RBAC enabled, the
+	// explicit empty grants deny callers with an AuthContext before dispatch
+	// (PERMISSION_DENIED). Missing AuthContext is also rejected before dispatch;
+	// no gRPC wire status for that branch is promised here. With RBAC bypassed,
+	// the stubs return UNIMPLEMENTED. Runtime implementation must grant SiteAgent
+	// all six RPCs, including removal: REST calls Core as that service. REST
+	// authorizes the end user's role and Tenant scope, and audits the end user;
+	// Core authorizes/audits the service caller and checks resource/policy bindings.
+	// Core cannot infer a Provider Admin role from the SiteAgent identity. Direct
+	// Core callers need explicit method/site permissions. Request IDs grant none.
+	// Returns all matching hold IDs (active by default) in (created_at, hold_id)
+	// order. Fetch their current state in max_find_by_ids-bounded batches.
+	FindExternalValidationHoldIds(context.Context, *ExternalValidationHoldSearchFilter) (*ExternalValidationHoldIdList, error)
+	// Fetches current holds, including Satisfied, with an optional tenant filter.
+	FindExternalValidationHoldsByIds(context.Context, *ExternalValidationHoldsByIdsRequest) (*ExternalValidationHoldList, error)
+	// Atomically opens one attempt or replays the attempt identified by the key.
+	StartExternalValidation(context.Context, *StartExternalValidationRequest) (*StartExternalValidationResponse, error)
+	// Cancels only a NotStarted allocation; Creating or Created must be reconciled.
+	CancelExternalValidation(context.Context, *CancelExternalValidationRequest) (*ExternalValidationAttempt, error)
+	// Records a result for the bound instance; never clears the hold immediately.
+	CompleteExternalValidation(context.Context, *CompleteExternalValidationRequest) (*ExternalValidationAttempt, error)
+	// Privileged audited recovery, fenced by the expected hold ID. For REST calls,
+	// REST enforces Provider Admin authorization; Core sees the SiteAgent caller.
+	// Unresolved allocation or cleanup returns FAILED_PRECONDITION. Successful
+	// removal atomically closes/fences any attempt and removes the matching gate.
+	RemoveExternalValidationHold(context.Context, *RemoveExternalValidationHoldRequest) (*emptypb.Empty, error)
 }
 
 // UnimplementedForgeServer should be embedded to have
@@ -8309,6 +8537,9 @@ func (UnimplementedForgeServer) Version(context.Context, *VersionRequest) (*Buil
 }
 func (UnimplementedForgeServer) GetRmsVersion(context.Context, *GetRmsVersionRequest) (*GetRmsVersionResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetRmsVersion not implemented")
+}
+func (UnimplementedForgeServer) GetRmsJobStatus(context.Context, *GetRmsJobStatusRequest) (*GetRmsJobStatusResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetRmsJobStatus not implemented")
 }
 func (UnimplementedForgeServer) StreamConsoleLogs(*StreamConsoleLogsRequest, grpc.ServerStreamingServer[ConsoleLogLine]) error {
 	return status.Error(codes.Unimplemented, "method StreamConsoleLogs not implemented")
@@ -8432,6 +8663,9 @@ func (UnimplementedForgeServer) FindNetworkSegmentsByIds(context.Context, *Netwo
 }
 func (UnimplementedForgeServer) CreateNetworkSegment(context.Context, *NetworkSegmentCreationRequest) (*NetworkSegment, error) {
 	return nil, status.Error(codes.Unimplemented, "method CreateNetworkSegment not implemented")
+}
+func (UnimplementedForgeServer) AddNetworkSegmentPrefix(context.Context, *AddNetworkSegmentPrefixRequest) (*NetworkSegment, error) {
+	return nil, status.Error(codes.Unimplemented, "method AddNetworkSegmentPrefix not implemented")
 }
 func (UnimplementedForgeServer) AttachNetworkSegmentToVpc(context.Context, *AttachNetworkSegmentToVpcRequest) (*NetworkSegment, error) {
 	return nil, status.Error(codes.Unimplemented, "method AttachNetworkSegmentToVpc not implemented")
@@ -9903,6 +10137,12 @@ func (UnimplementedForgeServer) ComponentPowerControl(context.Context, *Componen
 func (UnimplementedForgeServer) GetComponentPowerDetails(context.Context, *GetComponentPowerDetailsRequest) (*GetComponentPowerDetailsResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetComponentPowerDetails not implemented")
 }
+func (UnimplementedForgeServer) ComponentReset(context.Context, *ComponentResetRequest) (*ComponentResetResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ComponentReset not implemented")
+}
+func (UnimplementedForgeServer) GetComponentResetStatus(context.Context, *GetComponentResetStatusRequest) (*GetComponentResetStatusResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetComponentResetStatus not implemented")
+}
 func (UnimplementedForgeServer) ComponentConfigureSwitchCertificate(context.Context, *ComponentConfigureSwitchCertificateRequest) (*ComponentConfigureSwitchCertificateResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ComponentConfigureSwitchCertificate not implemented")
 }
@@ -9950,6 +10190,24 @@ func (UnimplementedForgeServer) FindRoutingProfileNames(context.Context, *Routin
 }
 func (UnimplementedForgeServer) FindRoutingProfilesByNames(context.Context, *RoutingProfilesByNamesRequest) (*NamedRoutingProfileList, error) {
 	return nil, status.Error(codes.Unimplemented, "method FindRoutingProfilesByNames not implemented")
+}
+func (UnimplementedForgeServer) FindExternalValidationHoldIds(context.Context, *ExternalValidationHoldSearchFilter) (*ExternalValidationHoldIdList, error) {
+	return nil, status.Error(codes.Unimplemented, "method FindExternalValidationHoldIds not implemented")
+}
+func (UnimplementedForgeServer) FindExternalValidationHoldsByIds(context.Context, *ExternalValidationHoldsByIdsRequest) (*ExternalValidationHoldList, error) {
+	return nil, status.Error(codes.Unimplemented, "method FindExternalValidationHoldsByIds not implemented")
+}
+func (UnimplementedForgeServer) StartExternalValidation(context.Context, *StartExternalValidationRequest) (*StartExternalValidationResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method StartExternalValidation not implemented")
+}
+func (UnimplementedForgeServer) CancelExternalValidation(context.Context, *CancelExternalValidationRequest) (*ExternalValidationAttempt, error) {
+	return nil, status.Error(codes.Unimplemented, "method CancelExternalValidation not implemented")
+}
+func (UnimplementedForgeServer) CompleteExternalValidation(context.Context, *CompleteExternalValidationRequest) (*ExternalValidationAttempt, error) {
+	return nil, status.Error(codes.Unimplemented, "method CompleteExternalValidation not implemented")
+}
+func (UnimplementedForgeServer) RemoveExternalValidationHold(context.Context, *RemoveExternalValidationHoldRequest) (*emptypb.Empty, error) {
+	return nil, status.Error(codes.Unimplemented, "method RemoveExternalValidationHold not implemented")
 }
 func (UnimplementedForgeServer) testEmbeddedByValue() {}
 
@@ -10003,6 +10261,24 @@ func _Forge_GetRmsVersion_Handler(srv interface{}, ctx context.Context, dec func
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(ForgeServer).GetRmsVersion(ctx, req.(*GetRmsVersionRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Forge_GetRmsJobStatus_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetRmsJobStatusRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ForgeServer).GetRmsJobStatus(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Forge_GetRmsJobStatus_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ForgeServer).GetRmsJobStatus(ctx, req.(*GetRmsJobStatusRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -10734,6 +11010,24 @@ func _Forge_CreateNetworkSegment_Handler(srv interface{}, ctx context.Context, d
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(ForgeServer).CreateNetworkSegment(ctx, req.(*NetworkSegmentCreationRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Forge_AddNetworkSegmentPrefix_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(AddNetworkSegmentPrefixRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ForgeServer).AddNetworkSegmentPrefix(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Forge_AddNetworkSegmentPrefix_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ForgeServer).AddNetworkSegmentPrefix(ctx, req.(*AddNetworkSegmentPrefixRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -19547,6 +19841,42 @@ func _Forge_GetComponentPowerDetails_Handler(srv interface{}, ctx context.Contex
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Forge_ComponentReset_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ComponentResetRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ForgeServer).ComponentReset(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Forge_ComponentReset_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ForgeServer).ComponentReset(ctx, req.(*ComponentResetRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Forge_GetComponentResetStatus_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetComponentResetStatusRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ForgeServer).GetComponentResetStatus(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Forge_GetComponentResetStatus_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ForgeServer).GetComponentResetStatus(ctx, req.(*GetComponentResetStatusRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _Forge_ComponentConfigureSwitchCertificate_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(ComponentConfigureSwitchCertificateRequest)
 	if err := dec(in); err != nil {
@@ -19835,6 +20165,114 @@ func _Forge_FindRoutingProfilesByNames_Handler(srv interface{}, ctx context.Cont
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Forge_FindExternalValidationHoldIds_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ExternalValidationHoldSearchFilter)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ForgeServer).FindExternalValidationHoldIds(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Forge_FindExternalValidationHoldIds_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ForgeServer).FindExternalValidationHoldIds(ctx, req.(*ExternalValidationHoldSearchFilter))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Forge_FindExternalValidationHoldsByIds_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ExternalValidationHoldsByIdsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ForgeServer).FindExternalValidationHoldsByIds(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Forge_FindExternalValidationHoldsByIds_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ForgeServer).FindExternalValidationHoldsByIds(ctx, req.(*ExternalValidationHoldsByIdsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Forge_StartExternalValidation_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(StartExternalValidationRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ForgeServer).StartExternalValidation(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Forge_StartExternalValidation_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ForgeServer).StartExternalValidation(ctx, req.(*StartExternalValidationRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Forge_CancelExternalValidation_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CancelExternalValidationRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ForgeServer).CancelExternalValidation(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Forge_CancelExternalValidation_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ForgeServer).CancelExternalValidation(ctx, req.(*CancelExternalValidationRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Forge_CompleteExternalValidation_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CompleteExternalValidationRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ForgeServer).CompleteExternalValidation(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Forge_CompleteExternalValidation_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ForgeServer).CompleteExternalValidation(ctx, req.(*CompleteExternalValidationRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Forge_RemoveExternalValidationHold_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RemoveExternalValidationHoldRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ForgeServer).RemoveExternalValidationHold(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Forge_RemoveExternalValidationHold_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ForgeServer).RemoveExternalValidationHold(ctx, req.(*RemoveExternalValidationHoldRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // Forge_ServiceDesc is the grpc.ServiceDesc for Forge service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -19849,6 +20287,10 @@ var Forge_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "GetRmsVersion",
 			Handler:    _Forge_GetRmsVersion_Handler,
+		},
+		{
+			MethodName: "GetRmsJobStatus",
+			Handler:    _Forge_GetRmsJobStatus_Handler,
 		},
 		{
 			MethodName: "CreateDomain",
@@ -20009,6 +20451,10 @@ var Forge_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "CreateNetworkSegment",
 			Handler:    _Forge_CreateNetworkSegment_Handler,
+		},
+		{
+			MethodName: "AddNetworkSegmentPrefix",
+			Handler:    _Forge_AddNetworkSegmentPrefix_Handler,
 		},
 		{
 			MethodName: "AttachNetworkSegmentToVpc",
@@ -21967,6 +22413,14 @@ var Forge_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _Forge_GetComponentPowerDetails_Handler,
 		},
 		{
+			MethodName: "ComponentReset",
+			Handler:    _Forge_ComponentReset_Handler,
+		},
+		{
+			MethodName: "GetComponentResetStatus",
+			Handler:    _Forge_GetComponentResetStatus_Handler,
+		},
+		{
 			MethodName: "ComponentConfigureSwitchCertificate",
 			Handler:    _Forge_ComponentConfigureSwitchCertificate_Handler,
 		},
@@ -22029,6 +22483,30 @@ var Forge_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "FindRoutingProfilesByNames",
 			Handler:    _Forge_FindRoutingProfilesByNames_Handler,
+		},
+		{
+			MethodName: "FindExternalValidationHoldIds",
+			Handler:    _Forge_FindExternalValidationHoldIds_Handler,
+		},
+		{
+			MethodName: "FindExternalValidationHoldsByIds",
+			Handler:    _Forge_FindExternalValidationHoldsByIds_Handler,
+		},
+		{
+			MethodName: "StartExternalValidation",
+			Handler:    _Forge_StartExternalValidation_Handler,
+		},
+		{
+			MethodName: "CancelExternalValidation",
+			Handler:    _Forge_CancelExternalValidation_Handler,
+		},
+		{
+			MethodName: "CompleteExternalValidation",
+			Handler:    _Forge_CompleteExternalValidation_Handler,
+		},
+		{
+			MethodName: "RemoveExternalValidationHold",
+			Handler:    _Forge_RemoveExternalValidationHold_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{

@@ -45,6 +45,7 @@ carbide-authn = { path = "../authn" }
 carbide-health-report = { path = "../health-report" }
 carbide-ib-fabric = { path = "../ib-fabric", features = ["test-support"] }
 carbide-instrument = { path = "../instrument", features = ["test-support"] }
+carbide-rack = { path = "../rack" }
 carbide-rpc = { path = "../rpc", features = ["model", "sqlx", "test-support"] }
 carbide-secrets = { path = "../secrets", features = ["test-support"] }
 carbide-site-explorer = { path = "../site-explorer", features = [

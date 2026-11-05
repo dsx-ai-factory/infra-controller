@@ -1352,6 +1352,12 @@ async fn test_gb200_deployment_migration_requires_every_dpu(pool: sqlx::PgPool) 
         config: env.config.clone(),
         dpf: env.api.dpf_sdk.clone(),
     };
+    let work_lock = env
+        .api
+        .work_lock_manager_handle
+        .try_acquire_lock("dpf-reprovisioning-test".into())
+        .await
+        .expect("acquire update admission work lock");
     let snapshots = get_all_snapshots(&env).await;
     for (outdated_count, admitted) in [(1, false), (2, true)] {
         *outdated.lock().unwrap() = mh.dpu_ids[..outdated_count]
@@ -1362,7 +1368,7 @@ async fn test_gb200_deployment_migration_requires_every_dpu(pool: sqlx::PgPool) 
             })
             .collect();
         let started = updater
-            .start_updates(&pool, 1, &HashSet::new(), &snapshots)
+            .start_updates(&pool, &work_lock, 1, &HashSet::new(), &snapshots)
             .await
             .unwrap();
         assert_eq!(

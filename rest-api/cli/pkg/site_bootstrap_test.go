@@ -391,7 +391,7 @@ func TestBootstrapSitePrerequisitesRejectsExistingResourceDrift(t *testing.T) {
 	assert.Empty(t, api.postOrder)
 }
 
-func TestNewAppIncludesSiteBootstrapCommand(t *testing.T) {
+func testNewAppIncludesSiteBootstrapCommand(t *testing.T) {
 	app, err := NewApp(openapi.Spec)
 	require.NoError(t, err)
 

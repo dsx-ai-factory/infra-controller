@@ -46,6 +46,7 @@ carbide-api-db = { path = "../api-db", default-features = false, features = [
 ] }
 carbide-api-model = { path = "../api-model", default-features = false }
 carbide-nvlink-manager = { path = "../nvlink-manager" }
+config-version = { path = "../config-version" }
 bmc-mock = { path = "../bmc-mock" }
 bmc-vendor = { path = "../bmc-vendor" }
 libnmxc = { path = "../libnmxc" }

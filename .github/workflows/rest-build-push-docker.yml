@@ -130,8 +130,8 @@ jobs:
       ngc_path: ${{ inputs.ngc_path }}
       runner: ${{ inputs.runner }}
       service_name: nico-rest-site-manager
-      binary_name: sitemgr
-      binary_path: /app/sitemgr
+      binary_name: site-manager
+      binary_path: /app/site-manager
       dockerfile: ./rest-api/docker/production/Dockerfile.nico-rest-site-manager
       semantic_version: ${{ inputs.semantic_version }}
       short_sha: ${{ inputs.short_sha }}

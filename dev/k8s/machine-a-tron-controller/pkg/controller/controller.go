@@ -45,7 +45,8 @@ const (
 	AnnotationBMCIP = "nvidia-infra-controller/mat-bmc-ip"
 	// AnnotationNvosIP is the switch NVOS IP address annotation.
 	AnnotationNvosIP = "nvidia-infra-controller/mat-nvos-ip"
-	// AnnotationAPIState is the API state annotation.
+	// AnnotationAPIState remains owned so reconciliation removes obsolete
+	// API-state annotations.
 	AnnotationAPIState = "nvidia-infra-controller/mat-api-state"
 	// AnnotationPowerState is the power state annotation.
 	AnnotationPowerState = "nvidia-infra-controller/mat-power-state"
@@ -133,9 +134,9 @@ const (
 type ServiceBuilder struct {
 	Namespace    string
 	BaseSelector map[string]string
-	// EnableStateAnnotations controls whether machine state annotations
-	// (api-state, power-state) are included on Services. When false (default),
-	// these annotations are omitted to reduce K8s API update churn.
+	// EnableStateAnnotations includes power-state annotations on individual
+	// device Services, including fallbacks in pod mode. Shared per-pod Services
+	// omit them. Disabled by default to reduce K8s API update churn.
 	EnableStateAnnotations bool
 	// Granularity selects per-device Services (the zero value) or per-pod
 	// Services.
@@ -244,7 +245,6 @@ func (b *ServiceBuilder) BuildService(machine *matclient.MachineStatus, machineT
 		AnnotationRedfishListenPort: strconv.Itoa(int(machine.BMC.Redfish.ListenPort)),
 	}
 	if b.EnableStateAnnotations {
-		annotations[AnnotationAPIState] = machine.APIState
 		annotations[AnnotationPowerState] = machine.PowerState
 	}
 	if machine.BMC.IP != nil {
@@ -329,7 +329,6 @@ func (b *ServiceBuilder) BuildNvosService(machine *matclient.MachineStatus, podN
 		AnnotationNvosIP:            *machine.NvosIP,
 	}
 	if b.EnableStateAnnotations {
-		annotations[AnnotationAPIState] = machine.APIState
 		annotations[AnnotationPowerState] = machine.PowerState
 	}
 	if machine.HardwareType != nil {
@@ -797,7 +796,7 @@ func isControllerLabel(k string) bool {
 }
 
 // isControllerAnnotation reports whether k is one of the annotations this
-// controller owns on device Pods.
+// controller owns on Services.
 func isControllerAnnotation(k string) bool {
 	switch k {
 	case AnnotationBMCIP, AnnotationNvosIP, AnnotationAPIState, AnnotationPowerState, AnnotationHardwareType, AnnotationRedfishListenPort, AnnotationIPMIListenPort, AnnotationSSHListenPort, AnnotationPublishedAddresses:

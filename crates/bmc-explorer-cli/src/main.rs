@@ -25,7 +25,6 @@ use carbide_redfish::boot_interface::BootInterfaceTarget;
 use carbide_redfish::nv_redfish::NvRedfishClientPool;
 use carbide_secrets::credentials::Credentials;
 use carbide_secrets::test_support::credentials::TestCredentialManager;
-use carbide_site_explorer::config::SiteExplorerExploreMode;
 use carbide_site_explorer::{AuthenticatedBmcClient, BmcEndpointExplorer};
 use clap::Parser;
 use mac_address::MacAddress;
@@ -45,12 +44,6 @@ struct Cli {
     #[arg(long)]
     password: String,
 
-    /// Exploration mode: one of `libredfish`, `nv-redfish`, or `compare-result`
-    ///
-    /// Defaults to `compare-result`.
-    #[arg(long, default_value = "compare-result")]
-    mode: String,
-
     /// Run benchmark instead of printing result; value is number of iterations
     #[arg(long)]
     benchmark: Option<u64>,
@@ -69,7 +62,7 @@ struct Cli {
     boot_mac: Option<MacAddress>,
 
     /// Report each drive's firmware version as a `Drive_...` firmware
-    /// inventory entry (nv-redfish exploration only)
+    /// inventory entry
     #[arg(long)]
     explore_drive_firmware: bool,
 }
@@ -99,17 +92,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         rf_pool,
         proxy_address.clone(),
     );
-    let mode = match args.mode.as_str() {
-        "libredfish" => SiteExplorerExploreMode::LibRedfish,
-        "nv-redfish" => SiteExplorerExploreMode::NvRedfish,
-        "compare-result" => SiteExplorerExploreMode::CompareResult,
-        other => {
-            eprintln!(
-                "Invalid mode '{other}'. Valid values are: libredfish, nv-redfish, compare-result."
-            );
-            std::process::exit(1);
-        }
-    };
     let rotate_switch_nvos_credentials = Default::default();
 
     let bmc_client = Arc::new(AuthenticatedBmcClient::new(
@@ -123,7 +105,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let explorer = BmcEndpointExplorer::new(
         bmc_client,
         rotate_switch_nvos_credentials,
-        mode,
         // Standalone debug tool: no database, so rotation bookkeeping is skipped.
         None,
     )
@@ -142,7 +123,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     bmc_ip_address,
                     carbide_site_explorer::BmcAccess::Direct(fallback_credentials.clone()),
                     boot_interface.as_ref(),
-                    None,
                 )
                 .await?;
         }
@@ -157,7 +137,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         bmc_ip_address,
                         carbide_site_explorer::BmcAccess::Direct(fallback_credentials.clone()),
                         boot_interface.as_ref(),
-                        None,
                     )
                     .await?,
             )

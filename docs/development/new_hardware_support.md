@@ -61,15 +61,7 @@ NICo discovers and manages bare-metal hosts through their BMC (Baseboard Managem
 | **[nv-redfish](https://github.com/NVIDIA/nv-redfish)** | Schema-driven, fast: site exploration reports, firmware inventory, sensor collection, health monitoring. | Site Explorer exploration (`crates/site-explorer/`), Hardware Health (`crates/health/src/`) |
 | **[libredfish](https://github.com/NVIDIA/libredfish)** | Stateful BMC interactions: boot config, BIOS setup, power control, account/credential management, lockdown | Site Explorer state controller operations (`crates/site-explorer/`) |
 
-Site Explorer uses `nv-redfish` by default to generate an `EndpointExplorationReport`. _Exploration through_ `libredfish` _is deprecated_; it remains temporarily available for comparison and transition testing through the `explore_mode` configuration setting (`SiteExplorerExploreMode`):
-
-| Mode | Behavior |
-|---|---|
-| `nv-redfish` | Generate the report with nv-redfish (default) |
-| `libredfish` | Generate the report with the deprecated libredfish exploration path |
-| `compare-result` | Run both paths and report differences for transition testing |
-
-Implement new exploration support in the `nv-redfish` path. Do not add new hardware support only to the deprecated libredfish exploration path. Stateful operations such as boot order, BIOS setup, lockdown, and credential rotation still use libredfish, so both libraries may need changes for a complete platform integration.
+Site Explorer generates every `EndpointExplorationReport` with `nv-redfish`, so implement new exploration support there. Stateful operations such as boot order, BIOS setup, lockdown, and credential rotation still use libredfish, so both libraries may need changes for a complete platform integration.
 
 Beyond the Redfish libraries, **NICo itself** has vendor-aware logic that also needs updating - see [Changes in NICo](#changes-in-nico).
 
@@ -206,13 +198,12 @@ Build the package from the workspace root:
 cargo build -p bmc-explorer-cli
 ```
 
-Then, run the CLI against the BMC using the supported nv-redfish exploration path:
+Then, run the CLI against the BMC:
 
 ```bash
 target/debug/bmc-explorer-cli \
   --username <bmc-user> \
   --password <bmc-password> \
-  --mode nv-redfish \
   --boot-mac <host-boot-interface-mac> \
   --bmc-port 443 \
   <bmc-ip>
@@ -222,15 +213,12 @@ target/debug/bmc-explorer-cli \
 
 `--bmc-port` is the (optional) port on which the BMC listens. HTTPS port 443 is the default; use `--bmc-port <port>` for a BMC listening elsewhere.
 
-The CLI itself defaults to `compare-result`, but new Site Explorer support must be tested explicitly with `--mode nv-redfish`, matching the deployed default. `--mode compare-result` is useful only when investigating a difference from the deprecated libredfish exploration path. It runs both implementations and logs report differences.
-
 For repeated timing tests, add `--benchmark <iterations>`. The benchmark runs the same exploration multiple times and suppresses the JSON report:
 
 ```bash
 target/debug/bmc-explorer-cli \
   --username <bmc-user> \
   --password <bmc-password> \
-  --mode nv-redfish \
   --benchmark 10 \
   <bmc-ip>
 ```

@@ -325,10 +325,11 @@ func GetUnallocatedMachineForInstanceType(ctx context.Context, logger zerolog.Lo
 	// Get all available Machines for the Instance Type
 	// Since this query is occurring outside of a lock, we will have to double check availability of Machines
 	filterInput := cdbm.MachineFilterInput{
-		InstanceTypeIDs: []uuid.UUID{instanceType.ID},
-		IsAssigned:      cutil.GetPtr(false),
-		Statuses:        []string{cdbm.MachineStatusReady},
-		Labels:          machineLabelSelector,
+		InstanceTypeIDs:               []uuid.UUID{instanceType.ID},
+		IsAssigned:                    cutil.GetPtr(false),
+		Statuses:                      []string{cdbm.MachineStatusReady},
+		Labels:                        machineLabelSelector,
+		ExcludeForceDeletionRequested: true,
 	}
 	machines, _, err := mcDAO.GetAll(ctx, tx, filterInput, cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)}, nil)
 	if err != nil {
@@ -436,7 +437,7 @@ func GetUnallocatedMachineForInstanceType(ctx context.Context, logger zerolog.Lo
 					return ErrMachineUnavailable
 				}
 
-				if umc.IsAssigned {
+				if umc.IsAssigned || umc.IsForceDeletionQuarantined() {
 					return ErrMachineUnavailable
 				}
 
@@ -483,10 +484,10 @@ func GetUnallocatedMachineForInstanceType(ctx context.Context, logger zerolog.Lo
 }
 
 // GetCountOfMachinesForInstanceType is a utility function to return count of
-// machines for instance type
+// machines for instance type, excluding recorded force-deletion attempts.
 func GetCountOfMachinesForInstanceType(ctx context.Context, tx *cdb.Tx, dbSession *cdb.Session, instanceTypeID uuid.UUID) (int, error) {
 	mitDAO := cdbm.NewMachineInstanceTypeDAO(dbSession)
-	_, tot, err := mitDAO.GetAll(ctx, tx, cdbm.MachineInstanceTypeFilterInput{InstanceTypeIDs: []uuid.UUID{instanceTypeID}}, cdbp.PageInput{Limit: cutil.GetPtr(0)}, nil)
+	_, tot, err := mitDAO.GetAll(ctx, tx, cdbm.MachineInstanceTypeFilterInput{InstanceTypeIDs: []uuid.UUID{instanceTypeID}, ExcludeForceDeletionRequested: true}, cdbp.PageInput{Limit: cutil.GetPtr(0)}, nil)
 	if err != nil {
 		return 0, err
 	}
@@ -886,8 +887,13 @@ func GetAllInstanceTypeAllocationStats(ctx context.Context, dbSession *cdb.Sessi
 	// instanceTypeIDToMachinesMap is used to keep track of the number of machines assigned to each instance type
 	// This would be the number of potential instances that could be created.
 	instanceTypeIDToMachinesMap := make(map[uuid.UUID]int)
+	allocationCapacityByInstanceType := make(map[uuid.UUID]int)
 	for _, machine := range machines {
 		instanceTypeIDToMachinesMap[*machine.InstanceTypeID]++
+		if machine.IsForceDeletionQuarantined() {
+			continue
+		}
+		allocationCapacityByInstanceType[*machine.InstanceTypeID]++
 
 		// If no instance was found for the machine, then it's unused.
 		// If it's in a Ready state, then record it as unused-but-usable.
@@ -917,12 +923,8 @@ func GetAllInstanceTypeAllocationStats(ctx context.Context, dbSession *cdb.Sessi
 		}
 
 		if tenantID == nil {
-			mtotal := instanceTypeIDToMachinesMap[instanceTypeID]
-			if aas.Total <= mtotal {
-				aas.MaxAllocatable = cutil.GetPtr(mtotal - aas.Total)
-			} else {
-				logger.Error().Int("Total Allocation Count", aas.Total).Int("Total Machines", mtotal).Msg("total Allocation count exceeds Machines assigned to Instance Type")
-			}
+			// Retained owner rows remain Assigned, but cannot back another Allocation.
+			aas.MaxAllocatable = cutil.GetPtr(max(0, allocationCapacityByInstanceType[instanceTypeID]-aas.Total))
 		}
 
 		allocAPIStatsMap[instanceTypeID] = aas
@@ -1447,7 +1449,8 @@ type SiteTemporalClientPool interface {
 	GetClientByID(siteID uuid.UUID) (tclient.Client, error)
 }
 
-// AuthorizeProviderSiteForCoreInput carries the inputs for AuthorizeProviderSiteForCore.
+// AuthorizeProviderSiteForCoreInput supplies both Site authorization helpers.
+// Only AuthorizeProviderSiteForCore uses SCP to resolve a Temporal client.
 type AuthorizeProviderSiteForCoreInput struct {
 	Ctx       context.Context
 	Logger    zerolog.Logger
@@ -1458,15 +1461,13 @@ type AuthorizeProviderSiteForCoreInput struct {
 	SiteID    string
 }
 
-// AuthorizeProviderSiteForCore validates that user is a Provider Admin for org,
-// resolves siteStrID to a Site owned by the org's Infrastructure Provider, and
-// returns the per-site Temporal client plus the site ID string. The site ID is
-// the shared key used to encrypt redacted secret fields for transport to the
-// site agent.
-func AuthorizeProviderSiteForCore(in AuthorizeProviderSiteForCoreInput) (tclient.Client, string, *cutil.APIError) {
+// AuthorizeProviderSite checks Provider Admin access and returns the owned Site.
+// It skips Site readiness and SCP so callers can reject requests using REST
+// data, such as a SKU's machine associations, without a Temporal client.
+func AuthorizeProviderSite(in AuthorizeProviderSiteForCoreInput) (*cdbm.Site, *cutil.APIError) {
 	if in.User == nil {
 		in.Logger.Error().Msg("invalid User object found in request context")
-		return nil, "", cutil.NewAPIError(http.StatusInternalServerError, "Failed to retrieve current user", nil)
+		return nil, cutil.NewAPIError(http.StatusInternalServerError, "Failed to retrieve current user", nil)
 	}
 
 	ok, err := auth.ValidateOrgMembership(in.User, in.Org)
@@ -1476,37 +1477,50 @@ func AuthorizeProviderSiteForCore(in AuthorizeProviderSiteForCoreInput) (tclient
 		} else {
 			in.Logger.Warn().Msg("could not validate org membership for user, access denied")
 		}
-		return nil, "", cutil.NewAPIError(http.StatusForbidden, fmt.Sprintf("Failed to validate membership for org: %s", in.Org), nil)
+		return nil, cutil.NewAPIError(http.StatusForbidden, fmt.Sprintf("Failed to validate membership for org: %s", in.Org), nil)
 	}
 
-	if ok := auth.ValidateUserRoles(in.User, in.Org, nil, auth.ProviderAdminRole); !ok {
+	ok = auth.ValidateUserRoles(in.User, in.Org, nil, auth.ProviderAdminRole)
+	if !ok {
 		in.Logger.Warn().Msg("user does not have Provider Admin role, access denied")
-		return nil, "", cutil.NewAPIError(http.StatusForbidden, "User does not have Provider Admin role with org", nil)
+		return nil, cutil.NewAPIError(http.StatusForbidden, "User does not have Provider Admin role with org", nil)
 	}
 
 	provider, err := GetInfrastructureProviderForOrg(in.Ctx, nil, in.DBSession, in.Org)
 	if err != nil {
 		if errors.Is(err, ErrOrgInstrastructureProviderNotFound) {
-			return nil, "", cutil.NewAPIError(http.StatusNotFound,
+			return nil, cutil.NewAPIError(http.StatusNotFound,
 				fmt.Sprintf("Org '%v' does not have an Infrastructure Provider", in.Org), nil)
 		}
 		in.Logger.Error().Err(err).Msg("error retrieving Infrastructure Provider for this org")
-		return nil, "", cutil.NewAPIError(http.StatusInternalServerError, "Failed to retrieve Infrastructure Provider", nil)
+		return nil, cutil.NewAPIError(http.StatusInternalServerError, "Failed to retrieve Infrastructure Provider", nil)
 	}
 
 	site, err := GetSiteFromIDString(in.Ctx, nil, in.SiteID, in.DBSession)
 	if err != nil {
 		if errors.Is(err, cdb.ErrDoesNotExist) || errors.Is(err, ErrInvalidID) {
 			in.Logger.Warn().Err(err).Str("Site ID", in.SiteID).Msg("site not found in request")
-			return nil, "", cutil.NewAPIError(http.StatusBadRequest,
+			return nil, cutil.NewAPIError(http.StatusBadRequest,
 				fmt.Sprintf("Could not find Site with ID specified in request data: %s", in.SiteID), nil)
 		}
 		in.Logger.Error().Err(err).Str("Site ID", in.SiteID).Msg("error retrieving Site from DB")
-		return nil, "", cutil.NewAPIError(http.StatusInternalServerError, "Failed to retrieve Site due to DB error", nil)
+		return nil, cutil.NewAPIError(http.StatusInternalServerError, "Failed to retrieve Site due to DB error", nil)
 	}
 
 	if site.InfrastructureProviderID != provider.ID {
-		return nil, "", cutil.NewAPIError(http.StatusForbidden, "Site specified in request doesn't belong to current org's Provider", nil)
+		return nil, cutil.NewAPIError(http.StatusForbidden, "Site specified in request doesn't belong to current org's Provider", nil)
+	}
+
+	return site, nil
+}
+
+// AuthorizeProviderSiteForCore runs AuthorizeProviderSite, requires a Registered
+// Site, and returns its Temporal client and ID. The Site ID is the key used
+// to encrypt redacted secret fields for transport to the site agent.
+func AuthorizeProviderSiteForCore(in AuthorizeProviderSiteForCoreInput) (tclient.Client, string, *cutil.APIError) {
+	site, apiErr := AuthorizeProviderSite(in)
+	if apiErr != nil {
+		return nil, "", apiErr
 	}
 
 	if site.Status != cdbm.SiteStatusRegistered {

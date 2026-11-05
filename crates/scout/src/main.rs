@@ -648,6 +648,7 @@ async fn handle_mlxreport_action(
         machine_id,
         mlx_action.device_actions,
         supervisor_config.as_ref(),
+        Some(config),
         |device| discover_device_with_settlement(device).map(Into::into),
         |request| mlx_device::publish_mlx_observation_report(config, request),
     )
@@ -658,6 +659,7 @@ async fn collect_and_publish_mlx_observations<PublishFuture>(
     machine_id: &MachineId,
     commands: Vec<fac::MlxDeviceAction>,
     supervisor_config: Result<&SupervisorConfig, &SupervisorLaunchError>,
+    core_options: Option<&Options>,
     discover: impl FnMut(&str) -> Result<rpc::protos::mlx_device::MlxDeviceInfo, DeviceDiscoveryError>,
     publish: impl FnOnce(PublishMlxObservationReportRequest) -> PublishFuture,
 ) where
@@ -665,7 +667,9 @@ async fn collect_and_publish_mlx_observations<PublishFuture>(
         std::future::Future<Output = CarbideClientResult<PublishMlxObservationReportResponse>>,
 {
     let report = match supervisor_config {
-        Ok(config) => collect_mlx_observations(machine_id, commands, config, discover).await,
+        Ok(config) => {
+            collect_mlx_observations(machine_id, commands, config, core_options, discover).await
+        }
         Err(_) => {
             tracing::error!(
                 failure_stage = "configuration",
@@ -759,6 +763,7 @@ async fn collect_mlx_observations(
     machine_id: &MachineId,
     commands: Vec<fac::MlxDeviceAction>,
     supervisor_config: &SupervisorConfig,
+    core_options: Option<&Options>,
     mut discover: impl FnMut(
         &str,
     )
@@ -779,7 +784,9 @@ async fn collect_mlx_observations(
         let pci_name = &device_action.pci_name;
         match device_action.command.as_ref() {
             Some(fac::mlx_device_action::Command::UpdateFirmware(task)) => {
-                let result = mlx_device::update_firmware(pci_name, task, supervisor_config).await;
+                let result =
+                    mlx_device::update_firmware(pci_name, task, supervisor_config, core_options)
+                        .await;
                 report
                     .observations
                     .extend(result.map(|result| MlxObservation {
@@ -1195,6 +1202,7 @@ async fn query_api(
     );
     let query = rpc_forge::ForgeAgentControlRequest {
         machine_id: Some(*machine_id),
+        nic_firmware_site_cache_supported: true,
     };
     let request = tonic::Request::new(query);
     let mut client = client::create_forge_client(config).await?;
@@ -1408,6 +1416,7 @@ mod tests {
             ..Default::default()
         };
         let observe_task = fac::MlxDeviceObserveFirmwareUpdate {
+            delivery_mode: Default::default(),
             operation_id: "nic-observe-config-failure".into(),
             phase_id: task.phase_id.clone(),
             profile: task.profile.clone(),
@@ -1468,6 +1477,7 @@ mod tests {
             &machine_id,
             commands,
             Err(&configuration_error),
+            None,
             |_| panic!("invalid configuration must not discover hardware"),
             |request| {
                 published = Some(request);

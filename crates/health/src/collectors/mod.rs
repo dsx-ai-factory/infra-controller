@@ -62,8 +62,9 @@ pub(crate) use reachability::{
     COLLECTOR_TYPE as REACHABILITY_COLLECTOR_TYPE, ReachabilityCollector,
     ReachabilityCollectorStartConfig, ReachabilityService, ReachabilityTarget,
 };
+pub(crate) use runtime::CANCELLED_CONNECT_GRACE;
 pub use runtime::{
-    BackoffConfig, Collector, CollectorStartContext, EventStream, ExponentialBackoff,
+    BackoffConfig, CloseReason, Collector, CollectorStartContext, EventStream, ExponentialBackoff,
     IterationResult, PeriodicCollector, StreamMetrics, StreamingCollector,
     StreamingCollectorStartContext, StreamingConnectResult,
 };

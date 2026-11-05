@@ -32,14 +32,19 @@ use std::process::Command;
 pub fn build() {
     // In a git worktree in a container (local dev) none of the git commands will work because
     // the real git directory isn't mounted.
-    let can_git = Command::new("git")
+    let in_git_repo = Command::new("git")
         .args(["rev-parse"])
         .status()
         .map(|s| s.success())
         .unwrap_or(false);
-    if can_git {
+    if in_git_repo {
         git_allow();
     }
+    // Source snapshots (`git archive`, vendored trees) and the unborn
+    // repository the release Dockerfiles get from `cargo new` have no
+    // history; there the version fields come from the environment only.
+    let repo = Path::new(".");
+    let can_git = git_has_head(repo);
 
     let user = std::env::var("USER").unwrap_or_default();
     // TODO: Remove after migration to new CARBIDE_ naming
@@ -57,7 +62,11 @@ pub fn build() {
     // those crates and all their dependents, even for two jobs compiling the
     // same commit in the same CI run. The committer date only moves when the
     // commit does, which is the granularity of everything else stamped here.
-    let build_date = build_date(Path::new("."), std::env::var("CI_COMMIT_TIMESTAMP").ok());
+    let build_date = build_date(
+        repo,
+        std::env::var("CI_COMMIT_TIMESTAMP").ok(),
+        std::env::var("SOURCE_DATE_EPOCH").ok(),
+    );
     // TODO: Remove after migration to new CARBIDE_ naming
     println!("cargo:rustc-env=FORGE_BUILD_DATE={build_date}");
     println!("cargo:rustc-env=CARBIDE_BUILD_DATE={build_date}");
@@ -79,6 +88,7 @@ pub fn build() {
         "VERSION",
         "CI_COMMIT_SHORT_SHA",
         "CI_COMMIT_TIMESTAMP",
+        "SOURCE_DATE_EPOCH",
         "USER",
         "HOSTNAME",
         "REPO_ROOT",
@@ -89,35 +99,25 @@ pub fn build() {
         println!("cargo:rerun-if-env-changed={var}");
     }
 
-    if !can_git {
-        println!("cargo:warning=No git, version will be blank");
-        // still define it so that we can read it in a build time macro
-        // TODO: Remove after migration to new CARBIDE_ naming
-        println!("cargo:rustc-env=FORGE_BUILD_GIT_TAG=");
-        println!("cargo:rustc-env=CARBIDE_BUILD_GIT_HASH=");
-        let helm_version = std::env::var("CARBIDE_BUILD_HELM_VERSION")
-            .ok()
-            .filter(|v| !v.is_empty())
-            .unwrap_or_default();
-        println!("cargo:rustc-env=CARBIDE_BUILD_HELM_VERSION={helm_version}");
-        return;
-    }
-
     // For these two in CI we use the env var, locally we query git
 
-    let sha = std::env::var("CI_COMMIT_SHORT_SHA")
-        .ok()
-        .unwrap_or_else(|| run("git", &["rev-parse", "--short=8", "HEAD"]));
+    let sha = env_or_git(
+        std::env::var("CI_COMMIT_SHORT_SHA").ok(),
+        repo,
+        &["rev-parse", "--short=8", "HEAD"],
+    );
     // TODO: Remove after migration to new CARBIDE_ naming
     println!("cargo:rustc-env=FORGE_BUILD_GIT_HASH={sha}");
     println!("cargo:rustc-env=CARBIDE_BUILD_GIT_HASH={sha}");
 
-    let build_version = std::env::var("VERSION").ok().unwrap_or_else(|| {
-        run(
-            "git",
-            &["describe", "--tags", "--first-parent", "--always", "--long"],
-        )
-    });
+    let build_version = env_or_git(
+        std::env::var("VERSION").ok(),
+        repo,
+        &["describe", "--tags", "--first-parent", "--always", "--long"],
+    );
+    if sha.is_empty() || build_version.is_empty() {
+        println!("cargo:warning=No git and no VERSION/CI_COMMIT_SHORT_SHA, version will be blank");
+    }
     // TODO: Remove after migration to new CARBIDE_ naming
     println!("cargo:rustc-env=FORGE_BUILD_GIT_TAG={build_version}");
     println!("cargo:rustc-env=CARBIDE_BUILD_GIT_TAG={build_version}");
@@ -161,8 +161,9 @@ pub fn build() {
     // loops when we want to avoid recompiling and when we don't really care if the generated
     // version is stale.)
     // TODO: Remove after migration to new CARBIDE_ naming
-    if std::env::var("FORGE_VERSION_AVOID_REBUILD").is_err()
-        || std::env::var("CARBIDE_VERSION_AVOID_REBUILD").is_err()
+    if can_git
+        && (std::env::var("FORGE_VERSION_AVOID_REBUILD").is_err()
+            || std::env::var("CARBIDE_VERSION_AVOID_REBUILD").is_err())
     {
         let git_query_head =
             run("git", &["rev-parse", "--path-format=absolute", "--git-dir"]) + "/HEAD";
@@ -190,20 +191,57 @@ pub fn build() {
 /// version: the release Dockerfiles build inside the empty repository that
 /// `cargo new` creates (`.git/` is excluded from the build context), so git
 /// works there but has no commits to read. Locally it comes from git when
-/// HEAD resolves. Otherwise (local containers without git, or an unborn
-/// HEAD) fall back to wall clock, where caching is not at stake.
-fn build_date(repo: &Path, ci_commit_timestamp: Option<String>) -> String {
-    if let Some(timestamp) = ci_commit_timestamp.filter(|v| !v.is_empty()) {
-        return timestamp;
+/// HEAD resolves. Otherwise (source snapshots, local containers without git,
+/// or an unborn HEAD) use `SOURCE_DATE_EPOCH` when the builder supplies it,
+/// and only then fall back to wall clock, where caching is not at stake.
+fn build_date(
+    repo: &Path,
+    ci_commit_timestamp: Option<String>,
+    source_date_epoch: Option<String>,
+) -> String {
+    let date = env_or_git(ci_commit_timestamp, repo, &["log", "-1", "--format=%cI"]);
+    if !date.is_empty() {
+        return date;
     }
-    if git_has_head(repo) {
-        let repo = repo.to_string_lossy();
-        let date = run("git", &["-C", &repo, "log", "-1", "--format=%cI"]);
-        if !date.is_empty() {
-            return date;
-        }
+    if let Some(epoch) = source_date_epoch.and_then(|v| v.parse().ok()) {
+        return utc_timestamp(epoch);
     }
     run("date", &["-u", "+%Y-%m-%dT%H:%M:%SZ"]) // like 'date --iso-8601=seconds --utc' but portable across GNU/BSD
+}
+
+/// `value` (a builder-supplied env var) when set and non-empty, otherwise the
+/// output of `git <args>` when HEAD resolves in `repo`, otherwise empty. An
+/// unpassed Dockerfile `ARG` sets its `ENV` to the empty string.
+fn env_or_git(value: Option<String>, repo: &Path, args: &[&str]) -> String {
+    if let Some(value) = value.filter(|v| !v.is_empty()) {
+        return value;
+    }
+    if !git_has_head(repo) {
+        return String::new();
+    }
+    let repo = repo.to_string_lossy();
+    run("git", &[&["-C", repo.as_ref()], args].concat())
+}
+
+/// Seconds since the Unix epoch as `YYYY-MM-DDTHH:MM:SSZ`, using Howard
+/// Hinnant's `civil_from_days` so this crate stays dependency-free.
+fn utc_timestamp(epoch: u64) -> String {
+    let (days, secs) = (epoch / 86_400, epoch % 86_400);
+    let z = days + 719_468;
+    let era = z / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + u64::from(month <= 2);
+    format!(
+        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z",
+        secs / 3_600,
+        secs % 3_600 / 60,
+        secs % 60
+    )
 }
 
 /// Whether `repo` is inside a git repository whose HEAD names a commit. A bare
@@ -367,6 +405,8 @@ mod tests {
 
     const COMMITTER_DATE: &str = "2026-01-02T03:04:05+00:00";
     const CI_TIMESTAMP: &str = "2026-05-06T07:08:09+00:00";
+    const SOURCE_DATE_EPOCH: &str = "1792084745";
+    const SOURCE_DATE: &str = "2026-10-15T17:19:05Z";
 
     fn git(repo: &Path, args: &[&str]) {
         let status = Command::new("git")
@@ -392,18 +432,24 @@ mod tests {
     fn build_date_is_never_empty() {
         let repo = tempfile::tempdir().expect("create temporary repository");
         let ci = || Some(CI_TIMESTAMP.to_string());
+        let epoch = || Some(SOURCE_DATE_EPOCH.to_string());
         git(repo.path(), &["init", "--quiet"]);
 
         assert_eq!(
-            build_date(repo.path(), ci()),
+            build_date(repo.path(), ci(), epoch()),
             CI_TIMESTAMP,
             "unborn HEAD, CI timestamp"
+        );
+        assert_eq!(
+            build_date(repo.path(), Some(String::new()), epoch()),
+            SOURCE_DATE,
+            "unborn HEAD, empty CI timestamp, SOURCE_DATE_EPOCH"
         );
         for (scenario, ci_timestamp) in [
             ("unborn HEAD, no CI timestamp", None),
             ("unborn HEAD, empty CI timestamp", Some(String::new())),
         ] {
-            let date = build_date(repo.path(), ci_timestamp);
+            let date = build_date(repo.path(), ci_timestamp, None);
             assert!(is_utc_timestamp(&date), "{scenario}: {date:?}");
         }
 
@@ -412,14 +458,52 @@ mod tests {
             &["commit", "--quiet", "--allow-empty", "-m", "initial"],
         );
         assert_eq!(
-            build_date(repo.path(), ci()),
+            build_date(repo.path(), ci(), epoch()),
             CI_TIMESTAMP,
             "HEAD, CI timestamp"
         );
+        // git >= 2.50 prints a UTC committer date as `Z`, older as `+00:00`.
         assert_eq!(
-            build_date(repo.path(), None),
+            build_date(repo.path(), None, epoch()).replace('Z', "+00:00"),
             COMMITTER_DATE,
-            "HEAD, no CI timestamp"
+            "HEAD, no CI timestamp, SOURCE_DATE_EPOCH"
         );
+    }
+
+    // A source snapshot (`git archive`, vendored tree) has no repository at
+    // all; the builder-supplied values must still be stamped.
+    #[test]
+    fn source_snapshot_stamps_builder_values() {
+        let snapshot = tempfile::tempdir().expect("create temporary snapshot");
+        let sha_args = &["rev-parse", "--short=8", "HEAD"];
+
+        assert_eq!(
+            env_or_git(Some("v2.2.2".to_string()), snapshot.path(), &["describe"]),
+            "v2.2.2"
+        );
+        assert_eq!(
+            env_or_git(Some("80d131a5".to_string()), snapshot.path(), sha_args),
+            "80d131a5"
+        );
+        assert_eq!(
+            env_or_git(Some(String::new()), snapshot.path(), sha_args),
+            ""
+        );
+        assert_eq!(
+            build_date(snapshot.path(), None, Some(SOURCE_DATE_EPOCH.to_string())),
+            SOURCE_DATE
+        );
+    }
+
+    #[test]
+    fn utc_timestamp_formats_epoch_seconds() {
+        for (epoch, expected) in [
+            (0, "1970-01-01T00:00:00Z"),
+            (951_782_400, "2000-02-29T00:00:00Z"),
+            (1_792_084_745, SOURCE_DATE),
+            (4_102_444_799, "2099-12-31T23:59:59Z"),
+        ] {
+            assert_eq!(utc_timestamp(epoch), expected, "epoch {epoch}");
+        }
     }
 }

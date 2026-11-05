@@ -203,11 +203,13 @@ each configuration operation.
 `Last seen` with the current time. Then check DPU power, agent status, and
 connectivity to `nico-api`.
 
-### `ServiceRunning`, `DhcpRelay`, and `DhcpServer`
+### `ServiceRunning`, `DhcpRelay`, `DhcpServer`, and `Fmds`
 
 `ServiceRunning` identifies a required DPU service that is not running. Inspect
 systemd and the HBN container. `DhcpRelay` and `DhcpServer` identify failures on
 the host DHCP path, which can prevent PXE from receiving boot instructions.
+
+On DPF, the DHCP server and FMDS run in their own pods on the DPU. `DhcpServer` and `Fmds` there mean that the DPU agent could not reach or update that pod, and the message contains the error. Check whether the pod is running on the DPU. A DHCP server failure also keeps the DPU from acknowledging the network configuration. An FMDS failure does not.
 
 ## Inspect DPU Logs
 

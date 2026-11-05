@@ -73,6 +73,7 @@ mod machine_validation;
 mod measured_boot;
 mod mqtt_state_change_hook;
 mod network_segment;
+mod nic_firmware;
 mod node_auth;
 mod resource_pool;
 mod scout_stream;

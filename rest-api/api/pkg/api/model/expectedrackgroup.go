@@ -73,8 +73,9 @@ type APIExpectedRackGroupCreateRequest struct {
 	RackGroupID string `json:"rackGroupId"`
 	// Topology is the externally declared group-level topology identifier.
 	Topology string `json:"topology"`
-	// Protocol identifies the rack fabric protocol used for profile derivation.
-	Protocol string `json:"protocol"`
+	// Protocol optionally identifies the rack fabric protocol used for profile derivation.
+	// Omitted or null means unspecified; supplied values must be non-blank.
+	Protocol *string `json:"protocol"`
 	// Racks contains rack identities and their device membership.
 	Racks []APIExpectedRackGroupRack `json:"racks"`
 	// Name is the optional human-readable name of the expected rack group.
@@ -101,9 +102,10 @@ func (ercr *APIExpectedRackGroupCreateRequest) Validate() error {
 			validation.RuneLength(1, 128),
 			validation.Match(util.NotAllWhitespaceRegexp).Error("Topology consists only of whitespace")),
 		validation.Field(&ercr.Protocol,
-			validation.Required.Error(validationErrorValueRequired),
+			validation.NilOrNotEmpty.Error("Protocol cannot be empty"),
 			validation.RuneLength(1, 128),
-			validation.Match(util.NotAllWhitespaceRegexp).Error("Protocol consists only of whitespace")),
+			validation.When(ercr.Protocol != nil,
+				validation.Match(util.NotAllWhitespaceRegexp).Error("Protocol consists only of whitespace"))),
 		validation.Field(&ercr.Racks, validation.By(APIExpectedRackGroup{Racks: ercr.Racks}.validateRacks)),
 		validation.Field(&ercr.Name,
 			validation.Length(0, 256), validationis.ASCII),
@@ -128,7 +130,8 @@ type APIExpectedRackGroupUpdateRequest struct {
 	RackGroupID *string `json:"rackGroupId"`
 	// Topology optionally replaces the group-level topology identifier.
 	Topology *string `json:"topology"`
-	// Protocol optionally replaces the rack fabric protocol.
+	// Protocol optionally replaces the rack fabric protocol. Omitted or null
+	// preserves the stored value, including an unspecified protocol.
 	Protocol *string `json:"protocol"`
 	// Racks contains rack identities and their device membership.
 	Racks []APIExpectedRackGroupRack `json:"racks"`
@@ -220,7 +223,7 @@ type APIExpectedRackGroup struct {
 	RackGroupID string `json:"rackGroupId"`
 	// Topology is the externally declared group-level topology identifier.
 	Topology string `json:"topology"`
-	// Protocol is the rack fabric protocol, or null for a legacy declaration.
+	// Protocol is the rack fabric protocol, or null when unspecified.
 	Protocol *string `json:"protocol"`
 	// Racks contains rack identities and their device membership.
 	Racks []APIExpectedRackGroupRack `json:"racks"`

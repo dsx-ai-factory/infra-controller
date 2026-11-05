@@ -15,7 +15,10 @@
  * limitations under the License.
  */
 
+mod artifact_writer;
 pub mod config;
+/// Authenticated Core artifact delivery owned by an admitted firmware operation.
+pub mod core_download;
 pub mod credentials;
 pub mod error;
 pub mod flasher;

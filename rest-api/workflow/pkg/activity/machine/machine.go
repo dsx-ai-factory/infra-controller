@@ -45,6 +45,7 @@ const (
 	controllerMachineStatePrefixDecommissioning       = "Decommissioning"
 	controllerMachineStatePrefixBomValidating         = "BomValidating"
 	controllerMachineStatePrefixMachineValidation     = "MachineValidation"
+	controllerMachineStatePrefixNicFirmwareUpdating   = "NicFirmwareUpdating"
 
 	// Decommissioning terminal substate (Core ManagedHostState::Decommissioning/Decommissioned)
 	controllerMachineDecommissioningSubstateDecommissioned = "Decommissioned"
@@ -464,12 +465,38 @@ func (mm *ManageMachine) UpdateMachinesInDB(ctx context.Context, siteIDStr strin
 			}
 
 			if wasDeleted {
+				// The initial inventory lookup may predate another restore and deletion attempt.
+				// Recheck under the row lock before clearing either deletion or quarantine state.
+				existingCloudMachine, err = mDAO.GetByIDWithDeleted(ctx, txn, existingCloudMachine.ID, true)
+				if err != nil {
+					slogger.Error().Err(err).Msg("failed to lock Machine for inventory restoration")
+					_ = txn.Rollback()
+					continue
+				}
+				wasDeleted = existingCloudMachine.Deleted != nil
+				if wasDeleted && site.IsTimeWithinStaleInventoryThreshold(*existingCloudMachine.Deleted) {
+					_ = txn.Rollback()
+					continue
+				}
+			}
+
+			if wasDeleted {
+				// Older writers can soft-delete a row while its Core attempt is unresolved.
+				// A tombstone alone must not release that deletion fence.
+				deletionComplete := existingCloudMachine.IsForceDeletionRequested &&
+					existingCloudMachine.IsForceDeletionComplete && existingCloudMachine.ForceDeletionWorkflowID == nil
+				if existingCloudMachine.IsForceDeletionQuarantined() && !deletionComplete {
+					slogger.Warn().Msg("not restoring Machine with unresolved forced deletion")
+					_ = txn.Rollback()
+					continue
+				}
 				// Restored Machines bypass the staleness check below, since Clear writes the
 				// row this reconcile is about to populate.
 				existingCloudMachine, err = mDAO.Clear(ctx, txn, cdbm.MachineClearInput{
-					MachineID: existingCloudMachine.ID,
-					Deleted:   true,
-					Updated:   &reconcileStamp,
+					MachineID:               existingCloudMachine.ID,
+					Deleted:                 true,
+					Updated:                 &reconcileStamp,
+					ForceDeletionWorkflowID: true,
 				})
 				if err != nil {
 					slogger.Error().Err(err).Msg("failed to clear soft-delete timestamp for Machine")
@@ -490,6 +517,16 @@ func (mm *ManageMachine) UpdateMachinesInDB(ctx context.Context, siteIDStr strin
 					}
 					continue
 				}
+			}
+
+			// A retained deletion record belongs to its owners. Present inventory may
+			// predate completion and must not restore usability or erase associations.
+			if !wasDeleted && existingCloudMachine.IsForceDeletionQuarantined() {
+				terr := txn.Rollback()
+				if terr != nil {
+					slogger.Error().Err(terr).Msg("failed to rollback retained Machine inventory transaction")
+				}
+				continue
 			}
 
 			// If the machine was updated at all since this inventory was received, we
@@ -532,6 +569,13 @@ func (mm *ManageMachine) UpdateMachinesInDB(ctx context.Context, siteIDStr strin
 				Status:                &machineStatus,
 				IsMissingOnSite:       cwutil.GetPtr(false),
 				Updated:               &reconcileStamp,
+			}
+
+			if wasDeleted {
+				// Deliberate REST cleanup releases the retained marker. A subsequent
+				// authoritative reappearance can restore the Machine normally.
+				updateInput.IsForceDeletionRequested = cwutil.GetPtr(false)
+				updateInput.IsForceDeletionComplete = cwutil.GetPtr(false)
 			}
 
 			_, serr := mDAO.Update(ctx, txn, updateInput)
@@ -1184,6 +1228,14 @@ func getNICoMachineStatus(controllerMachine *corev1.Machine, logger zerolog.Logg
 		case controllerMachineStatePrefixMachineValidation:
 			machineStatus = cdbm.MachineStatusInitializing
 			statusMessage = "Machine is undergoing machine validation"
+		case controllerMachineStatePrefixNicFirmwareUpdating:
+			if controllerMachineSubstate == "Failed" {
+				machineStatus = cdbm.MachineStatusError
+				statusMessage = "Machine NIC firmware update failed"
+			} else {
+				machineStatus = cdbm.MachineStatusInitializing
+				statusMessage = "Machine NIC firmware is being updated"
+			}
 		case controllerMachineStatePrefixAssigned:
 			machineStatus = cdbm.MachineStatusInUse
 			statusMessage = cdbm.MachineStatusInUseMessage

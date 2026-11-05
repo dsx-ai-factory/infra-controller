@@ -359,9 +359,9 @@ List and get commands support `--output <format>`:
 
 | Format | Use |
 |--------|-----|
-| `json` (default) | Structured output, suitable for `jq` |
+| `json` | Structured output, suitable for `jq`. Default for every command except `vpc-peering list`. |
 | `yaml` | Structured output, easier to read by hand |
-| `table` | Minimal columns. Some endpoints (notably `audit list`) only show `id` -- use `json` for full detail. |
+| `table` | Minimal columns. Default for `vpc-peering list`, which shows the peering ID and both VPC names and IDs. Some endpoints (notably `audit list`) only show `id` -- use `json` for full detail. |
 
 ```bash
 nicocli site list --output table

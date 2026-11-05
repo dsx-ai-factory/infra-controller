@@ -42,7 +42,10 @@ use crate::nico::host_read::HostDetail;
 pub(crate) trait NicoApi: Send + Sync {
     /// Hosts and DPUs, without predicted hosts.
     async fn machine_ids(&self) -> Result<Vec<MachineId>, CallError>;
+    /// Hosts from their full machine records (FindMachinesByIds).
     async fn hosts_by_ids(&self, ids: &[MachineId]) -> Result<Vec<HostDetail>, CallError>;
+    /// Hosts from the compact host read (FindHostStatesByIds).
+    async fn host_states_by_ids(&self, ids: &[MachineId]) -> Result<Vec<HostDetail>, CallError>;
     async fn switch_ids(&self) -> Result<Vec<SwitchId>, CallError>;
     async fn switches_by_ids(&self, ids: &[SwitchId]) -> Result<Vec<forge::Switch>, CallError>;
     async fn power_shelf_ids(&self) -> Result<Vec<PowerShelfId>, CallError>;

@@ -50,6 +50,11 @@ fn histogram() -> &'static Histogram<f64> {
                 "Duration of outbound calls by backend, operation, and outcome; the _count \
                  series, split by outcome, gives the request and error rates.",
             )
+            // Preserve existing `le` series and resolve slow calls through five minutes.
+            .with_boundaries(vec![
+                0.0, 5.0, 10.0, 25.0, 50.0, 75.0, 100.0, 250.0, 500.0, 750.0, 1000.0, 2500.0,
+                5000.0, 7500.0, 10000.0, 15000.0, 30000.0, 60000.0, 120000.0, 180000.0, 300000.0,
+            ])
             .build()
     })
 }

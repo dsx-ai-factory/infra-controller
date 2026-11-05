@@ -14,6 +14,7 @@ troubleshoot rule enforcement.
 - [Network Isolation Overview](../network_isolation.md)
 - [VPC Network Virtualization](../vpc/vpc_network_virtualization.md) — the
   VPC, VRF, and DPU configuration layer that NSGs sit on top of
+- [Tenant Connectivity and Shared Services](../vpc/tenant_connectivity.md) — ingress, peering, and storage access with explicit routing and policy
 
 ---
 
@@ -91,6 +92,8 @@ Each rule has:
 Rules are evaluated in priority order. The first matching `Permit` or
 `Deny` decides the packet; there is no implicit fall-through behaviour
 between rules of the same NSG.
+
+Directions are from the **instance's perspective**: ingress goes to the instance and egress leaves it. Each rendered tenant NSG policy ends in a deny rule. Include the required application flows and account for replies. Stateless filtering requires rules in both directions. Stateful egress permits supported return traffic for outbound flows when enabled at both site and NSG scope. It does not generally allow new inbound connections. Higher precedence site policy still applies. See the [FNN ACL template](https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/agent/templates/nvue_startup_fnn.conf) for the rendered rules.
 
 ---
 
