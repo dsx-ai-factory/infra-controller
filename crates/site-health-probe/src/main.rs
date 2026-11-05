@@ -112,7 +112,6 @@ async fn run() -> eyre::Result<()> {
             .register(Box::new(state_metrics::StateCollector::new(
                 Arc::clone(&store),
                 process_start,
-                cfg.state.nico_api.host_read,
             )))
             .wrap_err("register state metrics")?;
     }
@@ -431,6 +430,7 @@ fn build_readers(
         out.push(Arc::new(DevicesReader::new(
             schedule.devices.clone(),
             state.nico_api.batch_size,
+            state.nico_api.host_read,
             Arc::clone(&nico),
             Arc::clone(&gates.nico_api),
             Arc::clone(&sink) as _,

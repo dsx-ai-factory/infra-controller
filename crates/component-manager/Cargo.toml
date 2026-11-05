@@ -54,6 +54,9 @@ serde_json = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
+carbide-api-db = { path = "../api-db", default-features = false, features = [
+  "test-support",
+] }
 carbide-api-test-helper = { path = "../api-test-helper" }
 carbide-instrument = { path = "../instrument", features = ["test-support"] }
 carbide-macros = { path = "../macros" }

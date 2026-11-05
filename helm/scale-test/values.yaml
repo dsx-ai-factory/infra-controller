@@ -1,0 +1,42 @@
+# Acceptance test image holding the current scale-test suite binaries. Supply a
+# repository and either an exact digest (preferred) or a tag at install time;
+# rendering fails without them.
+image:
+  repository: ""
+  tag: ""
+  digest: ""
+  pullPolicy: IfNotPresent
+
+# References to existing image pull secrets in the release namespace.
+imagePullSecrets: []
+
+# The acceptance image is built for amd64 only, so the Jobs pin to amd64 nodes.
+# Override (or set to {}) to schedule elsewhere once a multi-arch image exists.
+nodeSelector:
+  kubernetes.io/arch: amd64
+
+# Default ServiceAccount, Role, Binding and Job names derive from the release
+# name. Set this to override that base name.
+fullnameOverride: ""
+
+# Suites. Each enabled entry renders one `helm test` Job that runs a fixed
+# binary and anchored test; only the suites the chart knows (cluster, probe)
+# may be enabled, and at least one must be. Lower weight runs first. A/probe
+# and B1/cluster are the only real consumers in v1.
+suites:
+  cluster:
+    enabled: true
+    weight: 1
+  probe:
+    enabled: false
+    weight: 2
+
+# Base URL of the probe Service (SCALE_TEST_PROBE_URL) for the probe suite. When
+# unset, the enabled probe fixture fails rather than skipping.
+probeUrl: ""
+
+# The Job deadline and the go test timeout for each suite, both positive
+# integer seconds (the timeout renders as a Go duration such as 480s).
+testBudget:
+  activeDeadlineSeconds: 600
+  testTimeoutSeconds: 480

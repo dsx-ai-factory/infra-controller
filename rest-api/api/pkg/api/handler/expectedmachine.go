@@ -5,6 +5,7 @@ package handler
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -1046,24 +1047,7 @@ func (cemh CreateExpectedMachinesHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, http.StatusForbidden, "Current org is not associated with the Site", nil)
 	}
 
-	// Snapshot existing MACs and serials for duplicate diagnostics. These
-	// checks remain separate from the transactional SKU attachment validation.
 	emDAO := cdbm.NewExpectedMachineDAO(cemh.dbSession)
-	existingMachinesOnSite, _, err := emDAO.GetAll(ctx, nil, cdbm.ExpectedMachineFilterInput{
-		SiteIDs: []uuid.UUID{siteID},
-	}, paginator.PageInput{
-		Limit: cutil.GetPtr(paginator.TotalLimit), // we want ALL records on site
-	}, []string{})
-	if err != nil {
-		logger.Error().Err(err).Msg("error retrieving Expected Machines from DB")
-		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Expected Machines due to DB error", nil)
-	}
-	existingMacAddressMap := make(map[string]bool)
-	existingSerialMap := make(map[string]bool)
-	for _, machine := range existingMachinesOnSite {
-		existingMacAddressMap[machine.BmcMacAddress] = true
-		existingSerialMap[machine.ChassisSerialNumber] = true
-	}
 
 	// Build the inputs and a credentials lookup keyed by the ExpectedMachineID
 	// we generate here. After CreateMultiple returns we look credentials up by
@@ -1102,10 +1086,30 @@ func (cemh CreateExpectedMachinesHandler) Handle(c echo.Context) error {
 		})
 	}
 
-	createdExpectedMachines, err := cdb.WithTxResult(ctx, cemh.dbSession, func(tx *cdb.Tx) ([]cdbm.ExpectedMachine, error) {
-		if apiErr := acquireExpectedInventorySharedMutationLock(ctx, logger, tx, site.ID); apiErr != nil {
+	// Read Committed gives the duplicate lookup a fresh snapshot after a lock retry.
+	createdExpectedMachines, err := cdb.WithTxResultOpts(ctx, cemh.dbSession, &sql.TxOptions{Isolation: sql.LevelReadCommitted}, func(tx *cdb.Tx) ([]cdbm.ExpectedMachine, error) {
+		// Hold the Expected Inventory lock through Core dispatch and commit so
+		// another serial writer cannot invalidate the duplicate check.
+		apiErr := acquireExpectedInventoryExclusiveMutationLock(ctx, logger, tx, site.ID)
+		if apiErr != nil {
 			return nil, apiErr
 		}
+		existingMachinesOnSite, _, err := emDAO.GetAll(ctx, tx, cdbm.ExpectedMachineFilterInput{
+			SiteIDs: []uuid.UUID{siteID},
+		}, paginator.PageInput{
+			Limit: cutil.GetPtr(paginator.TotalLimit), // we want ALL records on site
+		}, []string{})
+		if err != nil {
+			logger.Error().Err(err).Msg("error retrieving Expected Machines from DB")
+			return nil, cutil.NewAPIError(http.StatusInternalServerError, "Failed to retrieve Expected Machines due to DB error", nil)
+		}
+		existingMacAddressMap := make(map[string]bool)
+		existingSerialMap := make(map[string]bool)
+		for _, machine := range existingMachinesOnSite {
+			existingMacAddressMap[machine.BmcMacAddress] = true
+			existingSerialMap[machine.ChassisSerialNumber] = true
+		}
+
 		// Keep requested SKUs locked through the writes so deletion/recreation
 		// cannot change their Site after validation.
 		skuDAO := cdbm.NewSkuDAO(cemh.dbSession)
@@ -1119,7 +1123,7 @@ func (cemh CreateExpectedMachinesHandler) Handle(c echo.Context) error {
 			existingSkuIDsMap[sku.ID] = true
 		}
 
-		// Keep MAC/serial snapshot errors grouped with the locked SKU checks.
+		// Report duplicate and SKU errors together for each request item.
 		validationErrors := validation.Errors{}
 		for i, req := range apiRequests {
 			itemErrors := validation.Errors{}
@@ -1193,8 +1197,9 @@ func (cemh CreateExpectedMachinesHandler) Handle(c echo.Context) error {
 			return nil, cutil.NewAPIError(http.StatusInternalServerError, "Failed to retrieve client for Site", nil)
 		}
 
-		// Execute workflow and get results
-		workflowRun, werr := stc.ExecuteWorkflow(ctx, workflowOptions, "CreateExpectedMachines", workflowRequest)
+		rpcCtx, cancel := context.WithTimeout(ctx, cutil.WorkflowContextTimeout)
+		defer cancel()
+		workflowRun, werr := stc.ExecuteWorkflow(rpcCtx, workflowOptions, "CreateExpectedMachines", workflowRequest)
 		if werr != nil {
 			logger.Error().Err(werr).Msg("failed to schedule CreateExpectedMachines workflow on Site")
 			return nil, cutil.NewAPIError(http.StatusInternalServerError, fmt.Sprintf("Failed to schedule batch Expected Machine creation workflow on Site: %v", werr), nil)
@@ -1207,7 +1212,7 @@ func (cemh CreateExpectedMachinesHandler) Handle(c echo.Context) error {
 		// Get workflow results
 		var workflowResult corev1.BatchExpectedMachineOperationResponse
 
-		werr = workflowRun.Get(ctx, &workflowResult)
+		werr = workflowRun.Get(rpcCtx, &workflowResult)
 		if werr != nil {
 			logger.Error().Err(werr).Msg("error executing CreateExpectedMachines workflow on Site")
 			// Workflow failed entirely - don't commit transaction
@@ -1410,19 +1415,10 @@ func (uemh UpdateExpectedMachinesHandler) Handle(c echo.Context) error {
 
 	logger.Info().Int("MachineCount", len(apiRequests)).Msg("processing UpdateExpectedMachines request")
 
-	// Since we only have a list of Expected Machine ID as input we can only learn the SiteIDs involved by querying the DB
-	// but we also want to retrieve full Expected Machines from Site to check for Serial uniqueness.
-	// We will split into multiple queries:
-	// 1. Retrieve SiteID and Site by loading the requested ExpectedMachine records
-	// 2. Retrieve all Expected Machines for that Site to check for Serial uniqueness.
-	// Requested SKUs are validated and locked inside the write transaction below.
-	// TODO: now that we have a unique index on (mac,siteID) we should reconsider adding unique indices on (serial,siteID).
-	//       At this time it is expected that existing serial data may not be unique so we
-	//       cannot add such an index without cleaning existing data first.
-
 	// Retrieve the requested Expected Machines so we can resolve the SiteID
 	// and validate they all belong to the same Site. This is a pure
-	// validation read, so it stays outside the write transaction.
+	// validation read, so it stays outside the write transaction. Serial and
+	// SKU checks run inside that transaction under the Expected Inventory lock.
 	emDAO := cdbm.NewExpectedMachineDAO(uemh.dbSession)
 	requestedExpectedMachine, _, err := emDAO.GetAll(ctx, nil, cdbm.ExpectedMachineFilterInput{
 		ExpectedMachineIDs: slices.Collect(maps.Keys(idMap)),
@@ -1516,42 +1512,6 @@ func (uemh UpdateExpectedMachinesHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Failed to validate Expected Machine update data", validationErrors)
 	}
 
-	// Snapshot existing serials for duplicate diagnostics. The later SKU
-	// locks do not protect this snapshot from concurrent serial changes.
-	expectedMachinesOnSite, _, err := emDAO.GetAll(ctx, nil, cdbm.ExpectedMachineFilterInput{
-		SiteIDs: []uuid.UUID{siteID},
-	}, paginator.PageInput{
-		Limit: cutil.GetPtr(paginator.TotalLimit), // we want ALL records on site
-	}, []string{})
-	if err != nil {
-		logger.Error().Err(err).Msg("error retrieving Expected Machines from DB")
-		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Expected Machines due to DB error", nil)
-	}
-	emMap := make(map[uuid.UUID]cdbm.ExpectedMachine)
-	for i := range expectedMachinesOnSite {
-		em := &expectedMachinesOnSite[i]
-		emMap[em.ID] = *em
-	}
-
-	// Verify Serial Number uniqueness with existing records on Site
-	expectedMachineSerialNumberChecker := common.NewUniqueChecker[uuid.UUID]()
-
-	// Load DB data into checkers
-	for i := range expectedMachinesOnSite { // iterate on ALL Expected Machine on Site
-		em := &expectedMachinesOnSite[i]
-		if em.ChassisSerialNumber != "" {
-			expectedMachineSerialNumberChecker.Update(em.ID, em.ChassisSerialNumber)
-		}
-	}
-
-	// Apply Serial changes to the checker
-	for _, req := range apiRequests {
-		mid, _ := uuid.Parse(*req.ID)
-		if req.ChassisSerialNumber != nil {
-			expectedMachineSerialNumberChecker.Update(mid, *req.ChassisSerialNumber)
-		}
-	}
-
 	// The DAO returns rows in its own order. Match each row to the request
 	// by ID so its credentials and field mask stay together.
 	requestsByID := make(map[uuid.UUID]model.APIExpectedMachineUpdateRequest, len(apiRequests))
@@ -1592,11 +1552,47 @@ func (uemh UpdateExpectedMachinesHandler) Handle(c echo.Context) error {
 			HostLifecycleProfile:     machineReq.HostLifecycleProfile.ToDBModelPtr(),
 		})
 	}
-	// Update provided ExpectedMachines in DB
-	updatedExpectedMachines, err := cdb.WithTxResult(ctx, uemh.dbSession, func(tx *cdb.Tx) ([]cdbm.ExpectedMachine, error) {
-		if apiErr := acquireExpectedInventorySharedMutationLock(ctx, logger, tx, site.ID); apiErr != nil {
+	// Existing inventory may contain duplicate serials. Check explicit serial
+	// updates while keeping other fields editable on those records.
+	setsSerials := len(serialMap) > 0
+
+	// Read Committed gives the serial lookup a fresh snapshot after a lock retry.
+	updatedExpectedMachines, err := cdb.WithTxResultOpts(ctx, uemh.dbSession, &sql.TxOptions{Isolation: sql.LevelReadCommitted}, func(tx *cdb.Tx) ([]cdbm.ExpectedMachine, error) {
+		// Serial validation needs the exclusive lock before reading inventory.
+		// Updates omitting serials keep the shared mode used by ordinary mutations.
+		apiErr := acquireExpectedInventoryMutationLock(ctx, logger, tx, site.ID, !setsSerials)
+		if apiErr != nil {
 			return nil, apiErr
 		}
+		expectedMachineSerialNumberChecker := common.NewUniqueChecker[uuid.UUID]()
+		if setsSerials {
+			expectedMachinesOnSite, _, err := emDAO.GetAll(ctx, tx, cdbm.ExpectedMachineFilterInput{
+				SiteIDs: []uuid.UUID{siteID},
+			}, paginator.PageInput{
+				Limit: cutil.GetPtr(paginator.TotalLimit), // we want ALL records on site
+			}, []string{})
+			if err != nil {
+				logger.Error().Err(err).Msg("error retrieving Expected Machines from DB")
+				return nil, cutil.NewAPIError(http.StatusInternalServerError, "Failed to retrieve Expected Machines due to DB error", nil)
+			}
+
+			// Load stored serials before applying this batch.
+			for i := range expectedMachinesOnSite { // iterate on ALL Expected Machine on Site
+				em := &expectedMachinesOnSite[i]
+				if em.ChassisSerialNumber != "" {
+					expectedMachineSerialNumberChecker.Update(em.ID, em.ChassisSerialNumber)
+				}
+			}
+
+			// Apply Serial changes to the checker
+			for _, req := range apiRequests {
+				mid, _ := uuid.Parse(*req.ID)
+				if req.ChassisSerialNumber != nil {
+					expectedMachineSerialNumberChecker.Update(mid, *req.ChassisSerialNumber)
+				}
+			}
+		}
+
 		// Keep requested SKUs locked through the writes so deletion/recreation
 		// cannot change their Site after validation.
 		skuDAO := cdbm.NewSkuDAO(uemh.dbSession)
@@ -1609,7 +1605,7 @@ func (uemh UpdateExpectedMachinesHandler) Handle(c echo.Context) error {
 		for _, sku := range skus {
 			uniqueSkuIDsOnSite[sku.ID] = true
 		}
-		// Keep serial snapshot errors grouped with the locked SKU checks.
+		// Report serial and SKU errors together for each request item.
 		validationErrors := validation.Errors{}
 		for i, req := range apiRequests {
 			itemErrors := validation.Errors{}
@@ -1697,7 +1693,7 @@ func (uemh UpdateExpectedMachinesHandler) Handle(c echo.Context) error {
 			return nil, cutil.NewAPIError(http.StatusInternalServerError, "Failed to retrieve client for Site", nil)
 		}
 
-		apiErr := common.ExecuteCoreGRPC(ctx, stc, corev1.Forge_PatchExpectedMachines_FullMethodName, patchRequest, nil, site.ID.String(), secretFields...)
+		apiErr = common.ExecuteCoreGRPC(ctx, stc, corev1.Forge_PatchExpectedMachines_FullMethodName, patchRequest, nil, site.ID.String(), secretFields...)
 		if apiErr != nil {
 			logAPIError(logger, apiErr, "failed to patch expected machines")
 			return nil, apiErr

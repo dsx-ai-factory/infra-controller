@@ -256,27 +256,71 @@ fn ipv6_only_network_requires_dhcp_acceptance() {
     }
 }
 
-/// A failed stop must not prevent secondary-admin isolation, while DPUs that
-/// configure DHCP must still wait for acceptance before applying IPv6 networking.
+/// Without fixed service listeners, a failed secondary-admin DHCP stop must not prevent NVUE
+/// isolation, while IPv6-primary roles that submit a replacement must wait for acceptance.
 #[test]
 fn dhcp_stop_failure_does_not_block_secondary_admin_isolation() {
     use carbide_test_support::Outcome::{Fails, Yields};
     use carbide_test_support::scenarios;
 
-    scenarios!(run = |(is_primary_dpu, use_admin_network)| {
+    scenarios!(run = |(is_primary_dpu, use_admin_network, inventory)| {
+        // Compare host-DHCP role exemptions with omitted or explicitly empty service inventory.
         let mut config = comparison_network_config();
+        // Use an IPv6 primary loopback so a failed replacement reaches the DHCP acceptance check.
         config.managed_host_config.as_mut().unwrap().loopback_ip = "2001:db8::1".to_string();
         config.is_primary_dpu = is_primary_dpu;
         config.use_admin_network = use_admin_network;
+        config.service_vpc_slot_inventory = inventory;
         let dhcp_result = Err(eyre::eyre!("injected DHCP operation failure"));
 
         require_dhcp_before_ipv6_only_network_update(&config, &dhcp_result).map_err(drop)
     };
-        // Only this role stops DHCP instead of applying a replacement config.
-        "secondary admin" { (false, true) => Yields(()) }
+        // With no service inventory, only this role stops DHCP instead of applying a replacement.
+        "secondary admin" { (false, true, None) => Yields(()) }
+        // Explicit zero slots must preserve the same stop exemption as omitted inventory.
+        "secondary admin with empty inventory" {
+            (
+                false,
+                true,
+                Some(rpc::ServiceVpcSlotInventory { slots: vec![] }),
+            ) => Yields(())
+        }
         // Neither being secondary nor using the admin network alone bypasses it.
-        "secondary tenant" { (false, false) => Fails }
-        "primary admin" { (true, true) => Fails }
+        "secondary tenant" { (false, false, None) => Fails }
+        // A primary admin DPU still submits host DHCP, so admin-network selection cannot bypass
+        // acceptance.
+        "primary admin" { (true, true, None) => Fails }
+    );
+}
+
+/// An IPv6-primary secondary admin DPU with a fixed service listener must wait for DHCP acceptance
+/// because the failed operation is a service replacement rather than the legacy host-only stop.
+#[test]
+fn secondary_admin_service_listener_requires_dhcp_acceptance() {
+    // Use an IPv6 primary loopback so DHCP acceptance controls the IPv6-only NVUE gate.
+    let mut config = comparison_network_config();
+    config.managed_host_config.as_mut().unwrap().loopback_ip = "2001:db8::1".to_string();
+    // Select secondary-admin mode, which would stop DHCP in the legacy host-only topology.
+    config.is_primary_dpu = false;
+    config.use_admin_network = true;
+    // Add one fixed listener so this role submits a service replacement instead of stopping.
+    config.service_vpc_slot_inventory = Some(rpc::ServiceVpcSlotInventory {
+        slots: vec![rpc::ServiceVpcSlot {
+            slot_index: 0,
+            hbn_interface_name: "iface_svc_0".to_string(),
+        }],
+    });
+
+    // A failed service replacement must gate the IPv6-only network update.
+    let dhcp_result = Err(eyre::eyre!("injected DHCP operation failure"));
+    let error = require_dhcp_before_ipv6_only_network_update(&config, &dhcp_result)
+        .expect_err("service-bearing secondary admin update must wait for DHCP");
+
+    // The gate must report the same retryable wait used by other DHCP-bearing roles.
+    assert!(
+        error
+            .to_string()
+            .contains("IPv6-only network update is waiting for DHCP")
     );
 }
 

@@ -249,15 +249,17 @@ jobs:
       #
       # One restore per build. Using the Actions cache as sccache's backend
       # made one cache request per compilation and held the repository at the
-      # cache API rate limit. Cargo.lock keys the entry, and the prefix lets a
-      # lockfile bump start from the previous entry.
+      # cache API rate limit. Cargo.lock and rust-toolchain.toml key the entry,
+      # so a toolchain bump saves a fresh one instead of keeping an entry that
+      # can no longer hit. The prefix lets a lockfile bump start from the
+      # previous entry.
       - name: Restore sccache
         id: sccache
         if: inputs.sccache_scope != ''
         uses: actions/cache/restore@v4
         with:
           path: ~/.cache/sccache-build
-          key: sccache-${{ inputs.sccache_scope }}-${{ hashFiles('Cargo.lock') }}
+          key: sccache-${{ inputs.sccache_scope }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
           restore-keys: sccache-${{ inputs.sccache_scope }}-
 
       # Outside the workspace, because the Rust images `COPY . ./` the whole

@@ -22,6 +22,7 @@ use std::time::{Duration, Instant};
 use ::rpc::forge as rpc;
 use carbide_authn::SpiffeContext;
 use carbide_authn::middleware::{CertDescriptionMiddleware, ConnectionAttributes};
+use carbide_firmware::FirmwareArtifactCache;
 use hyper::server::conn::http2;
 use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use hyper_util::server::conn::auto;
@@ -379,6 +380,7 @@ pub(crate) async fn start(
     auth_config: &Option<AuthConfig>,
     meter: Meter,
     admin_ui_routes_builder: Option<AdminUiRoutesBuilder>,
+    firmware_artifact_cache: FirmwareArtifactCache,
     cancel_token: CancellationToken,
 ) -> eyre::Result<SocketAddr> {
     let api_reflection_service = Builder::configure()
@@ -538,6 +540,11 @@ pub(crate) async fn start(
     let router = axum::Router::new()
         .route("/", axum::routing::get(root_url))
         .merge(grpc_router)
+        .merge(crate::handlers::nic_firmware_artifact::router(
+            api_service.database_connection.clone(),
+            firmware_artifact_cache,
+            cancel_token.clone(),
+        ))
         .route_service(
             "/grpc.reflection.v1alpha.ServerReflection/{*r}",
             api_reflection_service,

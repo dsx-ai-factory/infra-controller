@@ -37,13 +37,17 @@ sccache_seed() {
 sccache_setup() {
 	# Bounds the directory CI saves, matching test-release-container-services.
 	: "${SCCACHE_CACHE_SIZE:=5G}"
+	# The server exits after 600s without a compile by default, and the
+	# sccache_report that follows would then start a fresh one and print
+	# zeroed stats.
+	: "${SCCACHE_IDLE_TIMEOUT:=0}"
 	# The server runs detached, so without a log file the reason behind a
 	# write error is discarded and only the count shows up in the stats.
 	# sccache logs disk write errors at debug level, so sccache::server is
 	# raised to debug.
 	SCCACHE_ERROR_LOG=/tmp/sccache-server.log
 	SCCACHE_LOG='warn,sccache::server=debug'
-	export SCCACHE_CACHE_SIZE SCCACHE_ERROR_LOG SCCACHE_LOG
+	export SCCACHE_CACHE_SIZE SCCACHE_IDLE_TIMEOUT SCCACHE_ERROR_LOG SCCACHE_LOG
 	: >"${SCCACHE_ERROR_LOG}"
 	sccache_seed
 	echo "sccache: using local cache directory ${SCCACHE_DIR}"

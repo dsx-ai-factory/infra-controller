@@ -859,7 +859,7 @@ impl<C: Callbacks> SingleSystemState<C> {
 async fn get_system_collection<C: Callbacks>(State(state): State<BmcState<C>>) -> Response {
     // Delta power shelves serve no `Systems` collection at all (the endpoint
     // 404s), which is the condition site-explorer's Delta path handles.
-    if !state.exposes_computer_systems {
+    if !state.service_root_state.exposes_computer_systems {
         return http::not_found();
     }
     let members = state
@@ -1093,7 +1093,10 @@ async fn patch_settings<C: Callbacks>(
         }
         system_state.apply_boot_source_override(boot);
     }
-    if matches!(state.bmc_vendor, redfish::oem::BmcVendor::Ami) {
+    if matches!(
+        state.service_root_state.vendor,
+        redfish::oem::BmcVendor::Ami
+    ) {
         http::ok_no_content()
     } else {
         json!({}).into_ok_response()
@@ -1281,7 +1284,10 @@ async fn patch_boot_option_settings<C: Callbacks>(
     if !system_state.patch_boot_option(&boot_option_id, patch_request) {
         return http::not_found();
     }
-    if matches!(state.bmc_vendor, redfish::oem::BmcVendor::Ami) {
+    if matches!(
+        state.service_root_state.vendor,
+        redfish::oem::BmcVendor::Ami
+    ) {
         http::ok_no_content()
     } else {
         json!({}).into_ok_response()

@@ -1,3 +1,7 @@
+{{- $env := deepCopy (.Values.env | default dict) -}}
+{{- with .Values.otlpEndpoint -}}
+{{- $_ := set $env "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT" . -}}
+{{- end -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -56,6 +60,13 @@ spec:
                 exec /opt/carbide/ssh-console run -c /etc/forge/ssh-console/config.toml
               fi
           imagePullPolicy: {{ .Values.global.image.pullPolicy }}
+          {{- with $env }}
+          env:
+            {{- range $name, $value := . }}
+            - name: {{ $name }}
+              value: {{ $value | quote }}
+            {{- end }}
+          {{- end }}
           securityContext:
             capabilities:
               add:

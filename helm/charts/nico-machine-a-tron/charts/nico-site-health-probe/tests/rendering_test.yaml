@@ -398,6 +398,9 @@ tests:
       - matchRegex:
           path: data["config.yaml"]
           pattern: 'max_kept_snapshots: 16'
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'host_read: auto'
       - notMatchRegex:
           path: data["config.yaml"]
           pattern: 'metrics_store'
@@ -760,7 +763,22 @@ tests:
       - failedTemplate:
           errorPattern: 'duration "90" must be numbers with units'
 
-  - it: rejects a compact host read
+  - it: renders the hostRead a deployer pins
+    template: templates/configmap.yaml
+    set:
+      state:
+        enabled: true
+        siteId: site-1
+        nicoApi:
+          hostRead: full
+      nicoApiClientCert:
+        existingSecret: nico-admin-cert
+    asserts:
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'host_read: full'
+
+  - it: rejects an unknown hostRead
     # The failure surfaces through deployment.yaml, whose config-checksum
     # annotation renders the configmap first.
     template: templates/deployment.yaml
@@ -769,12 +787,12 @@ tests:
         enabled: true
         siteId: site-1
         nicoApi:
-          hostRead: auto
+          hostRead: fast
       nicoApiClientCert:
         existingSecret: nico-admin-cert
     asserts:
       - failedTemplate:
-          errorPattern: 'state.nicoApi.hostRead must be full'
+          errorPattern: 'state.nicoApi.hostRead must be auto, full or compact, not "fast"'
 
   - it: requires the REST target while the REST reader is on
     # The failure surfaces through deployment.yaml, whose config-checksum

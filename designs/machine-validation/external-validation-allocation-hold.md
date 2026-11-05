@@ -12,6 +12,8 @@
 | 0.4 | 2026-09-29 | Sunil Kumar | Bind validation allocation to the request and define recovery |
 | 0.5 | 2026-10-01 | Sunil Kumar | Require successful Machine Validation, reuse Create Instance and tenant authorization, and remove workflow-specific timeouts |
 | 0.6 | 2026-10-07 | Sunil Kumar | Clarify shared targeted allocation and repair coexistence with an external-validation hold |
+| 0.7 | 2026-10-19 | Sunil Kumar | Align hold discovery with cursor-paginated IDs and tenant-scoped retrieval |
+| 0.8 | 2026-10-29 | Sunil Kumar | Align Core inventory batching, tenant scope, timestamps, and autonomous allocation recovery |
 
 ## Table of Contents
 
@@ -30,7 +32,7 @@
 - [4. Security and Compatibility](#4-security-and-compatibility)
 - [5. Design Reference: Explicit ExternalValidation State](#5-design-reference-explicit-externalvalidation-state)
 
-# **1. Introduction**
+## **1. Introduction**
 
 Machine Validation runs local checks through Scout, including site-provided
 plugins. Passing those checks establishes local machine health, but some sites
@@ -53,7 +55,7 @@ allocation hold, normal lifecycle, and audit trail, while the authorized
 external-validation tenant claims the `Ready` machine and performs its own
 detailed validation or repair work.
 
-## **1.1 Purpose**
+### **1.1 Purpose**
 
 The purpose of this document is to define a simple, generic way for a site to
 run external validation before a machine is released for normal tenant use.
@@ -75,7 +77,7 @@ The required behavior is:
 4. Only a successful result followed by normal instance cleanup releases the
    machine for normal allocation.
 
-## **1.2 Scope**
+### **1.2 Scope**
 
 This SDD covers:
 
@@ -94,7 +96,7 @@ This SDD does not cover:
 4. Changing the Machine Validation plugin input/output contract.
 5. Escalating failed Machine Validation tests to external validation.
 
-## **1.3 Assumption: External Tenant Allocation**
+### **1.3 Assumption: External Tenant Allocation**
 
 NICo reuses the existing targeted-allocation internals to allocate a held
 machine into the external-validation team's site-controlled tenant. NICo keeps
@@ -105,7 +107,7 @@ that tenant's instance. The service uses the existing Create Instance API with
 field. NICo verifies the request binding before allowing allocation because the
 `PreventAllocations` hold remains active until the workflow completes.
 
-# **2. Current State**
+## **2. Current State**
 
 NICo already has the building blocks needed for this workflow:
 
@@ -130,7 +132,7 @@ the authorized external-validation tenant claim the machine through the existing
 targeted-instance flow and then perform its detailed validation or repair work.
 The `PreventAllocations` health hold blocks normal tenants during that work.
 
-# **3. Design**
+## **3. Design**
 
 Each item below is marked **New** or **Changed**.
 
@@ -143,7 +145,7 @@ Each item below is marked **New** or **Changed**.
 | Create Instance API | **Changed** — accepts an optional `externalValidationRequestId` to bind targeted allocation to an active validation attempt. Existing OS and network inputs are reused. |
 | Machine Validation | **Changed** — successful validation creates a hold for eligible machines before they become normally allocatable. Test selection and failure behavior are unchanged. |
 
-## **3.1 Site Policy**
+### **3.1 Site Policy**
 
 The policy is site-scoped. It selects eligible machines using the site's normal
 Machine Validation context or machine-group selection. It also defines the
@@ -161,10 +163,18 @@ The following is an illustrative site configuration for every eligible machine:
 [machine_validation_config.external_validation_hold]
 enabled = true
 contexts = ["Discovery"]
-validation_tenant_id = "f97df110-f4de-492e-8849-4a6af68026b0"
+validation_tenant_org_id = "fds34511233a"
 health_report_source = "external-validation-hold"
 alert_id = "ExternalValidationRequired"
 ```
+
+`health_report_source` sets the `source` value of the NICo-owned health report
+used by this workflow. The configured name is reused across machines, with each
+held machine having its own report. `alert_id` identifies the allocation-blocking
+alert inside that report. Neither value identifies an individual hold; `hold_id`
+serves that purpose. NICo manages this source through the hold lifecycle.
+External validators must use the hold/attempt APIs rather than modifying the
+health report directly.
 
 The final configuration API must make the selected scope explicit; it must not
 enable the policy for every machine by default.
@@ -174,17 +184,24 @@ separate NICo-owned source.
 
 Only one external-validation policy may match a machine for one validation
 cycle. NICo rejects ambiguous configuration at validation time rather than
-creating competing holds. `validation_tenant_id` identifies the tenant permitted
+creating competing holds. `validation_tenant_org_id` identifies the tenant permitted
 to run this workflow. The tenant must not be used for ordinary customer workloads.
 
-`validation_tenant_id` is the REST Tenant UUID used on instances and VPCs, not
-an organization name or a newly created tenant for each attempt. A site may
-reuse an existing validation tenant. The team retrieves its tenant through
-`GET /v2/org/{org}/nico/tenant/current` and uses the returned ID. Site access
-and targeted-instance-creation capability must already be enabled through the
-normal tenant onboarding workflow. The REST layer resolves that UUID to the
-Core tenant organization; Core validates the corresponding organization, not
-the REST UUID against a Core organization ID.
+`validation_tenant_org_id` is the Core tenant organization ID. Obtain it from
+the `org` field returned by `GET /v2/org/{org}/nico/tenant/current`; it is also
+the `{org}` component of REST paths and the `organization_id` REST sends when
+creating the Core Tenant. Do not configure the response's `id` UUID: that
+separate REST Tenant identity is used for REST Instance create's `tenantId`,
+and REST resolves it to the Core organization ID. A site may reuse an existing
+validation tenant. Site access and targeted-instance creation must already be
+enabled through normal onboarding; a new tenant per attempt is unnecessary.
+
+When policy configuration is implemented, advertise its effective validation
+tenant organization IDs in `RuntimeConfig`, analogous to
+`machine_validation_enabled`. REST Site inventory retains that advertisement
+for early validation-Tenant checks, in addition to REST authorization and Core
+binding checks. Missing advertisement on older builds is unknown, not proof of
+authorization or an empty policy. Policy and advertisement are Milestone 4 work.
 
 There is no separate service-identity setting or alias registration. NICo uses
 its existing authentication and tenant-management authorization. Any caller
@@ -200,7 +217,7 @@ validation; it is not the validation-cycle identifier. The example selects
 new-capacity discovery only. A reprovision starts a new cycle, regardless of
 which context its local validation uses.
 
-## **3.2 Allocation Hold**
+### **3.2 Allocation Hold**
 
 After Machine Validation succeeds for an eligible machine, NICo creates a
 workflow-owned health override.
@@ -229,7 +246,7 @@ NICo records durable state for every hold and its active attempt. The attempt's
 opaque `request_id` fences completion, so an old result cannot release a later
 retry.
 
-### **3.2.1 Atomic Gate and Durable State**
+#### **3.2.1 Atomic Gate and Durable State**
 
 Creating a hold is part of making a machine available for the external
 workflow. NICo must persist the hold record and its `PreventAllocations` health
@@ -244,12 +261,13 @@ The durable model is conceptually:
 ExternalValidationHold
   hold_id
   site_id
-  validation_tenant_id
+  validation_tenant_org_id
   machine_id
   validation_cycle_id
   policy_id
   state                  // Pending, AttemptOpen, AwaitingCleanup, Satisfied, Recovery
   created_at
+  state_changed_at       // created_at initially; advances only on hold-state transitions
   active_attempt_id      // optional
 
 ExternalValidationAttempt
@@ -259,8 +277,11 @@ ExternalValidationAttempt
   caller_idempotency_key
   state                  // Open, Passed, Failed, Cancelled
   opened_at
+  closed_at              // set once for a terminal result; absent while Open
   allocation_state         // NotStarted, Creating, or Created
   allocation_fingerprint   // binds the first accepted Create Instance inputs
+  accepted_instance_inputs // complete inputs for autonomous recovery, not just a hash
+  allocation_instance_id   // chosen ID retained before dispatch, including generated IDs
   allocation_started_at    // optional; set when allocation is accepted
   validation_instance_id // optional until allocation creates the instance
   result_details         // optional, bounded
@@ -274,7 +295,7 @@ audit record after clearing it.
 
 NICo enforces these invariants in the database: a partial unique constraint
 permits only one `Open` attempt per `hold_id`, and the tuple
-`(site_id, validation_tenant_id, caller_idempotency_key)` is unique. Attempt
+`(site_id, validation_tenant_org_id, caller_idempotency_key)` is unique. Attempt
 creation locks the hold and inserts the attempt in the same transaction. These
 constraints, rather than client timing, decide which concurrent `Start` call
 wins.
@@ -296,7 +317,7 @@ does not replace their operation timeouts or introduce a separate cleanup
 deadline. Instance binding comes from Create Instance, not from guessing
 which instance later appeared on the machine.
 
-## **3.3 External Validation Flow**
+### **3.3 External Validation Flow**
 
 The external-validation path starts only after Machine Validation succeeds
 for a machine selected by the site policy:
@@ -359,24 +380,36 @@ NICo provides these workflow APIs:
 
 | API | Purpose |
 | :--- | :--- |
-| `ListExternalValidationHolds()` | Returns all active holds and their current attempt status. This is the authoritative discovery and recovery API. |
+| `FindExternalValidationHoldIds()` | Returns all matching IDs at the site, with optional tenant, machine, and state filters; active holds are the default. |
+| `FindExternalValidationHoldsByIds()` | Returns current holds and attempt status for batches bounded by the site's `max_find_by_ids`, with an optional tenant filter, including Satisfied holds. Together these reads are the authoritative discovery and recovery path. |
 | `StartExternalValidation(machine_id, caller_idempotency_key)` | Opens an attempt for a pending hold and returns an opaque `request_id`. It reports no active hold or an already-open attempt without creating another one. |
 | `CancelExternalValidation(request_id, details)` | Closes an active attempt only before allocation starts. It is idempotent and leaves the hold in place. |
 | `CompleteExternalValidation(request_id, outcome, details, validation_instance_id)` | Records a result only for the matching active attempt. An identical completion replay is idempotent; a stale request or conflicting completion is rejected. |
-| `RemoveExternalValidationHold(machine_id, reason)` | Audited break-glass recovery; not the normal completion path. |
+| `RemoveExternalValidationHold(machine_id, hold_id, reason)` | Audited break-glass recovery, fenced by the expected hold ID; not the normal completion path. |
 
 There is no separate validation-instance creation API. The existing Create
 Instance API receives the additive request-binding field described below.
+The companion [REST surface PR #8147](https://github.com/dsx-ai-factory/infra-controller/pull/8147)
+publishes the routes, OpenAPI/SDK models, and HTTP 501 placeholders. Core proxying,
+request-bound allocation, and reconciliation follow in the implementation
+milestones. See the [REST integration contract](external-validation-api-contract.md#rest-integration-contract-implementation-deferred)
+for the mapping and schema alignment still required before activation.
 
-### **3.3.1 Phase 1 API Contract**
+#### **3.3.1 Phase 1 API Contract**
 
-Callers of `ListExternalValidationHolds`, `StartExternalValidation`,
+Callers of `FindExternalValidationHoldIds`, `FindExternalValidationHoldsByIds`, `StartExternalValidation`,
 `CancelExternalValidation`, and `CompleteExternalValidation` must be authenticated
 and authorized to manage validation for the configured tenant at that site.
 Another authorized caller in the same tenant may resume an attempt; it is not
 restricted to the actor that started it. These callers cannot create, modify,
-or clear the NICo health override. `RemoveExternalValidationHold` requires
-site-administrator break-glass authority, not ordinary tenant permissions.
+or clear the NICo health override. REST authorizes the end user's role and
+Tenant/site access, requires Provider Admin authority for
+`RemoveExternalValidationHold`, and audits that user. It calls Core as
+`SiteAgent`; runtime Core grants must include that principal for all six RPCs.
+Core authorizes/audits the service caller and checks resource/policy bindings;
+it cannot infer the original user's role from a Site Agent identity. Direct
+Core callers require explicit method/site permissions. Milestone 1 retains
+empty grants until runtime checks are implemented.
 
 All hold and attempt mutations are persisted and auditable. The API responses
 below are the external service's durable contract; DSX Exchange events are not
@@ -388,20 +421,38 @@ The binding must reach the allocation commit; storing it only in the REST
 service after creation is insufficient. Requests without the new field retain
 existing behavior for machines without an external-validation hold.
 
-#### **ListExternalValidationHolds**
+##### **Hold ID discovery and retrieval**
 
-The service calls this on startup and periodically thereafter. It returns every
-active hold in its authorized scope, with pagination for large sites. Each item
-includes:
+The service calls `FindExternalValidationHoldIds` on startup and periodically
+thereafter, then fetches current state using `FindExternalValidationHoldsByIds`.
+Both operations accept optional tenant organization filtering at the connected
+site. REST supplies the caller's org for Tenant calls; Provider Admin inventory
+may omit it to discover holds across the site. A present empty filter is invalid.
+ID discovery returns all matching IDs in one response, ordered by immutable
+creation time and UUID byte order. Detail retrieval accepts nonempty batches
+bounded by `RuntimeConfig.max_find_by_ids` (default 100) and omits unknown,
+removed, or tenant-filter-mismatched holds. Satisfied holds
+remain readable by ID; discovery excludes them unless explicitly filtered by
+that state. Optional machine and state filters combine with tenant scope using
+AND semantics.
+
+Neither operation promises a frozen snapshot. State can change between the ID
+lookup and detail batches. Changes cannot shift positions in the saved ID list;
+newly matching holds are found on the next full lookup. An omitted hold does
+not prove allocation or cleanup finished. No cursor or live offset is used.
+See the [gRPC integration contract](external-validation-api-contract.md#discovery-and-pagination)
+for filtering and batch bounds. Each retrieved item includes:
 
 ```text
 machine_id
 hold_id                     // stable for this external-validation cycle
-hold_state                  // Pending, AttemptOpen, AwaitingCleanup, or Recovery
+hold_state                  // Pending, AttemptOpen, AwaitingCleanup, Satisfied, or Recovery
 request_id                  // present when an attempt is open, awaiting cleanup, or in recovery
 allocation_state             // NotStarted, Creating, or Created
 validation_instance_id      // present when allocation creates the target instance
 created_at
+state_changed_at             // last hold-state transition; initially created_at
+closed_at                    // terminal attempt result time; absent while Open
 ```
 
 The allocation state and `validation_instance_id` are persisted by NICo as
@@ -411,7 +462,7 @@ The service uses this response to decide whether to start a new attempt or
 resume an existing one. It must not infer that every `Ready` machine requires
 external validation.
 
-#### **StartExternalValidation**
+##### **StartExternalValidation**
 
 Request:
 
@@ -457,10 +508,10 @@ recovery without binding attempts to one service credential.
 The external service must persist the `caller_idempotency_key` before calling
 `StartExternalValidation` and persist the returned `request_id` before creating
 the targeted instance. If it crashes between either step, it calls `Start` again
-with the same key or uses `ListExternalValidationHolds()` to recover the durable
+with the same key or uses hold ID discovery and retrieval to recover the durable
 active `request_id`. NICo never relies on an in-memory request ID.
 
-#### **Existing Create Instance API**
+##### **Existing Create Instance API**
 
 The service uses `POST /v2/org/{org}/nico/instance` with normal instance
 configuration and one proposed optional field, `externalValidationRequestId`
@@ -511,8 +562,11 @@ explicit repair exception is defined in Section 3.6.
 The request authorizes bypass of this workflow's hold only; unrelated blocking
 health alerts remain enforced for validation allocation.
 
-NICo atomically records `Creating` and a fingerprint of the accepted instance
-inputs before dispatching allocation. The same request ID is the allocation
+NICo atomically records `Creating`, the complete accepted instance inputs, a
+fingerprint, and the chosen instance identity before dispatching allocation.
+Accepted inputs include a supplied Core `instance_id`; changing it conflicts.
+If omitted, Core saves its generated identity and reuses it for replay and
+recovery. The same request ID is the allocation
 idempotency key through every layer. Core enforces one allocation per key and
 commits the request-to-instance binding with the instance before returning
 success. A crash between the allocation commit and REST response cannot leave
@@ -522,8 +576,10 @@ An identical retry returns the original instance or an explicit in-progress
 response while allocation is `Creating`. Reusing the ID with changed creation
 inputs returns a conflict. NICo reconciles ambiguous allocation outcomes by
 that key; the service must not start a fresh attempt. Only a confirmed
-no-allocation outcome can return the attempt to `NotStarted` for cancellation
-or a corrected create request. Closed or superseded requests must never create
+no-allocation outcome, with the old create fenced, can return the attempt to
+`NotStarted` for cancellation. Accepted inputs remain immutable; correcting
+them requires cancellation and a new attempt. A rejection before acceptance
+can be corrected without changing the request ID. Closed or superseded requests must never create
 another instance, even if their prior instance was deleted.
 
 The hold-listing API exposes `allocation_state` and `validation_instance_id`
@@ -531,7 +587,7 @@ for recovery. The binding is protected instance metadata, persisted only when
 request-bound creation is accepted. A label cannot establish or change it, and
 ordinary instances are not automatically adopted into an attempt.
 
-#### **Targeted Instance Caller and Ownership**
+##### **Targeted Instance Caller and Ownership**
 
 The caller of targeted instance creation is an authenticated service or
 administrator authorized for the configured validation tenant and site. NICo
@@ -544,7 +600,7 @@ the machine and does not remove the hold. A definite pre-allocation rejection
 can be cancelled immediately. An accepted or ambiguous allocation is recovered
 through the same request ID rather than cancelled or replaced by another attempt.
 
-The resulting instance belongs to `validation_tenant_id`; that tenant is the
+The resulting instance belongs to `validation_tenant_org_id`; that tenant is the
 execution environment for the external team's validation or repair work. The
 external-validation service owns the operational lifecycle of that instance:
 it waits for it to become usable, runs the work, reports the outcome through
@@ -553,7 +609,7 @@ lifecycle and hold only. On completion, NICo verifies that the supplied
 instance is assigned to the held machine and belongs to the configured
 validation tenant.
 
-#### **CompleteExternalValidation**
+##### **CompleteExternalValidation**
 
 Request:
 
@@ -582,12 +638,17 @@ keeps the hold and enters recovery rather than treating the attempt as success.
 `Failed`, `Cancelled`, a missing result, or a failed cleanup leaves the hold in place.
 NICo never treats a missing result or a deleted validation instance as success.
 
-#### **Instance Release and Recovery Detection**
+##### **Instance Release and Recovery Detection**
 
 NICo owns recovery detection through its existing controller loop, not a
 separate service. It checks saved attempts against allocation, instance, and
 cleanup state, including after restart. Release and deletion also trigger
 checks; missed notifications or an unavailable validator must not stop recovery.
+Core must re-drive every durable Creating record from its saved inputs and
+instance identity without relying on caller retries. When dependencies recover
+and an authoritative outcome can be established, it resolves to Created or
+confirmed NotStarted. Created means the Core instance and request binding have
+committed, not that REST persisted its row or that provisioning reached Ready.
 
 - **Expected release:** After NICo records `Passed`, `Failed`, or `Cancelled`,
   the hold stays `AwaitingCleanup` through instance deletion. NICo retains the
@@ -602,12 +663,18 @@ checks; missed notifications or an unavailable validator must not stop recovery.
   using the saved allocation key and authoritative site state; another
   allocation remains blocked until the outcome is resolved.
 
+No fixed convergence time is promised. Extended dependency outages may leave
+Creating until authoritative checks resume. Contradictory state or an outcome
+requiring operator resolution puts the hold in Recovery with a reason while
+retaining the unresolved allocation record. Recovery is not an automatic
+NotStarted result, and elapsed time cannot authorize cancellation or removal.
+
 An authorized operator must resolve the allocation and cleanup, then explicitly
 close or fence the attempt before returning to `Pending`. Unconfirmed cleanup
 keeps the hold in `Recovery`; it never expires into success. Hold removal uses
 the administrator-only break-glass rules in Section 4.
 
-#### **CancelExternalValidation**
+##### **CancelExternalValidation**
 
 Request:
 
@@ -629,7 +696,7 @@ the existing Create Instance API with the same request ID and inputs, or reads
 the hold's allocation state, so it cannot cancel an attempt that may already
 own a machine.
 
-## **3.4 Machine Validation Success Gate**
+### **3.4 Machine Validation Success Gate**
 
 External validation is an additional check after successful Machine Validation,
 not a replacement for failed local tests. Built-in tests and plugins retain
@@ -644,7 +711,7 @@ the hold in place for recovery. There are no plugin waivers or skipped tests.
 An active repair request or another blocking health alert also prevents normal
 allocation; a passing external result does not clear those independent sources.
 
-## **3.5 Validation Cycle and Retry**
+### **3.5 Validation Cycle and Retry**
 
 NICo ties the hold to the machine's pre-allocation validation cycle. A cycle
 starts for a new discovery or reprovisioning lifecycle.
@@ -690,7 +757,7 @@ new attempt with a new `request_id`, so older results cannot affect it. NICo
 does not open a retry while the previous attempt is in `AwaitingCleanup` or
 `Recovery`.
 
-## **3.6 Relationship to Breakfix and Repair**
+### **3.6 Relationship to Breakfix and Repair**
 
 Breakfix and external validation share the existing targeted Create Instance
 API. Both allocate an exact machine into a privileged tenant with that team's
@@ -708,7 +775,7 @@ and [Repair System Integration](../../docs/manuals/repair/repair_integration.md)
 remain the repair contracts. Online repair is different: it keeps an existing
 instance assigned and does not create another targeted instance.
 
-### **Repair admission while a hold is active**
+#### **Repair admission while a hold is active**
 
 These checks are new only for held machines; targeted repair already exists.
 NICo permits repair without `externalValidationRequestId` only when:
@@ -747,7 +814,7 @@ cleanup and local validation succeed
 and other blocking alerts are cleared; removing `RequestRepair` alone is not
 proof of success.
 
-### **Example: validation fails, repair runs, then validation retries**
+#### **Example: validation fails, repair runs, then validation retries**
 
 The diagram shows the successful repair-and-retry path. Every normal customer
 allocation remains blocked until the final hold removal. These stages belong
@@ -795,21 +862,22 @@ sequenceDiagram
     Note over NICo,Health: ExternalValidationRequired removed<br/>Machine Ready<br/>Normal allocation allowed if no other blockers remain
 ```
 
-## **3.7 Phased Delivery**
+### **3.7 Phased Delivery**
 
 | Phase | New implementation | Reused behavior | Outcome |
 | :--- | :--- | :--- | :--- |
 | Phase 1 | Site policy, durable hold and attempt records, external-validation APIs, request binding, and hold-aware repair admission. | Health override, existing OS/network inputs, targeted allocation, repair workflow, instance lifecycle, and Machine Validation. | Complete, recoverable external-validation workflow. |
 | Phase 2 | External-validation hold metadata in DSX Exchange `Ready` events. | Phase 1 reconciliation API and state-change publishing. | Faster common path; correctness still comes from Phase 1 APIs. |
 
-### **Phase 1: API-driven workflow**
+#### **Phase 1: API-driven workflow**
 
 Phase 1 delivers the complete, correct external-validation workflow without a
 new DSX Exchange event contract. NICo creates and owns the
 `PreventAllocations` hold after successful Machine Validation for an eligible
 machine, before making it `Ready`. The site-controlled external-validation
 service uses
-`ListExternalValidationHolds()` to discover and reconcile pending work, then
+`FindExternalValidationHoldIds()` and `FindExternalValidationHoldsByIds()` to
+discover and reconcile pending work, then
 uses `StartExternalValidation(machine_id, caller_idempotency_key)` to obtain a
 `request_id`. It creates the validation instance through the existing Create
 Instance API, supplying its OS and network inputs, `allowUnhealthyMachine: true`,
@@ -822,7 +890,7 @@ both completed. API-based discovery is mandatory in this phase: it lets the serv
 recover after restart and remains correct even if it has not observed a machine
 state notification.
 
-### **Phase 2: DSX Exchange event enrichment**
+#### **Phase 2: DSX Exchange event enrichment**
 
 Phase 2 improves the common event-driven path but does not replace Phase 1
 reconciliation. NICo already publishes managed-host state changes to the DSX
@@ -834,8 +902,8 @@ stable hold/cycle identifier.
 The external-validation service can then ignore ordinary `Ready` events without
 an API lookup and start work promptly when the event carries an active hold.
 Implementing this phase requires an AsyncAPI contract update and matching NICo
-state-change publisher and periodic-republisher changes. `ListExternalValidationHolds()`
-remains the source of truth for service startup, missed events, and
+state-change publisher and periodic-republisher changes. Hold ID discovery and
+retrieval remain the source of truth for service startup, missed events, and
 out-of-order delivery.
 
 Before external teams integrate, Phase 1 must publish the reviewed protobuf and
@@ -845,7 +913,7 @@ response and error schemas, in-progress allocation responses, idempotent replay,
 and conflict handling. The examples here are a proposed design, not an available
 API specification or a delivery-date commitment.
 
-# **4. Security and Compatibility**
+## **4. Security and Compatibility**
 
 - Only NICo creates, reconciles, and normally clears this hold.
 - The validation service cannot remove a hold. Administrator-only break-glass
@@ -874,7 +942,7 @@ API specification or a delivery-date commitment.
   behavior unless a site explicitly enables this policy. The design does not
   change the Machine Validation plugin contract or normal tenant allocation.
 
-# **5. Design Reference: Explicit `ExternalValidation` State**
+## **5. Design Reference: Explicit `ExternalValidation` State**
 
 A dedicated `ExternalValidation` state was considered as an alternative to
 returning a host to `Ready` with a `PreventAllocations` allocation hold. It is

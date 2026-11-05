@@ -379,15 +379,20 @@ pub async fn update_nvos_update_job(
     Ok(())
 }
 
-pub async fn final_delete(txn: &mut PgConnection, rack_id: &RackId) -> DatabaseResult<()> {
+/// `final_delete` permanently deletes an active or soft-deleted rack,
+/// retaining its history.
+///
+/// Returns `true` if a rack was deleted, or `false` if absent. Does not commit
+/// the caller's transaction.
+pub async fn final_delete(txn: &mut PgConnection, rack_id: &RackId) -> DatabaseResult<bool> {
     let query = "DELETE from racks WHERE id=$1";
-    sqlx::query(query)
+    let result = sqlx::query(query)
         .bind(rack_id)
         .execute(txn)
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
 
-    Ok(())
+    Ok(result.rows_affected() > 0)
 }
 
 pub async fn insert_health_report(

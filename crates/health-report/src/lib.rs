@@ -660,6 +660,18 @@ impl HealthProbeId {
     pub fn nvlink_unhealthy() -> Self {
         HealthProbeId("NvlinkUnhealthy".to_string())
     }
+
+    /// The ID used while a host marked for NVLink isolation still has GPUs in an NVLink
+    /// partition, or the NVLink partition monitor cannot confirm that it has none.
+    pub fn nvlink_isolation_pending() -> Self {
+        HealthProbeId("NvlinkIsolationPending".to_string())
+    }
+
+    /// The ID the NVLink partition monitor reports as a success once NMX-C lists none of a
+    /// marked host's GPUs in any NVLink partition.
+    pub fn nvlink_isolated() -> Self {
+        HealthProbeId("NvlinkIsolated".to_string())
+    }
 }
 
 impl std::fmt::Debug for HealthProbeId {
@@ -773,6 +785,15 @@ impl HealthAlertClassification {
     /// operator needs the state machine running but SLA alerts would be spurious.
     pub fn exclude_from_state_machine_sla() -> Self {
         Self("ExcludeFromStateMachineSla".to_string())
+    }
+
+    /// Tells the NVLink partition monitor to remove every GPU on the host from
+    /// every NVLink partition, tenant or tray default, and to keep them out
+    /// until the classification is cleared. Applied before a compute tray is
+    /// physically moved or replaced, so NMX-C is never left holding the UIDs
+    /// of GPUs that are no longer in the rack.
+    pub fn isolate_from_nvlink_partitions() -> Self {
+        Self("IsolateFromNvLinkPartitions".to_string())
     }
 }
 

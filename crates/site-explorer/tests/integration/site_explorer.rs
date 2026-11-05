@@ -579,6 +579,438 @@ async fn test_suppressed_unexplored_endpoint_does_not_consume_budget_and_resumes
     Ok(())
 }
 
+/// A new address on an owned BMC skips preingestion even if its first probe
+/// fails. Existing endpoints still preserve retries requested through the API.
+#[sqlx_test]
+async fn test_new_ipv6_address_of_managed_bmc_skips_preingestion(
+    pool: PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use model::allocation_type::AllocationType;
+    use model::machine_interface_address::MachineInterfaceAssociation;
+
+    let env = Env::new(pool).await;
+    // With automatic creation disabled, every new endpoint would be Complete
+    // regardless of ownership, so keep the production ownership check enabled.
+    let explorer = env.test_site_explorer(SiteExplorerConfig {
+        create_machines: Arc::new(true.into()),
+        ..suppression_test_config(1)
+    });
+    let cases = [
+        // Successful first discovery must skip preingestion before any retry.
+        (
+            "healthy first probe",
+            "02:00:00:00:13:03",
+            "2001:db8::8734",
+            None,
+        ),
+        // A failed probe still belongs to the managed BMC. A healthy refresh
+        // must not expose it as Initial work.
+        (
+            "failed first probe",
+            "02:00:00:00:13:05",
+            "2001:db8::8735",
+            Some(EndpointExplorationError::ConnectionRefused {
+                details: "managed alias first probe failed".to_string(),
+            }),
+        ),
+    ];
+    for (case_index, (scenario, mac, ipv6, first_error)) in cases.into_iter().enumerate() {
+        let mut bmc = env.new_machine(mac, "Vendor1");
+        bmc.discover_dhcp(env.api()).await?;
+        let ipv4: IpAddr = bmc.ip.parse()?;
+        let ipv6: IpAddr = ipv6.parse()?;
+        let hardware_info = HardwareInfo {
+            dmi_data: Some(DmiData {
+                product_serial: format!("managed-bmc-{mac}"),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let machine_id = from_hardware_info_with_type(&hardware_info, MachineType::Host)?;
+        let report = EndpointExplorationReport {
+            endpoint_type: EndpointType::Bmc,
+            chassis: vec![Chassis {
+                id: "managed-bmc".to_string(),
+                serial_number: Some(format!("managed-bmc-{mac}")),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        // Only the ownership predicate needs a Ready machine row; no topology or
+        // DPU inventory is needed to prove the endpoint's initial stored state.
+        let mut txn = env.pool.begin().await?;
+        db::machine::create(
+            &mut txn,
+            None,
+            &machine_id,
+            ManagedHostState::Ready,
+            None,
+            CURRENT_STATE_MODEL_VERSION,
+        )
+        .await?;
+        let interfaces = db::machine_interface::find_by_mac_address(txn.as_mut(), bmc.mac).await?;
+        let interface_id = interfaces
+            .first()
+            .expect("DHCP created the BMC interface")
+            .id;
+        db::machine_interface::associate_bmc_interface(
+            &interface_id,
+            MachineInterfaceAssociation::Machine(machine_id),
+            &mut txn,
+        )
+        .await?;
+        db::explored_endpoints::insert(ipv4, &report, false, txn.as_mut()).await?;
+        db::explored_endpoints::set_preingestion_complete(ipv4, txn.as_mut()).await?;
+        let original = db::explored_endpoints::find_all_by_ip(ipv4, txn.as_mut())
+            .await?
+            .pop()
+            .expect("the completed IPv4 endpoint was saved");
+        db::machine_interface_address::insert(
+            txn.as_mut(),
+            interface_id,
+            ipv6,
+            AllocationType::Dhcp,
+        )
+        .await?;
+        txn.commit().await?;
+
+        explorer.insert_endpoints(vec![(ipv4, report.clone())]);
+        if let Some(error) = &first_error {
+            explorer.insert_endpoint_result(ipv6, Err(error.clone()));
+        } else {
+            explorer.insert_endpoints(vec![(ipv6, report.clone())]);
+        }
+        explorer.run_single_iteration().await?;
+
+        let mut txn = env.pool.begin().await?;
+        let discovered = db::explored_endpoints::find_all_by_ip(ipv6, txn.as_mut()).await?;
+        let original_after = db::explored_endpoints::find_all_by_ip(ipv4, txn.as_mut()).await?;
+        let interfaces_after =
+            db::machine_interface::find_by_mac_address(txn.as_mut(), bmc.mac).await?;
+        let preingestion =
+            db::explored_endpoints::find_preingest_not_waiting_not_error(txn.as_mut()).await?;
+        txn.commit().await?;
+
+        assert_eq!(discovered.len(), 1);
+        let endpoint = &discovered[0];
+        if first_error.is_some() {
+            assert_eq!(
+                endpoint.report.endpoint_type,
+                EndpointType::Unknown,
+                "{scenario}"
+            );
+        } else {
+            assert_eq!(
+                endpoint.report.endpoint_type,
+                EndpointType::Bmc,
+                "{scenario}"
+            );
+            assert_eq!(endpoint.report.chassis, report.chassis, "{scenario}");
+        }
+        assert_eq!(
+            endpoint.report.last_exploration_error, first_error,
+            "{scenario}"
+        );
+        assert_eq!(
+            endpoint.preingestion_state,
+            PreingestionState::Complete,
+            "{scenario}"
+        );
+        assert!(!preingestion.iter().any(|entry| entry.address == ipv6));
+        assert_eq!(original_after, vec![original]);
+        assert_eq!(interfaces_after.len(), 1);
+        assert_eq!(interfaces_after[0].id, interface_id);
+        assert_eq!(interfaces_after[0].machine_id, Some(machine_id));
+        let owner = db::machine::find_one(&env.pool, &machine_id, MachineSearchConfig::default())
+            .await?
+            .expect("the BMC's original machine remains saved after discovery");
+        assert_eq!(
+            owner.current_state(),
+            &ManagedHostState::Ready,
+            "{scenario}"
+        );
+        let mut addresses = interfaces_after[0].addresses.clone();
+        addresses.sort();
+        assert_eq!(addresses, vec![ipv4, ipv6]);
+
+        if first_error.is_some() {
+            // Recover the same failed address without changing its completion state.
+            explorer.insert_endpoints(vec![(ipv6, report.clone())]);
+            env.api()
+                .re_explore_endpoint(Request::new(rpc::forge::ReExploreEndpointRequest {
+                    ip_address: ipv6.to_string(),
+                    if_version_match: None,
+                }))
+                .await?;
+            explorer.run_single_iteration().await?;
+            let recovered = db::explored_endpoints::find_by_ips(&env.pool, vec![ipv6])
+                .await?
+                .pop()
+                .expect("the recovered IPv6 endpoint remains saved");
+            let preingestion =
+                db::explored_endpoints::find_preingest_not_waiting_not_error(&env.pool).await?;
+            assert_eq!(
+                recovered.report_version.version_nr(),
+                endpoint.report_version.version_nr() + 1
+            );
+            assert_eq!(recovered.report.endpoint_type, EndpointType::Bmc);
+            assert_eq!(recovered.report.chassis, report.chassis);
+            assert_eq!(recovered.report.last_exploration_error, None);
+            assert_eq!(recovered.preingestion_state, PreingestionState::Complete);
+            assert!(!preingestion.iter().any(|entry| entry.address == ipv6));
+        } else {
+            // Clearing an actual Failed state requests a retry through the public API.
+            // Refresh must save the report without completing that existing retry.
+            let mut txn = env.pool.begin().await?;
+            db::explored_endpoints::set_preingestion_failed(
+                ipv6,
+                "operator retry fixture".to_string(),
+                txn.as_mut(),
+            )
+            .await?;
+            txn.commit().await?;
+            let failed = db::explored_endpoints::find_by_ips(&env.pool, vec![ipv6])
+                .await?
+                .pop()
+                .expect("the failed endpoint remains saved");
+            assert!(matches!(
+                failed.preingestion_state,
+                PreingestionState::Failed { .. }
+            ));
+            env.api()
+                .clear_site_exploration_error(Request::new(
+                    rpc::forge::ClearSiteExplorationErrorRequest {
+                        ip_address: ipv6.to_string(),
+                    },
+                ))
+                .await?;
+            let cleared = db::explored_endpoints::find_by_ips(&env.pool, vec![ipv6])
+                .await?
+                .pop()
+                .expect("the cleared endpoint remains saved");
+            assert_eq!(cleared.preingestion_state, PreingestionState::Initial);
+            env.api()
+                .re_explore_endpoint(Request::new(rpc::forge::ReExploreEndpointRequest {
+                    ip_address: ipv6.to_string(),
+                    if_version_match: None,
+                }))
+                .await?;
+            // Requested refreshes also leave routine capacity, which can probe IPv4.
+            explorer.run_single_iteration().await?;
+
+            let mut txn = env.pool.begin().await?;
+            let refreshed = db::explored_endpoints::find_all_by_ip(ipv6, txn.as_mut())
+                .await?
+                .pop()
+                .expect("the managed IPv6 endpoint remains saved after refresh");
+            let preingestion =
+                db::explored_endpoints::find_preingest_not_waiting_not_error(txn.as_mut()).await?;
+            txn.commit().await?;
+            assert_eq!(
+                refreshed.report_version.version_nr(),
+                cleared.report_version.version_nr() + 1
+            );
+            assert!(!refreshed.exploration_requested);
+            assert_eq!(refreshed.preingestion_state, PreingestionState::Initial);
+            assert!(preingestion.iter().any(|entry| entry.address == ipv6));
+
+            // Delete only the alias endpoint to re-enter first persistence with its
+            // addresses and ownership intact. Reject Complete, not the initial INSERT.
+            let mut txn = env.pool.begin().await?;
+            db::explored_endpoints::delete(txn.as_mut(), ipv6).await?;
+            let sibling_before_fault =
+                db::explored_endpoints::find_all_by_ip(ipv4, txn.as_mut()).await?;
+            txn.commit().await?;
+            sqlx::query(
+                r#"
+        ALTER TABLE explored_endpoints
+        ADD CONSTRAINT reject_managed_alias_completion
+        CHECK (address <> '2001:db8::8734'::inet OR preingestion_state->>'state' <> 'complete')
+    "#,
+            )
+            .execute(&env.pool)
+            .await?;
+            let error = explorer
+                .run_single_iteration()
+                .await
+                .expect_err("the alias completion write must fail");
+            let carbide_site_explorer::errors::SiteExplorerError::DatabaseError(
+                db::DatabaseError::Sqlx(query_error),
+            ) = error
+            else {
+                panic!("expected the injected completion-write error, got {error:?}");
+            };
+            let database_error = query_error
+                .source
+                .as_database_error()
+                .expect("the completion failure has a database source");
+            assert_eq!(
+                database_error.constraint(),
+                Some("reject_managed_alias_completion")
+            );
+            assert!(
+                db::explored_endpoints::find_by_ips(&env.pool, vec![ipv6])
+                    .await?
+                    .is_empty()
+            );
+            assert_eq!(
+                db::explored_endpoints::find_by_ips(&env.pool, vec![ipv4]).await?,
+                sibling_before_fault
+            );
+            let owner_after_fault =
+                db::machine_interface::find_by_mac_address(&env.pool, bmc.mac).await?;
+            assert_eq!(owner_after_fault.len(), 1);
+            assert_eq!(owner_after_fault[0].id, interface_id);
+            assert_eq!(owner_after_fault[0].machine_id, Some(machine_id));
+            let mut addresses = owner_after_fault[0].addresses.clone();
+            addresses.sort();
+            assert_eq!(addresses, vec![ipv4, ipv6]);
+            assert!(
+                !db::explored_endpoints::find_preingest_not_waiting_not_error(&env.pool)
+                    .await?
+                    .iter()
+                    .any(|entry| entry.address == ipv6)
+            );
+            sqlx::query(
+                "ALTER TABLE explored_endpoints DROP CONSTRAINT reject_managed_alias_completion",
+            )
+            .execute(&env.pool)
+            .await?;
+            explorer.run_single_iteration().await?;
+            let retried = db::explored_endpoints::find_by_ips(&env.pool, vec![ipv6])
+                .await?
+                .pop()
+                .expect("the same alias is saved after the write recovers");
+            assert_eq!(retried.report.chassis, report.chassis);
+            assert_eq!(retried.preingestion_state, PreingestionState::Complete);
+            assert!(
+                !db::explored_endpoints::find_preingest_not_waiting_not_error(&env.pool)
+                    .await?
+                    .iter()
+                    .any(|entry| entry.address == ipv6)
+            );
+        }
+
+        let sibling = db::explored_endpoints::find_by_ips(&env.pool, vec![ipv4])
+            .await?
+            .pop()
+            .expect("the IPv4 sibling remains saved after refresh");
+        assert_eq!(
+            sibling.preingestion_state,
+            PreingestionState::Complete,
+            "{scenario}"
+        );
+        let interfaces = db::machine_interface::find_by_mac_address(&env.pool, bmc.mac).await?;
+        assert_eq!(interfaces.len(), 1, "{scenario}");
+        assert_eq!(interfaces[0].id, interface_id, "{scenario}");
+        assert_eq!(interfaces[0].machine_id, Some(machine_id), "{scenario}");
+        assert_eq!(
+            interfaces[0].interface_type,
+            model::machine_interface::InterfaceType::Bmc,
+            "{scenario}"
+        );
+        assert_eq!(
+            interfaces[0].association_type,
+            Some(model::machine_interface_address::InterfaceAssociationType::Machine),
+            "{scenario}"
+        );
+        let mut addresses = interfaces[0].addresses.clone();
+        addresses.sort();
+        assert_eq!(addresses, vec![ipv4, ipv6], "{scenario}");
+        let machines = db::machine::find(
+            &env.pool,
+            ObjectFilter::<MachineId>::All,
+            MachineSearchConfig::default(),
+        )
+        .await?;
+        assert_eq!(machines.len(), case_index + 1, "{scenario}");
+        let owner = machines
+            .iter()
+            .find(|machine| machine.id == machine_id)
+            .expect("the BMC's original machine remains saved");
+        assert_eq!(
+            owner.current_state(),
+            &ManagedHostState::Ready,
+            "{scenario}"
+        );
+    }
+
+    Ok(())
+}
+
+/// The managed-BMC exception must still leave new, unowned BMCs eligible for
+/// normal preingestion when automatic machine creation is enabled.
+#[sqlx_test]
+async fn test_unowned_bmc_first_discovery_remains_in_preingestion(
+    pool: PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use model::allocation_type::AllocationType;
+
+    let env = Env::new(pool).await;
+    let mut bmc = env.new_machine("02:00:00:00:13:04", "Vendor1");
+    bmc.discover_dhcp(env.api()).await?;
+    let ipv4: IpAddr = bmc.ip.parse()?;
+    let address: IpAddr = "2001:db8::8734".parse()?;
+    let report = EndpointExplorationReport {
+        endpoint_type: EndpointType::Bmc,
+        chassis: vec![Chassis {
+            id: "managed-bmc".to_string(),
+            serial_number: Some(format!("managed-bmc-{}", bmc.mac)),
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    // Match the managed fixture's family and completed sibling. Only ownership
+    // differs, so neither IPv6 nor sibling completion alone may skip preingestion.
+    let mut txn = env.pool.begin().await?;
+    let interfaces = db::machine_interface::find_by_mac_address(txn.as_mut(), bmc.mac).await?;
+    let interface = interfaces
+        .first()
+        .expect("DHCP created the unowned BMC interface");
+    assert_eq!(interface.machine_id, None);
+    db::explored_endpoints::insert(ipv4, &report, false, txn.as_mut()).await?;
+    db::explored_endpoints::set_preingestion_complete(ipv4, txn.as_mut()).await?;
+    let original = db::explored_endpoints::find_all_by_ip(ipv4, txn.as_mut()).await?;
+    db::machine_interface_address::insert(
+        txn.as_mut(),
+        interface.id,
+        address,
+        AllocationType::Dhcp,
+    )
+    .await?;
+    txn.commit().await?;
+    let explorer = env.test_site_explorer(SiteExplorerConfig {
+        create_machines: Arc::new(true.into()),
+        ..suppression_test_config(1)
+    });
+    explorer.insert_endpoints(vec![(address, report)]);
+    explorer.run_single_iteration().await?;
+
+    let mut txn = env.pool.begin().await?;
+    let discovered = db::explored_endpoints::find_all_by_ip(address, txn.as_mut()).await?;
+    let preingestion =
+        db::explored_endpoints::find_preingest_not_waiting_not_error(txn.as_mut()).await?;
+    txn.commit().await?;
+    assert_eq!(discovered.len(), 1);
+    assert_eq!(discovered[0].report.endpoint_type, EndpointType::Bmc);
+    assert_eq!(discovered[0].preingestion_state, PreingestionState::Initial);
+    assert!(preingestion.iter().any(|entry| entry.address == address));
+    assert_eq!(
+        db::explored_endpoints::find_by_ips(&env.pool, vec![ipv4]).await?,
+        original
+    );
+    let interfaces_after = db::machine_interface::find_by_mac_address(&env.pool, bmc.mac).await?;
+    assert_eq!(interfaces_after.len(), 1);
+    assert_eq!(interfaces_after[0].id, interface.id);
+    assert_eq!(interfaces_after[0].machine_id, None);
+    let mut addresses = interfaces_after[0].addresses.clone();
+    addresses.sort();
+    assert_eq!(addresses, vec![ipv4, address]);
+
+    Ok(())
+}
+
 /// An expected BMC whose first probe fails must be retried before older routine
 /// reports. Recovery must release that capacity so routine refresh can resume.
 #[sqlx_test]
@@ -2757,6 +3189,10 @@ async fn test_site_explorer_main(pool: PgPool) -> Result<(), Box<dyn std::error:
 async fn test_site_explorer_audit_exploration_results(
     pool: PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    // This iteration records a failed creation; see the mutex's comment.
+    let _failed_creation_guard = super::machine_creator::FAILED_CREATION_METRIC_TEST_SERIAL
+        .lock()
+        .await;
     let env = Env::new(pool.clone()).await;
     let underlay_segment = env.underlay_segment.id;
 
@@ -4882,6 +5318,10 @@ async fn test_site_explorer_pairs_dpu_from_chassis_serial(
     use model::expected_machine::{ExpectedMachine, ExpectedMachineData};
     use model::site_explorer::BlueFieldOperatingMode;
 
+    // This iteration records a failed creation; see the mutex's comment.
+    let _failed_creation_guard = super::machine_creator::FAILED_CREATION_METRIC_TEST_SERIAL
+        .lock()
+        .await;
     let env = Env::new(pool).await;
 
     const CHASSIS_DPU_SERIAL: &str = "chassis-reported-dpu-serial";
@@ -5174,6 +5614,10 @@ async fn test_site_explorer_deduplicates_inventory_serials_and_repairs_persisted
 async fn test_site_explorer_pairs_vr_bf4_from_bluefield_chassis(
     pool: PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    // This iteration records a failed creation; see the mutex's comment.
+    let _failed_creation_guard = super::machine_creator::FAILED_CREATION_METRIC_TEST_SERIAL
+        .lock()
+        .await;
     let env = Env::new(pool).await;
 
     let reports = generate_managed_host_reports(HardwareType::NvidiaDgxVr).await?;

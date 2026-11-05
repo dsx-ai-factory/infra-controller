@@ -491,6 +491,7 @@ async fn test_instance_type_delete(pool: sqlx::PgPool) -> Result<(), Box<dyn std
             }),
             metadata: None,
             allow_unhealthy_machine: false,
+            external_validation_request_id: None,
         }))
         .await
         .unwrap()
@@ -694,6 +695,7 @@ async fn test_instance_type_associate(
             }),
             metadata: None,
             allow_unhealthy_machine: false,
+            external_validation_request_id: None,
         }))
         .await
         .unwrap_err();
@@ -723,6 +725,7 @@ async fn test_instance_type_associate(
             }),
             metadata: None,
             allow_unhealthy_machine: false,
+            external_validation_request_id: None,
         }))
         .await
         .unwrap()

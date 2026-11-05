@@ -15,6 +15,10 @@
 # limitations under the License.
 #
 
+# See skip_git_env_info in the root Makefile.toml.
+[config]
+skip_git_env_info = true
+
 [env]
 REPO_ROOT = { script = [
   "dirname $(cargo locate-project --message-format plain --workspace)",

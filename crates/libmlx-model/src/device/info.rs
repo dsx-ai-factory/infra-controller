@@ -47,6 +47,11 @@ pub struct MlxDeviceInfo {
     // fw_version_current is the currently
     // installed firmware version.
     pub fw_version_current: Option<String>,
+    /// `fw_version_running` is the Linux RDMA driver's firmware version for
+    /// this PCI function, read from `infiniband/<device>/fw_ver`. It is `None`
+    /// when unavailable or ambiguous; `fw_version_current` is independent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fw_version_running: Option<String>,
     // pxe_version_current is the currently installed
     // PXE boot version.
     pub pxe_version_current: Option<String>,
@@ -195,6 +200,7 @@ impl MlxDeviceInfo {
             psid: Some("MT_00000055".to_string()),
             device_description: Some("Mellanox ConnectX-6 Dx EN 100GbE dual port".to_string()),
             part_number: Some("MCX623106AN-CDAT".to_string()),
+            fw_version_running: Some("22.31.1014".to_string()),
             fw_version_current: Some("22.32.1010".to_string()),
             pxe_version_current: Some("3.6.0502".to_string()),
             uefi_version_current: Some("14.25.1020".to_string()),
@@ -214,6 +220,7 @@ impl MlxDeviceInfo {
             psid: None,
             device_description: None,
             part_number: None,
+            fw_version_running: None,
             fw_version_current: None,
             pxe_version_current: None,
             uefi_version_current: None,
