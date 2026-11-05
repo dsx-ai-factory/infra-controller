@@ -1180,7 +1180,8 @@ impl EndpointExplorationReport {
             .any(|c| c.id.to_lowercase().contains("mgx_nvswitch_0"))
     }
 
-    /// Return `DpuModel` if the explored endpoint is a DPU
+    /// Return `DpuModel` if the explored endpoint is a DPU.
+    /// Return `Unknown` if no DPU generation is recognized or recognized generations conflict.
     pub fn identify_dpu(&self) -> Option<DpuModel> {
         if !self
             .systems
@@ -1191,22 +1192,19 @@ impl EndpointExplorationReport {
             return None;
         }
 
-        let chassis_map = self
+        let mut models = self
             .chassis
             .iter()
-            .map(|x| (x.id.as_str(), x))
-            .collect::<HashMap<_, _>>();
-        let model = chassis_map
-            .get("Card1")
-            .and_then(|value| chassis_model(value))
-            .or_else(|| {
-                self.chassis
-                    .iter()
-                    .filter(|chassis| is_dpu_product_chassis_id(&chassis.id))
-                    .find_map(chassis_model)
-            })
-            .unwrap_or("");
-        Some(DpuModel::from(model))
+            .filter(|chassis| is_dpu_product_chassis_id(&chassis.id))
+            .filter_map(chassis_model)
+            .map(DpuModel::from)
+            .filter(|model| *model != DpuModel::Unknown);
+        let model = models.next().unwrap_or(DpuModel::Unknown);
+        Some(if models.all(|other| other == model) {
+            model
+        } else {
+            DpuModel::Unknown
+        })
     }
 
     pub fn create_temporary_dmi_data(
@@ -2229,14 +2227,14 @@ pub fn is_bf4_dpu_part_number(part_number: &str) -> bool {
         || normalized_part_number.starts_with("900-9d4a4")
 }
 
-/// Whether a DPU BMC chassis member carries the card product identity
+/// Whether a DPU BMC chassis member can carry the card product identity
 /// (part/model/serial).
 ///
 /// Older Redfish reports publish this identity on `Card1`; newer BF4 firmware may
 /// instead publish it on the integrated BMC chassis (`Bluefield_BMC` or
-/// `BlueField_BMC_0`). These IDs are expected to be mutually exclusive as product
-/// identity sources in real reports, so callers can select the first matching
-/// chassis.
+/// `BlueField_BMC_0`). Reports can contain several of these chassis, including
+/// placeholders or BMC component models. Model identification requires the
+/// recognized DPU generations to agree.
 fn is_dpu_product_chassis_id(id: &str) -> bool {
     matches!(id, "Card1" | "Bluefield_BMC" | "BlueField_BMC_0")
 }
@@ -2259,7 +2257,12 @@ fn chassis_part_number(chassis: &Chassis) -> Option<&str> {
 }
 
 fn chassis_model(chassis: &Chassis) -> Option<&str> {
-    chassis.model.as_deref().map(str::trim).none_if_empty()
+    chassis
+        .model
+        .as_deref()
+        .map(str::trim)
+        .none_if_empty()
+        .filter(|model| !model.eq_ignore_ascii_case("n/a"))
 }
 
 // returns true if the passed in string is a BlueField part number
@@ -3338,6 +3341,108 @@ mod tests {
                 ("Bluefield", "BlueField-3 DPU") => Some(DpuModel::BlueField3),
                 ("Bluefield", "unrecognized DPU") => Some(DpuModel::Unknown),
                 ("System", "BlueField-3 DPU") => None,
+            }
+        );
+    }
+
+    #[test]
+    fn identify_dpu_requires_agreeing_recognized_chassis_models() {
+        value_scenarios!(
+            run = |models: Vec<(&str, Option<&str>)>| {
+                let mut report = EndpointExplorationReport {
+                    systems: vec![ComputerSystem {
+                        id: "Bluefield".to_string(),
+                        ..Default::default()
+                    }],
+                    chassis: models.into_iter().map(|(id, model)| Chassis {
+                        id: id.to_string(),
+                        model: model.map(str::to_string),
+                        ..Default::default()
+                    }).collect(),
+                    ..Default::default()
+                };
+                let identified = report.identify_dpu();
+                assert!(report.is_dpu());
+                report.chassis.reverse();
+                assert_eq!(report.identify_dpu(), identified, "chassis order must not affect identification");
+                identified
+            };
+            "placeholder Card1 model allows either product BMC chassis" {
+                vec![("Card1", Some("N/A")), ("Bluefield_BMC", Some("BlueField-3 DPU"))]
+                    => Some(DpuModel::BlueField3),
+                vec![("Card1", Some(" n/a ")), ("BlueField_BMC_0", Some("BlueField-3 DPU"))]
+                    => Some(DpuModel::BlueField3),
+                vec![("Card1", None), ("Bluefield_BMC", Some("BlueField-3 DPU"))]
+                    => Some(DpuModel::BlueField3),
+                vec![("Card1", Some(" \t ")), ("Bluefield_BMC", Some("BlueField-3 DPU"))]
+                    => Some(DpuModel::BlueField3),
+            }
+            "placeholder BMC model does not mask another product model" {
+                vec![("Card1", Some("BlueField-3 DPU")), ("Bluefield_BMC", Some("N/A"))]
+                    => Some(DpuModel::BlueField3),
+                vec![("Card1", Some("N/A")), ("Bluefield_BMC", Some("N/A")), ("BlueField_BMC_0", Some("BlueField-3 DPU"))]
+                    => Some(DpuModel::BlueField3),
+            }
+            "equivalent model spellings agree" {
+                vec![("Card1", Some("NVIDIA BlueField 3 DPU")), ("Bluefield_BMC", Some("BlueField-3 DPU"))]
+                    => Some(DpuModel::BlueField3),
+            }
+            "conflicting recognized product models remain unknown" {
+                vec![("Card1", Some("BlueField-3 DPU")), ("Bluefield_BMC", Some("BlueField-2 DPU"))]
+                    => Some(DpuModel::Unknown),
+                vec![("Card1", Some("N/A")), ("Bluefield_BMC", Some("BlueField-3 DPU")), ("BlueField_BMC_0", Some("BlueField-2 DPU"))]
+                    => Some(DpuModel::Unknown),
+            }
+            "unrecognized chassis models do not mask a recognized DPU generation" {
+                vec![("Card1", Some("BlueField-3 DPU")), ("Bluefield_BMC", Some("unrecognized DPU"))]
+                    => Some(DpuModel::BlueField3),
+                vec![("Card1", Some("unrecognized DPU")), ("Bluefield_BMC", Some("BlueField-3 DPU"))]
+                    => Some(DpuModel::BlueField3),
+            }
+            "no usable product model still identifies a DPU" {
+                vec![] => Some(DpuModel::Unknown),
+                vec![("Card1", Some("N/A"))] => Some(DpuModel::Unknown),
+                vec![("Card1", Some("N/A")), ("unrelated", Some("BlueField-3 DPU"))]
+                    => Some(DpuModel::Unknown),
+            }
+        );
+    }
+
+    #[test]
+    fn dpu_hardware_info_skips_placeholder_part_descriptions() {
+        value_scenarios!(
+            run = |bmc_model: Option<&str>| {
+                let dpu = ExploredDpu {
+                    bmc_ip: "192.0.2.1".parse().unwrap(),
+                    host_pf_mac_address: Some("00:11:22:33:44:55".parse().unwrap()),
+                    host_chassis_id: None,
+                    report: Arc::new(EndpointExplorationReport {
+                        systems: vec![ComputerSystem {
+                            id: "Bluefield".to_string(),
+                            serial_number: Some("test-dpu".to_string()),
+                            ..Default::default()
+                        }],
+                        chassis: vec![
+                            Chassis {
+                                id: "Card1".to_string(),
+                                model: Some("N/A".to_string()),
+                                ..Default::default()
+                            },
+                            Chassis {
+                                id: "Bluefield_BMC".to_string(),
+                                model: bmc_model.map(str::to_string),
+                                ..Default::default()
+                            },
+                        ],
+                        ..Default::default()
+                    }),
+                };
+                dpu.hardware_info().unwrap().dpu_info.unwrap().part_description
+            };
+            "part description uses the next meaningful model or stays empty" {
+                Some(" BlueField-3 DPU ") => "BlueField-3 DPU".to_string(),
+                Some(" n/a ") => String::new(),
+                None => String::new(),
             }
         );
     }
