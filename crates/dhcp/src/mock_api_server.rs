@@ -239,6 +239,17 @@ struct DhcpResponseOverrides {
     booturl: Option<String>,
 }
 
+#[derive(Default)]
+struct DiscoveryControl {
+    responses: HashMap<String, DhcpResponseOverrides>,
+    pause: Option<DiscoveryPause>,
+}
+
+struct DiscoveryPause {
+    entered: tokio::sync::oneshot::Sender<()>,
+    resume: tokio::sync::oneshot::Receiver<()>,
+}
+
 pub struct MockAPIServer {
     calls: Arc<Mutex<HashMap<String, usize>>>,
     handle: JoinHandle<Result<(), hyper::Error>>,
@@ -248,7 +259,7 @@ pub struct MockAPIServer {
     inject_failure: Arc<Mutex<bool>>,
     discoveries: Arc<Mutex<Vec<rpc::DhcpDiscovery>>>,
     expired_leases: Arc<Mutex<Vec<rpc::ExpireDhcpLeaseRequest>>>,
-    response_overrides: Arc<Mutex<HashMap<String, DhcpResponseOverrides>>>,
+    response_overrides: Arc<Mutex<DiscoveryControl>>,
 }
 
 #[derive(Debug)]
@@ -284,7 +295,7 @@ impl MockAPIServer {
         let d2 = discoveries.clone();
         let expired_leases = Arc::new(Mutex::new(Vec::new()));
         let e2 = expired_leases.clone();
-        let response_overrides = Arc::new(Mutex::new(HashMap::new()));
+        let response_overrides = Arc::new(Mutex::new(DiscoveryControl::default()));
         let o2 = response_overrides.clone();
         let listener = TcpListener::bind(addr).await.unwrap();
         let local_addr = listener.local_addr().unwrap().to_string();
@@ -339,9 +350,33 @@ impl MockAPIServer {
         self.response_overrides
             .lock()
             .unwrap()
+            .responses
             .entry(normalized_mac_key(mac_address))
             .or_default()
             .address = Some(address.to_string());
+    }
+
+    /// Pause the next DiscoverDhcp response after receiving it. The first
+    /// channel signals arrival; sending or dropping the second resumes it.
+    /// Only one pause may be pending, and unrelated requests continue normally.
+    pub fn pause_next_discovery(
+        &self,
+    ) -> (
+        tokio::sync::oneshot::Receiver<()>,
+        tokio::sync::oneshot::Sender<()>,
+    ) {
+        let (entered, received) = tokio::sync::oneshot::channel();
+        let (resume, resumed) = tokio::sync::oneshot::channel();
+        let mut control = self.response_overrides.lock().unwrap();
+        assert!(
+            control.pause.is_none(),
+            "a discovery pause is already pending"
+        );
+        control.pause = Some(DiscoveryPause {
+            entered,
+            resume: resumed,
+        });
+        (received, resume)
     }
 
     /// Override what FQDN the mock returns for a specific MAC on subsequent
@@ -351,6 +386,7 @@ impl MockAPIServer {
         self.response_overrides
             .lock()
             .unwrap()
+            .responses
             .entry(normalized_mac_key(mac_address))
             .or_default()
             .fqdn = Some(fqdn.to_string());
@@ -362,6 +398,7 @@ impl MockAPIServer {
         self.response_overrides
             .lock()
             .unwrap()
+            .responses
             .entry(normalized_mac_key(mac_address))
             .or_default()
             .booturl = Some(booturl.to_string());
@@ -401,7 +438,7 @@ impl MockAPIServer {
         fail: Option<Arc<Mutex<bool>>>,
         discoveries: Arc<Mutex<Vec<rpc::DhcpDiscovery>>>,
         expired_leases: Arc<Mutex<Vec<rpc::ExpireDhcpLeaseRequest>>>,
-        response_overrides: Arc<Mutex<HashMap<String, DhcpResponseOverrides>>>,
+        response_overrides: Arc<Mutex<DiscoveryControl>>,
     ) -> Result<Response<GrpcBody>, MockAPIServerError> {
         let path = req.uri().path();
         calls
@@ -442,7 +479,7 @@ impl MockAPIServer {
     async fn discover_dhcp(
         req: Request<Incoming>,
         discoveries: Arc<Mutex<Vec<rpc::DhcpDiscovery>>>,
-        response_overrides: Arc<Mutex<HashMap<String, DhcpResponseOverrides>>>,
+        response_overrides: Arc<Mutex<DiscoveryControl>>,
     ) -> Vec<u8> {
         let input_bytes = req.into_body().collect().await.unwrap().to_bytes();
 
@@ -451,9 +488,15 @@ impl MockAPIServer {
         let (address_family, message_kind) = validate_discovery_contract(&disco);
         discoveries.lock().unwrap().push(disco.clone());
         let mac_key = normalized_mac_key(&disco.mac_address);
+        let pause = response_overrides.lock().unwrap().pause.take();
+        if let Some(pause) = pause {
+            pause.entered.send(()).ok();
+            pause.resume.await.ok();
+        }
         let mut overrides = response_overrides
             .lock()
             .unwrap()
+            .responses
             .get(&mac_key)
             .cloned()
             .unwrap_or_default();

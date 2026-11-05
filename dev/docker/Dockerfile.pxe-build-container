@@ -22,7 +22,13 @@
 # Build: cargo make build-pxe-build-container
 # Use:   cargo make pxe-docker-x86
 #
-FROM ubuntu:24.04@sha256:fe81560990fae86dc4743202b2cb4d3df98d0bcf949173cecef15ce1127ef852
+ARG CONTAINER_BASE_IMAGE=ubuntu:24.04@sha256:fe81560990fae86dc4743202b2cb4d3df98d0bcf949173cecef15ce1127ef852
+FROM ${CONTAINER_BASE_IMAGE} AS kea-builder
+ARG KEA_VERSION
+COPY dev/docker/build-kea.sh dev/docker/kea-lease6-replacement.patch dev/docker/setup-kea-repository.sh dev/docker/isc-kea-3-0.asc /tmp/kea-build/
+RUN /tmp/kea-build/build-kea.sh "${KEA_VERSION}"
+
+FROM ${CONTAINER_BASE_IMAGE}
 
 ARG KEA_VERSION
 
@@ -86,6 +92,9 @@ RUN apt-get update && \
 	jq \
 	zip \
 	&& rm -rf /var/lib/apt/lists/*
+
+COPY --from=kea-builder /kea-packages/isc-kea-common.deb /tmp/isc-kea-common.deb
+RUN dpkg -i /tmp/isc-kea-common.deb && rm /tmp/isc-kea-common.deb
 
 # Install Rust via rustup, pinned to match rust-toolchain.toml
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
