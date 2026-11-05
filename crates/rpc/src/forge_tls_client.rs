@@ -32,6 +32,7 @@ use rustls::{ClientConfig, RootCertStore};
 use tonic::body::Body;
 use tonic::codegen::http::uri::PathAndQuery;
 use tonic::transport::Uri;
+use tower::ServiceExt;
 use tower::util::BoxCloneService;
 use tryhard::backoff_strategies::FixedBackoff;
 use tryhard::{NoOnRetry, RetryFutureConfig};
@@ -112,7 +113,7 @@ pub type ForgeClientT =
 /// response-body consumption separately from the transport's header deadline.
 pub struct ForgeHttpClient {
     origin: Uri,
-    service: BoxCloneService<hyper::Request<Body>, hyper::Response<Incoming>, TransportError>,
+    service: BoxCloneService<hyper::Request<Body>, hyper::Response<Body>, TransportError>,
 }
 
 impl ForgeHttpClient {
@@ -121,7 +122,7 @@ impl ForgeHttpClient {
     pub async fn get(
         &mut self,
         path: PathAndQuery,
-    ) -> Result<hyper::Response<Incoming>, TransportError> {
+    ) -> Result<hyper::Response<Body>, TransportError> {
         let uri = Uri::builder()
             .scheme(
                 self.origin
@@ -1052,6 +1053,7 @@ mod tests {
 
     use carbide_test_support::value_scenarios;
     use forge_http_connector::connector::ConnectorMetrics;
+    use hyper::body::Incoming;
     use hyper::rt::Executor as _;
     use hyper_rustls::HttpsConnector;
     use hyper_util::rt::TokioExecutor;
@@ -1068,7 +1070,7 @@ mod tests {
         let requests = captured.clone();
         let service = tower::service_fn(move |request: hyper::Request<Body>| {
             *requests.lock().unwrap() = Some((request.method().clone(), request.uri().clone()));
-            std::future::ready(Err::<hyper::Response<Incoming>, _>(TransportError(
+            std::future::ready(Err::<hyper::Response<Body>, _>(TransportError(
                 "request captured".into(),
             )))
         });
@@ -1236,28 +1238,26 @@ mod tests {
             hyper::server::conn::http2::Builder::new(TokioExecutor::new())
                 .serve_connection(
                     TokioIo::new(socket),
-                    hyper::service::service_fn(
-                        move |request: hyper::Request<hyper::body::Incoming>| {
-                            let seen_tx = seen_tx.clone();
-                            async move {
-                                seen_tx.send(request.headers().clone()).await.unwrap();
-                                let mut trailers = hyper::HeaderMap::new();
-                                trailers.insert("grpc-status", "0".parse().unwrap());
-                                let body = StreamBody::new(tokio_stream::iter([
-                                    Ok::<_, std::convert::Infallible>(Frame::data(
-                                        Bytes::from_static(&[0, 0, 0, 0, 0]),
-                                    )),
-                                    Ok(Frame::trailers(trailers)),
-                                ]));
-                                Ok::<_, std::convert::Infallible>(
-                                    hyper::Response::builder()
-                                        .header("content-type", "application/grpc")
-                                        .body(body)
-                                        .unwrap(),
-                                )
-                            }
-                        },
-                    ),
+                    hyper::service::service_fn(move |request: hyper::Request<Incoming>| {
+                        let seen_tx = seen_tx.clone();
+                        async move {
+                            seen_tx.send(request.headers().clone()).await.unwrap();
+                            let mut trailers = hyper::HeaderMap::new();
+                            trailers.insert("grpc-status", "0".parse().unwrap());
+                            let body = StreamBody::new(tokio_stream::iter([
+                                Ok::<_, std::convert::Infallible>(Frame::data(Bytes::from_static(
+                                    &[0, 0, 0, 0, 0],
+                                ))),
+                                Ok(Frame::trailers(trailers)),
+                            ]));
+                            Ok::<_, std::convert::Infallible>(
+                                hyper::Response::builder()
+                                    .header("content-type", "application/grpc")
+                                    .body(body)
+                                    .unwrap(),
+                            )
+                        }
+                    }),
                 )
                 .await
                 .unwrap();
