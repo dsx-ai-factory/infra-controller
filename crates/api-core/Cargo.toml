@@ -188,11 +188,10 @@ zeroize = { workspace = true }
 [features]
 default = ["linux-build"]
 linux-build = ["tss-esapi"]
-# Exposes the `tests::common` fixtures (which build a real `Api`) to other crates — notably
+# Exposes the `test_support` fixtures (which build a real `Api`) to other crates — notably
 # `carbide-api-web`, whose admin-UI tests need them. Pulls in the test-support features of the
-# service crates the fixtures use, plus the codegen/cert helpers they need. NOT enabled in normal
-# builds (resolver v2 keeps it out of the production `carbide-api` binary); only `carbide-api-web`'s
-# dev-dependency turns it on.
+# service crates the fixtures use, plus the codegen/cert helpers they need. API and integration
+# test targets enable it through dev-dependencies; `carbide-test-harness` enables it directly.
 test-support = [
   "dep:carbide-test-support",
   "carbide-api-model/test-support",
@@ -219,6 +218,7 @@ carbide-api-db = { path = "../api-db", default-features = false, features = [
 carbide-api-model = { path = "../api-model", default-features = false, features = [
   "test-support",
 ] }
+carbide-api-test-helper = { path = "../api-test-helper" }
 carbide-firmware = { path = "../firmware", features = ["test-support"] }
 carbide-ib-fabric = { path = "../ib-fabric", features = ["test-support"] }
 carbide-instrument = { path = "../instrument", features = ["test-support"] }
@@ -231,6 +231,9 @@ carbide-nvlink-manager = { path = "../nvlink-manager", features = [
 ] }
 carbide-rack = { path = "../rack", features = ["test-support"] }
 carbide-redfish = { path = "../redfish", features = ["test-support"] }
+carbide-resource-pool-api = { path = "../resource-pool-api", features = [
+  "test-support",
+] }
 carbide-rpc = { path = "../rpc", features = ["model", "sqlx", "test-support"] }
 carbide-rpc-utils = { path = "../rpc-utils" }
 carbide-secrets = { path = "../secrets", features = ["test-support"] }
@@ -250,10 +253,12 @@ mockito = { workspace = true }
 prost = { workspace = true }
 prost-types = { workspace = true }
 rcgen = { workspace = true }
+reqwest = { workspace = true, features = ["http2"] }
 strum = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
 tonic-prost = { workspace = true }
+tracing-opentelemetry = { workspace = true }
 
 [lints]
 workspace = true

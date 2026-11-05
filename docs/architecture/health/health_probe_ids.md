@@ -111,7 +111,7 @@ unavailable, missing, or unrecognized sensor state uses `SensorFailure`.
 The DSX Exchange consumer maps Building Management System (BMS) leak events to
 rack health reports. The target is the rack ID. Active events prevent
 allocations and use the `SensorCritical` and `Hardware` classifications. The
-two leak-detection probes also use `RackLeak`; the sensor-fault probe does not,
+leak-detection probe also uses `RackLeak`; the sensor-fault probe does not,
 because it does not establish that a leak is active.
 
 ### `BmsLeakDetectRack`
@@ -121,10 +121,6 @@ Indicates that BMS reported a rack-level leak.
 ### `BmsLeakSensorFaultRack`
 
 Indicates that BMS reported a rack-level leak sensor fault.
-
-### `BmsLeakDetectRackTray`
-
-Indicates that BMS reported a rack-tray leak.
 
 ## NVLink domain health probe identifiers
 
@@ -205,6 +201,40 @@ unhealthy GPU matching the host's inventory, the monitor re-asserts the alert
 with a new `in_alert_since` after manual removal. Use removal for resolved
 faults whose alerts the monitor can no longer clear, such as a replaced GPU or
 a host that has left the NVLink inventory.
+
+## NVLink isolation health probe identifiers
+
+A host whose aggregate health carries the `IsolateFromNvLinkPartitions`
+classification, for example from the admin CLI `compute-tray-due-for-swap`
+template, is marked for NVLink isolation. On each check of the host's machine
+group, the NVLink partition monitor removes the host's GPUs from every NVLink
+partition and records the progress as a `Merge` report under the source
+`nvlink-isolation`. The report states the membership NMX-C listed when the check
+started, so a host reads as isolated on the check after its removals complete.
+A check that applies changes is repeated on the next pass
+(`nvlink_config.monitor_run_interval`, default `60s`).
+
+The monitor rewrites the report only when the status changes. A failed write
+leaves the stored report unchanged, is logged with the machine ID, and keeps
+the machine group from being skipped until the next pass retries it. When the
+host is no longer marked, the monitor removes the report.
+
+See [Moving or Replacing a Compute Tray](../../manuals/nvlink_partitioning.md#moving-or-replacing-a-compute-tray)
+for the operator steps.
+
+### `NvlinkIsolationPending`
+
+An alert that names the GPUs NMX-C still lists in a partition, or states that
+isolation cannot be confirmed because the host's NVLink GPU inventory is empty
+or contains a GPU whose stored UID is `0`. The alert carries
+[`PreventAllocations`](health_alert_classifications.md#preventallocations) and
+[`SuppressExternalAlerting`](health_alert_classifications.md#suppressexternalalerting).
+
+### `NvlinkIsolated`
+
+A success that the monitor reports once the host's NVLink GPU inventory is
+known and NMX-C lists none of those GPUs in any partition. The report then has
+no alerts.
 
 ## DPU related health probe identifiers
 

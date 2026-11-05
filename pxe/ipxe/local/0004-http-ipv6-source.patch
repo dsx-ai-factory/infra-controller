@@ -1,9 +1,10 @@
 HTTP IPv6 source binding for NICo boot
 
-Core identifies HTTP clients by their DHCPv6 lease.  An additional SLAAC
-prefix can otherwise select a different source address.  The optional
-`http-source6` setting binds HTTP and HTTPS connections to an address and
-interface; the embedded script decides when to set or clear it.
+Core identifies HTTP clients by their registered address, such as a DHCPv6
+lease or an inferred EUI-64 SLAAC address.  Automatic source selection can
+otherwise use an address Core does not recognize.  The optional `http-source6`
+setting binds HTTP and HTTPS connections to an address and interface; the
+embedded script decides when to set or clear it.
 
 Configured payload URLs may use hostnames, so resolution must return IPv6
 destinations even when the DNS server is IPv4.  Each connection keeps its

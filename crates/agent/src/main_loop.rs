@@ -1108,7 +1108,8 @@ impl MainLoop {
         // `read` does not block
         match self.periodic_config_reader.net_conf_read() {
             Some(conf) => {
-                // DHCP server only runs on the primary dpu or when using the tenant network
+                // Secondary-admin service reservations do not produce host-interface timestamps, so
+                // report request history only for primary DPUs or DPUs using the tenant network.
                 if !conf.use_admin_network || conf.is_primary_dpu {
                     status_out.last_dhcp_requests =
                         fetch_last_dhcp_requests(self.options.dhcp_grpc_server.as_deref()).await;
@@ -2156,10 +2157,10 @@ ATF: v2.2(release):4.9.3-")
     Ok(())
 }
 
-/// Require confirmed DHCP acceptance before IPv6-primary NVUE and FMDS updates,
-/// including later network-policy changes that configure DHCP. Secondary admin
-/// DPUs only stop DHCP, so a failed stop must not delay their NVUE isolation.
-/// Any DHCP error still leaves the network version pending for the next retry.
+/// Require confirmed DHCP acceptance before IPv6-primary NVUE and FMDS updates, including later
+/// network-policy changes that configure DHCP. Secondary admin DPUs without service listeners only
+/// stop DHCP, so a failed stop must not delay their NVUE isolation. Callers must leave the network
+/// version pending after any DHCP error so the next iteration retries.
 fn require_dhcp_before_ipv6_only_network_update(
     config: &rpc::ManagedHostNetworkConfigResponse,
     dhcp_result: &eyre::Result<bool>,
@@ -2167,7 +2168,12 @@ fn require_dhcp_before_ipv6_only_network_update(
     let Some(host) = &config.managed_host_config else {
         return Ok(());
     };
-    let stops_dhcp = config.use_admin_network && !config.is_primary_dpu;
+    let stops_dhcp = config.use_admin_network
+        && !config.is_primary_dpu
+        && config
+            .service_vpc_slot_inventory
+            .as_ref()
+            .is_none_or(|inventory| inventory.slots.is_empty());
     if !stops_dhcp && managed_host_ipv4_loopback(host)?.is_none() && dhcp_result.is_err() {
         // The caller reports the original DHCP error alongside this gate error.
         eyre::bail!("IPv6-only network update is waiting for DHCP");

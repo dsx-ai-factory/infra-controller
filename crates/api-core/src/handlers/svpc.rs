@@ -963,28 +963,42 @@ pub(crate) async fn publish_mlx_device_report(
     ))
 }
 
-/// Scout is telling carbide the observed status (locking status, card mode) of the
-/// mlx devices in its host
+/// `publish_mlx_observation_report` stores generic firmware and lockdown results
+/// against the authenticated host's machine state. Remaining observations use
+/// the legacy DPA/SVPC handler when enabled; generic reporting is independent
+/// of those settings.
 pub(crate) async fn publish_mlx_observation_report(
     api: &Api,
-    request: Request<mlx_device_pb::PublishMlxObservationReportRequest>,
+    mut request: Request<mlx_device_pb::PublishMlxObservationReportRequest>,
 ) -> Result<Response<mlx_device_pb::PublishMlxObservationReportResponse>, Status> {
     log_request_data(&request);
 
-    if request.get_ref().report.as_ref().is_some_and(|report| {
-        report
+    let authenticated_machine_id = crate::auth::authenticated_machine_id(&request);
+    if let Some(report) = request.get_ref().report.as_ref() {
+        let has_generic = report
             .observations
             .iter()
-            .any(|observation| observation.firmware_update_result.is_some())
-    }) {
-        // Generic NIC results belong to machine-owned operation storage, not
-        // DPA card state. Reject the entire batch before either the disabled-DPA
-        // no-op or DPA writes can acknowledge a result that was not persisted.
-        // https://github.com/dsx-ai-factory/infra-controller/issues/6677
-        return Err(CarbideError::FailedPrecondition(
-            "NIC firmware update result ingestion is not enabled".into(),
-        )
-        .into());
+            .any(|obs| obs.firmware_update_result.is_some() || obs.lockdown_result.is_some());
+        if has_generic {
+            let authenticated = authenticated_machine_id?.ok_or_else(|| {
+                CarbideError::PermissionDeniedError(
+                    "firmware recovery reports require an authenticated host identity".into(),
+                )
+            })?;
+            super::nic_firmware_operation::persist(api, authenticated, report).await?;
+        }
+    }
+    if let Some(report) = request.get_mut().report.as_mut() {
+        // Generic receipts have their own machine-state transaction. A retry
+        // of a mixed batch is safe: duplicate receipts do not regress progress.
+        report
+            .observations
+            .retain(|obs| obs.firmware_update_result.is_none() && obs.lockdown_result.is_none());
+        if report.observations.is_empty() {
+            return Ok(Response::new(
+                mlx_device_pb::PublishMlxObservationReportResponse {},
+            ));
+        }
     }
 
     if !api.runtime_config.is_ewethers_enabled() || !api.runtime_config.is_svpc_enabled() {

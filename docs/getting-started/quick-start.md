@@ -98,6 +98,10 @@ export NICO_DPF_DPU_CLUSTER_VIP=<free-routable-ip>    # DPU cluster control-plan
 # Otherwise configure it through the API after installation. DPU provisioning
 # waits for the credential; carbide-api startup does not in local_first mode.
 
+# Optional: KMIP KEK provider. setup creates the nico-kmip-client Secret from a
+# directory holding ca.pem, client.pem, and client.key.
+# export NICO_KMIP_CLIENT_DIR=/path/to/kmip-client
+
 # RMS (Rack Management Service) installs by default. Set the image tag (there
 # is no safe default), or pass --skip-rms to setup.sh to opt out:
 export NICO_RMS_IMAGE_TAG=v0.10.0-rc2             # your rms-api image tag (git describe of your build)
@@ -119,6 +123,7 @@ For authenticated NGC pulls, obtain an API key at [ngc.nvidia.com](https://ngc.n
 | `NICO_DPF_DPU_INTERFACE`, `NICO_DPF_DPU_CLUSTER_VIP` | **Yes**, unless `--skip-dpf` | DPF DPU provisioning (default-on): the control-plane NIC facing the DPUs and a free DPU-routable VIP for the DPU cluster control plane. See [helm-prereqs → DPF](https://github.com/dsx-ai-factory/infra-controller/blob/main/helm-prereqs/README.md#dpf). |
 | `NICO_DPF_BMC_ROOT_PASSWORD` | No (DPF only) | Existing site-wide BMC password. After a DPF-enabled Core deployment is accepted, setup stores it in `nico-system/nico-bmc-v0-credentials` and makes that watched Secret the authoritative local version-0 source. When omitted on such a deployment, setup reuses its marked Secret or leaves version 0 backend-managed. Declining deployment leaves the Secret untouched. A later non-DPF Core deployment preserves this configuration only when the installed release already uses it; a stray Secret is not adopted. A rerun rejects a different value, and using the variable with `--skip-core` or `--skip-dpf` is an error. |
 | `NICO_SITE_UUID` | No | Stable UUID for this site. If unset, `setup.sh` tries to reuse the UUID from a prior install (site-agent ConfigMap). If that fails, it adopts an existing REST site with the same name, or mints a UUID and seeds the site record itself. |
+| `NICO_KMIP_CLIENT_DIR` | No | Directory holding `ca.pem`, `client.pem`, and `client.key` for the opt-in [KMIP KEK provider](../configuration/kmip-kek-provider.md). Before Core deploys, setup creates the `nico-system/nico-kmip-client` Secret from them for `nico-api` to mount, and preflight checks that each of the provider's TLS paths lies under a chart-provided mount or under a mounted Secret that exists and has the key the path reads. An error with `--skip-core`. See [helm-prereqs → Opting in to the KMIP KEK provider](https://github.com/dsx-ai-factory/infra-controller/blob/main/helm-prereqs/README.md#opting-in-to-the-kmip-kek-provider). |
 
 ### 3b. Set your Site Name
 
@@ -389,6 +394,10 @@ All IPs must be within the `IPAddressPool` ranges you defined in `values/metallb
 - **nico-dns Note**: Use `perPodAnnotations` (a list) rather than `annotations` because each replica gets its own VIP.
 - **nico-api IP and DNS Note**: The nico-api VIP must resolve in external DNS to the `hostname` you set in Step 3c.
 
+For the SSH Console endpoint, DNS, host-key verification, and Tenant access,
+see [SSH Console Setup and Access](../configuration/ssh-console.md).
+The Site's REST console fields do not deploy or enable the service.
+
 ### 3i. (Optional) Pre-set the Site UUID
 
 On a fresh install, you normally leave `NICO_SITE_UUID` unset. `setup.sh` resolves the UUID in several ways: it tries to reuse the UUID from a prior install (site-agent ConfigMap); if that fails, it adopts an existing REST site with the same name, or mints a UUID and seeds the site record itself (see Step 5). You only need to set the UUID explicitly to bind the site-agent to a site that already exists:
@@ -415,7 +424,7 @@ The `preflight.sh` script checks the following:
 | Category | Checks |
 |----------|--------|
 | Environment variables | Conditional image variables are set; registry has no URL scheme; UUID is valid if set; KUBECONFIG path exists if set |
-| Required tools | `helm`, `helmfile`, `kubectl`, `jq`, `ssh-keygen` are in PATH. Core VIP validation also requires Python 3 with PyYAML. |
+| Required tools | `helm`, `helmfile`, `kubectl`, `jq`, `ssh-keygen` are in PATH. Core VIP validation also requires Python 3 with PyYAML. The KMIP KEK provider check needs Python 3.11 or later, or the `tomli` package, when the site config mentions KMIP; without either, preflight warns and skips that check, or fails when `NICO_KMIP_CLIENT_DIR` is set. |
 | `values/metallb-config.yaml` | File exists; YAML is valid; at least one IPAddressPool defined; exactly one advertisement mode active (BGP or L2, not both); example placeholder hostnames not still present |
 | Cluster reachability | `kubectl` can reach the API server. |
 | Node resources | At least three schedulable nodes |

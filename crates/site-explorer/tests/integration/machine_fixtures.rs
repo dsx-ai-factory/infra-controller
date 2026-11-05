@@ -136,7 +136,7 @@ pub(super) fn expected_machine(managed_host: &ManagedHostConfig) -> ExpectedMach
     }
 }
 
-async fn discover_bmc(
+pub(super) async fn discover_bmc(
     api: &Api,
     segment: TestNetworkSegment,
     mac_address: MacAddress,

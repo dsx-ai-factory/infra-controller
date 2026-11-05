@@ -6,6 +6,19 @@
 use mac_address::MacAddress;
 use model::machine::PowerState;
 
+/// A managed component within a rack's compute trays, switches, or power shelves.
+#[derive(Clone, Copy, Debug)]
+pub enum RackComponent {
+    /// Compute BMC
+    ComputeBmc,
+    /// Switch BMC
+    SwitchBmc,
+    /// Switch NVOS
+    SwitchNvos,
+    /// Powershelf PMC
+    PowerShelfPmc,
+}
+
 /// Backend providing fresh power observations without registering or mutating devices.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PowerStateSource {

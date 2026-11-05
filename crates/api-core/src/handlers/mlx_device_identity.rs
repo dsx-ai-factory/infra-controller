@@ -96,6 +96,7 @@ mod tests {
     fn observation(devices: Vec<MlxDeviceInfo>) -> MlxDeviceObservation {
         MlxDeviceObservation {
             observed_at: chrono::DateTime::from_timestamp(42, 0).unwrap(),
+            received_at: None,
             devices: devices
                 .into_iter()
                 .map(|device| device.try_into().unwrap())

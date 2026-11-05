@@ -368,6 +368,37 @@ fn test_run_single_iteration_propagates_lock_infrastructure_failure(pool: sqlx::
     );
 }
 
+/// The manager waits the interval that Version reports in its update policy.
+#[crate::sqlx_test()]
+fn update_manager_uses_policy_interval(pool: sqlx::PgPool) {
+    let mut join_set = JoinSet::new();
+    let work_lock_manager_handle =
+        db::work_lock_manager::start(&mut join_set, pool.clone(), Default::default())
+            .await
+            .unwrap();
+
+    for configured in [None, Some(0), Some(7)] {
+        let mut config = crate::test_support::default_config::get();
+        config.machine_update_run_interval = configured;
+        let policy = rpc::forge::RuntimeConfig::from(config.clone())
+            .machine_update_policy
+            .expect("Version reports the update policy");
+        let update_manager = MachineUpdateManager::new(
+            pool.clone(),
+            Arc::new(config),
+            opentelemetry::global::meter("test"),
+            work_lock_manager_handle.clone(),
+            None,
+        );
+        assert_eq!(
+            update_manager.run_interval(),
+            Duration::from_secs(policy.effective_run_interval_seconds),
+            "{configured:?}"
+        );
+    }
+    join_set.shutdown().await;
+}
+
 /// Manually adds the HostUpdateInProgress health alert to a Machine
 async fn add_host_update_alert(
     txn: &mut PgConnection,

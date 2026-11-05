@@ -132,9 +132,7 @@ fn machine_router_inner<C: Callbacks>(
         update_service_config.task_completion_jitter =
             crate::redfish::update_service::DEFAULT_TASK_COMPLETION_JITTER.min(delay);
     }
-    let bmc_vendor = machine_info.bmc_vendor();
-    let bmc_product = machine_info.bmc_product();
-    let bmc_redfish_version = machine_info.bmc_redfish_version();
+    let service_root_config = machine_info.service_root_config();
     let oem_state = machine_info.oem_state();
     let factory_default_account = machine_info.factory_default_account();
     let event_service_config = match &options.event_service {
@@ -165,6 +163,7 @@ fn machine_router_inner<C: Callbacks>(
             router.add_routes(crate::redfish::oem::nvidia::bluefield::add_routes)
         }
         MachineInfo::Host(_) => router
+            .add_routes(crate::redfish::oem::nvidia::chassis::add_routes)
             .add_routes(crate::redfish::oem::dell::idrac::add_routes)
             .add_routes(crate::redfish::oem::supermicro::manager::add_routes),
     };
@@ -191,12 +190,16 @@ fn machine_router_inner<C: Callbacks>(
         .bmc_reset_duration
         .filter(|d| !d.is_zero())
         .map(|d| Arc::new(crate::availability::BmcAvailabilityState::new(d)));
+    let component_integrities = machine_info.component_integrity_config();
+    let service_root_state = Arc::new(redfish::service_root::ServiceRootState::from_config(
+        service_root_config,
+        event_service_config.is_some(),
+        component_integrities.is_some(),
+    ));
     let state = BmcState {
         event_service: event_service_config.map(crate::EventServiceState::new),
         event_sequence: Arc::default(),
-        bmc_vendor,
-        bmc_product,
-        bmc_redfish_version,
+        service_root_state,
         oem_state,
         manager,
         system_state,
@@ -207,8 +210,7 @@ fn machine_router_inner<C: Callbacks>(
         injection: injection.clone(),
         availability: availability.clone(),
         callbacks: Some(callbacks.clone()),
-        exposes_computer_systems: machine_info.exposes_computer_systems(),
-        component_integrities: machine_info.component_integrity_config(),
+        component_integrities,
     };
     let account_service_state = state.account_service_state.clone();
     let session_service_state = state.session_service_state.clone();
@@ -220,7 +222,9 @@ fn machine_router_inner<C: Callbacks>(
         )
     );
     let router = router
-        .add_routes(|router| crate::redfish::computer_system::add_routes(router, bmc_vendor))
+        .add_routes(|router| {
+            crate::redfish::computer_system::add_routes(router, service_root_config.vendor)
+        })
         .add_routes(crate::ipmi::add_routes)
         .with_state(state.clone())
         .merge(crate::injection::management_router(injection.clone()));

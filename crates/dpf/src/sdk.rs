@@ -17,6 +17,8 @@
 
 //! DPF SDK - High-level interface for DPF operations.
 
+mod bmc_credentials;
+mod version;
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::net::{IpAddr, Ipv4Addr};
@@ -24,6 +26,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+pub use bmc_credentials::{
+    BmcCredentialFailureReason, BmcCredentialHealth, BmcCredentialObservation,
+    bmc_credential_secret_name,
+};
 use carbide_utils::none_if_empty::NoneIfEmpty;
 use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
 use kube::core::ObjectMeta;
@@ -216,6 +222,7 @@ pub struct DpfSdk<R, L = NoLabels> {
     repo: Arc<R>,
     namespace: String,
     labeler: L,
+    operator_version: semver::Version,
     shared_bmc_password_ready: Arc<AtomicBool>,
     _bmc_refresh_guard: Option<tokio_util::sync::DropGuard>,
 }
@@ -285,7 +292,7 @@ impl<'a, R, P, L> DpfSdkBuilder<'a, R, P, L> {
 
 impl<R, P, L> DpfSdkBuilder<'_, R, P, L>
 where
-    R: K8sConfigRepository + 'static,
+    R: K8sConfigRepository + DpfOperatorConfigRepository + 'static,
     P: BmcPasswordProvider + 'static,
 {
     /// Fetch password, write the K8s BMC secret, spawn refresh task,
@@ -306,11 +313,15 @@ where
     /// DPUDevice while the replacement replica starts.
     /// Without a refresh interval nothing would ever retry, so there a failed
     /// read stays fatal.
+    ///
+    /// Reads the installed operator version once. A missing operator config or version,
+    /// invalid version, read failure, or expired read deadline fails SDK construction.
     async fn init_secret_and_task(self) -> Result<DpfSdk<R, L>, DpfError> {
         let repo = Arc::new(self.repo);
         let namespace = self.namespace;
         let provider = self.bmc_password_provider;
         let shared_bmc_password_ready = Arc::new(AtomicBool::new(false));
+        let operator_version = version::read_operator_version(repo.as_ref(), &namespace).await?;
 
         let password = match provider.get_bmc_password().await {
             Ok(password) => {
@@ -359,13 +370,14 @@ where
             repo,
             namespace,
             labeler: self.labeler,
+            operator_version,
             shared_bmc_password_ready,
             _bmc_refresh_guard: guard,
         })
     }
 
-    /// Consume the builder, create the K8s BMC secret and optionally
-    /// spawn a background refresh task. Does not create DPF CRDs.
+    /// Consume the builder, create the K8s BMC secret, cache the installed operator version,
+    /// and optionally spawn a background credential refresh task. Does not create DPF CRDs.
     pub async fn build_without_resources(self) -> Result<DpfSdk<R, L>, DpfError> {
         self.init_secret_and_task().await
     }
@@ -1124,8 +1136,7 @@ pub fn build_service_configuration(
             deployment_service_name: svc.name.clone(),
             interfaces: interfaces.none_if_empty(),
             service_configuration,
-            // NICo-owned services can update independently; other services wait
-            // for the DPU service sync handler to open the NodeEffect gate.
+            // Service upgrades wait for the NodeEffect gate unless explicitly overridden.
             upgrade_policy: DpuServiceConfigurationUpgradePolicy {
                 apply_node_effect: Some(svc.apply_node_effect.unwrap_or(true)),
             },
@@ -1321,7 +1332,7 @@ pub fn build_deployment(
                 flavor_template: matches!(deployment_type, DpuDeploymentType::Bf4Astra)
                     .then(|| flavor_name.to_string()),
             },
-            revision_history_limit: None,
+            revision_history_limit: Some(1000),
             service_chains,
             services: services_map,
         },
@@ -3340,6 +3351,35 @@ impl<R: DpuDeviceRepository, L: ResourceLabeler> DpfSdk<R, L> {
         info: DpuDeviceInfo,
         astra_provisioning_inputs: Option<(&ExpectedMachine, AstraRoutePrefixes)>,
     ) -> Result<(), DpfError> {
+        self.register_dpu_device_internal(info, astra_provisioning_inputs, None)
+            .await
+    }
+
+    /// Create a DPUDevice with its per-device credential reference already set.
+    ///
+    /// The Secret must have been created in this SDK's namespace first. Existing devices are
+    /// never switched to a different credential by registration; a mismatched reference is an error.
+    pub async fn register_dpu_device_with_credential(
+        &self,
+        info: DpuDeviceInfo,
+        astra_provisioning_inputs: Option<(&ExpectedMachine, AstraRoutePrefixes)>,
+        secret_name: &str,
+    ) -> Result<(), DpfError> {
+        bmc_credentials::validate_per_device_secret_name(secret_name)?;
+        self.register_dpu_device_internal(
+            info,
+            astra_provisioning_inputs,
+            Some(secret_name.to_string()),
+        )
+        .await
+    }
+
+    async fn register_dpu_device_internal(
+        &self,
+        info: DpuDeviceInfo,
+        astra_provisioning_inputs: Option<(&ExpectedMachine, AstraRoutePrefixes)>,
+        credential_secret_name: Option<String>,
+    ) -> Result<(), DpfError> {
         let cr_name = dpu_device_cr_name(&info.device_id);
         let expected_machine = astra_provisioning_inputs.map(|(machine, _)| machine);
         let astra_underlay_inputs = astra_provisioning_inputs.map(|(machine, prefixes)| {
@@ -3358,6 +3398,10 @@ impl<R: DpuDeviceRepository, L: ResourceLabeler> DpfSdk<R, L> {
         if let Some(existing) =
             DpuDeviceRepository::get(&*self.repo, &cr_name, &self.namespace).await?
         {
+            bmc_credentials::check_registration_credential(
+                &existing,
+                credential_secret_name.as_deref(),
+            )?;
             if existing.metadata.deletion_timestamp.is_some() {
                 return Err(DpfError::InvalidState(format!(
                     "DPUDevice {cr_name} is being deleted (has deletionTimestamp); \
@@ -3382,7 +3426,9 @@ impl<R: DpuDeviceRepository, L: ResourceLabeler> DpfSdk<R, L> {
             return Ok(());
         }
 
-        if !self.shared_bmc_password_ready.load(Ordering::Acquire) {
+        if credential_secret_name.is_none()
+            && !self.shared_bmc_password_ready.load(Ordering::Acquire)
+        {
             return Err(DpfError::BmcPasswordSourceUnavailable(
                 "cannot register a DPUDevice until the shared BMC credential has been accepted and published"
                     .to_string(),
@@ -3430,7 +3476,7 @@ impl<R: DpuDeviceRepository, L: ResourceLabeler> DpfSdk<R, L> {
                 pf0_name: None,
                 psid: None,
                 serial_number: info.serial_number,
-                bmc_credential_secret_name: None,
+                bmc_credential_secret_name: credential_secret_name.clone(),
                 cluster: None,
                 nic_device_count: None,
                 values,
@@ -3452,6 +3498,14 @@ impl<R: DpuDeviceRepository, L: ResourceLabeler> DpfSdk<R, L> {
             {
                 let existing =
                     DpuDeviceRepository::get(&*self.repo, &cr_name, &self.namespace).await?;
+                if let Some(existing) = &existing {
+                    bmc_credentials::check_registration_credential(
+                        existing,
+                        credential_secret_name.as_deref(),
+                    )?;
+                } else if credential_secret_name.is_some() {
+                    return Err(DpfError::not_found("DPUDevice", &cr_name));
+                }
                 if existing
                     .as_ref()
                     .is_some_and(|d| d.metadata.deletion_timestamp.is_some())
@@ -6431,7 +6485,7 @@ mod tests {
     }
 
     #[test]
-    fn deployment_disables_secure_boot() {
+    fn deployment_defaults() {
         let deployment = build_deployment(
             &[],
             "deployment",
@@ -6443,6 +6497,7 @@ mod tests {
             DpuDeploymentType::Bf3,
         );
 
+        assert_eq!(deployment.spec.revision_history_limit, Some(1000));
         assert_eq!(deployment.spec.dpus.secure_boot, Some(false));
         assert_eq!(
             serde_json::to_value(deployment).unwrap()["spec"]["dpus"]["secureBoot"],
@@ -7030,6 +7085,10 @@ mod tests {
 
     #[async_trait]
     impl crate::repository::DpfOperatorConfigRepository for SdkMock {
+        async fn get_version(&self, _: &str, _: &str) -> Result<String, DpfError> {
+            Ok("26.8.0".to_string())
+        }
+
         async fn get(
             &self,
             _name: &str,
@@ -8668,6 +8727,10 @@ mod tests {
 
     #[async_trait]
     impl crate::repository::DpfOperatorConfigRepository for SecretTrackingMock {
+        async fn get_version(&self, _: &str, _: &str) -> Result<String, DpfError> {
+            Ok("26.8.0".to_string())
+        }
+
         async fn get(
             &self,
             _name: &str,

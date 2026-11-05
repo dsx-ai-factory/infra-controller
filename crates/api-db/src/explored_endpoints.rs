@@ -805,6 +805,15 @@ pub async fn set_preingestion_time_sync_reset(
     set_preingestion(address, state, txn).await
 }
 
+/// The firmware check asked for one refreshed report; the endpoint waits in
+/// `FirmwareCheckRefreshWait` and the check runs again on that report.
+pub async fn set_preingestion_firmware_check_refresh_wait(
+    address: IpAddr,
+    txn: &mut PgConnection,
+) -> Result<(), DatabaseError> {
+    set_preingestion(address, PreingestionState::FirmwareCheckRefreshWait, txn).await
+}
+
 pub async fn set_preingestion_recheck_versions_reason(
     address: IpAddr,
     reason: String,
@@ -1328,6 +1337,7 @@ mod tests {
 
         let timeout = EndpointExplorationError::ConnectionTimeout {
             details: "deadline exceeded".to_string(),
+            consecutive_count: 1,
         };
         let latency = std::time::Duration::from_secs(2);
         assert_eq!(

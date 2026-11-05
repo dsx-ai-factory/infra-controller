@@ -49,9 +49,9 @@ use crate::machine::network::{MachineNetworkStatusObservation, ManagedHostNetwor
 use crate::machine::topology::{DiscoveryData, MachineTopology, TopologyData};
 use crate::machine::{
     CURRENT_STATE_MODEL_VERSION, Dpf, DpuMachine, FailureCause, FailureDetails, FailureSource,
-    HostMachine, HostProfile, MachineInterfaceSnapshot, MachineLastRebootRequested,
-    MachineLastRebootRequestedMode, ManagedHostState, ManagedHostStateSnapshot, StableHostMachine,
-    UpgradeDecision,
+    HardwareInfoScope, HostMachine, HostProfile, MachineInterfaceSnapshot,
+    MachineLastRebootRequested, MachineLastRebootRequestedMode, ManagedHostState,
+    ManagedHostStateSnapshot, StableHostMachine, UpgradeDecision,
 };
 use crate::machine_interface::InterfaceType;
 use crate::network_segment::NetworkSegmentType;
@@ -549,6 +549,7 @@ pub fn managed_host_state_snapshot() -> ManagedHostStateSnapshot {
         managed_state,
         aggregate_health: health_report_with_source("aggregate-health"),
         rack_health_overrides: None,
+        hardware_info_scope: HardwareInfoScope::Full,
     }
 }
 

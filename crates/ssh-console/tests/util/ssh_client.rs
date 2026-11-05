@@ -23,7 +23,7 @@ use std::time::{Duration, Instant};
 
 use eyre::Context;
 use russh::ChannelMsg;
-use russh::keys::{PrivateKeyWithHashAlg, PublicKey};
+use russh::keys::{PrivateKeyWithHashAlg, PublicKeyOrCertificate};
 use ssh_console::POWER_RESET_COMMAND;
 use tokio::sync::oneshot;
 
@@ -444,7 +444,7 @@ impl russh::client::Handler for PermissiveSshClient {
     type Error = eyre::Error;
     async fn check_server_key(
         &mut self,
-        _server_public_key: &PublicKey,
+        _server_public_key: &PublicKeyOrCertificate,
     ) -> Result<bool, Self::Error> {
         Ok(true)
     }

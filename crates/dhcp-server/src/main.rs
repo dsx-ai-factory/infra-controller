@@ -1484,7 +1484,7 @@ async fn process(
 
 /// Process one DHCPv6 datagram and send its response to the exact UDP source.
 // Roots a trace per packet, as the v4 path does.
-#[tracing::instrument(skip_all, fields(source_address = %source))]
+#[tracing::instrument(skip_all, fields(source_address = %source, circuit_id = %context.interface))]
 async fn process_v6(source: SocketAddr, packet: &[u8], mut context: V6ListenerContext) {
     let SocketAddr::V6(source) = source else {
         let error = format!("source address {source} is not IPv6");
@@ -1652,6 +1652,59 @@ mod test {
                 },
             );
         }
+    }
+
+    /// Per-packet span fields must identify the receiving interface even when validation drops
+    /// the packet before DHCP decoding.
+    #[tokio::test]
+    async fn ipv6_packet_span_identifies_source_and_interface() {
+        use tracing::instrument::WithSubscriber;
+        use tracing_subscriber::prelude::*;
+
+        struct PacketSpan(Arc<std::sync::Mutex<Vec<(String, String)>>>);
+
+        impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for PacketSpan {
+            fn on_new_span(
+                &self,
+                attributes: &tracing::span::Attributes<'_>,
+                _: &tracing::span::Id,
+                _: tracing_subscriber::layer::Context<'_, S>,
+            ) {
+                if attributes.metadata().name() == "process_v6" {
+                    let mut fields = self.0.lock().unwrap();
+                    attributes.record(
+                        &mut |field: &tracing::field::Field, value: &dyn std::fmt::Debug| {
+                            fields.push((field.name().to_string(), format!("{value:?}")));
+                        },
+                    );
+                }
+            }
+        }
+
+        carbide_instrument::testing::keep_callsites_enabled();
+        let fields = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::registry().with(PacketSpan(fields.clone()));
+        let context = super::V6ListenerContext {
+            socket: Arc::new(UdpSocket::bind((Ipv6Addr::LOCALHOST, 0)).await.unwrap()),
+            config: Arc::new(init(get_test_args()).await.unwrap()),
+            handler: Arc::new(Box::new(Test {})),
+            interface: "vlan200".to_string(),
+            machine_cache: Arc::new(Mutex::new(LruCache::new(
+                std::num::NonZeroUsize::new(cache::MACHINE_CACHE_SIZE).unwrap(),
+            ))),
+            dhcp_timestamps: Arc::new(Mutex::new(DhcpTimestamps::new(
+                DhcpTimestampsFilePath::NotSet,
+            ))),
+        };
+        let source = "[2001:db8::1]:547".parse().unwrap();
+        // A direct SOLICIT from the server port is rejected before decoding or sending a reply.
+        super::process_v6(source, &[u8::from(MessageTypeV6::Solicit)], context)
+            .with_subscriber(subscriber)
+            .await;
+
+        let fields = fields.lock().unwrap();
+        assert!(fields.contains(&("source_address".to_string(), source.to_string())));
+        assert!(fields.contains(&("circuit_id".to_string(), "vlan200".to_string())));
     }
 
     #[derive(Debug)]

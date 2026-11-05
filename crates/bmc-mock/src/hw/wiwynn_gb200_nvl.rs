@@ -33,6 +33,15 @@ pub(crate) struct WiwynnGB200Nvl<'a> {
 }
 
 impl WiwynnGB200Nvl<'_> {
+    pub(crate) fn service_root_config(&self) -> redfish::service_root::Config {
+        redfish::service_root::Config {
+            vendor: redfish::oem::BmcVendor::Wiwynn,
+            product: Some("GB200 NVL"),
+            redfish_version: "1.17.0",
+            exposes_computer_systems: true,
+        }
+    }
+
     fn sensor_layout() -> redfish::sensor::Layout {
         redfish::sensor::Layout {
             temperature: 40,
@@ -204,6 +213,7 @@ impl WiwynnGB200Nvl<'_> {
                 part_number: Some("B81.11810.0005".into()),
                 model: Some("GB200 NVL".into()),
                 pcie_devices: Some(vec![]),
+                aux_power_reset: true,
                 ..redfish::chassis::SingleChassisConfig::defaults()
             })
             .chain(std::iter::once(redfish::chassis::SingleChassisConfig {

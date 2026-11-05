@@ -132,6 +132,7 @@ fn diagnostic(bytes: &[u8]) -> String {
 /// and completed processes do not prove that device-internal work has stopped.
 #[derive(Clone, Debug, Default)]
 pub struct FirmwareToolExecutor {
+    #[cfg(target_os = "linux")]
     supervisor_path: Option<std::path::PathBuf>,
     #[cfg(target_os = "linux")]
     owner_exit_behavior: ToolOwnerExitBehavior,
@@ -141,12 +142,19 @@ impl FirmwareToolExecutor {
     /// `with_supervisor_path` selects the matching supervisor binary for an
     /// embedding application. The path must be absolute; omission uses a sibling
     /// executable. A missing or unusable helper fails before dispatching a tool.
+    #[cfg(target_os = "linux")]
     pub fn with_supervisor_path(path: impl Into<std::path::PathBuf>) -> Self {
         Self {
             supervisor_path: Some(path.into()),
-            #[cfg(target_os = "linux")]
             owner_exit_behavior: ToolOwnerExitBehavior::default(),
         }
+    }
+
+    /// `with_supervisor_path` has no helper to select on other platforms, where
+    /// `execute` fails before starting a tool.
+    #[cfg(not(target_os = "linux"))]
+    pub fn with_supervisor_path(_path: impl Into<std::path::PathBuf>) -> Self {
+        Self {}
     }
 
     /// Let accepted work finish under its existing deadline if its owner exits.

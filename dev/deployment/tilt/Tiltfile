@@ -390,6 +390,17 @@ prerequisite(
     labels=['observability'],
 )
 prerequisite(
+    name='tempo',
+    chart='grafana-community/tempo',
+    release_name='tempo',
+    namespace=observability_namespace,
+    version='3.2.1',
+    values=observability_values['tempo'],
+    repo='repo-grafana-community',
+    resource_deps=['nico-observability-namespace'],
+    labels=['observability'],
+)
+prerequisite(
     name='alloy',
     chart='grafana/alloy',
     release_name='alloy',
@@ -411,6 +422,7 @@ helm_resource(
         'nico-observability-namespace',
         'grafana-dashboards',
         'loki',
+        'tempo',
         'prometheus',
     ],
     labels=['observability'],
@@ -955,6 +967,13 @@ core_global = all_values['global']
 nico_api_values = component_values(core_global, all_values['nico-api'])
 nico_api_dependencies = ['nico-local-config', 'nico-postgres', 'vault']
 
+if enable_observability:
+    nico_api_values['tracing'] = {'enabled': True}
+    api_env = nico_api_values.setdefault('env', {})
+    if not api_env.get('OTEL_EXPORTER_OTLP_TRACES_ENDPOINT'):
+        api_env['OTEL_EXPORTER_OTLP_TRACES_ENDPOINT'] = 'http://tempo.%s.svc.cluster.local:4317' % observability_namespace
+    nico_api_dependencies.append('tempo')
+
 if enable_dsx_exchange:
     helm_repo(
         'nats',
@@ -1297,6 +1316,7 @@ if enable_observability:
         'nico-postgres-exporter',
         'prometheus',
         'loki',
+        'tempo',
         'alloy',
         'grafana',
     ])

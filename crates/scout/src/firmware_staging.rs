@@ -47,6 +47,7 @@ struct FirmwareDownloadFailed {
 pub(super) struct FirmwareStaging {
     work_dir: tempfile::TempDir,
     download_dir: PathBuf,
+    retry_backoff: Duration,
 }
 
 impl FirmwareStaging {
@@ -59,7 +60,15 @@ impl FirmwareStaging {
         Ok(Self {
             work_dir,
             download_dir,
+            retry_backoff: Duration::from_secs(1),
         })
+    }
+
+    /// Keep real HTTP attempts in tests without waiting through production backoff.
+    #[cfg(test)]
+    pub(super) fn with_retry_backoff(mut self, retry_backoff: Duration) -> Self {
+        self.retry_backoff = retry_backoff;
+        self
     }
 
     pub(super) fn work_dir(&self) -> &Path {
@@ -119,7 +128,14 @@ impl FirmwareStaging {
 
         tokio::time::timeout(
             download_timeout,
-            download_file_with_retries(client, &parsed, &destination, kind, &url_context),
+            download_file_with_retries(
+                client,
+                &parsed,
+                &destination,
+                kind,
+                &url_context,
+                self.retry_backoff,
+            ),
         )
         .await
         .map_err(|_| match kind {
@@ -248,10 +264,11 @@ async fn download_file_with_retries(
     destination: &Path,
     kind: FirmwareDownloadKind,
     url_context: &LoggableFirmwareUrl,
+    retry_backoff: Duration,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     tryhard::retry_fn(|| download_file(client, url, destination))
         .retries(DOWNLOAD_MAX_RETRIES)
-        .exponential_backoff(Duration::from_secs(1))
+        .exponential_backoff(retry_backoff)
         .on_retry(|attempt, next_delay, error| {
             let next_action = if next_delay.is_some() {
                 FirmwareDownloadNextAction::Retry
@@ -342,7 +359,7 @@ mod tests {
     use axum::body::{Body, Bytes};
     use axum::http::StatusCode;
     use axum::routing::get;
-    use carbide_instrument::testing::{capture_logs, capture_logs_async};
+    use carbide_instrument::testing::{MetricsCapture, capture_logs, capture_logs_async};
     use carbide_test_support::{Check, check_values};
     use futures_util::{StreamExt, stream};
     use rpc::scout_firmware_upgrade::{FileArtifact, ScoutFirmwareUpgradeTask};
@@ -558,6 +575,83 @@ printf 'first=%s second=%s' "$(cat "$1")" "$(cat "$2")"
         stop_server(server).await;
     }
 
+    /// Real HTTP failures exhaust four attempts, count `retry` and `give_up`,
+    /// and keep URL credentials out of errors and logs.
+    #[test]
+    fn test_download_failure() {
+        const SECRET: &str = "DOWNLOAD_FAILURE_SECRET_MARKER";
+
+        let metrics = MetricsCapture::start();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let ((base, result), logs) = runtime.block_on(capture_logs_async(async {
+            let (base, server) = start_server(Router::new()).await;
+            let mut staging = FirmwareStaging::new()
+                .unwrap()
+                .with_retry_backoff(Duration::from_millis(10));
+            let result = staging
+                .stage(
+                    &reqwest::Client::new(),
+                    &format!("{base}/scripts/nonexistent.sh?token={SECRET}#{SECRET}"),
+                    "doesntmatter",
+                    FirmwareDownloadKind::Script,
+                    Duration::from_secs(30),
+                )
+                .await;
+            stop_server(server).await;
+            (base, result)
+        }));
+
+        let attempt_logs = logs
+            .iter()
+            .filter(|log| log.field("event_name") == Some("scout_firmware_download_attempt_failed"))
+            .collect::<Vec<_>>();
+        let expected_url = format!("{base}/scripts/nonexistent.sh");
+        // Assert the caller-visible retry budget independently of its constant.
+        assert_eq!(attempt_logs.len(), 4);
+        assert!(attempt_logs.iter().all(|log| {
+            log.field("kind") == Some("script")
+                && log.field("url") == Some(expected_url.as_str())
+                && log.message == "[firmware_upgrade] download attempt failed; retrying"
+                && log
+                    .field("error")
+                    .is_some_and(|error| !error.contains(SECRET))
+        }));
+        assert_eq!(
+            attempt_logs
+                .iter()
+                .filter(|log| log.field("next_action") == Some("retry"))
+                .count(),
+            3
+        );
+        assert_eq!(
+            attempt_logs
+                .iter()
+                .filter(|log| log.field("next_action") == Some("give_up"))
+                .count(),
+            1
+        );
+        assert_eq!(
+            metrics.counter_delta(
+                "carbide_scout_firmware_download_attempt_failures_total",
+                &[("kind", "script"), ("next_action", "retry")],
+            ),
+            3.0
+        );
+        assert_eq!(
+            metrics.counter_delta(
+                "carbide_scout_firmware_download_attempt_failures_total",
+                &[("kind", "script"), ("next_action", "give_up")],
+            ),
+            1.0
+        );
+        let error = result.expect_err("the failed download must exhaust its retry budget");
+        assert!(error.to_string().contains(&expected_url));
+        assert!(!format!("{error:?}\n{logs:?}").contains(SECRET));
+    }
+
     /// A transient HTTP failure must retry the same input and return checked
     /// bytes from the later successful response.
     #[tokio::test]
@@ -578,7 +672,9 @@ printf 'first=%s second=%s' "$(cat "$1")" "$(cat "$2")"
             }),
         );
         let (base, server) = start_server(app).await;
-        let mut staging = FirmwareStaging::new().unwrap();
+        let mut staging = FirmwareStaging::new()
+            .unwrap()
+            .with_retry_backoff(Duration::from_millis(10));
         let path = staging
             .stage(
                 &reqwest::Client::new(),

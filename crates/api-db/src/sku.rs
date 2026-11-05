@@ -279,6 +279,16 @@ pub async fn update_metadata(
     Ok(())
 }
 
+/// `replace` replaces an existing SKU's components, schema version, description,
+/// and device type, then requests verification for associated machines. It
+/// preserves the creation time and machine assignments and returns the saved SKU.
+///
+/// The schema version must equal [`CURRENT_SKU_VERSION`]. An empty ID, unsupported
+/// schema version, invalid storage constraints, or definition matching another
+/// SKU returns [`DatabaseError::InvalidArgument`] before checking for absence.
+/// A valid replacement that does not match another SKU returns
+/// [`DatabaseError::NotFoundError`] when its target ID is absent. Other SQLx
+/// errors are preserved.
 pub async fn replace(txn: &mut PgConnection, sku: &Sku) -> Result<Sku, DatabaseError> {
     validate_replacement(&sku.id, &sku.components, sku.schema_version)?;
     let mut inner_txn = Transaction::begin_inner(txn).await?;
@@ -392,7 +402,13 @@ async fn replace_locked(txn: &mut PgConnection, sku: &Sku) -> Result<(), Databas
         .bind(&sku.id)
         .fetch_one(&mut *txn)
         .await
-        .map_err(|e| DatabaseError::new("replace sku: update", e))?;
+        .map_err(|e| match e {
+            sqlx::Error::RowNotFound => DatabaseError::NotFoundError {
+                kind: "SKU",
+                id: sku.id.clone(),
+            },
+            e => DatabaseError::new("replace sku: update", e),
+        })?;
 
     crate::machine::update_sku_status_verify_request_time_for_sku(txn, &sku.id).await
 }

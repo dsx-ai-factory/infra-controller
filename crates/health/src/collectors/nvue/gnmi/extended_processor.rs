@@ -725,6 +725,10 @@ mod tests {
         assert_eq!(captured_metrics(&sink).len(), emitted);
 
         let mut unrelated = update.clone();
+        unrelated.update[0].path.as_mut().unwrap().elem[0]
+            .key
+            .insert("name".into(), String::new());
+
         unrelated.update[0]
             .path
             .as_mut()

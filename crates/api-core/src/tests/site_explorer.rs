@@ -185,12 +185,15 @@ async fn admin_address_reconciliation_republishes_a_config_changed_under_it(
     winning_config.use_admin_network = Some(!winning_config.use_admin_network.unwrap_or(true));
 
     let metrics = MetricsCapture::start();
-    let reconcile = creator.create_managed_host(
+    // Box `create_managed_host` to keep this test within libtest's default
+    // thread stack. Its inline future enlarges the test and SQLx runner
+    // frames even during fixture setup, before reconciliation starts.
+    let reconcile = Box::pin(creator.create_managed_host(
         &explored_host,
         &mut host_report,
         Some(&expected_machine),
         &env.pool,
-    );
+    ));
     let competing_write = async {
         // Reconciliation has repaired the address rows and read the old version.
         // Change the config before releasing the machine row it needs to update.
@@ -681,7 +684,7 @@ async fn test_get_machine_position_info(pool: PgPool) -> Result<(), Box<dyn std:
         common::api_fixtures::create_managed_host(&env).await.into();
 
     let dpu_machine = env.find_machine(&dpu_machine_id).await.remove(0);
-    let bmc_ip: IpAddr = dpu_machine.bmc_info.as_ref().unwrap().ip().parse().unwrap();
+    let bmc_ip: IpAddr = dpu_machine.bmc.as_ref().unwrap().ip().parse().unwrap();
 
     // Get the existing explored endpoint (created by create_managed_host) and update it with position info
     let mut txn = env.pool.begin().await?;

@@ -182,7 +182,7 @@ HBN runs as a container on the DPU and manages network routing using [Cumulus Li
 
 DPU health reporting includes HBN status such as whether the container is running, BGP peering state, and configuration version.
 
-General reference: [DOCA HBN Service](https://docs.nvidia.com/doca/sdk/pdf/doca-hbn-service.pdf)
+General reference: [DOCA HBN Service](https://docs.nvidia.com/doca/sdk/doca-hbn-service-guide/index.html)
 
 ### FNN
 

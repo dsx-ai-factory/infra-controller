@@ -337,23 +337,21 @@ pub async fn find_by_machine_id(
     machine_id: &MachineId,
 ) -> DatabaseResult<TenantIdentityConfig> {
     let instance_machine_id = instance_machine_id_for_identity_lookup(txn, machine_id).await?;
-    let row = sqlx::query_as::<_, TenantIdentityConfig>(
+    // `tic` is the alias declared by `TenantIdentityConfig`'s `DbTable` metadata.
+    let query = format!(
         r"
-        SELECT tic.organization_id, tic.issuer, tic.default_audience, tic.allowed_audiences,
-            tic.token_ttl_sec, tic.subject_prefix, tic.enabled, tic.created_at, tic.updated_at,
-            tic.encrypted_signing_key_1, tic.encrypted_signing_key_2,
-            tic.signing_key_public_1, tic.signing_key_public_2,
-            tic.current_signing_key_slot, tic.non_active_slot_expires_at,
-            tic.token_endpoint, tic.auth_method, tic.encrypted_auth_method_config,
-            tic.subject_token_audience, tic.token_delegation_created_at
-        FROM tenant_identity_config tic
+        SELECT {}
+        FROM {}
         INNER JOIN instances i ON tic.organization_id = i.tenant_org
         WHERE i.machine_id = $1 AND i.deleted IS NULL AND tic.enabled = true",
-    )
-    .bind(instance_machine_id)
-    .fetch_optional(&mut *txn)
-    .await
-    .map_err(|e| DatabaseError::query("SELECT tenant_identity_config BY machine_id", e))?;
+        TenantIdentityConfig::db_aliased_columns(),
+        TenantIdentityConfig::db_aliased_table(),
+    );
+    let row = sqlx::query_as::<_, TenantIdentityConfig>(sqlx::AssertSqlSafe(query))
+        .bind(instance_machine_id)
+        .fetch_optional(&mut *txn)
+        .await
+        .map_err(|e| DatabaseError::query("SELECT tenant_identity_config BY machine_id", e))?;
     let Some(cfg) = row else {
         return Err(DatabaseError::NotFoundError {
             kind: "machine_identity",
@@ -543,6 +541,7 @@ mod tests {
     use std::time::Duration;
 
     use carbide_secrets::key_encryption;
+    use carbide_uuid::machine::{MachineIdSource, MachineType};
     use chrono::Utc;
     use model::metadata::Metadata;
     use model::tenant::identity_config::SigningAlgorithm;
@@ -662,6 +661,118 @@ ecbC7Qcisdw2/9l8bk/zfF9gvu4kh3hXZzMWgk+vj1e8KSX+NYswYiacQA==
             actual.non_active_slot_expires_at,
             expected.non_active_slot_expires_at
         );
+    }
+
+    #[crate::sqlx_test]
+    async fn machine_lookup_requires_enabled_config_for_active_instance_tenant(pool: sqlx::PgPool) {
+        // The join must decode every selected column before reloading the
+        // matching organization. Each exclusion changes one lookup condition.
+        let mut txn = pool.begin().await.expect("begin machine lookup test");
+        let org_id = test_org_id();
+        let other_org_id = "OtherIdentityConfigOrg".parse().unwrap();
+        ensure_tenant(&mut txn, &org_id).await;
+        ensure_tenant(&mut txn, &other_org_id).await;
+        let config = base_identity_config(false, None);
+        set(&org_id, &config, Some(placeholder_key_material()), &mut txn)
+            .await
+            .expect("create identity config");
+        let machine_id = MachineId::new(
+            MachineIdSource::ProductBoardChassisSerial,
+            [1; 32],
+            MachineType::Host,
+        );
+        let other_machine_id = MachineId::new(
+            MachineIdSource::ProductBoardChassisSerial,
+            [2; 32],
+            MachineType::Host,
+        );
+        sqlx::query("INSERT INTO machines (id, dpf) VALUES ($1, '{}'::jsonb)")
+            .bind(machine_id)
+            .execute(&mut *txn)
+            .await
+            .expect("create instance machine");
+        sqlx::query("INSERT INTO instances (machine_id, tenant_org) VALUES ($1, $2)")
+            .bind(machine_id)
+            .bind(&org_id)
+            .execute(&mut *txn)
+            .await
+            .expect("create tenant instance");
+
+        #[derive(Clone, Copy)]
+        struct Case<'a> {
+            name: &'static str,
+            lookup_machine_id: MachineId,
+            instance_org: &'a TenantOrganizationId,
+            enabled: bool,
+            deleted: bool,
+            expect_found: bool,
+        }
+        let active = Case {
+            name: "active instance",
+            lookup_machine_id: machine_id,
+            instance_org: &org_id,
+            enabled: true,
+            deleted: false,
+            expect_found: true,
+        };
+        let cases = [
+            active,
+            Case {
+                name: "different machine",
+                lookup_machine_id: other_machine_id,
+                expect_found: false,
+                ..active
+            },
+            Case {
+                name: "different tenant",
+                instance_org: &other_org_id,
+                expect_found: false,
+                ..active
+            },
+            Case {
+                name: "disabled config",
+                enabled: false,
+                expect_found: false,
+                ..active
+            },
+            Case {
+                name: "deleted instance",
+                deleted: true,
+                expect_found: false,
+                ..active
+            },
+        ];
+        for case in cases {
+            sqlx::query("UPDATE instances SET tenant_org = $2, deleted = $3 WHERE machine_id = $1")
+                .bind(machine_id)
+                .bind(case.instance_org)
+                .bind(case.deleted.then(Utc::now))
+                .execute(&mut *txn)
+                .await
+                .expect("set instance lookup conditions");
+            sqlx::query(
+                "UPDATE tenant_identity_config SET enabled = $2 WHERE organization_id = $1",
+            )
+            .bind(&org_id)
+            .bind(case.enabled)
+            .execute(&mut *txn)
+            .await
+            .expect("set identity config lookup conditions");
+
+            let result = find_by_machine_id(&mut txn, &case.lookup_machine_id).await;
+
+            if case.expect_found {
+                let found = result.expect(case.name);
+                assert_eq!(found.organization_id, org_id);
+            } else {
+                assert!(
+                    matches!(result, Err(DatabaseError::NotFoundError { kind: "machine_identity", ref id })
+                        if id == &case.lookup_machine_id.to_string()),
+                    "{}: {result:?}",
+                    case.name,
+                );
+            }
+        }
     }
 
     #[crate::sqlx_test]

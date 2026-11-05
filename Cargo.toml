@@ -27,7 +27,7 @@ repository = "https://github.com/dsx-ai-factory/infra-controller"
 
 [workspace.dependencies]
 clap = { version = "4", features = ["derive", "env"] }
-libredfish = { git = "https://github.com/NVIDIA/libredfish.git", tag = "v0.47.19" }
+libredfish = { git = "https://github.com/NVIDIA/libredfish.git", tag = "v0.47.25" }
 librms = { git = "https://github.com/dsx-ai-factory/nv-rms-client.git", tag = "v0.11.0", features = ["server"] }
 ansi-to-html = "0.2.2"
 
@@ -45,7 +45,7 @@ hyper-rustls = { version = "^0.27" }
 hyper-timeout = { version = "^0.5" }
 hyper-util = { version = "^0.1" }
 
-rustls = { version = "0.23.16", features = ["aws_lc_rs"] }
+rustls = { version = "0.23.46", features = ["aws_lc_rs"] }
 rustls-pki-types = "1.10.0"
 sqlx = { version = "0.9" }
 sqlx-core = { version = "0.9" }
@@ -62,11 +62,11 @@ opentelemetry-semantic-conventions = "0.32.1"
 tracing-opentelemetry = "0.33.0"
 
 # NV-Redfish
-nv-redfish = { version = "0.20.0" }
-nv-redfish-dispatcher = { version = "0.20.0" }
-nv-redfish-server-core = { version = "0.20.0" }
-nv-redfish-csdl-compiler = { version = "0.20.0" }
-nv-redfish-schema = { version = "0.20.0" }
+nv-redfish = { version = "0.22.0" }
+nv-redfish-dispatcher = { version = "0.22.0" }
+nv-redfish-server-core = { version = "0.22.0" }
+nv-redfish-csdl-compiler = { version = "0.22.0" }
+nv-redfish-schema = { version = "0.22.0" }
 
 ########
 # MARK: - Pinned packages that we can't upgrade due to conflicts or just bugs
@@ -137,9 +137,9 @@ gtmpl_value = "0.5.1"
 hashbrown = "0.17.1"
 heck = "0.5.0"
 hex = "0.4.3"
-hickory-proto = "0.26.1"
-hickory-resolver = "0.26.1"
-hickory-server = "0.26.1"
+hickory-proto = "0.26.3"
+hickory-resolver = "0.26.3"
+hickory-server = "0.26.3"
 hkdf = "0.13.0"
 hostname = "0.4"
 http = "1.3.1"
@@ -185,6 +185,7 @@ once_cell = "1.19"
 pandoc = "0.8.11"
 pin-project-lite = "0.2"
 pkcs1 = "0.7.5"
+pkg-config = "0.3"
 prettyplease = "0.2.30"
 prettytable-rs = { default-features = false, version = "0.10" }
 procfs = "0.18"
@@ -203,21 +204,24 @@ regex = "1.11.2"
 reqwest = { default-features = false, version = "0.13.3" }
 reqwest-middleware = "0.5"
 reqwest-tracing = { version = "0.7", default-features = false, features = [
-  "opentelemetry_0_31",
+  "opentelemetry_0_32",
 ] }
 resolv-conf = "0.7.0"
 ringbuf = "0.5.0"
 rsa = "0.9.9"
 rtnetlink = "0.21"
 rumqttc = { default-features = false, version = "0.25" }
-russh = "0.62.4"
+russh = "0.65.0"
 rustc-hash = "2.1.1"
 rustls-pemfile = "2.2.0"
+schemars = { version = "1.2", features = ["chrono04"] }
+semver = "1.0.28"
 serde = "1.0.228"
 serde_bytes = "0.11"
 serde_derive = "1"
 serde_json = "1.0"
 serde_regex = "1.1.0"
+serde_urlencoded = "0.7"
 serde_with = "3.12.0"
 serde_yaml = "0.9"
 serial_test = "3"
@@ -247,7 +251,7 @@ tower-http = "0.7"
 tower-layer = "0.3"
 tower-service = "0.3.2"
 tower-test = "0.4"
-tracing = "0.1.41"
+tracing = "0.1.44"
 tracing-appender = "0.2.4"
 tracing-log = "0.2.0"
 tracing-subscriber = "0.3"
@@ -265,7 +269,7 @@ wait-timeout = "0.2.1"
 walkdir = "2.5.0"
 x509-parser = "0.18.1"
 zeroize = { version = "1", features = ["derive"] }
-zip = { version = "8.6", default-features = false }
+zip = { version = "9.0", default-features = false }
 jsonpath-rust = "1.0.4"
 
 [profile.ci-tests]

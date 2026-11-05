@@ -28,6 +28,24 @@ pub(crate) struct GenericAmi<'a> {
 }
 
 impl GenericAmi<'_> {
+    pub(crate) fn ami_service_root_config(&self) -> redfish::service_root::Config {
+        redfish::service_root::Config {
+            vendor: redfish::oem::BmcVendor::Ami,
+            product: Some("AMI Redfish Server"),
+            redfish_version: "1.17.0",
+            exposes_computer_systems: true,
+        }
+    }
+
+    pub(crate) fn supermicro_service_root_config(&self) -> redfish::service_root::Config {
+        redfish::service_root::Config {
+            vendor: redfish::oem::BmcVendor::Supermicro,
+            product: Some("Super Server"),
+            redfish_version: "1.17.0",
+            exposes_computer_systems: true,
+        }
+    }
+
     pub(crate) fn event_service_config(&self) -> Option<crate::EventServiceConfig> {
         Some(crate::EventServiceConfig::default())
     }

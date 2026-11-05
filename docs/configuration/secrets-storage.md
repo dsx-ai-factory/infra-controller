@@ -20,7 +20,16 @@ The credentials store behaves as follows:
 - Writes go to exactly one backend: `writer`.
 - The Postgres store is an append-only journal. The newest entry for a path is the credential, and an empty password reads as "no credential". Each entry's value is encrypted with its own data encryption key (DEK), and the DEK is wrapped by a key encryption key (KEK) held outside the database by a key management service (KMS) provider.
 - Reads never consult the routing table. Every stored entry records which KEK wrapped it, so rotating a key redirects new writes without touching what is already readable.
-- Vault keeps serving public key infrastructure (PKI) certificates regardless of this chain. Retiring Vault from credential reads does not retire it from PKI, and `nico-api` still needs its Vault connection settings.
+- Certificate issuance is configured separately, in `[certificates]`, so retiring Vault from credential reads does not retire it from public key infrastructure (PKI) issuance.
+- The `nico-api` process needs its Vault connection settings only while one of these settings uses the shared Vault client:
+  - The `backends` list includes `vault`, or `writer` is `vault`.
+  - The `[secrets]` section sets `import_from = "vault"`, even after the import has completed.
+  - There is no `[secrets]` section, and `CARBIDE_CREDENTIAL_STORE` is unset or `vault`.
+  - A certificate type whose cert-manager flag (`use_cert_manager` or `use_cert_manager_ufm` in `[certificates]`) is false uses `[certificates] backend = "shared_vault"`, the default.
+
+  The required settings are the environment variables `VAULT_ADDR`, `VAULT_KV_MOUNT_LOCATION`, `VAULT_PKI_MOUNT_LOCATION`, and `VAULT_PKI_ROLE_NAME`, plus a token and the Vault CA file. The token is the Kubernetes service-account token when one is mounted, and `VAULT_TOKEN` otherwise. The CA file is the path in `VAULT_CACERT`, or `/var/run/secrets/forge-roots/ca.crt` by default. Setting `VAULT_NAMESPACE` is optional. A missing setting fails startup before `nico-api` connects to Postgres, and the error names the settings that need it.
+
+  A Transit KMS provider builds its own Vault client, even when none of the conditions above apply. It needs `VAULT_ADDR`, a static `VAULT_TOKEN`, and the Vault CA file. It starts after `nico-api` connects to Postgres, so a missing Transit setting fails startup later than the check above. Refer to [KMS Providers](#kms-providers).
 
 The secrets KEK is the secrets store's own key; it is unrelated to the machine-identity KEK (refer to [Machine Identity](machine_identity.md)).
 
@@ -77,7 +86,7 @@ These are the `[secrets]` fields:
 | `routing` | Maps path prefixes to the `kek_id` that encrypts new writes under them, longest prefix winning. A `"/"` catch-all entry is required. | (required) |
 | `backends` | The backend read order, highest priority first. An empty list, or a backend named twice, fails the boot. | `["vault"]` |
 | `writer` | Where new credential writes go: `"vault"` or `"postgres"`. | `"vault"` |
-| `import_from` | A source backend to import from, once, at startup. Only `"vault"` is supported. Unset means nothing to import. | unset |
+| `import_from` | A source backend to import from, once, at startup. Only `"vault"` is supported. Unset means nothing to import. While it is set, `nico-api` requires its Vault connection settings, even after the import has completed. | unset |
 | `import_approach` | How the import treats paths that already exist in Postgres: `"missing_only"` skips them; `"all"` appends a fresh entry holding the Vault value, which then becomes the current value for that path. Use `"all"` only when replacing existing Postgres values is intended. Only the first import is affected; refer to the migration walk. | `"missing_only"` |
 
 The following development/test example reads Postgres first with Vault as the fallback, using a local Integrated KEK. It is not a production custody recommendation:
@@ -168,7 +177,7 @@ keys = { "site-kek-1" = { env = "NICO_SECRETS_KEK" } }
 Two things differ from a Vault-backed site:
 
 - `helm-prereqs` seeds factory-default BMC credentials into Vault KV through its `vault.kvSeeds` value. With `backends = ["postgres"]` those seeds are invisible. Either set `vault.kvSeeds: []` and add the credentials with `nico-admin-cli credential add-*` once the API is up, as in [Set Site-wide Credentials](../getting-started/quick-start.md), or list `vault` after `postgres` in `backends` and set `import_from = "vault"` for the first boot, then remove both once the import has completed.
-- Vault stays installed for certificate issuance, so the Vault connection settings the chart already provides remain required.
+- Vault stays installed for certificate issuance. The chart issues `nico-api` certificates through the shared Vault client by default, so the Vault connection settings it already provides remain required; refer to [How It Works](#how-it-works).
 
 Confirm the store is in use with the `Postgres secrets backend configured` log line at boot and a rising `carbide_api_secrets_requests_total` counter, whose `operation` label distinguishes reads (`get`) from writes.
 
@@ -177,9 +186,9 @@ Confirm the store is in use with the `Postgres secrets backend configured` log l
 The migration is a config walk. Each step is a config change plus a restart, and each step reverses for reads by putting the previous config back: the journal is append-only and the import leaves Vault untouched. Writes are a different matter; see the rollback note after the steps.
 
 1. **Stage the section.** Add `[secrets]` with `kms` and `routing` filled in and everything else at defaults. Reads and writes flow exactly as before. Roll this release out to every `nico-api` replica before the next step: the import cannot fence a replica that is still running an older release.
-2. **Import once.** Set `import_from = "vault"`. At the next startup, one replica copies every Vault credential into Postgres; a journal marker and a lease in the `work_locks` table keep the import one-time and multi-replica safe. The default `missing_only` approach is idempotent, so a crash mid-import re-runs at the next boot and converges. If enumerating the source fails or returns nothing, the import aborts before writing anything. The log line `Vault secret import completed` reports how many credentials were imported and skipped. Once the marker exists, later boots log `Vault import already completed` and never contact Vault for the import, so `import_from` can stay set, and `import_approach = "all"` has no effect after the first import. Keep credential writers quiet between this step and step 3: leave rotation off and do not ingest hosts or add credentials, because anything written to Vault after the import exists only in Vault, the marker prevents a second import, and step 4 makes it unreadable.
+2. **Import once.** Set `import_from = "vault"`. At the next startup, one replica copies every Vault credential into Postgres; a journal marker and a lease in the `work_locks` table keep the import one-time and multi-replica safe. The default `missing_only` approach is idempotent, so a crash mid-import re-runs at the next boot and converges. If enumerating the source fails or returns nothing, the import aborts before writing anything. The log line `Vault secret import completed` reports how many credentials were imported and skipped. Once the marker exists, later boots log `Vault import already completed` and never contact Vault for the import, so `import_from` can stay set, although it keeps the Vault connection settings required, and `import_approach = "all"` has no effect after the first import. Keep credential writers quiet between this step and step 3: leave rotation off and do not ingest hosts or add credentials, because anything written to Vault after the import exists only in Vault, the marker prevents a second import, and step 4 makes it unreadable.
 3. **Read Postgres first.** Set `backends = ["postgres", "vault"]` and `writer = "postgres"`. Postgres serves reads, Vault stays behind it for anything Postgres misses, and new writes land in the journal. Reads served by Postgres increment `carbide_api_secrets_requests_total` with `operation="get"`.
-4. **Retire Vault reads.** Confirm that nothing was written to Vault after the import, then set `backends = ["postgres"]`. Vault remains configured for PKI.
+4. **Retire Vault reads.** Confirm that nothing was written to Vault after the import, then set `backends = ["postgres"]`. Certificate issuance is unaffected: it follows `[certificates]`, which uses Vault by default. While `import_from = "vault"` stays set, `nico-api` still requires its Vault connection settings. Removing it drops that requirement unless a certificate type still uses the shared Vault client (refer to [How It Works](#how-it-works)).
 
 You can also shadow-write before step 3: `writer = "postgres"` while `backends` is still `["vault"]` sends writes where reads cannot yet see them. NICo allows this and logs the warning `secrets writer's backend is not the highest-priority backend`; it is useful on purpose (confirm writes land before reads trust Postgres) and surprising by accident.
 

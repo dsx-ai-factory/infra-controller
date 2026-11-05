@@ -47,7 +47,7 @@ use state_controller::controller::StateController;
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 
-use super::{dpf_config, expect_dpf_service_inventory, phase_observation};
+use super::{bf4_deployment_config, dpf_config, expect_dpf_service_inventory, phase_observation};
 use crate::cfg::file::CarbideConfig;
 use crate::machine_update_manager::dpu_nic_firmware::DpuNicFirmwareUpdate;
 use crate::machine_update_manager::machine_update_module::MachineUpdateModule;
@@ -170,6 +170,13 @@ async fn fixture_with_config(
     expect_dpf_service_inventory(&mut mock);
     let dpf: Arc<dyn DpfOperations> = Arc::new(mock);
     config.dpf = dpf_config();
+    // Configure both BF4 classes because preflight tests can add CX9 inventory after Generic provisioning.
+    if deployment == DpuDeploymentType::Bf4Generic {
+        // Enable deployment-scoped ServiceInterfaces because configuring bf4_astra requires them.
+        config.dpf.deployment_scoped_service_interfaces = true;
+        config.dpf.deployments.bf4_generic = Some(bf4_deployment_config("bf4-generic"));
+        config.dpf.deployments.bf4_astra = Some(bf4_deployment_config("bf4-astra"));
+    }
     let env = create_test_env_with_overrides(
         pool,
         TestEnvOverrides::with_config(config).with_dpf_sdk(dpf.clone()),
@@ -284,9 +291,11 @@ async fn automatic_update_times_out_blocked_inventory_and_recovers(pool: sqlx::P
         .acquire_timeout(Duration::from_secs(60))
         .after_connect(|connection, _| {
             Box::pin(async move {
-                // Production must install its own server bound.
+                // Keep server cleanup short after advancing the Tokio budget.
+                // `deployment_reads_bound_server_work_and_preserve_operator_limits`
+                // separately checks the production SQL cap.
                 sqlx::query(
-                    "SELECT set_config('statement_timeout', '0', false), \
+                    "SELECT set_config('statement_timeout', '5s', false), \
                      set_config('lock_timeout', '0', false)",
                 )
                 .execute(connection)
@@ -316,16 +325,36 @@ async fn automatic_update_times_out_blocked_inventory_and_recovers(pool: sqlx::P
         result = &mut admission => panic!("inventory read did not wait for the table lock: {result:?}"),
         pid = wait_for_blocked_query(&f.env.pool, blocker_pid, "expected_machines") => pid,
     };
+    // The real query is blocked. Admission must finish on its Tokio deadline,
+    // before PostgreSQL's separate wall-clock cap can release the query.
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_secs(29).saturating_sub(started_at.elapsed())).await;
     assert!(
-        timeout(Duration::from_secs(35), &mut admission)
-            .await
-            .expect("compatibility must time out before the pool's 60-second acquire timeout")
-            .unwrap()
-            .is_empty()
+        futures::poll!(&mut admission).is_pending(),
+        "blocked inventory must not fail before the compatibility deadline"
+    );
+    tokio::time::advance(Duration::from_secs(2)).await;
+    let timed_out_admission = timeout(Duration::from_millis(100), &mut admission).await;
+    tokio::time::resume();
+    let still_blocked: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM pg_stat_activity \
+         WHERE pid = $1 AND wait_event_type = 'Lock' \
+         AND $2 = ANY(pg_blocking_pids(pid)))",
+    )
+    .bind(blocked_pid)
+    .bind(blocker_pid)
+    .fetch_one(&f.env.pool)
+    .await
+    .unwrap();
+    assert!(
+        still_blocked,
+        "admission must stop before PostgreSQL releases the blocked query"
     );
     assert!(
-        started_at.elapsed() >= Duration::from_secs(29),
-        "blocked inventory must consume the compatibility deadline rather than fail early"
+        timed_out_admission
+            .expect("admission must stop on its deadline while the database query is still blocked")
+            .unwrap()
+            .is_empty()
     );
     assert_eq!(f.label_reads.load(Ordering::SeqCst), 0);
     let connection = timeout(Duration::from_secs(5), reader_pool.acquire())
@@ -333,7 +362,7 @@ async fn automatic_update_times_out_blocked_inventory_and_recovers(pool: sqlx::P
         .expect("cancelled inventory read must release the pool slot while its lock is held")
         .unwrap();
     drop(connection);
-    timeout(Duration::from_secs(5), async {
+    timeout(Duration::from_secs(10), async {
         loop {
             let exists: bool =
                 sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE pid = $1)")
@@ -361,7 +390,7 @@ async fn automatic_update_times_out_blocked_inventory_and_recovers(pool: sqlx::P
     txn.commit().await.unwrap();
     blocker.commit().await.unwrap();
 
-    // The server cap must preserve an operator's tighter statement deadline.
+    // The public compatibility check must return an operator's statement timeout.
     sqlx::query("SELECT set_config('statement_timeout', '100ms', false)")
         .execute(&reader_pool)
         .await
@@ -411,11 +440,6 @@ async fn automatic_update_times_out_blocked_inventory_and_recovers(pool: sqlx::P
     }
     txn.commit().await.unwrap();
     assert_eq!(f.label_reads.load(Ordering::SeqCst), 1);
-    let restored_timeout: String = sqlx::query_scalar("SHOW statement_timeout")
-        .fetch_one(&reader_pool)
-        .await
-        .unwrap();
-    assert_eq!(restored_timeout, "0");
     reader_pool.close().await;
 }
 

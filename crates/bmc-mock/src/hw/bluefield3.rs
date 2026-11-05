@@ -47,6 +47,15 @@ pub(crate) struct FirmwareVersions {
 }
 
 impl Bluefield3<'_> {
+    pub(crate) fn service_root_config(&self) -> redfish::service_root::Config {
+        redfish::service_root::Config {
+            vendor: redfish::oem::BmcVendor::Nvidia(redfish::oem::NvidiaNamestyle::Capitalized),
+            product: Some("BlueField-3 DPU"),
+            redfish_version: "1.17.0",
+            exposes_computer_systems: true,
+        }
+    }
+
     fn sensor_layout() -> redfish::sensor::Layout {
         redfish::sensor::Layout {
             temperature: 4,

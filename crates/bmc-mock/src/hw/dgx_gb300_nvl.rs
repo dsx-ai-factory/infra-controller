@@ -45,6 +45,15 @@ pub(crate) struct DgxGB300Nvl<'a> {
 }
 
 impl DgxGB300Nvl<'_> {
+    pub(crate) fn service_root_config(&self) -> redfish::service_root::Config {
+        redfish::service_root::Config {
+            vendor: redfish::oem::BmcVendor::Nvidia(redfish::oem::NvidiaNamestyle::Uppercase),
+            product: Some("GB BMC"),
+            redfish_version: "1.17.0",
+            exposes_computer_systems: true,
+        }
+    }
+
     pub(crate) fn event_service_config(&self) -> Option<crate::EventServiceConfig> {
         Some(crate::EventServiceConfig::default())
     }

@@ -17,12 +17,13 @@
 
 use std::str::FromStr;
 
+use carbide_libmlx_model::device::identity::{MlxDeviceSelector, MlxDeviceSelectorError};
 use carbide_libmlx_model::device::info::MlxDeviceInfo;
-use carbide_libmlx_model::firmware::FirmwareSpec;
 use carbide_libmlx_model::firmware::operation::{
     FirmwareOperation, FirmwareOperationPhase, FirmwareOperationState, ObserverExitBehavior,
 };
 use carbide_libmlx_model::firmware::result::FirmwareFlashReport;
+use carbide_libmlx_model::firmware::{FirmwareDeliveryMode, FirmwareSpec};
 use carbide_libmlx_model::nvconfig::DpuNvConfigProfile;
 use carbide_utils::none_if_empty::NoneIfEmpty;
 use mac_address::MacAddress;
@@ -30,16 +31,61 @@ use mac_address::MacAddress;
 use crate::forge::DpuNvConfigProfile as DpuNvConfigProfilePb;
 use crate::protos::firmware_supervisor::ObserverExitBehavior as ObserverExitBehaviorPb;
 use crate::protos::mlx_device::{
-    FirmwareFlashReport as FirmwareFlashReportPb, FirmwareOperation as FirmwareOperationPb,
-    FirmwareOperationPhase as FirmwareOperationPhasePb,
+    FirmwareDeliveryMode as FirmwareDeliveryModePb, FirmwareFlashReport as FirmwareFlashReportPb,
+    FirmwareOperation as FirmwareOperationPb, FirmwareOperationPhase as FirmwareOperationPhasePb,
     FirmwareOperationState as FirmwareOperationStatePb, FirmwareSpec as FirmwareSpecPb,
-    MlxDeviceInfo as MlxDeviceInfoPb,
+    MlxDeviceInfo as MlxDeviceInfoPb, MlxDeviceSelector as MlxDeviceSelectorPb,
 };
+
+impl From<FirmwareDeliveryMode> for FirmwareDeliveryModePb {
+    fn from(mode: FirmwareDeliveryMode) -> Self {
+        match mode {
+            FirmwareDeliveryMode::Direct => Self::Direct,
+            FirmwareDeliveryMode::SiteCache => Self::SiteCache,
+        }
+    }
+}
+
+impl From<FirmwareDeliveryModePb> for FirmwareDeliveryMode {
+    fn from(mode: FirmwareDeliveryModePb) -> Self {
+        match mode {
+            FirmwareDeliveryModePb::Direct => Self::Direct,
+            FirmwareDeliveryModePb::SiteCache => Self::SiteCache,
+        }
+    }
+}
 
 impl From<DpuNvConfigProfile> for DpuNvConfigProfilePb {
     fn from(profile: DpuNvConfigProfile) -> Self {
         match profile {
             DpuNvConfigProfile::Gb200B3240V1 => Self::Gb200B3240V1,
+        }
+    }
+}
+
+impl TryFrom<MlxDeviceSelectorPb> for MlxDeviceSelector {
+    type Error = MlxDeviceSelectorError;
+
+    fn try_from(identity: MlxDeviceSelectorPb) -> Result<Self, Self::Error> {
+        use crate::protos::mlx_device::mlx_device_selector::Identity;
+
+        match identity.identity {
+            Some(Identity::BaseMac(mac_address)) => Self::from_mac_str(&mac_address),
+            Some(Identity::BaseGuid(guid)) => Self::Guid(guid).validate(),
+            None => Err(MlxDeviceSelectorError::MissingIdentity),
+        }
+    }
+}
+
+impl From<MlxDeviceSelector> for MlxDeviceSelectorPb {
+    fn from(identity: MlxDeviceSelector) -> Self {
+        use crate::protos::mlx_device::mlx_device_selector::Identity;
+
+        Self {
+            identity: Some(match identity {
+                MlxDeviceSelector::Mac(mac_address) => Identity::BaseMac(mac_address.to_string()),
+                MlxDeviceSelector::Guid(guid) => Identity::BaseGuid(guid),
+            }),
         }
     }
 }
@@ -54,6 +100,7 @@ impl From<MlxDeviceInfo> for MlxDeviceInfoPb {
             device_description: info.device_description.unwrap_or_default(),
             part_number: info.part_number.unwrap_or_default(),
             fw_version_current: info.fw_version_current.unwrap_or_default(),
+            fw_version_running: info.fw_version_running,
             pxe_version_current: info.pxe_version_current.unwrap_or_default(),
             uefi_version_current: info.uefi_version_current.unwrap_or_default(),
             uefi_version_virtio_blk_current: info
@@ -90,6 +137,7 @@ impl TryFrom<MlxDeviceInfoPb> for MlxDeviceInfo {
             device_description: proto.device_description.none_if_empty(),
             part_number: proto.part_number.none_if_empty(),
             fw_version_current: proto.fw_version_current.none_if_empty(),
+            fw_version_running: proto.fw_version_running.none_if_empty(),
             pxe_version_current: proto.pxe_version_current.none_if_empty(),
             uefi_version_current: proto.uefi_version_current.none_if_empty(),
             uefi_version_virtio_blk_current: proto.uefi_version_virtio_blk_current.none_if_empty(),
@@ -268,6 +316,43 @@ mod test {
 
     use super::*;
 
+    /// Shared wire selectors must use the same strict selector validation as
+    /// Core, while keeping the MAC and opaque GUID variants distinct.
+    #[test]
+    fn device_selector_wire_conversion_validates_and_preserves_variants() {
+        use crate::protos::mlx_device::mlx_device_selector::Identity::{BaseGuid, BaseMac};
+
+        scenarios!(
+            run = |identity| {
+                MlxDeviceSelector::try_from(MlxDeviceSelectorPb { identity })
+                    .map(|identity| MlxDeviceSelectorPb::from(identity).identity)
+            };
+            "MAC uses typed address formatting" {
+                Some(BaseMac("02abcdef0123".into())) =>
+                    Yields(Some(BaseMac("02:AB:CD:EF:01:23".into()))),
+            }
+            "GUID preserves exact spelling" {
+                Some(BaseGuid("opaque-Base_Guid".into())) =>
+                    Yields(Some(BaseGuid("opaque-Base_Guid".into()))),
+            }
+            "missing oneof is not a default selector" {
+                None => FailsWith(MlxDeviceSelectorError::MissingIdentity),
+            }
+            "wire MAC cannot bypass strict spelling" {
+                Some(BaseMac("+2:ab:cd:01:02:03".into())) =>
+                    FailsWith(MlxDeviceSelectorError::MalformedMac),
+            }
+            "wire MAC cannot bypass domain validation" {
+                Some(BaseMac("00:00:00:00:00:00".into())) =>
+                    FailsWith(MlxDeviceSelectorError::InvalidMac),
+            }
+            "wire GUID cannot bypass domain validation" {
+                Some(BaseGuid("--".into())) =>
+                    FailsWith(MlxDeviceSelectorError::InvalidGuid),
+            }
+        );
+    }
+
     #[test]
     fn test_firmware_spec_roundtrip() {
         let original = FirmwareSpec {
@@ -303,6 +388,7 @@ mod test {
                     psid: "".to_string(), // Empty string should become None
                     device_description: "".to_string(),
                     part_number: "".to_string(),
+                    fw_version_running: Some(String::new()),
                     fw_version_current: "".to_string(),
                     pxe_version_current: "".to_string(),
                     uefi_version_current: "".to_string(),
@@ -317,6 +403,7 @@ mod test {
                     psid: None,
                     device_description: None,
                     part_number: None,
+                    fw_version_running: None,
                     fw_version_current: None,
                     pxe_version_current: None,
                     uefi_version_current: None,
@@ -330,9 +417,8 @@ mod test {
         );
     }
 
-    // `FirmwareFlashReport` -> proto -> `FirmwareFlashReport` roundtrip. The
-    // report isn't `PartialEq`, so project to the tuple of fields the originals
-    // asserted; the conversions are total (`From`), hence `check_values`.
+    // Report conversion preserves each recorded step and version, including
+    // partial failure and steps the caller did not request.
     #[test]
     fn firmware_flash_report_roundtrip() {
         value_scenarios!(
@@ -431,10 +517,7 @@ mod test {
                 assert_eq!(converted.phase, phase);
                 assert_eq!(converted.diagnostic, original.diagnostic);
                 assert!(!converted.is_complete());
-                assert_eq!(
-                    FirmwareFlashReportPb::from(converted.report),
-                    FirmwareFlashReportPb::from(original.report),
-                );
+                assert_eq!(converted.report, original.report);
                 (proto.state, proto.phase)
             };
             "state and phase wire identities" {

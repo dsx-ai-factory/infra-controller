@@ -28,7 +28,7 @@ type ExpectedRackGroupUpdateRequest struct {
 	RackGroupId NullableString `json:"rackGroupId,omitempty"`
 	// Optional replacement topology identifier, non-blank and at most 128 characters.
 	Topology NullableString `json:"topology,omitempty"`
-	// Optional replacement rack fabric protocol, non-blank and at most 128 characters. `NVLINK_V6` enables GB-to-VR profile topology normalization.
+	// Optional replacement rack fabric protocol, non-blank and at most 128 characters. Omission or null preserves the stored protocol, including an unspecified value. `NVLINK_V6` enables GB-to-VR profile topology normalization.
 	Protocol NullableString `json:"protocol,omitempty"`
 	// Ordered racks and their devices. Rack IDs and device identity tuples must be unique across the group, with case-sensitive comparison. A provided array replaces the complete list; on PATCH, omission or null preserves it and [] clears it. On create, omission or null supplies an empty list.
 	Racks []ExpectedRackGroupRack `json:"racks,omitempty"`

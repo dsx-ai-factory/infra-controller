@@ -33,6 +33,15 @@ pub(crate) struct DgxVrNvl<'a> {
 }
 
 impl DgxVrNvl<'_> {
+    pub(crate) fn service_root_config(&self) -> redfish::service_root::Config {
+        redfish::service_root::Config {
+            vendor: redfish::oem::BmcVendor::Nvidia(redfish::oem::NvidiaNamestyle::Uppercase),
+            product: Some("VR NVL72"),
+            redfish_version: "1.17.0",
+            exposes_computer_systems: true,
+        }
+    }
+
     const BLUEFIELD_CHASSIS_ID: &'static str = "BlueField_0";
     const BLUEFIELD_NIC_ID: &'static str = "BlueField_NIC_0";
     const BLUEFIELD_PCIE_DEVICE_ID: &'static str = "BlueField_0";

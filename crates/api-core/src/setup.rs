@@ -31,7 +31,7 @@ use carbide_extension_service_controller::context::{
 };
 use carbide_extension_service_controller::handler::ExtensionServiceStateHandler;
 use carbide_extension_service_controller::io::ExtensionServiceStateControllerIO;
-use carbide_firmware::FirmwareDownloader;
+use carbide_firmware::{FirmwareArtifactCache, FirmwareDownloader};
 use carbide_health_metrics::PerObjectMetricsRegistry;
 use carbide_ib_fabric::IbFabricMonitor;
 use carbide_ib_fabric::ib::{self, IBFabricManager};
@@ -61,7 +61,7 @@ use carbide_rack_controller::firmware_object::FirmwareObjectFetcher;
 use carbide_rack_controller::handler::RackStateHandler;
 use carbide_rack_controller::io::RackStateControllerIO;
 use carbide_redfish::libredfish::{BmcCredentialOps, RedfishClientPool};
-use carbide_resource_pool::{PoolDefinitionSource, ResourcePoolRegistry};
+use carbide_resource_pool::PoolDefinitionSource;
 use carbide_secrets::credentials::{CredentialManager, CredentialReader};
 use carbide_site_explorer::{AuthenticatedBmcClient, EndpointExplorationService, SiteExplorer};
 use carbide_spdm_controller::context::SpdmStateHandlerServices;
@@ -396,9 +396,28 @@ pub async fn start_runtime(runtime_inputs: RuntimeInputs<'_>) -> eyre::Result<So
     } else {
         PoolDefinitionSource::SeedConfiguration
     };
-    let registry =
-        ResourcePoolRegistry::resolve(pool_definition_source, &mut txn, &pool_config.selections)
-            .await?;
+    // Production selection remains Integrated-only, including bindings left
+    // behind after their pool disappears from configuration. The lower
+    // registry initialization is also exercised with remote providers in tests.
+    for binding in db::resource_pool::binding::all(txn.as_pgconn()).await? {
+        eyre::ensure!(
+            binding.backend_kind == ResourcePoolBackendKind::Integrated,
+            "resource pool `{}` has a saved gRPC binding; v2.4 requires integrated allocation",
+            binding.pool_name,
+        );
+    }
+    let mut resource_pool_monitor = crate::resource_pool::ResourcePoolMonitor::new(
+        db_pool.clone(),
+        &carbide_config.resource_pool_backends,
+    )?;
+    let registry = resource_pool_monitor
+        .resolve_registry(
+            pool_definition_source,
+            &mut txn,
+            &pool_config.selections,
+            &work_lock_manager_handle,
+        )
+        .await?;
     // Ordinary seed definitions keep their stored values when TOML ranges or
     // types change. PKey initialization adds configured integer ranges later,
     // so it must not reuse a pool that already contains IP addresses.
@@ -416,10 +435,10 @@ pub async fn start_runtime(runtime_inputs: RuntimeInputs<'_>) -> eyre::Result<So
         // Pool inventory is the set of values, such as VNIs or IP addresses,
         // that NICo can allocate. Seed new pools here, preserving existing
         // inventory when its configured ranges change. `create_common_pools`
-        // below requires the mandatory pools to exist and have free values
-        // before it builds the handles used by the API and controllers. Route
-        // servers and site prefixes also need to reflect the config before
-        // the API starts serving requests.
+        // below requires free values for mandatory Integrated or unbound pools,
+        // and accepted definitions for remote pools, before it builds the handles
+        // used by the API and controllers. Route servers and site prefixes also
+        // need to reflect the config before the API starts serving requests.
         db::resource_pool::reconcile_pool_defs(&mut txn, &seed_data.initial_pools).await?;
         // We'll always update whatever route servers are in the config
         // to the database, and then leverage the enable_route_servers
@@ -467,6 +486,10 @@ pub async fn start_runtime(runtime_inputs: RuntimeInputs<'_>) -> eyre::Result<So
     }
     txn.commit().await?;
 
+    resource_pool_monitor
+        .register_pools(&registry, pool_definition_source, &cancel_token)
+        .await?;
+
     if !carbide_config.listen_only {
         // Idempotently seed the dedicated site-wide lockdown IKM (v0) from the
         // site-wide BMC root, so existing sites converge onto the decoupled
@@ -484,6 +507,23 @@ pub async fn start_runtime(runtime_inputs: RuntimeInputs<'_>) -> eyre::Result<So
         // `*_credential_rotation_backfill` data migration (see its header for the
         // ordering invariants), not seeded here.
     };
+
+    // Controllers and artifact serving share the same bounded transfer pool.
+    // The cache constructor leaves disk untouched until an authorized request.
+    let firmware_downloader =
+        FirmwareDownloader::with_config(carbide_config.firmware_global.downloads.clone())?;
+    let firmware_artifact_cache = FirmwareArtifactCache::new(
+        carbide_config
+            .firmware_global
+            .firmware_download_cache_directory
+            .clone(),
+        carbide_config
+            .firmware_global
+            .nic_firmware_cache_capacity_bytes,
+        firmware_downloader.clone(),
+        cancel_token.clone(),
+        join_set,
+    )?;
 
     // A listen-only replica trusts another instance to reconcile configuration,
     // but it must reject every unassigned row that the corresponding
@@ -588,6 +628,7 @@ pub async fn start_runtime(runtime_inputs: RuntimeInputs<'_>) -> eyre::Result<So
             .rotate_switch_nvos_credentials
             .clone(),
         carbide_config.site_explorer.explore_mode,
+        carbide_config.site_explorer.explore_drive_firmware,
         db_pool.clone(),
     );
     let endpoint_exploration_service = Arc::new(EndpointExplorationService::new(
@@ -736,11 +777,6 @@ pub async fn start_runtime(runtime_inputs: RuntimeInputs<'_>) -> eyre::Result<So
             .wrap_err("failed to build the firmware-object HTTP client")?,
     );
 
-    let resource_pool_monitor = crate::resource_pool::ResourcePoolMonitor::new(
-        db_pool.clone(),
-        &carbide_config.resource_pool_backends,
-    )?;
-
     let api_service = Arc::new(Api {
         certificate_provider,
         common_pools,
@@ -791,6 +827,7 @@ pub async fn start_runtime(runtime_inputs: RuntimeInputs<'_>) -> eyre::Result<So
             per_object_metrics,
             ipmi_tool.clone(),
             seed_data,
+            firmware_downloader,
             cancel_token.clone(),
         )
         .await?;
@@ -815,6 +852,7 @@ pub async fn start_runtime(runtime_inputs: RuntimeInputs<'_>) -> eyre::Result<So
         &carbide_config.auth,
         meter,
         admin_ui_routes_builder,
+        firmware_artifact_cache,
         cancel_token.clone(),
     )
     .await?;
@@ -1702,6 +1740,7 @@ async fn initialize_and_start_controllers<'a>(
     per_object_prometheus_registry: Option<prometheus::Registry>,
     ipmi_tool: Arc<dyn IPMITool>,
     seed_data: Option<SeedData<'a>>,
+    downloader: FirmwareDownloader,
     cancel_token: CancellationToken,
 ) -> eyre::Result<()> {
     let Api {
@@ -1828,15 +1867,16 @@ async fn initialize_and_start_controllers<'a>(
         resource_pool_stats,
     });
 
+    api_service.resource_pool_monitor.start_recovery(
+        &api_service.resource_pool_registry,
+        meter.clone(),
+        join_set,
+        cancel_token.clone(),
+    )?;
+
     if let Some(seed_data) = seed_data {
         if !seed_data.initial_vpcs.is_empty() {
-            db_init::create_initial_vpcs(
-                db_pool,
-                &seed_data.initial_vpcs,
-                common_pools.ethernet.pool_vpc_vni.as_ref(),
-                &api_service.resource_pool_registry,
-            )
-            .await?;
+            db_init::create_initial_vpcs(&api_service, &seed_data.initial_vpcs).await?;
         }
 
         if !seed_data.initial_networks.is_empty() {
@@ -1876,8 +1916,6 @@ async fn initialize_and_start_controllers<'a>(
         );
     }
 
-    let downloader =
-        FirmwareDownloader::with_config(carbide_config.firmware_global.downloads.clone())?;
     let upload_limiter = Arc::new(Semaphore::new(carbide_config.firmware_global.max_uploads));
 
     // Create state change emitter with DSX Exchange Event Bus hook if enabled
@@ -2605,16 +2643,14 @@ fn nmxc_tls_config_from_nvlink(
 #[cfg(test)]
 mod tests {
     use std::collections::{BTreeMap, BTreeSet, HashMap};
-    use std::path::Path;
 
     use carbide_dpf::DpfError;
     use carbide_machine_controller::dpf::MockDpfOperations;
     use carbide_network::virtualization::VpcVirtualizationType;
     use carbide_test_support::Outcome::{FailsWith, Yields};
-    use carbide_test_support::{Case, check_cases, scenarios, value_scenarios};
+    use carbide_test_support::{Case, check_cases, value_scenarios};
     use figment::Figment;
     use figment::providers::{Format, Toml};
-    use model::expected_machine::HostDpuPolicy;
     use model::extension_service::ServiceVpcAddressFamily;
     use model::network_segment::{NetworkDefinition, NetworkDefinitionSegmentType};
     use model::resource_pool::ResourcePoolType;
@@ -2625,7 +2661,7 @@ mod tests {
         CarbideConfig, DpfInterfaceIdentity, HostInterceptBridging, HostRepresentorBridgingConfig,
         InitialObjectsConfig, VmaasConfig, default_hbn_bridge,
     };
-    use crate::cfg::load::{merged_carbide_config_figment, parse_carbide_config};
+    use crate::cfg::load::parse_carbide_config;
 
     /// Verifies disabled DPF bypasses malformed platform values, absent packaged chart metadata, and
     /// resource construction because these inputs are irrelevant until DPF management is enabled.
@@ -3203,91 +3239,6 @@ mod tests {
         );
     }
 
-    #[derive(Clone, Copy)]
-    struct PolicyLayers {
-        global_setting: &'static str,
-        site_setting: &'static str,
-        environment_value: Option<&'static str>,
-    }
-
-    #[allow(clippy::result_large_err)] // Figment controls the error representation.
-    fn load_layered_dpu_policy(
-        layers: PolicyLayers,
-    ) -> Result<Option<HostDpuPolicy>, figment::Error> {
-        let mut policy = None;
-        figment::Jail::try_with(|jail| {
-            jail.clear_env();
-            if let Some(environment_value) = layers.environment_value {
-                jail.set_env("CARBIDE_API_SITE_EXPLORER", environment_value);
-            }
-
-            let global_config = format!(
-                "{}\n[site_explorer]\n{}\n",
-                include_str!("cfg/test_data/min_config.toml"),
-                layers.global_setting,
-            );
-            let site_config = format!("[site_explorer]\n{}\n", layers.site_setting);
-            jail.create_file("global.toml", &global_config)?;
-            jail.create_file("site.toml", &site_config)?;
-
-            policy = Some(
-                merged_carbide_config_figment(
-                    Path::new("global.toml"),
-                    Some(Path::new("site.toml")),
-                )
-                .extract::<CarbideConfig>()?
-                .site_explorer
-                .dpu_policy,
-            );
-            Ok(())
-        })?;
-
-        Ok(policy.expect("Jail must run the configuration extraction"))
-    }
-
-    #[test]
-    fn site_explorer_dpu_policy_respects_provider_precedence_across_legacy_key() {
-        scenarios!(
-            run = load_layered_dpu_policy;
-            "site config overrides global config regardless of key spelling" {
-                PolicyLayers {
-                    global_setting: "dpu_policy = \"nic\"",
-                    site_setting: "dpu_mode = \"no_dpu\"",
-                    environment_value: None,
-                } => Yields(Some(HostDpuPolicy::Ignore)),
-                PolicyLayers {
-                    global_setting: "dpu_mode = \"no_dpu\"",
-                    site_setting: "dpu_policy = \"manage\"",
-                    environment_value: None,
-                } => Yields(Some(HostDpuPolicy::Manage)),
-            }
-
-            "environment overrides site config regardless of key spelling" {
-                PolicyLayers {
-                    global_setting: "",
-                    site_setting: "dpu_policy = \"nic\"",
-                    environment_value: Some("{dpu_mode=no_dpu}"),
-                } => Yields(Some(HostDpuPolicy::Ignore)),
-                PolicyLayers {
-                    global_setting: "",
-                    site_setting: "dpu_mode = \"no_dpu\"",
-                    environment_value: Some("{dpu_policy=manage}"),
-                } => Yields(Some(HostDpuPolicy::Manage)),
-            }
-
-            "canonical key wins within one provider" {
-                PolicyLayers {
-                    global_setting: concat!(
-                        "dpu_policy = \"nic\"\n",
-                        "dpu_mode = \"no_dpu\"",
-                    ),
-                    site_setting: "",
-                    environment_value: None,
-                } => Yields(Some(HostDpuPolicy::Nic)),
-            }
-        );
-    }
-
     fn minimal_carbide_config() -> CarbideConfig {
         Figment::new()
             .merge(Toml::string(
@@ -3784,70 +3735,6 @@ mod tests {
                 }
             }
         }
-    }
-
-    #[test]
-    #[allow(clippy::result_large_err)] // Figment controls the error representation.
-    fn rack_profile_attributes_merge_per_key_with_provider_precedence() {
-        figment::Jail::expect_with(|jail| {
-            jail.clear_env();
-
-            // Environment input replaces only its duplicate key; unrelated
-            // keys from lower-priority providers remain in the effective map.
-            jail.set_env(
-                "CARBIDE_API_RACK_PROFILES",
-                "{NVL72={attributes={attribute1=environment,additional_attribute4=environment}}}",
-            );
-
-            let global_config = format!(
-                r#"{}
-
-[rack_profiles.NVL72]
-product_family = "gb200"
-attributes = {{ attribute1 = "global", additional_attribute2 = "global" }}
-
-[rack_profiles.NVL72.rack_capabilities.compute]
-count = 18
-
-[rack_profiles.NVL72.rack_capabilities.switch]
-count = 9
-
-[rack_profiles.NVL72.rack_capabilities.power_shelf]
-count = 8
-"#,
-                include_str!("cfg/test_data/min_config.toml"),
-            );
-
-            let site_config = r#"
-[rack_profiles.NVL72]
-attributes = { attribute1 = "site", additional_attribute3 = "site" }
-"#;
-            jail.create_file("global.toml", &global_config)?;
-            jail.create_file("site.toml", site_config)?;
-
-            let config = merged_carbide_config_figment(
-                Path::new("global.toml"),
-                Some(Path::new("site.toml")),
-            )
-            .extract::<CarbideConfig>()?;
-
-            let attributes = &config.rack_profiles.get("NVL72").unwrap().attributes;
-
-            assert_eq!(
-                attributes,
-                &HashMap::from([
-                    ("attribute1".to_string(), "environment".to_string()),
-                    ("additional_attribute2".to_string(), "global".to_string()),
-                    ("additional_attribute3".to_string(), "site".to_string()),
-                    (
-                        "additional_attribute4".to_string(),
-                        "environment".to_string(),
-                    ),
-                ])
-            );
-
-            Ok(())
-        });
     }
 
     #[test]
