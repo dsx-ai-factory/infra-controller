@@ -241,6 +241,18 @@ func TestForgeRPCs(t *testing.T) {
 		is(t, []any{callErr != nil, len(fake.seen())}, []any{true, 0}, "no anonymous call")
 	})
 
+	t.Run("a reloaded certificate with a wrong SPIFFE identity is refused", func(t *testing.T) {
+		fake := &fakeForge{version: "v"}
+		c, dir := fixture(t, fake, nil, "forge.test")
+		// The mounted pair now names another service. The server accepts any client certificate, so only the client's per-handshake identity check can refuse it;
+		// without that check the call would reach the server.
+		wrongCert, wrongKey, _ := leaf(t, "spiffe://nico.local/ns/forge/sa/other", nil)
+		_ = os.WriteFile(filepath.Join(dir, "tls.crt"), wrongCert, 0o600)
+		_ = os.WriteFile(filepath.Join(dir, "tls.key"), wrongKey, 0o600)
+		_, callErr := c.Version(ctx)
+		is(t, []any{callErr != nil, len(fake.seen())}, []any{true, 0}, "wrong identity refused")
+	})
+
 	t.Run("a caller cancel stops a call", func(t *testing.T) {
 		fake := &fakeForge{block: make(chan struct{})}
 		c, _ := fixture(t, fake, nil, "forge.test")

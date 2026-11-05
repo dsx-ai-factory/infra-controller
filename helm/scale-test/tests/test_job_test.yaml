@@ -406,6 +406,38 @@ tests:
             value: ""
           any: true
 
+  - it: supplies no dev default for the SPIFFE settings, so an unset one renders empty and the fixture fails loudly
+    set:
+      suites.cluster.enabled: false
+      suites.inventory.enabled: true
+      inventory.namespace: mat-ns
+      inventory.clientSecret: nico-cert
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: SCALE_TEST_TRUST_DOMAIN
+            value: ""
+          any: true
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: SCALE_TEST_SERVICE_BASE_PATHS
+            value: ""
+          any: true
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: SCALE_TEST_MACHINE_BASE_PATH
+            value: ""
+          any: true
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: SCALE_TEST_SERVER_NAME
+            value: ""
+          any: true
+
   - it: fails when the inventory suite lacks its namespace
     set:
       suites.cluster.enabled: false
