@@ -290,6 +290,8 @@ impl From<SecretsError> for eyre::Report {
 mod tests {
     use std::time::Duration;
 
+    use serial_test::serial;
+
     use super::*;
     use crate::credentials::{CredentialKey, Credentials, MqttCredentialType};
 
@@ -327,6 +329,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial]
     async fn credential_reader_serves_file_source_without_vault_settings() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("creds.yaml");
@@ -365,6 +368,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial]
     async fn credential_reader_fails_when_named_vault_cannot_be_built() {
         // An explicit CA path that does not exist fails regardless of ambient
         // VAULT_* settings: a named Vault that cannot start fails startup
