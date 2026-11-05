@@ -597,126 +597,139 @@ picks up the new CA and ignores the trailing old one. `/v1/pki/ca/pem` serves
 the file verbatim, so it returns both certificates while the bundle is in place,
 whereas `/v1/pki/ca` decodes it and returns only the leading one.
 
-Once both have rolled out, re-apply the secret with `new-ca.crt` alone and
-restart both again, in the same order, to drop trust in the old CA.
-Certificates already issued by the old CA stay valid until they expire, so plan
-the second step after the longest `duration` in use. If a short outage is
-acceptable, skip the bundle and restart nico-rest-cert-manager followed by Site
-Manager.
+Before removing the old CA, explicitly renew Site Manager's client
+`Certificate`, `site-manager-client-tls` by default, and verify that its replacement
+chains to the new client CA. Updating the issuer's CA Secret alone does not
+trigger cert-manager.io to reissue existing certificates. Allow the new Secret
+to reach Site Manager and its client certificate to reload before proceeding;
+otherwise `ENFORCE` rejects the old client certificate with HTTP 401.
+
+Replace or wait out every certificate that still depends on the old CA,
+including the 2160-hour client certificate. Then re-apply the Secret with
+`new-ca.crt` alone and restart both deployments in the same order to drop old CA
+trust. A dedicated client CA has its own rotation: overlap its trust bundle in
+Certificate Manager, restart it, renew the client certificate, and remove the
+old client CA only after the replacement is in use.
 
 ### Certificate issuance authentication
 
-`POST /v1/pki/cloud-cert` authenticates Site Manager using its client certificate
-and exact SPIFFE URI SAN. Certificate Manager requests an optional certificate
-at the TLS handshake, then checks the chain, validity period, client-auth usage,
-and URI at this endpoint. It does not call the Kubernetes API. Public CA
-retrieval and health endpoints do not require a client certificate.
+REST Cert Manager (`nico-rest-cert-manager`) checks the client certificate and
+exact SPIFFE URI of callers to `POST /v1/pki/cloud-cert`. Its mode determines
+whether a failed check blocks issuance:
 
-`AUDIT` is the binary and chart default: rejected callers are logged but issuance
-continues. It provides upgrade compatibility, **not enforcement**. `ENFORCE`
-returns HTTP 401 for missing or invalid credentials and HTTP 403 for a trusted
-certificate with a URI outside the allowlist. Both modes apply lifetime bounds.
-Admission logs include `authorization_mode` and `service_identity` for allowed
-callers, plus `rejection_reason` for rejected callers; an unverified identity is
-left empty. An empty allowlist rejects every caller
-in audit logs and prevents startup in `ENFORCE`.
+- `AUDIT`, the binary and deployment default, logs callers it would reject but
+  still issues their certificates. It supports mixed-version upgrades but
+  **does not protect the endpoint**.
+- `ENFORCE` returns HTTP 401 for missing or invalid client credentials and
+  HTTP 403 for a trusted certificate whose URI is outside the allowlist.
 
-These optional Certificate Manager settings use CLI flags first, then their
-associated environment variables, then the binary defaults:
+The CA endpoints (`/v1/pki/ca` and `/v1/pki/ca/pem`) and health checks do not
+require a client certificate. Both modes apply the certificate lifetime bounds
+below.
 
-| Flag | Environment variable | Default and contract |
+Site Manager uses a separate client-only certificate in `site-manager-client-tls`,
+created by the Helm chart or `base/site-manager/client-certificate.yaml`.
+cert-manager.io issues it for 90 days and renews it 15 days before expiry.
+Site Manager polls the mounted certificate and key every 30 seconds; Kubernetes
+Secret projection adds delay, and new TLS connections use the replacement.
+CA trust changes still require a restart.
+
+#### Turn on enforcement
+
+1. Deploy or upgrade with authorization in `AUDIT`. The umbrella chart rolls
+   both services without ordering guarantees. Wait for the client certificate
+   and both deployments to become ready. For an externally managed client
+   certificate, provision its Secret before upgrading.
+2. Complete a Site Agent credential handshake using a valid, unexpired OTP
+   (`POST /v1/sitecreds`). Creating or registering a Site alone does not request
+   a certificate. Inspect issuance logs from every Certificate Manager replica
+   over a window that includes this handshake; for the default namespace:
+
+   ```bash
+   kubectl -n nico-rest logs -l app=nico-rest-cert-manager --since=1h --tail=-1 \
+     | grep 'certificate issuance'
+   ```
+
+   Adjust the namespace and time window to your deployment. Require an
+   `authorized caller` entry with Site Manager's configured `service_identity`;
+   no matching log lines is not evidence of success. Investigate every
+   `rejected caller` entry and any unexpected authorized identity before continuing.
+3. Set `CERT_AUTH_MODE=ENFORCE`, or Helm's
+   `nico-rest-cert-manager.authorization.mode: ENFORCE`, and roll out Certificate
+   Manager again. Enabling it during the initial upgrade rejects older Site
+   Manager pods and can interrupt Site Agent handshakes.
+
+Before rolling back to a release without client authentication, return to
+`AUDIT` and wait for Certificate Manager's rollout. This avoids rejecting older
+Site Manager pods during a mixed-version or partial rollback.
+
+#### Settings
+
+CLI flags take precedence over environment variables, then binary defaults.
+Helm and Kustomize set the new authentication settings through environment
+variables so older images can ignore them. Helm rejects reserved authentication
+keys in `extraEnv`; use the dedicated values instead.
+
+| Environment variable (CLI flag) | Helm value | Binary default and deployment behavior |
 |---|---|---|
-| `--authorization-mode` | `CERT_AUTH_MODE` | `AUDIT`; accepts uppercase `AUDIT` or `ENFORCE`, with surrounding whitespace trimmed |
-| `--allowed-identities` | `CERT_AUTH_ALLOWED_IDENTITIES` | Empty; repeat the flag or comma-separate exact, unique SPIFFE workload URIs with a nonempty path; no wildcard matching |
-| `--client-ca-file` | `CERT_AUTH_CLIENT_CA_FILE` | Empty uses the effective signing CA, including its configured primary/alternate fallback; otherwise a readable PEM CA bundle is required |
+| `CERT_AUTH_MODE` (`--authorization-mode`) | `nico-rest-cert-manager.authorization.mode` | `AUDIT`; accepts uppercase `AUDIT` or `ENFORCE`, trimming surrounding whitespace. |
+| `CERT_AUTH_ALLOWED_IDENTITIES` (`--allowed-identities`) | `nico-rest-cert-manager.authorization.allowedIdentities` | Binary: empty, which logs every caller as rejected in `AUDIT` and prevents startup in `ENFORCE`. Helm's empty list generates Site Manager's ID; Kustomize sets it explicitly. Repeat the flag or comma-separate exact, unique SPIFFE URIs with a nonempty path; no wildcards. |
+| `CERT_AUTH_CLIENT_CA_FILE` (`--client-ca-file`) | `nico-rest-cert-manager.authorization.clientCaSecretName` or `nico-rest-cert-manager.authorization.clientCaFile` | Empty uses the effective signing CA, including its primary/alternate fallback. The Secret option mounts `ca.crt` at `/etc/pki/client-ca/ca.crt`; the path option uses an existing mount. These options are mutually exclusive. |
+| `CREDS_MANAGER_CLIENT_CERT_PATH` / `CREDS_MANAGER_CLIENT_KEY_PATH` (`--creds-manager-client-cert-path` / `--creds-manager-client-key-path`) | `nico-rest-site-manager.clientCertificate.secretName` | Binary: both empty, for operation with `AUDIT` or an older issuer. Helm/Kustomize: `/etc/credsmgr-client/tls.crt` and `/etc/credsmgr-client/tls.key` from `site-manager-client-tls`. Set both paths or neither; a partial or unreadable pair prevents startup. |
 
-Helm sets these through `nico-rest-cert-manager.authorization.mode`,
-`authorization.allowedIdentities`, and `authorization.clientCaFile` (or the
-Secret-backed `authorization.clientCaSecretName` described below), using
-**environment variables**, so an older image can ignore the new settings.
-An empty chart identity list generates
-`spiffe://<global.spiffeTrustDomain>/<release-namespace>/sa/nico-rest-site-manager`.
-The trust domain defaults to `nico.local`. This chart default differs from the
-empty binary allowlist. Reserved authentication keys cannot be set through
-`extraEnv`; use the dedicated values instead.
+Helm generates the client URI as
+`spiffe://<global.spiffe.trustDomain>/<namespace>/sa/<service-account>`; the trust
+domain defaults to `nico.local`. `nico-rest-site-manager.clientCertificate.spiffeID`
+overrides that URI. It must match Certificate Manager's allowlist; the umbrella
+chart rejects a mismatch when both subcharts are enabled. Kustomize uses
+`spiffe://nico.local/nico-rest/sa/nico-rest-site-manager`; change both
+`base/site-manager/client-certificate.yaml` and `base/cert-manager/deployment.yaml`
+when changing the namespace or identity.
 
-Site Manager uses a separate client-only `Certificate`, stored by default in
-`site-manager-client-tls`, distinct from its serving certificate. The chart's
-`clientCertificate.spiffeID` overrides the generated identity; otherwise the URI
-uses the shared trust domain and Site Manager's actual namespace and service
-account name. `validate-subchart-wiring.yaml` rejects a mismatch with Certificate
-Manager's allowlist. `clientCertificate.enabled: false` requires an externally
-provisioned Secret at `clientCertificate.secretName`; the mount remains required.
-The default client certificate duration is 2160 hours, renewed 360 hours before
-expiry, using `global.certificate.issuerRef`.
+Under `nico-rest-site-manager.clientCertificate`, `duration` defaults to `2160h`,
+`renewBefore` to `360h`, and `enabled` to `true`. Issuance uses
+`global.certificate.issuerRef`. With `enabled: false`, provision the required
+Secret yourself: it needs `tls.crt` and `tls.key`, client-auth usage, exactly one
+allowed SPIFFE URI, and a chain to Certificate Manager's trusted client CA.
 
-| Site Manager flag | Environment variable | Binary default and contract |
-|---|---|---|
-| `--creds-manager-client-cert-path` | `CREDS_MANAGER_CLIENT_CERT_PATH` | Empty; optional client PEM certificate; must be supplied together with the key |
-| `--creds-manager-client-key-path` | `CREDS_MANAGER_CLIENT_KEY_PATH` | Empty; matching readable private key; a partial or invalid pair prevents startup |
-| `--creds-manager-ca-path` | None | `/etc/credsmgr-ca/ca.crt`; readable PEM CA bundle verifying the server; missing or unusable bundles prevent startup |
+Site Manager requires an HTTPS `--creds-manager-url`, verifies its hostname
+against `--creds-manager-ca-path`, and refuses redirects. The endpoint must be
+directly routable; this client ignores proxy environment variables. The server
+CA defaults to `/etc/credsmgr-ca/ca.crt`, mounted by Helm from
+`nico-rest-site-manager.credsManagerCa.secretName` (`ca-signing-secret`, key
+`tls.crt`). A missing or unusable bundle prevents startup.
 
-CLI flags override environment variables. The chart sets the client paths via
-environment variables to `/etc/credsmgr-client/tls.crt` and
-`/etc/credsmgr-client/tls.key`. With both unset, Site Manager uses verified TLS
-without a client identity, for compatibility with older charts in `AUDIT`.
-`DynTLSCfg` polls the configured client certificate and key every 30 seconds;
-valid replacements are used on new TLS connections. A client CA bundle change
-still requires a restart. Site Manager requires an HTTPS endpoint, verifies the
-URL hostname, and refuses redirects. The endpoint must be directly routable;
-Site Manager ignores proxy environment variables for this client.
+#### Trust and certificate lifetimes
 
-Helm's `credsManagerCa.secretName` defaults to `ca-signing-secret`, with key
-`tls.crt`, mounted as `ca.crt`; only the public CA is mounted. Its Role no longer
-grants Secret API access. Kubelet can still mount the explicitly configured
-Secrets. The Kustomize base uses the same mounts and defaults to
-`spiffe://nico.local/nico-rest/sa/nico-rest-site-manager`; when changing namespace
-or identity, update both `client-certificate.yaml` and
-`CERT_AUTH_ALLOWED_IDENTITIES`.
+The client certificate issuer must match Certificate Manager's trusted client
+CA. For a dedicated client CA, configure its issuer and either the client CA
+Secret or an already mounted PEM bundle above. A missing Secret or `ca.crt` key
+prevents the pod from starting. Restart Certificate Manager after changing its
+client CA bundle, and Site Manager after changing its server CA bundle. Follow
+the CA rotation procedure above before dropping an old CA.
 
-#### Upgrade and trust boundary
-
-Both umbrella subcharts use `global.image.tag`, so one upgrade rolls both
-services without ordering guarantees. Leave authorization in `AUDIT` while the
-new client certificate is issued and both deployments finish rolling out.
-Confirm the configured URI is the only intended caller and investigate every
-authorization rejection before setting `authorization.mode` to `ENFORCE` in a
-subsequent upgrade. Switching early causes older Site Manager pods to receive
-401 responses and registrations to fail until rollout completes. Return to
-`AUDIT` before rolling back to an image without client authentication.
-
-The client certificate must chain to Certificate Manager's configured client CA.
-Its issuer is configurable independently from the server signing CA; when these
-differ, create a Secret in Certificate Manager's namespace containing the client
-CA bundle under `ca.crt` and set `authorization.clientCaSecretName` to its name.
-The chart mounts that bundle read-only at `/etc/pki/client-ca/ca.crt` and configures
-authorization to use it. A missing Secret or `ca.crt` key prevents the pod from
-starting. This setting is mutually exclusive with `authorization.clientCaFile`,
-which selects a bundle in an existing mount. Certificate Manager reads the client
-CA bundle at startup; restart its pods after rotating this Secret or bundle.
-The default ClusterIssuer uses automatic approval: a principal able to request
-certificates from it can request the allowed URI. Constrain certificate issuance
-with approval policy or use a dedicated client CA whose issuance is restricted.
-Adding a namespaced Issuer backed by the same CA does not close an unrestricted
-ClusterIssuer path. SPIFFE checking rejects legacy DNS-only certificates issued
-by this endpoint, but cannot distinguish an impersonating URI legitimately
-signed by a trusted issuer. See [cert-manager approval policy](https://cert-manager.io/docs/policy/approval/).
-
-#### Certificate lifetimes
+The default cert-manager.io installation auto-approves requests to the
+`nico-rest-ca-issuer` ClusterIssuer, so anyone able to request certificates from
+it can request Site Manager's URI. Restrict issuance with
+[approval policy](https://cert-manager.io/docs/policy/approval/) or use a dedicated
+client CA whose issuance is restricted. A namespaced Issuer sharing the same CA
+does not close an unrestricted ClusterIssuer path. Certificates issued by REST
+Cert Manager have DNS identities and no SPIFFE URI, so they cannot pass this
+identity check.
 
 The request's `ttl` is an integer number of hours; zero or omission selects
 2160 hours (90 days). Requests with a nonempty `app`, including Site Agent
-credentials, accept 1–2160 hours. An empty `app`, used by Site Manager's fallback
-serving-certificate request, accepts 1–8760 hours (365 days). Values outside
-these ranges return HTTP 400. The `app` distinction is caller-supplied, not an
-additional authorization boundary; every issuance is bounded by one year.
-Certificate Manager's own serving certificate is also limited to one year. It
-renews the in-memory keypair on the first TLS handshake within seven days of
-expiry. Failed renewals retain a still-valid certificate and retry on a handshake
-after one hour; expired certificates are rejected until renewal succeeds.
-Renewal uses the in-memory signing CA; rotating that CA requires a restart.
-Existing certificates are not revoked by these checks. Site Agent bootstrap
-still requires an existing Site in `AwaitHandshake` and its correct, unexpired OTP.
+credentials, accept 1–2160 hours. Other requests accept 1–8760 hours (365 days).
+Values outside these ranges return HTTP 400. `app` is caller-supplied, not an
+additional authorization boundary. These limits do not revoke existing
+certificates. Site Agent bootstrap still requires a Site in `AwaitHandshake`
+and its correct, unexpired OTP.
+
+Certificate Manager's serving certificate lasts one year and renews on the first
+TLS handshake within seven days of expiry. Failed renewals retain an unexpired
+certificate and retry on a handshake after one hour; expired certificates are
+rejected until renewal succeeds. Renewal uses the in-memory signing CA, so
+rotating that CA requires a restart.
 
 ### Apply
 

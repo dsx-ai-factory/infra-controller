@@ -44,5 +44,5 @@ subchart being relocated, set args.credsManagerUrl explicitly.
 {{- end }}
 
 {{- define "nico-rest-site-manager.clientIdentity" -}}
-{{- default (printf "spiffe://%s/%s/sa/%s" (default "nico.local" .Values.global.spiffeTrustDomain) (include "nico-rest-site-manager.namespace" .) (include "nico-rest-site-manager.name" .)) .Values.clientCertificate.spiffeID -}}
+{{- default (printf "spiffe://%s/%s/sa/%s" (default "nico.local" (.Values.global.spiffe | default dict).trustDomain) (include "nico-rest-site-manager.namespace" .) (include "nico-rest-site-manager.name" .)) .Values.clientCertificate.spiffeID -}}
 {{- end -}}

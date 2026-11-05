@@ -87,5 +87,5 @@ clientCertificate:
   secretName: site-manager-client-tls
   duration: 2160h
   renewBefore: 360h
-  # -- Empty derives spiffe://<global.spiffeTrustDomain>/<namespace>/sa/<service-account>.
+  # -- Empty derives spiffe://<global.spiffe.trustDomain>/<namespace>/sa/<service-account>.
   spiffeID: ""
