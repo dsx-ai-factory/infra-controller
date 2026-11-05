@@ -638,6 +638,7 @@ disabled in v2.4.
 | `nmx_c_certificate_rotation` | `NmxCCertificateRotationConfig` | *(default)* | Optional expiry-driven rotation for NMX-C server certificates. |
 | `partition_monitor_max_concurrent_groups` | `NonZeroUsize` | `16` | Maximum number of NMX-C machine groups (chassis or rack) reconciled concurrently per monitor iteration. Each group in flight holds one NMX-C client and at most one database connection, so this bounds the monitor's gRPC fan-out and its share of the pool. Documented range 1 to 256. Larger values are accepted with a startup warning. 0 is rejected. |
 | `partition_monitor_full_check_interval` | `Duration` | `10m` | How often a machine group is fully reconciled against NMX-C even when nothing changed. Between full checks a group whose database inputs are unchanged since its last successful check, and whose instances all have their NVLink config applied, is skipped. GPU health and the `NvlinkUnhealthy` alert on a skipped group refresh at this interval. `0s` disables skipping. |
+| `partition_monitor_unreachable_alert_after` | `NonZeroU32` | `3` | Consecutive partition monitor passes a rack's NMX-C must be unusable before the monitor raises the rack's `NmxcUnreachable` health alert. The first pass that reaches NMX-C clears it. Must be non-zero. |
 
 When `enabled` or `nmx_c_certificate_rotation.enabled` is `true`, `nico-api`
 fills in unset NMX-C TLS settings at startup:

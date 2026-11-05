@@ -130,6 +130,37 @@ Indicates that NMX-C reported `Unhealthy` or `UnhealthyDbCorrupted` controller
 health for an NVLink domain. A `Healthy` report clears the probe. `Degraded` and
 `Unknown` do not generate a domain health report.
 
+## NVLink rack health probe identifiers
+
+### `NmxcUnreachable`
+
+Raised on a rack when the NVLink partition monitor could not use the rack's
+NMX-C for `nvlink_config.partition_monitor_unreachable_alert_after` consecutive
+passes (default `3`): no switch yielded an endpoint, the endpoint URL was
+invalid, the client could not be created, `Hello` failed, or `Hello` returned
+no usable domain UUID. The monitor writes a `Merge` report on the rack under the
+source `nvlink-partition-monitor`, with one alert whose `target` is the NMX-C
+endpoint URL the monitor resolved, absent when none resolved, and whose
+`message` names the failing step. The alert carries
+[`Hardware`](health_alert_classifications.md#hardware) only; it does not block
+allocations. A single failed pass is not reported, since a keepalive timeout on
+a loaded site is routine, and the stored alert is not rewritten while the outage
+continues. Only passes that contact the rack count: a rack skipped by change
+detection is not checked, so an outage on an otherwise unchanged rack is first
+noticed at its next full check, up to
+`nvlink_config.partition_monitor_full_check_interval` later (default `10m`),
+and the consecutive-pass count starts there. The first pass that reaches NMX-C
+removes the report, as does a rack that no longer has managed hosts for the
+monitor to reconcile. Only passes without a stored report count towards the
+threshold, so removing the report by hand during an ongoing outage suppresses
+it for another `partition_monitor_unreachable_alert_after` consecutive failed
+passes. The alert's `in_alert_since` is the first failed pass of the run that
+raised it, not the pass that wrote it. A report write that fails is retried on
+the next pass, including the removal of a report from a rack that has since
+recovered and is being skipped by change detection. Standalone chassis mapped
+through
+`nvlink_nmxc_endpoints` have no rack and receive no such alert.
+
 ## NVLink GPU health probe identifiers
 
 ### `NvlinkUnhealthy`
