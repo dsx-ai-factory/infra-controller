@@ -28,6 +28,8 @@ image_url=
 image_sha=
 image_auth_type=
 image_auth_token=
+insecure_tls=no
+curl_args=()
 distro_name=
 distro_version=
 distro_release=
@@ -40,6 +42,15 @@ forge_test_pass=
 update_grub_template="yes"
 update_grub_cfg="yes"
 
+# Apply common curl options and TLS policy to all downloads.
+function configure_curl_args() {
+	curl_args=(--fail --retry 5 --retry-all-errors)
+	if [ "$insecure_tls" == "yes" ]; then
+		curl_args+=(-k)
+		echo "WARNING: insecure_tls=yes disables HTTPS certificate verification" | tee "$log_output" >&2
+	fi
+}
+
 # Downloads the complete request URL to one caller-visible local filename while
 # preserving each forwarded curl argument as a separate value.
 function curl_url() {
@@ -50,7 +61,7 @@ function curl_url() {
 	if [ -z "$file" ]; then
 		file=$(basename "${url%%\?*}")
 	fi
-	curl --fail --retry 5 --retry-all-errors -k -L "$@" \
+	curl "${curl_args[@]}" -L "$@" \
 		--output "$file" "$url" 2>&1 | tee "$log_output"
 	return "${PIPESTATUS[0]}"
 }
@@ -220,7 +231,7 @@ function get_distro_image() {
 		echo "Distro $distro_name not supported" | tee $log_output
 		exit 1;
 	fi
-	curl --fail --retry 5 --retry-all-errors -k -L $shaurl --output shafile 2>&1 | tee $log_output
+	curl "${curl_args[@]}" -L "$shaurl" --output shafile 2>&1 | tee "$log_output"
 	if [ "${PIPESTATUS[0]}" -ne 0 ]; then
 		echo "Failed to download checksum file from $shaurl" | tee "$log_output"
 		return 1
@@ -241,9 +252,16 @@ function add_cloud_init() {
 	fi
 	seed_dir=/mnt/var/lib/cloud/seed/nocloud-net
 	mkdir -p "$seed_dir"
-	curl --fail --retry 5 --retry-all-errors -k "$cloud_init_url/user-data" --output "$seed_dir/user-data" 2>&1 | tee "$log_output"
-	curl --fail --retry 5 --retry-all-errors -k "$cloud_init_url/meta-data" --output "$seed_dir/meta-data" 2>&1 | tee "$log_output"
-	curl --fail --retry 5 --retry-all-errors -k "$cloud_init_url/network-config" --output "$seed_dir/network-config" 2>&1 | tee "$log_output"
+	local cloud_init_file download_status
+	for cloud_init_file in user-data meta-data network-config; do
+		curl "${curl_args[@]}" \
+			"$cloud_init_url/$cloud_init_file" --output "$seed_dir/$cloud_init_file" 2>&1 | tee "$log_output"
+		download_status=${PIPESTATUS[0]}
+		if [ "$download_status" -ne 0 ]; then
+			echo "Failed to download cloud-init $cloud_init_file" | tee "$log_output"
+			return "$download_status"
+		fi
+	done
 }
 
 function expand_root_fs() {
@@ -1114,6 +1132,9 @@ function parse_kernel_cmdline_argument() {
 	local argument=$1
 
 	case "$argument" in
+		insecure_tls=*)
+			insecure_tls=${argument#insecure_tls=}
+			;;
 		image_url=*)
 			image_url=${argument#image_url=}
 			;;
@@ -1203,6 +1224,7 @@ function main() {
 	do
 		parse_kernel_cmdline_argument "$argument" || true
 	done
+	configure_curl_args
 	if [ -z "$rootfs_uuid" ] && [ -z "$rootfs_label" ]; then
 		rootfs_label="cloudimg-rootfs" #default rootfs name for cloud images
 	fi
@@ -1286,7 +1308,10 @@ function main() {
 				fi
 			fi
 			if [ ! -z "$cloud_init_url" ]; then
-				add_cloud_init
+				if ! add_cloud_init; then
+					umount /mnt 2>&1 | tee "$log_output"
+					return 1
+				fi
 			fi
 			add_testing_user
 			umount /mnt 2>&1 | tee $log_output
