@@ -211,24 +211,27 @@ async fn get_device<C: Callbacks>(
     else {
         return http::not_found();
     };
+    // Hold the drive's operation lock from the snapshot through the identity
+    // lookup, so no insert or eject can change the medium in between. A drive
+    // with an operation in progress reports no identity instead of delaying this
+    // GET until that operation, which may be a long download, finishes.
+    let operation = device.operation.try_lock().ok();
     let mut body = device.to_json(&system_id);
-    let contents = device.contents();
-    if matches!(
-        contents,
-        VirtualMediaContents::Inserted {
-            write_protected: true,
-            ..
-        }
-    ) && let Some(callbacks) = &state.callbacks
+    if operation.is_some()
+        && matches!(
+            device.contents(),
+            VirtualMediaContents::Inserted {
+                write_protected: true,
+                ..
+            }
+        )
+        && let Some(callbacks) = &state.callbacks
     {
         let identity = match callbacks.virtual_media_identity(&device_id).await {
             Ok(identity) => identity,
             Err(error) => return device.backend_error(error, "virtual media identity failed"),
         };
-        // An insert or eject that completed during the lookup makes its answer stale.
-        if let Some(media_id) = identity
-            && device.contents() == contents
-        {
+        if let Some(media_id) = identity {
             body = body.patch(json!({
                 "Oem": {"VM": {"MediaId": media_id}},
                 "Actions": {"Oem": {"#VM.BootOnce": {
@@ -704,6 +707,100 @@ mod tests {
             boot_settings,
             "a one-time media boot leaves the persistent boot order and override unchanged"
         );
+    }
+
+    /// Identifies `media-1` once the test releases each lookup; media updates wait
+    /// for the test to apply them.
+    struct GatedIdentityCallbacks {
+        lookups: mpsc::UnboundedSender<oneshot::Sender<()>>,
+        updates: mpsc::UnboundedSender<VirtualMediaUpdate>,
+    }
+
+    impl Callbacks for GatedIdentityCallbacks {
+        async fn computer_system_reset(
+            &self,
+            _: crate::ResourceResetType,
+        ) -> Result<(), ActionError> {
+            Ok(())
+        }
+
+        async fn set_virtual_media(&self, update: VirtualMediaUpdate) -> Result<(), ActionError> {
+            self.updates.send(update).unwrap();
+            Ok(())
+        }
+
+        async fn virtual_media_identity(&self, _: &str) -> Result<Option<String>, ActionError> {
+            let (release, released) = oneshot::channel();
+            self.lookups.send(release).unwrap();
+            released.await.unwrap();
+            Ok(Some("media-1".into()))
+        }
+
+        fn state_refresh_indication(&self) {}
+    }
+
+    #[tokio::test]
+    async fn media_identity_lookup_excludes_insert_and_eject() {
+        let (lookups, mut lookup_started) = mpsc::unbounded_channel();
+        let (updates, mut applied) = mpsc::unbounded_channel();
+        let (router, _state) = crate::machine_router(
+            &host_info(HardwareType::DellPowerEdgeR750),
+            Arc::new(GatedIdentityCallbacks { lookups, updates }),
+            "test-host".to_owned(),
+            false,
+            MachineRouterOptions {
+                virtual_media_devices: Some(vec![DeviceConfig {
+                    id: "ConfigCd".into(),
+                    name: "Config".into(),
+                    media_types: vec!["CD".into()],
+                }]),
+                ..Default::default()
+            },
+        );
+        let drive = "/redfish/v1/Systems/System.Embedded.1/VirtualMedia/ConfigCd";
+        let insert = format!("{drive}/Actions/VirtualMedia.InsertMedia");
+        let eject = format!("{drive}/Actions/VirtualMedia.EjectMedia");
+        let image = json!({"Image": "http://example.com/config.iso"});
+        let (status, _) = request(&router, Method::POST, &insert, Some(image.clone())).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        applied.recv().await.unwrap().commit();
+
+        // An eject requested during the lookup waits for the lookup to finish.
+        let mut get = Box::pin(request(&router, Method::GET, drive, None));
+        let release = tokio::select! {
+            result = &mut get => panic!("GET finished before its lookup: {result:?}"),
+            release = lookup_started.recv() => release.unwrap(),
+        };
+        let mut ejecting = Box::pin(request(&router, Method::POST, &eject, Some(json!({}))));
+        std::future::poll_fn(|cx| {
+            assert!(std::future::Future::poll(ejecting.as_mut(), cx).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        assert!(
+            applied.try_recv().is_err(),
+            "the eject waits for the drive lock"
+        );
+        release.send(()).unwrap();
+        let (_, body) = get.await;
+        assert_eq!(body.unwrap()["Oem"]["VM"]["MediaId"], "media-1");
+
+        // The update keeps the drive lock until it is applied. A GET meanwhile
+        // answers at once, without an identity.
+        assert_eq!(ejecting.await.0, StatusCode::NO_CONTENT);
+        let pending = applied.recv().await.unwrap();
+        let (status, body) = request(&router, Method::GET, drive, None).await;
+        assert_eq!(status, StatusCode::OK);
+        let body = body.unwrap();
+        assert_eq!(body["Inserted"], true, "the eject is not applied yet");
+        assert!(
+            body.get("Oem").is_none(),
+            "a busy drive reports no identity"
+        );
+        assert!(lookup_started.try_recv().is_err());
+        pending.commit();
+        let (_, body) = request(&router, Method::GET, drive, None).await;
+        assert_eq!(body.unwrap()["Inserted"], false);
     }
 
     #[tokio::test]
