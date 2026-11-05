@@ -29956,10 +29956,13 @@ type ManagedHostServiceInterfaceConfig struct {
 	MacAddress string `protobuf:"bytes,15,opt,name=mac_address,json=macAddress,proto3" json:"mac_address,omitempty"`
 	// Stable identity used to correlate this service interface across reconciliation.
 	InternalUuid *UUID `protobuf:"bytes,16,opt,name=internal_uuid,json=internalUuid,proto3" json:"internal_uuid,omitempty"`
-	// Administrative loopback assigned to the selected VPC's tenant VRF on this DPU.
+	// DPU-local loopback shared by host and service ports in this VPC.
 	// Unlike ManagedHostNetworkConfig.loopback_ip, this address is not the DPU VXLAN VTEP.
-	// Host and service interfaces selecting the same VPC on this DPU reuse this address.
+	// If present, must be one non-empty IPv4 or IPv6 address without CIDR notation.
 	// Omitted when fnn.use_vpc_vrf_loopback is false.
+	// Omission is valid. A rendered host port in this VPC can supply the loopback.
+	// The VPC has no loopback if no rendered port supplies one.
+	// Present host and service loopback values for the same VNI must match.
 	TenantVrfLoopbackIp *string `protobuf:"bytes,17,opt,name=tenant_vrf_loopback_ip,json=tenantVrfLoopbackIp,proto3,oneof" json:"tenant_vrf_loopback_ip,omitempty"`
 	unknownFields       protoimpl.UnknownFields
 	sizeCache           protoimpl.SizeCache
