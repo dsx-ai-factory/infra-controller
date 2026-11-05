@@ -113,6 +113,33 @@ async fn create_vpc(
         .unwrap())
 }
 
+/// Returns the option set IDs the public Find RPC lists for `tenant`.
+async fn find_option_set_ids(env: &TestEnv, tenant: &str) -> Vec<DhcpOptionSetId> {
+    env.api
+        .find_dhcp_option_set_ids(Request::new(rpc::forge::FindDhcpOptionSetIdsRequest {
+            name: None,
+            tenant_organization_id: Some(tenant.to_string()),
+        }))
+        .await
+        .unwrap()
+        .into_inner()
+        .ids
+}
+
+/// Returns the VPC's `dhcp_option_set_id` as the public Find RPC reports it.
+async fn vpc_dhcp_option_set(env: &TestEnv, vpc_id: VpcId) -> Option<String> {
+    let vpcs = env
+        .api
+        .find_vpcs_by_ids(Request::new(rpc::forge::VpcsByIdsRequest {
+            vpc_ids: vec![vpc_id],
+        }))
+        .await
+        .unwrap()
+        .into_inner()
+        .vpcs;
+    vpcs[0].config.as_ref().unwrap().dhcp_option_set_id.clone()
+}
+
 /// Updates only the VPC's `dhcp_option_set_id`, then returns the value the public Find RPC reports.
 async fn update_vpc_dhcp_option_set(
     env: &TestEnv,
@@ -126,16 +153,7 @@ async fn update_vpc_dhcp_option_set(
             ..Default::default()
         }))
         .await?;
-    let vpcs = env
-        .api
-        .find_vpcs_by_ids(Request::new(rpc::forge::VpcsByIdsRequest {
-            vpc_ids: vec![vpc_id],
-        }))
-        .await
-        .unwrap()
-        .into_inner()
-        .vpcs;
-    Ok(vpcs[0].config.as_ref().unwrap().dhcp_option_set_id.clone())
+    Ok(vpc_dhcp_option_set(env, vpc_id).await)
 }
 
 /// Sends the instance's current config with `dhcp_option_set_id` replaced, then returns the stored value.
@@ -200,6 +218,8 @@ async fn test_dhcp_option_set_lifecycle(pool: sqlx::PgPool) {
         vec![created.clone()]
     );
     assert!(find_option_sets(&env, id, OTHER_TENANT).await.is_empty());
+    assert_eq!(find_option_set_ids(&env, TENANT).await, vec![id]);
+    assert!(find_option_set_ids(&env, OTHER_TENANT).await.is_empty());
 
     // Updating replaces the options and moves the set to a new version.
     let update = |version: &str| rpc::forge::UpdateDhcpOptionSetRequest {
@@ -250,6 +270,7 @@ async fn test_dhcp_option_set_lifecycle(pool: sqlx::PgPool) {
     assert_eq!(err.code(), Code::NotFound);
     delete_option_set(&env, id, TENANT).await.unwrap();
     assert!(find_option_sets(&env, id, TENANT).await.is_empty());
+    assert!(find_option_set_ids(&env, TENANT).await.is_empty());
 }
 
 /// The database only checks that an attached set exists, not who owns it, so
@@ -334,10 +355,10 @@ async fn test_attaching_other_tenants_dhcp_option_set_is_rejected(pool: sqlx::Pg
     assert_eq!(err.code(), Code::FailedPrecondition);
 }
 
-/// Older clients omit `dhcp_option_set_id` on instance updates, so omission
-/// must keep the attached set while an empty string detaches it.
+/// Instance updates replace the whole config, so omitting `dhcp_option_set_id`
+/// removes the attached set, as it does for the instance's NSG.
 #[crate::sqlx_test]
-async fn test_instance_update_keeps_dhcp_option_set_when_omitted(pool: sqlx::PgPool) {
+async fn test_instance_update_without_dhcp_option_set_removes_it(pool: sqlx::PgPool) {
     let env = create_test_env(pool).await;
     create_fixture_tenant(&env, TENANT).await.unwrap();
     let set_id = create_option_set(&env, TENANT, "http://boot.example.com/x.efi")
@@ -359,25 +380,18 @@ async fn test_instance_update_keeps_dhcp_option_set_when_omitted(pool: sqlx::PgP
         .build()
         .await;
 
-    // Older clients omit the field, so the stored option set must survive.
     assert_eq!(
         update_instance_dhcp_option_set(&env, &instance, None)
-            .await
-            .unwrap(),
-        Some(set_id)
-    );
-    assert_eq!(
-        update_instance_dhcp_option_set(&env, &instance, Some(String::new()))
             .await
             .unwrap(),
         None
     );
 }
 
-/// Older clients omit `dhcp_option_set_id` on VPC updates, so omission must
-/// keep the attached set, while a new ID replaces it and an empty string clears it.
+/// VPC updates replace the attached set: a new ID swaps it in, and omitting
+/// `dhcp_option_set_id` removes it, as it does for the VPC's NSG.
 #[crate::sqlx_test]
-async fn test_vpc_update_keeps_replaces_and_clears_dhcp_option_set(pool: sqlx::PgPool) {
+async fn test_vpc_update_replaces_or_removes_dhcp_option_set(pool: sqlx::PgPool) {
     let env = create_test_env(pool).await;
     create_fixture_tenant(&env, TENANT).await.unwrap();
     let [set_a, set_b] = [
@@ -390,11 +404,7 @@ async fn test_vpc_update_keeps_replaces_and_clears_dhcp_option_set(pool: sqlx::P
         .unwrap();
 
     // Each update applies to the state the previous one left.
-    for (sent, expected) in [
-        (None, Some(&set_a)),
-        (Some(set_b.clone()), Some(&set_b)),
-        (Some(String::new()), None),
-    ] {
+    for (sent, expected) in [(Some(set_b.clone()), Some(&set_b)), (None, None)] {
         assert_eq!(
             update_vpc_dhcp_option_set(&env, vpc_id, sent.clone())
                 .await
@@ -491,10 +501,5 @@ async fn test_attach_waits_for_concurrent_dhcp_option_set_delete(pool: sqlx::PgP
     delete_txn.commit().await.unwrap();
     let err = attach.await.unwrap_err();
     assert_eq!(err.code(), Code::FailedPrecondition);
-    assert_eq!(
-        update_vpc_dhcp_option_set(&env, vpc_id, None)
-            .await
-            .unwrap(),
-        None
-    );
+    assert_eq!(vpc_dhcp_option_set(&env, vpc_id).await, None);
 }

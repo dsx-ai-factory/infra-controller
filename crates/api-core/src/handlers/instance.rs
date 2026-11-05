@@ -1402,7 +1402,6 @@ pub(crate) async fn update_instance_config(
         .transpose()
         .map_err(CarbideError::from)?
         .unwrap_or_default();
-    let keep_dhcp_option_set = rpc_config.dhcp_option_set_id.is_none();
     let mut config: InstanceConfig = rpc_config.try_into().map_err(CarbideError::from)?;
     config.extension_services = requested_extension_services.clone().into_new_attachments();
 
@@ -1519,11 +1518,6 @@ pub(crate) async fn update_instance_config(
         Some(profile) => Some(profile),
         None => initial_instance.config.power_profile.clone(),
     };
-
-    // Older clients omit dhcp_option_set_id, so omission keeps the stored value.
-    if keep_dhcp_option_set {
-        config.dhcp_option_set_id = initial_instance.config.dhcp_option_set_id;
-    }
 
     if uses_deprecated_auto_without_config {
         let Some(auto_config) = initial_instance.config.network.auto_config else {

@@ -2729,13 +2729,14 @@ impl ApiClient {
         version: String,
         metadata: Option<rpc::Metadata>,
         network_security_group_id: Option<String>,
+        dhcp_option_set_id: Option<String>,
     ) -> CarbideCliResult<rpc::Vpc> {
         let request = rpc::VpcUpdateRequest {
             id: Some(vpc_id),
             if_version_match: Some(version),
             metadata,
             network_security_group_id,
-            dhcp_option_set_id: None,
+            dhcp_option_set_id,
             default_nvlink_logical_partition_id: None,
             routing_profile_overrides: None,
             power_resource_group: None,

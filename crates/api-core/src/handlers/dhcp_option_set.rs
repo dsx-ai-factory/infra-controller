@@ -54,6 +54,31 @@ pub(crate) async fn create(
     }))
 }
 
+pub(crate) async fn find_ids(
+    api: &Api,
+    request: Request<rpc::FindDhcpOptionSetIdsRequest>,
+) -> Result<Response<rpc::FindDhcpOptionSetIdsResponse>, Status> {
+    log_request_data(&request);
+    let req = request.into_inner();
+
+    let tenant_organization_id = req
+        .tenant_organization_id
+        .as_deref()
+        .map(parse_tenant)
+        .transpose()?;
+
+    let mut txn = api.txn_begin().await?;
+    let ids = dhcp_option_set::find_ids(
+        &mut txn,
+        req.name.as_deref(),
+        tenant_organization_id.as_ref(),
+    )
+    .await?;
+    txn.commit().await?;
+
+    Ok(Response::new(rpc::FindDhcpOptionSetIdsResponse { ids }))
+}
+
 pub(crate) async fn find_by_ids(
     api: &Api,
     request: Request<rpc::FindDhcpOptionSetsByIdsRequest>,

@@ -361,8 +361,7 @@ async fn prepare_create(
         {
             return Err(CarbideError::FailedPrecondition(format!(
                 "DhcpOptionSet `{id}` does not exist or is not owned by tenant `{tenant_org}`"
-            ))
-            .into());
+            )));
         }
     }
 
@@ -418,7 +417,6 @@ pub(crate) async fn update(
     request: Request<rpc::VpcUpdateRequest>,
 ) -> Result<Response<rpc::VpcUpdateResult>, Status> {
     log_request_data(&request);
-    let keep_dhcp_option_set = request.get_ref().dhcp_option_set_id.is_none();
     // Preserve operator errors previously returned by handler-level validation
     // without changing how unrelated request-conversion errors are represented.
     let mut vpc_update =
@@ -520,10 +518,6 @@ pub(crate) async fn update(
         tenant_prefix_overlap::validate_vpc_policy(api, &mut txn, &policy.candidate).await?;
     }
 
-    // Older clients omit dhcp_option_set_id, so omission keeps the stored value.
-    if keep_dhcp_option_set {
-        vpc_update.dhcp_option_set_id = current_vpc.config.dhcp_option_set_id;
-    }
     if let Some(ref id) = vpc_update.dhcp_option_set_id {
         let tenant_org = current_vpc
             .config

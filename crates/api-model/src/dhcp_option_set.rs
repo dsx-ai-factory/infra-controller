@@ -63,7 +63,7 @@ impl<'r> sqlx::FromRow<'r, PgRow> for DhcpOptionSet {
     }
 }
 
-/// Values left unset or empty keep NICo's default.
+/// At least one value must be set; boot URLs must use http or https. Unset values keep NICo's default.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct DhcpOptions {
     pub v4: Option<DhcpOptionsV4>,

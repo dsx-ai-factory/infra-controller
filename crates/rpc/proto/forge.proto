@@ -792,6 +792,7 @@ service Forge {
   // DhcpOptionSets
   //
   rpc CreateDhcpOptionSet(CreateDhcpOptionSetRequest) returns (CreateDhcpOptionSetResponse);
+  rpc FindDhcpOptionSetIds(FindDhcpOptionSetIdsRequest) returns (FindDhcpOptionSetIdsResponse);
   rpc FindDhcpOptionSetsByIds(FindDhcpOptionSetsByIdsRequest) returns (FindDhcpOptionSetsByIdsResponse);
   rpc UpdateDhcpOptionSet(UpdateDhcpOptionSetRequest) returns (UpdateDhcpOptionSetResponse);
   rpc DeleteDhcpOptionSet(DeleteDhcpOptionSetRequest) returns (DeleteDhcpOptionSetResponse);
@@ -2535,7 +2536,7 @@ message VpcUpdateRequest {
   // preserve the current association, send an empty string to remove it, or
   // send a non-empty value to replace it.
   optional string power_resource_group = 20;
-  // Omission keeps the current DHCP option set and an empty string removes it.
+  // DHCP option set used by hosts in this VPC unless an instance sets its own.
   optional string dhcp_option_set_id = 21;
 }
 
@@ -3953,7 +3954,6 @@ message InstanceConfig {
   optional string power_profile = 26;
 
   // DHCP option set for this instance; overrides the VPC's option set per field.
-  // On update, omission keeps the current option set and an empty string removes it.
   optional string dhcp_option_set_id = 27;
 }
 
@@ -13259,7 +13259,7 @@ message ExpectedNvLinkDomainList {
   repeated ExpectedNvLinkDomain domains = 1;
 }
 
-// Values left unset or empty keep NICo's default.
+// At least one value must be set; boot URLs must use http or https. Unset values keep NICo's default.
 message DhcpOptions {
   DhcpOptionsV4 v4 = 1;
   DhcpOptionsV6 v6 = 2;
@@ -13293,6 +13293,15 @@ message CreateDhcpOptionSetRequest {
 
 message CreateDhcpOptionSetResponse {
   DhcpOptionSet dhcp_option_set = 1;
+}
+
+message FindDhcpOptionSetIdsRequest {
+  optional string name                   = 1;
+  optional string tenant_organization_id = 2;
+}
+
+message FindDhcpOptionSetIdsResponse {
+  repeated common.DhcpOptionSetId ids = 1;
 }
 
 message FindDhcpOptionSetsByIdsRequest {

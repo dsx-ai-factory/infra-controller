@@ -356,6 +356,7 @@ const (
 	Forge_GetNetworkSecurityGroupPropagationStatus_FullMethodName           = "/forge.Forge/GetNetworkSecurityGroupPropagationStatus"
 	Forge_GetNetworkSecurityGroupAttachments_FullMethodName                 = "/forge.Forge/GetNetworkSecurityGroupAttachments"
 	Forge_CreateDhcpOptionSet_FullMethodName                                = "/forge.Forge/CreateDhcpOptionSet"
+	Forge_FindDhcpOptionSetIds_FullMethodName                               = "/forge.Forge/FindDhcpOptionSetIds"
 	Forge_FindDhcpOptionSetsByIds_FullMethodName                            = "/forge.Forge/FindDhcpOptionSetsByIds"
 	Forge_UpdateDhcpOptionSet_FullMethodName                                = "/forge.Forge/UpdateDhcpOptionSet"
 	Forge_DeleteDhcpOptionSet_FullMethodName                                = "/forge.Forge/DeleteDhcpOptionSet"
@@ -1239,6 +1240,7 @@ type ForgeClient interface {
 	// DhcpOptionSets
 	//
 	CreateDhcpOptionSet(ctx context.Context, in *CreateDhcpOptionSetRequest, opts ...grpc.CallOption) (*CreateDhcpOptionSetResponse, error)
+	FindDhcpOptionSetIds(ctx context.Context, in *FindDhcpOptionSetIdsRequest, opts ...grpc.CallOption) (*FindDhcpOptionSetIdsResponse, error)
 	FindDhcpOptionSetsByIds(ctx context.Context, in *FindDhcpOptionSetsByIdsRequest, opts ...grpc.CallOption) (*FindDhcpOptionSetsByIdsResponse, error)
 	UpdateDhcpOptionSet(ctx context.Context, in *UpdateDhcpOptionSetRequest, opts ...grpc.CallOption) (*UpdateDhcpOptionSetResponse, error)
 	DeleteDhcpOptionSet(ctx context.Context, in *DeleteDhcpOptionSetRequest, opts ...grpc.CallOption) (*DeleteDhcpOptionSetResponse, error)
@@ -5096,6 +5098,16 @@ func (c *forgeClient) CreateDhcpOptionSet(ctx context.Context, in *CreateDhcpOpt
 	return out, nil
 }
 
+func (c *forgeClient) FindDhcpOptionSetIds(ctx context.Context, in *FindDhcpOptionSetIdsRequest, opts ...grpc.CallOption) (*FindDhcpOptionSetIdsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(FindDhcpOptionSetIdsResponse)
+	err := c.cc.Invoke(ctx, Forge_FindDhcpOptionSetIds_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *forgeClient) FindDhcpOptionSetsByIds(ctx context.Context, in *FindDhcpOptionSetsByIdsRequest, opts ...grpc.CallOption) (*FindDhcpOptionSetsByIdsResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(FindDhcpOptionSetsByIdsResponse)
@@ -8041,6 +8053,7 @@ type ForgeServer interface {
 	// DhcpOptionSets
 	//
 	CreateDhcpOptionSet(context.Context, *CreateDhcpOptionSetRequest) (*CreateDhcpOptionSetResponse, error)
+	FindDhcpOptionSetIds(context.Context, *FindDhcpOptionSetIdsRequest) (*FindDhcpOptionSetIdsResponse, error)
 	FindDhcpOptionSetsByIds(context.Context, *FindDhcpOptionSetsByIdsRequest) (*FindDhcpOptionSetsByIdsResponse, error)
 	UpdateDhcpOptionSet(context.Context, *UpdateDhcpOptionSetRequest) (*UpdateDhcpOptionSetResponse, error)
 	DeleteDhcpOptionSet(context.Context, *DeleteDhcpOptionSetRequest) (*DeleteDhcpOptionSetResponse, error)
@@ -9549,6 +9562,9 @@ func (UnimplementedForgeServer) GetNetworkSecurityGroupAttachments(context.Conte
 }
 func (UnimplementedForgeServer) CreateDhcpOptionSet(context.Context, *CreateDhcpOptionSetRequest) (*CreateDhcpOptionSetResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method CreateDhcpOptionSet not implemented")
+}
+func (UnimplementedForgeServer) FindDhcpOptionSetIds(context.Context, *FindDhcpOptionSetIdsRequest) (*FindDhcpOptionSetIdsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method FindDhcpOptionSetIds not implemented")
 }
 func (UnimplementedForgeServer) FindDhcpOptionSetsByIds(context.Context, *FindDhcpOptionSetsByIdsRequest) (*FindDhcpOptionSetsByIdsResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method FindDhcpOptionSetsByIds not implemented")
@@ -16244,6 +16260,24 @@ func _Forge_CreateDhcpOptionSet_Handler(srv interface{}, ctx context.Context, de
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Forge_FindDhcpOptionSetIds_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(FindDhcpOptionSetIdsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ForgeServer).FindDhcpOptionSetIds(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Forge_FindDhcpOptionSetIds_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ForgeServer).FindDhcpOptionSetIds(ctx, req.(*FindDhcpOptionSetIdsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _Forge_FindDhcpOptionSetsByIds_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(FindDhcpOptionSetsByIdsRequest)
 	if err := dec(in); err != nil {
@@ -21689,6 +21723,10 @@ var Forge_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "CreateDhcpOptionSet",
 			Handler:    _Forge_CreateDhcpOptionSet_Handler,
+		},
+		{
+			MethodName: "FindDhcpOptionSetIds",
+			Handler:    _Forge_FindDhcpOptionSetIds_Handler,
 		},
 		{
 			MethodName: "FindDhcpOptionSetsByIds",

@@ -3152,6 +3152,13 @@ impl Forge for Api {
         crate::handlers::dhcp_option_set::create(self, request).await
     }
 
+    async fn find_dhcp_option_set_ids(
+        &self,
+        request: Request<rpc::FindDhcpOptionSetIdsRequest>,
+    ) -> Result<Response<rpc::FindDhcpOptionSetIdsResponse>, Status> {
+        crate::handlers::dhcp_option_set::find_ids(self, request).await
+    }
+
     async fn find_dhcp_option_sets_by_ids(
         &self,
         request: Request<rpc::FindDhcpOptionSetsByIdsRequest>,

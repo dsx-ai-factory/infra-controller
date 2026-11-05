@@ -65,6 +65,30 @@ pub async fn create(
     }
 }
 
+/// Returns the IDs of DhcpOptionSet records, optionally filtered by name and tenant.
+pub async fn find_ids(
+    txn: &mut PgConnection,
+    name: Option<&str>,
+    tenant_organization_id: Option<&TenantOrganizationId>,
+) -> DatabaseResult<Vec<DhcpOptionSetId>> {
+    let mut builder = sqlx::QueryBuilder::new("SELECT id FROM dhcp_option_sets WHERE TRUE");
+    if let Some(name) = name {
+        builder.push(" AND name = ");
+        builder.push_bind(name);
+    }
+    if let Some(tenant_organization_id) = tenant_organization_id {
+        builder.push(" AND tenant_organization_id = ");
+        builder.push_bind(tenant_organization_id.to_string());
+    }
+    builder.push(" ORDER BY id");
+
+    builder
+        .build_query_scalar()
+        .fetch_all(txn)
+        .await
+        .map_err(|e| DatabaseError::query(builder.sql(), e))
+}
+
 /// Returns the DhcpOptionSet records with the given IDs, optionally limited
 /// to one tenant and locked for update.
 pub async fn find_by_ids(
