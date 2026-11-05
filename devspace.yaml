@@ -112,6 +112,8 @@ images:
         - dev/docker/Dockerfile.build-container-x86_64
         - dev/docker/Dockerfile.build-container-aarch64
         - dev/docker/kea.version
+        - dev/docker/build-kea.sh
+        - dev/docker/kea-lease6-replacement.patch
         - dev/docker/setup-kea-repository.sh
         - dev/docker/configure-kea-runtime.sh
         - dev/docker/isc-kea-3-0.asc
@@ -136,6 +138,8 @@ images:
         - dev/docker/Dockerfile.build-container-x86_64
         - dev/docker/Dockerfile.build-container-aarch64
         - dev/docker/kea.version
+        - dev/docker/build-kea.sh
+        - dev/docker/kea-lease6-replacement.patch
         - dev/docker/setup-kea-repository.sh
         - dev/docker/configure-kea-runtime.sh
         - dev/docker/isc-kea-3-0.asc
@@ -159,6 +163,8 @@ images:
         - dev/docker/Dockerfile.build-container-x86_64
         - dev/docker/Dockerfile.build-container-aarch64
         - dev/docker/kea.version
+        - dev/docker/build-kea.sh
+        - dev/docker/kea-lease6-replacement.patch
         - dev/docker/setup-kea-repository.sh
         - dev/docker/configure-kea-runtime.sh
         - dev/docker/isc-kea-3-0.asc

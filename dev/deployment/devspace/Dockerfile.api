@@ -42,6 +42,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   tpm2-tools \
   && rm -rf /var/lib/apt/lists/*
 
+COPY --from=artifacts /artifacts/isc-kea-common.deb /tmp/isc-kea-common.deb
+RUN dpkg -i /tmp/isc-kea-common.deb && rm /tmp/isc-kea-common.deb
+
 RUN sh /tmp/kea-repository/configure-kea-runtime.sh && rm -rf /tmp/kea-repository
 
 RUN mkdir -p /opt/carbide /opt/carbide/firmware /mnt/persistence /var/run/kea

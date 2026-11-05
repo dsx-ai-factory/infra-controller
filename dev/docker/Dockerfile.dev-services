@@ -198,6 +198,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   isc-kea-dhcp6=${KEA_VERSION} \
   && rm -rf /var/lib/apt/lists/*
 
+COPY --from=source /opt/kea/isc-kea-common.deb /tmp/isc-kea-common.deb
+RUN dpkg -i /tmp/isc-kea-common.deb && rm /tmp/isc-kea-common.deb
+
 RUN sh /tmp/kea-repository/configure-kea-runtime.sh && rm -rf /tmp/kea-repository
 
 RUN mkdir -p /usr/lib/kea/hooks /var/lib/kea /var/run/kea

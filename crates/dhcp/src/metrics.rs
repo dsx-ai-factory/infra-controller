@@ -262,12 +262,14 @@ pub(super) enum V6DropReason {
     InvalidMachinePointer,
     FetchMachineError,
     TooManyFailuresError,
+    LeaseTransactionBusy,
+    StaleLeaseIdentity,
     Unknown,
 }
 
 impl V6DropReason {
     /// Every variant, as the single source for FFI string mapping and tests.
-    const ALL: [Self; 13] = [
+    const ALL: [Self; 15] = [
         Self::NonRelayedPacket,
         Self::Success,
         Self::Ignore,
@@ -280,6 +282,8 @@ impl V6DropReason {
         Self::InvalidMachinePointer,
         Self::FetchMachineError,
         Self::TooManyFailuresError,
+        Self::LeaseTransactionBusy,
+        Self::StaleLeaseIdentity,
         Self::Unknown,
     ];
 
@@ -298,6 +302,8 @@ impl V6DropReason {
             Self::InvalidMachinePointer => "invalid_machine_pointer",
             Self::FetchMachineError => "fetch_machine_error",
             Self::TooManyFailuresError => "too_many_failures_error",
+            Self::LeaseTransactionBusy => "lease_transaction_busy",
+            Self::StaleLeaseIdentity => "stale_lease_identity",
             Self::Unknown => "unknown",
         }
     }
@@ -992,7 +998,7 @@ mod tests {
     }
 
     /// Pins every DHCPv6 `reason` label rendering. These strings come from
-    /// `V6HookResult` and must remain the exact bytes tests and dashboards use.
+    /// Rust hook outcomes and C++ guards; tests and dashboards use these exact bytes.
     #[test]
     fn v6_drop_reason_renders_the_contract_strings_byte_identically() {
         check_values(
@@ -1056,6 +1062,16 @@ mod tests {
                     scenario: "too many failures",
                     input: V6DropReason::TooManyFailuresError,
                     expect: "too_many_failures_error",
+                },
+                Check {
+                    scenario: "lease transaction busy",
+                    input: V6DropReason::LeaseTransactionBusy,
+                    expect: "lease_transaction_busy",
+                },
+                Check {
+                    scenario: "stale lease identity",
+                    input: V6DropReason::StaleLeaseIdentity,
+                    expect: "stale_lease_identity",
                 },
                 Check {
                     scenario: "unknown bucket",
