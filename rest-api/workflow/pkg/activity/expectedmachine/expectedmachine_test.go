@@ -1319,6 +1319,7 @@ func TestManageExpectedMachine_UpdateExpectedMachinesInDB(t *testing.T) {
 					SkuId:                    &sku.ID,
 					FallbackDpuSerialNumbers: []string{"DPU-1", "DPU-2"},
 					IsDpfEnabled:             cutil.GetPtr(true),
+					DpuMode:                  cutil.GetPtr(corev1.DpuMode_NO_DPU),
 					HostLifecycleProfile:     &corev1.HostLifecycleProfile{DisableLockdown: cutil.GetPtr(true)},
 				},
 				want: cdbm.ExpectedMachine{
@@ -1332,6 +1333,7 @@ func TestManageExpectedMachine_UpdateExpectedMachinesInDB(t *testing.T) {
 					MachineID:                &machine.ID,
 					FallbackDpuSerialNumbers: []string{"DPU-1", "DPU-2"},
 					IsDpfEnabled:             cutil.GetPtr(true),
+					DpuPolicy:                cutil.GetPtr(cdbm.ExpectedMachineDpuPolicyIgnore),
 					HostLifecycleProfile:     cdbm.HostLifecycleProfile{DisableLockdown: cutil.GetPtr(true)},
 				},
 			},
@@ -1353,6 +1355,10 @@ func TestManageExpectedMachine_UpdateExpectedMachinesInDB(t *testing.T) {
 				reported.Metadata.Name = ""
 				reported.Metadata.Description = "updated-description"
 				want.Description = cutil.GetPtr("updated-description")
+			}},
+			{"DPU policy", func(reported *corev1.ExpectedMachine, want *cdbm.ExpectedMachine) {
+				reported.DpuMode = cutil.GetPtr(corev1.DpuMode_NIC_MODE)
+				want.DpuPolicy = cutil.GetPtr(cdbm.ExpectedMachineDpuPolicyNic)
 			}},
 			{"DPF setting", func(reported *corev1.ExpectedMachine, want *cdbm.ExpectedMachine) {
 				reported.IsDpfEnabled = cutil.GetPtr(false)

@@ -136,6 +136,8 @@ Where `expected-machines.json` is a JSON array of `ExpectedMachineCreateRequest`
 ]
 ```
 
+REST create, update and replace-all (`PUT .../expected-machine/all`) also accept **`dpuPolicy`** (`manage`, `nic`, `ignore`), which maps to Forge `dpu_mode`. **`isDpfEnabled`** is separate: it marks DPF provisioning eligibility, not the per-host DPU policy.
+
 Two constraints apply to every batch request, both enforced at the API gateway:
 
 - **Maximum 100 machines per request.** For sites with more than 100 machines, send multiple `batch-create` calls.

@@ -2193,6 +2193,62 @@ func TestExpectedMachineSQLDAO_UpdateMultiple_BmcIpAddress(t *testing.T) {
 	assert.Equal(t, &preservedIPName, stored.Name)
 }
 
+// TestExpectedMachineSQLDAO_UpdateMultiple_DpuPolicy guards against dpu_policy supplied for
+// one row clearing the value omitted by another row.
+func TestExpectedMachineSQLDAO_UpdateMultiple_DpuPolicy(t *testing.T) {
+	ctx := context.Background()
+	dbSession := testInitDB(t)
+	defer dbSession.Close()
+	testExpectedMachineSetupSchema(t, dbSession)
+
+	user := TestBuildUser(t, dbSession, "test-user", "test-org", []string{"admin"})
+	ip := TestBuildInfrastructureProvider(t, dbSession, "test-provider", "test-org", user)
+	site := TestBuildSite(t, dbSession, ip, "test-site", user)
+	emsd := NewExpectedMachineDAO(dbSession)
+
+	originalPolicy := ExpectedMachineDpuPolicyManage
+	preservedPolicy := ExpectedMachineDpuPolicyNic
+	updatedPolicy := ExpectedMachineDpuPolicyIgnore
+
+	emUpdated, err := emsd.Create(ctx, nil, ExpectedMachineCreateInput{
+		ExpectedMachineID:   uuid.New(),
+		SiteID:              site.ID,
+		BmcMacAddress:       "00:1B:44:11:3A:F6",
+		ChassisSerialNumber: "CHASSIS-ZERO-DPU-A",
+		DpuPolicy:           &originalPolicy,
+		CreatedBy:           user.ID,
+	})
+	require.NoError(t, err)
+	emPreserved, err := emsd.Create(ctx, nil, ExpectedMachineCreateInput{
+		ExpectedMachineID:   uuid.New(),
+		SiteID:              site.ID,
+		BmcMacAddress:       "00:1B:44:11:3A:F7",
+		ChassisSerialNumber: "CHASSIS-ZERO-DPU-B",
+		DpuPolicy:           &preservedPolicy,
+		CreatedBy:           user.ID,
+	})
+	require.NoError(t, err)
+
+	got, err := emsd.UpdateMultiple(ctx, nil, []ExpectedMachineUpdateInput{
+		{
+			ExpectedMachineID: emUpdated.ID,
+			DpuPolicy:         &updatedPolicy,
+		},
+		{
+			ExpectedMachineID: emPreserved.ID,
+		},
+	})
+	require.NoError(t, err)
+	if assert.Len(t, got, 2) {
+		assert.Equal(t, &updatedPolicy, got[0].DpuPolicy)
+		assert.Equal(t, &preservedPolicy, got[1].DpuPolicy)
+	}
+
+	stored, err := emsd.Get(ctx, nil, emPreserved.ID, nil, false)
+	require.NoError(t, err)
+	assert.Equal(t, &preservedPolicy, stored.DpuPolicy)
+}
+
 // TestExpectedMachineSQLDAO_UpdateMultiple_HostLifecycleProfile guards against a
 // mixed batch clearing host_lifecycle_profile on rows that did not set it.
 // Because the shared bulk UPDATE applies one column list to every row, the field

@@ -62,6 +62,8 @@ type ExpectedMachineCreateRequest struct {
 	HostId NullableInt32 `json:"hostId,omitempty"`
 	// When true, this host is eligible for DPF-based provisioning. Optional. Omission or null uses an effective default of true. Set false explicitly to disable DPF-based provisioning.
 	IsDpfEnabled NullableBool `json:"isDpfEnabled,omitempty"`
+	// Per-host DPU policy. Distinct from isDpfEnabled.
+	DpuPolicy NullableString `json:"dpuPolicy,omitempty"`
 	// User-defined key-value pairs for organizing and categorizing Expected Machines
 	Labels map[string]string `json:"labels,omitempty"`
 	// Optional per-host lifecycle profile
@@ -828,6 +830,49 @@ func (o *ExpectedMachineCreateRequest) UnsetIsDpfEnabled() {
 	o.IsDpfEnabled.Unset()
 }
 
+// GetDpuPolicy returns the DpuPolicy field value if set, zero value otherwise (both if not set or set to explicit null).
+func (o *ExpectedMachineCreateRequest) GetDpuPolicy() string {
+	if o == nil || IsNil(o.DpuPolicy.Get()) {
+		var ret string
+		return ret
+	}
+	return *o.DpuPolicy.Get()
+}
+
+// GetDpuPolicyOk returns a tuple with the DpuPolicy field value if set, nil otherwise
+// and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
+func (o *ExpectedMachineCreateRequest) GetDpuPolicyOk() (*string, bool) {
+	if o == nil {
+		return nil, false
+	}
+	return o.DpuPolicy.Get(), o.DpuPolicy.IsSet()
+}
+
+// HasDpuPolicy returns a boolean if a field has been set.
+func (o *ExpectedMachineCreateRequest) HasDpuPolicy() bool {
+	if o != nil && o.DpuPolicy.IsSet() {
+		return true
+	}
+
+	return false
+}
+
+// SetDpuPolicy gets a reference to the given NullableString and assigns it to the DpuPolicy field.
+func (o *ExpectedMachineCreateRequest) SetDpuPolicy(v string) {
+	o.DpuPolicy.Set(&v)
+}
+
+// SetDpuPolicyNil sets the value for DpuPolicy to be an explicit nil
+func (o *ExpectedMachineCreateRequest) SetDpuPolicyNil() {
+	o.DpuPolicy.Set(nil)
+}
+
+// UnsetDpuPolicy ensures that no value is present for DpuPolicy, not even an explicit nil
+func (o *ExpectedMachineCreateRequest) UnsetDpuPolicy() {
+	o.DpuPolicy.Unset()
+}
+
 // GetLabels returns the Labels field value if set, zero value otherwise.
 func (o *ExpectedMachineCreateRequest) GetLabels() map[string]string {
 	if o == nil || IsNil(o.Labels) {
@@ -952,6 +997,9 @@ func (o ExpectedMachineCreateRequest) ToMap() (map[string]interface{}, error) {
 	}
 	if o.IsDpfEnabled.IsSet() {
 		toSerialize["isDpfEnabled"] = o.IsDpfEnabled.Get()
+	}
+	if o.DpuPolicy.IsSet() {
+		toSerialize["dpuPolicy"] = o.DpuPolicy.Get()
 	}
 	if !IsNil(o.Labels) {
 		toSerialize["labels"] = o.Labels

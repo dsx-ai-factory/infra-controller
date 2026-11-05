@@ -24,6 +24,13 @@ import (
 	"github.com/uptrace/bun"
 )
 
+// DPU policy values accepted by the REST API, mapped to Core's DpuMode.
+const (
+	ExpectedMachineDpuPolicyManage = "manage"
+	ExpectedMachineDpuPolicyNic    = "nic"
+	ExpectedMachineDpuPolicyIgnore = "ignore"
+)
+
 const (
 	// ExpectedMachineOrderByDefault default field to be used for ordering when none specified
 	ExpectedMachineOrderByDefault = "created"
@@ -76,6 +83,7 @@ type ExpectedMachine struct {
 	TrayIdx                  *int32                     `bun:"tray_idx"`
 	HostID                   *int32                     `bun:"host_id"`
 	IsDpfEnabled             *bool                      `bun:"is_dpf_enabled"`
+	DpuPolicy                *string                    `bun:"dpu_policy"`
 	Labels                   Labels                     `bun:"labels,type:jsonb"`
 	HostLifecycleProfile     HostLifecycleProfile       `bun:"host_lifecycle_profile,type:jsonb,notnull"`
 	Created                  time.Time                  `bun:"created,nullzero,notnull,default:current_timestamp"`
@@ -247,6 +255,11 @@ func (em *ExpectedMachine) ToProto(creds ExpectedMachineCredentials) *corev1.Exp
 	if em.IsDpfEnabled != nil {
 		proto.IsDpfEnabled = em.IsDpfEnabled
 	}
+	if em.DpuPolicy != nil && *em.DpuPolicy != "" {
+		if mode, ok := dpuPolicyToProto(*em.DpuPolicy); ok {
+			proto.DpuMode = &mode
+		}
+	}
 	proto.HostLifecycleProfile = em.HostLifecycleProfile.ToProto()
 
 	if creds.Username != nil {
@@ -321,6 +334,9 @@ func (em *ExpectedMachine) FromProto(proto *corev1.ExpectedMachine, linkedMachin
 	em.HostID = proto.HostId
 	em.Labels.FromProto(proto.Metadata.GetLabels())
 	em.IsDpfEnabled = proto.IsDpfEnabled
+	if proto.DpuMode != nil {
+		em.DpuPolicy = dpuModeFromProto(*proto.DpuMode)
+	}
 	em.HostLifecycleProfile.FromProto(proto.GetHostLifecycleProfile())
 }
 
@@ -346,6 +362,7 @@ type ExpectedMachineCreateInput struct {
 	HostID                   *int32
 	Labels                   map[string]string
 	IsDpfEnabled             *bool
+	DpuPolicy                *string
 	HostLifecycleProfile     HostLifecycleProfile
 	CreatedBy                uuid.UUID
 }
@@ -371,6 +388,7 @@ type ExpectedMachineUpdateInput struct {
 	HostID                   *int32
 	Labels                   map[string]string
 	IsDpfEnabled             *bool
+	DpuPolicy                *string
 	HostLifecycleProfile     *HostLifecycleProfile
 }
 
@@ -524,6 +542,7 @@ func (emsd ExpectedMachineSQLDAO) CreateMultiple(ctx context.Context, tx *db.Tx,
 			HostID:                   input.HostID,
 			Labels:                   input.Labels,
 			IsDpfEnabled:             input.IsDpfEnabled,
+			DpuPolicy:                input.DpuPolicy,
 			HostLifecycleProfile:     input.HostLifecycleProfile,
 			CreatedBy:                input.CreatedBy,
 		}
@@ -866,6 +885,8 @@ func (emsd ExpectedMachineSQLDAO) UpdateMultiple(ctx context.Context, tx *db.Tx,
 	bmcIPUpdates := make([]*ExpectedMachine, 0, len(inputs))
 	// Server names have the same omission semantics: update only supplied rows.
 	serverNameUpdates := make([]*ExpectedMachine, 0, len(inputs))
+	// Zero-DPU REST fields use the same per-row omission semantics as BMC IP.
+	dpuPolicyUpdates := make([]*ExpectedMachine, 0, len(inputs))
 	// host_lifecycle_profile is applied in its own bulk update scoped to only the
 	// rows that set it (see below), so rows that omit it keep their existing value.
 	hlpUpdates := make([]*ExpectedMachine, 0, len(inputs))
@@ -951,6 +972,12 @@ func (emsd ExpectedMachineSQLDAO) UpdateMultiple(ctx context.Context, tx *db.Tx,
 			em.IsDpfEnabled = input.IsDpfEnabled
 			columnsSet["is_dpf_enabled"] = true
 		}
+		if input.DpuPolicy != nil {
+			dpuPolicyUpdates = append(dpuPolicyUpdates, &ExpectedMachine{
+				ID:        input.ExpectedMachineID,
+				DpuPolicy: input.DpuPolicy,
+			})
+		}
 
 		expectedMachines = append(expectedMachines, em)
 		ids = append(ids, input.ExpectedMachineID)
@@ -985,6 +1012,9 @@ func (emsd ExpectedMachineSQLDAO) UpdateMultiple(ctx context.Context, tx *db.Tx,
 		}
 		if len(serverNameUpdates) > 0 {
 			traceColumns = append(traceColumns, "server_name")
+		}
+		if len(dpuPolicyUpdates) > 0 {
+			traceColumns = append(traceColumns, "dpu_policy")
 		}
 		if len(hlpUpdates) > 0 {
 			traceColumns = append(traceColumns, "host_lifecycle_profile")
@@ -1021,6 +1051,17 @@ func (emsd ExpectedMachineSQLDAO) UpdateMultiple(ctx context.Context, tx *db.Tx,
 		_, err = db.GetIDB(tx, emsd.dbSession).NewUpdate().
 			Model(&serverNameUpdates).
 			Column("server_name").
+			Bulk().
+			Exec(ctx)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	if len(dpuPolicyUpdates) > 0 {
+		_, err = db.GetIDB(tx, emsd.dbSession).NewUpdate().
+			Model(&dpuPolicyUpdates).
+			Column("dpu_policy").
 			Bulk().
 			Exec(ctx)
 		if err != nil {
@@ -1243,4 +1284,34 @@ func NewExpectedMachineDAO(dbSession *db.Session) ExpectedMachineDAO {
 	return &ExpectedMachineSQLDAO{
 		dbSession: dbSession,
 	}
+}
+
+// dpuPolicyToProto maps a REST dpuPolicy value to Core's DpuMode.
+func dpuPolicyToProto(policy string) (corev1.DpuMode, bool) {
+	switch strings.ToLower(policy) {
+	case ExpectedMachineDpuPolicyManage:
+		return corev1.DpuMode_DPU_MODE, true
+	case ExpectedMachineDpuPolicyNic:
+		return corev1.DpuMode_NIC_MODE, true
+	case ExpectedMachineDpuPolicyIgnore:
+		return corev1.DpuMode_NO_DPU, true
+	default:
+		return corev1.DpuMode_DPU_MODE_UNSPECIFIED, false
+	}
+}
+
+// dpuModeFromProto maps Core's DpuMode to a REST dpuPolicy value, or nil when unset.
+func dpuModeFromProto(mode corev1.DpuMode) *string {
+	var policy string
+	switch mode {
+	case corev1.DpuMode_DPU_MODE:
+		policy = ExpectedMachineDpuPolicyManage
+	case corev1.DpuMode_NIC_MODE:
+		policy = ExpectedMachineDpuPolicyNic
+	case corev1.DpuMode_NO_DPU:
+		policy = ExpectedMachineDpuPolicyIgnore
+	default:
+		return nil
+	}
+	return &policy
 }
