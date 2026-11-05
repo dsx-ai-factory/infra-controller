@@ -606,24 +606,14 @@ mod tests {
         let helper = directory.path().join("invalid-after-deadline");
         // Capture the cancellation byte before EOF. The malformed result can
         // only arrive after the caller has enforced its attempt deadline.
-        // An isolated writer keeps writable descriptors out of concurrent forks.
-        let writer = tokio::time::timeout(
-            Duration::from_secs(5),
-            tokio::process::Command::new("/bin/sh")
-                .args([
-                    "-c",
-                    "set -eu; umask 077; printf '%s' \"$2\" > \"$1\"; chmod 700 \"$1\"",
-                    "fixture-writer",
-                ])
-                .arg(&helper)
-                .arg("#!/bin/sh\nprintf 'MLX-SUPERVISOR-1\\n'\n/bin/cat > \"$0.request\"\nprintf '\\000\\000\\000\\001x'\n")
-                .kill_on_drop(true)
-                .status(),
+        crate::runner::write_fixture_executables(
+            directory.path(),
+            &[(
+                "invalid-after-deadline",
+                "#!/bin/sh\nprintf 'MLX-SUPERVISOR-1\\n'\n/bin/cat > \"$0.request\"\nprintf '\\000\\000\\000\\001x'\n",
+            )],
         )
-        .await
-        .expect("fixture writer must finish within its watchdog")
-        .expect("start isolated fixture writer");
-        assert!(writer.success(), "fixture writer failed: {writer}");
+        .await;
         let request_path = helper.with_extension("request");
         let executor = FirmwareToolExecutor::with_supervisor_path(helper).continue_on_owner_exit();
         let command = CommandSpec::new("/bin/true");

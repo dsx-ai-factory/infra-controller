@@ -2492,26 +2492,9 @@ printf '\000\000\000\001x'
 "#,
             hello = std::str::from_utf8(crate::runner::HELLO).unwrap(),
         );
-        // A separate writer keeps writable executable descriptors out of
-        // concurrent test forks. The helper records, but never runs, the tool.
-        let status = timeout(
-            Duration::from_secs(10),
-            tokio::process::Command::new("/bin/sh")
-                .args([
-                    "-c",
-                    "set -eu; umask 077; printf '%s' \"$2\" > \"$1\"",
-                    "fixture-writer",
-                ])
-                .arg(&helper)
-                .arg(contents)
-                .kill_on_drop(true)
-                .status(),
-        )
-        .await
-        .expect("fixture writer completes within its watchdog")
-        .expect("write malformed helper");
-        assert!(status.success());
-        fs::set_permissions(&helper, fs::Permissions::from_mode(0o700)).unwrap();
+        // The helper records the requested tool without running it.
+        crate::runner::write_fixture_executables(root.path(), &[("malformed-helper", &contents)])
+            .await;
         supervisor.executor = FirmwareToolExecutor::with_supervisor_path(helper);
 
         let request = checked_submission(&supervisor, "uncertain-inspection");
