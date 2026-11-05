@@ -79,6 +79,17 @@ pub(super) async fn handle_maintenance(
         MachineMaintenanceOperation::Reset => {
             handle_reset(host_machine_id, mh_snapshot, request, ctx).await
         }
+        MachineMaintenanceOperation::Reboot => {
+            invoke_power_operation(
+                host_machine_id,
+                mh_snapshot,
+                request,
+                ctx,
+                PowerAction::GracefulRestart,
+                "Reboot",
+            )
+            .await
+        }
         MachineMaintenanceOperation::ChassisReset { chassis_id } => {
             handle_chassis_reset(host_machine_id, mh_snapshot, request, ctx, chassis_id).await
         }

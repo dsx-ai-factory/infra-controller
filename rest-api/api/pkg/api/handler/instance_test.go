@@ -1632,6 +1632,35 @@ func TestCreateInstanceHandler_Handle(t *testing.T) {
 			verifyChildSpanner: true,
 		},
 		{
+			name:   "targeted creation rejects an unresolved deletion despite a cleared marker and unhealthy override",
+			fields: fields{dbSession: dbSession, tc: tc, cfg: cfg},
+			args: args{
+				reqData: &model.APIInstanceCreateRequest{
+					Name: "retained-force-deletion", TenantID: tn1.ID.String(), VpcID: vpc1.ID.String(),
+					IpxeScript:            cutil.GetPtr(common.DefaultIpxeScript),
+					Interfaces:            []model.APIInterfaceCreateOrUpdateRequest{{SubnetID: cutil.GetPtr(subnet1.ID.String())}},
+					AllowUnhealthyMachine: cutil.GetPtr(true), PhoneHomeEnabled: cutil.GetPtr(false),
+				},
+				prepareReq: func(t *testing.T, req *model.APIInstanceCreateRequest) {
+					machine := testInstanceBuildMachine(t, dbSession, ip.ID, st1.ID, cutil.GetPtr(false), nil)
+					testInstanceBuildMachineInstanceType(t, dbSession, machine, ist1)
+					_, err := cdbm.NewMachineDAO(dbSession).Update(ctx, nil, cdbm.MachineUpdateInput{
+						MachineID: machine.ID, IsForceDeletionRequested: cutil.GetPtr(false), IsForceDeletionComplete: cutil.GetPtr(true), ForceDeletionWorkflowID: cutil.GetPtr("unresolved-attempt"), IsUsableByTenant: cutil.GetPtr(false),
+					})
+					require.NoError(t, err)
+					req.MachineID = cutil.GetPtr(machine.ID)
+					t.Cleanup(func() {
+						retained, getErr := cdbm.NewMachineDAO(dbSession).GetByID(ctx, nil, machine.ID, nil, false)
+						require.NoError(t, getErr)
+						assert.False(t, retained.IsAssigned)
+						assert.Equal(t, cutil.GetPtr("unresolved-attempt"), retained.ForceDeletionWorkflowID)
+					})
+				},
+				reqOrg: tnOrg, reqUser: tnu1, respCode: http.StatusBadRequest,
+				respMessage: "has a force-deletion request and cannot be used for a new Instance",
+			},
+		},
+		{
 			name: "test Instance create API endpoint failure, machine DB status not Ready but controller Ready without allowUnhealthyMachine",
 			fields: fields{
 				dbSession: dbSession,
@@ -5638,6 +5667,15 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 		t, dbSession, instNoIB.ID, nil, &vpcPrefixSite2.ID, nil, cdbm.InterfaceStatusDeleting,
 	)
 
+	// Reissues must retire active rows without restarting cleanup for older deletions.
+	retiringUpdated := time.Now().UTC().Add(-2 * time.Minute).Truncate(time.Microsecond)
+	instRetiringIB := testInstanceBuildInstance(t, dbSession, "test-instance-retiring-ib", tn1.ID, ip.ID, st1.ID, &ist1.ID, vpc1.ID, cutil.GetPtr(mcIbPartitionSwap.ID), &os2.ID, nil, cdbm.InstanceStatusReady)
+	retiringIB := testInstanceBuildIBInterface(t, dbSession, instRetiringIB, st1, ibp1, 0, true, nil, cutil.GetPtr(cdbm.InfiniBandInterfaceStatusDeleting), false)
+	activeIB := testInstanceBuildIBInterface(t, dbSession, instRetiringIB, st1, ibp2, 1, true, nil, cutil.GetPtr(cdbm.InfiniBandInterfaceStatusReady), false)
+	instRetiringNVLink := testInstanceBuildInstance(t, dbSession, "test-instance-retiring-nvlink", tn1.ID, ip.ID, st3.ID, &ist4.ID, vpc4.ID, cutil.GetPtr(mc5.ID), &os2.ID, nil, cdbm.InstanceStatusReady)
+	retiringNVLink := testInstanceBuildInstanceNVLinkInterface(t, dbSession, st3.ID, instRetiringNVLink.ID, nvllp1.ID, nil, nil, 0, cdbm.NVLinkInterfaceStatusDeleting)
+	activeNVLink := testInstanceBuildInstanceNVLinkInterface(t, dbSession, st3.ID, instRetiringNVLink.ID, nvllp2.ID, nil, nil, 1, cdbm.NVLinkInterfaceStatusReady)
+
 	type fields struct {
 		dbSession *cdb.Session
 		tc        temporalClient.Client
@@ -8713,6 +8751,71 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 			wantErr:                     false,
 			verifySiteControllerRequest: true,
 			verifyChildSpanner:          true,
+		},
+		{
+			name:   "InfiniBand reissue preserves already deleting interface timestamp",
+			fields: fields{dbSession: dbSession, tc: tc, scp: scp, cfg: cfg},
+			args: args{
+				reqData: &model.APIInstanceUpdateRequest{
+					IpxeScript: os2.IpxeScript,
+					InfiniBandInterfaces: []model.APIInfiniBandInterfaceCreateOrUpdateRequest{{
+						InfiniBandPartitionID: ibp1.ID.String(),
+						Device:                retiringIB.Device,
+						DeviceInstance:        retiringIB.DeviceInstance,
+						IsPhysical:            true,
+					}},
+				},
+				reqInstance:         instRetiringIB.ID.String(),
+				reqOrg:              tnOrg1,
+				reqUser:             tnu1,
+				respCode:            http.StatusOK,
+				ibInterfaceToDelete: []cdbm.InfiniBandInterface{*retiringIB, *activeIB},
+				beforeHandle: func(t *testing.T) {
+					_, err := dbSession.DB.Exec("UPDATE infiniband_interface SET updated = ? WHERE instance_id = ?", retiringUpdated, instRetiringIB.ID)
+					require.NoError(t, err)
+				},
+				afterHandle: func(t *testing.T) {
+					dao := cdbm.NewInfiniBandInterfaceDAO(dbSession)
+					retiring, err := dao.GetByID(ctx, nil, retiringIB.ID, nil)
+					require.NoError(t, err)
+					assert.True(t, retiring.Updated.Equal(retiringUpdated), "reissue must not refresh the deleting row")
+					active, err := dao.GetByID(ctx, nil, activeIB.ID, nil)
+					require.NoError(t, err)
+					assert.True(t, active.Updated.After(retiringUpdated), "new deletion must update the active row")
+				},
+			},
+			verifySiteControllerRequest: true,
+		},
+		{
+			name:   "NVLink reissue preserves already deleting interface timestamp",
+			fields: fields{dbSession: dbSession, tc: tc, scp: scp, cfg: cfg},
+			args: args{
+				reqData: &model.APIInstanceUpdateRequest{
+					IpxeScript: os2.IpxeScript,
+					NVLinkInterfaces: []model.APINVLinkInterfaceCreateOrUpdateRequest{{
+						NVLinkLogicalPartitionID: nvllp1.ID.String(), DeviceInstance: retiringNVLink.DeviceInstance,
+					}},
+				},
+				reqInstance:              instRetiringNVLink.ID.String(),
+				reqOrg:                   tnOrg1,
+				reqUser:                  tnu1,
+				respCode:                 http.StatusOK,
+				nvlinkInterfacesToDelete: []cdbm.NVLinkInterface{*retiringNVLink, *activeNVLink},
+				beforeHandle: func(t *testing.T) {
+					_, err := dbSession.DB.Exec("UPDATE nvlink_interface SET updated = ? WHERE instance_id = ?", retiringUpdated, instRetiringNVLink.ID)
+					require.NoError(t, err)
+				},
+				afterHandle: func(t *testing.T) {
+					dao := cdbm.NewNVLinkInterfaceDAO(dbSession)
+					retiring, err := dao.GetByID(ctx, nil, retiringNVLink.ID, nil)
+					require.NoError(t, err)
+					assert.True(t, retiring.Updated.Equal(retiringUpdated), "reissue must not refresh the deleting row")
+					active, err := dao.GetByID(ctx, nil, activeNVLink.ID, nil)
+					require.NoError(t, err)
+					assert.True(t, active.Updated.After(retiringUpdated), "new deletion must update the active row")
+				},
+			},
+			verifySiteControllerRequest: true,
 		},
 	}
 	for _, tt := range tests {

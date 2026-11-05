@@ -306,6 +306,7 @@ mod tests {
             psid: Some("psid".into()),
             device_description: None,
             part_number: Some("part".into()),
+            fw_version_running: None,
             fw_version_current: None,
             pxe_version_current: None,
             uefi_version_current: None,

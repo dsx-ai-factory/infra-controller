@@ -1,0 +1,227 @@
+suite: scale-test acceptance Jobs
+templates:
+  - test-job.yaml
+release:
+  name: run
+  namespace: scale-ns
+set:
+  image:
+    repository: registry.example/scale-test-acceptance
+    digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
+tests:
+  - it: renders only the enabled cluster suite as a hardened helm test Job
+    asserts:
+      - hasDocuments:
+          count: 1
+      - isKind:
+          of: Job
+      - equal:
+          path: metadata.name
+          value: run-scale-test-cluster
+      - equal:
+          path: metadata.annotations["helm.sh/hook"]
+          value: test
+      - equal:
+          path: metadata.annotations["helm.sh/hook-weight"]
+          value: "1"
+      - equal:
+          path: metadata.annotations["helm.sh/hook-delete-policy"]
+          value: before-hook-creation
+      - equal:
+          path: spec.backoffLimit
+          value: 0
+      - equal:
+          path: spec.activeDeadlineSeconds
+          value: 600
+      - equal:
+          path: spec.template.spec.restartPolicy
+          value: Never
+      - equal:
+          path: spec.template.spec.serviceAccountName
+          value: run-scale-test
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: registry.example/scale-test-acceptance@sha256:0000000000000000000000000000000000000000000000000000000000000000
+      - equal:
+          path: spec.template.spec.containers[0].command
+          value: ["/tests/cluster.test"]
+      # The amd64-only image pins the Jobs to amd64 nodes.
+      - equal:
+          path: spec.template.spec.nodeSelector["kubernetes.io/arch"]
+          value: amd64
+      # The run pattern is anchored to the exact fixture, so a partial match cannot run the wrong test or none.
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: "-test.run=^TestAgainstARealCluster$"
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: "-test.timeout=480s"
+      - equal:
+          path: spec.template.spec.securityContext.runAsNonRoot
+          value: true
+      - equal:
+          path: spec.template.spec.securityContext.seccompProfile.type
+          value: RuntimeDefault
+      - equal:
+          path: spec.template.spec.containers[0].securityContext.readOnlyRootFilesystem
+          value: true
+      - equal:
+          path: spec.template.spec.containers[0].securityContext.allowPrivilegeEscalation
+          value: false
+      - contains:
+          path: spec.template.spec.containers[0].securityContext.capabilities.drop
+          content: ALL
+      - equal:
+          path: spec.template.spec.containers[0].env[0].valueFrom.fieldRef.fieldPath
+          value: metadata.namespace
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: SCALE_TEST_PROBE_URL
+          any: true
+
+  - it: gives the probe suite its URL and leaves the cluster suite without it
+    set:
+      suites.probe.enabled: true
+      probeUrl: http://probe.scale-ns.svc:8080
+    asserts:
+      - hasDocuments:
+          count: 2
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: SCALE_TEST_PROBE_URL
+          any: true
+        documentIndex: 0
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: "-test.run=^TestAgainstARealProbe$"
+        documentIndex: 1
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: SCALE_TEST_PROBE_URL
+            value: http://probe.scale-ns.svc:8080
+          any: true
+        documentIndex: 1
+
+  - it: keeps each suite's Job name distinct at the maximum release length
+    release:
+      name: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    set:
+      suites.probe.enabled: true
+    asserts:
+      - hasDocuments:
+          count: 2
+      - matchRegex:
+          path: metadata.name
+          pattern: ^.{1,63}$
+      - matchRegex:
+          path: metadata.name
+          pattern: -cluster$
+        documentIndex: 0
+      - matchRegex:
+          path: metadata.name
+          pattern: -probe$
+        documentIndex: 1
+
+  - it: accepts positive custom budgets and renders the timeout as a duration
+    set:
+      testBudget:
+        activeDeadlineSeconds: 1200
+        testTimeoutSeconds: 900
+    asserts:
+      - equal:
+          path: spec.activeDeadlineSeconds
+          value: 1200
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: "-test.timeout=900s"
+
+  - it: fails when no suite is enabled
+    set:
+      suites.cluster.enabled: false
+      suites.probe.enabled: false
+    asserts:
+      - failedTemplate:
+          errorMessage: at least one suite must be enabled under suites.<name>.enabled
+
+  - it: fails when an unknown suite is enabled
+    set:
+      suites.bogus.enabled: true
+    asserts:
+      - failedTemplate:
+          errorMessage: unknown suite "bogus"; the known suites are cluster and probe
+
+  - it: fails when the image repository is missing
+    set:
+      image.repository: ""
+    asserts:
+      - failedTemplate:
+          errorMessage: image.repository is required
+
+  - it: fails when neither image digest nor tag is set
+    set:
+      image:
+        repository: registry.example/scale-test-acceptance
+        digest: ""
+        tag: ""
+    asserts:
+      - failedTemplate:
+          errorMessage: image.digest or image.tag is required
+
+  - it: fails when the Job deadline is null
+    set:
+      testBudget.activeDeadlineSeconds: null
+    asserts:
+      - failedTemplate:
+          errorMessage: testBudget.activeDeadlineSeconds must be a positive integer number of seconds (1 to 2147483647)
+
+  - it: fails when the Job deadline is zero or negative
+    set:
+      testBudget.activeDeadlineSeconds: -1
+    asserts:
+      - failedTemplate:
+          errorMessage: testBudget.activeDeadlineSeconds must be a positive integer number of seconds (1 to 2147483647)
+
+  - it: fails when the Job deadline is fractional
+    set:
+      testBudget.activeDeadlineSeconds: 10.5
+    asserts:
+      - failedTemplate:
+          errorMessage: testBudget.activeDeadlineSeconds must be a positive integer number of seconds (1 to 2147483647)
+
+  - it: fails when the Job deadline overflows
+    set:
+      testBudget.activeDeadlineSeconds: 9999999999
+    asserts:
+      - failedTemplate:
+          errorMessage: testBudget.activeDeadlineSeconds must be a positive integer number of seconds (1 to 2147483647)
+
+  - it: fails when the test timeout is zero
+    set:
+      testBudget.testTimeoutSeconds: 0
+    asserts:
+      - failedTemplate:
+          errorMessage: testBudget.testTimeoutSeconds must be a positive integer number of seconds (1 to 2147483647)
+
+  - it: fails when the test timeout is fractional
+    set:
+      testBudget.testTimeoutSeconds: 0.5
+    asserts:
+      - failedTemplate:
+          errorMessage: testBudget.testTimeoutSeconds must be a positive integer number of seconds (1 to 2147483647)
+
+  - it: fails when the test timeout overflows
+    set:
+      testBudget.testTimeoutSeconds: 9999999999
+    asserts:
+      - failedTemplate:
+          errorMessage: testBudget.testTimeoutSeconds must be a positive integer number of seconds (1 to 2147483647)
+
+  - it: fails when the test timeout is malformed
+    set:
+      testBudget.testTimeoutSeconds: "5s"
+    asserts:
+      - failedTemplate:
+          errorMessage: testBudget.testTimeoutSeconds must be a positive integer number of seconds (1 to 2147483647)

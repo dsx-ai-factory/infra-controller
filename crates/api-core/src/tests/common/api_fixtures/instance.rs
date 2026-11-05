@@ -140,6 +140,7 @@ impl<'a, 'b> TestInstanceBuilder<'a, 'b> {
                 config: Some(self.config),
                 metadata: self.metadata,
                 allow_unhealthy_machine: false,
+                external_validation_request_id: None,
             }))
             .await
             .expect("Create instance failed.")

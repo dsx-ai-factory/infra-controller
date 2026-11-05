@@ -259,6 +259,12 @@ where
                                 message
                             ))
                         }
+                    } else if grpc_method.is_none() && result.status().is_success() {
+                        // Non-gRPC HTTP uses all 2xx statuses for success,
+                        // including artifact polling's pending 202 response.
+                        outcome = Ok(());
+                        grpc_status = None;
+                        carbide_error = None;
                     } else {
                         outcome = Err(format!("HTTP status: {}", result.status()));
                         grpc_status = None;
@@ -340,5 +346,113 @@ where
 
             result
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::convert::Infallible;
+    use std::sync::{Arc, Mutex};
+
+    use axum::body::Body;
+    use carbide_test_support::Outcome::Yields;
+    use carbide_test_support::{Case, check_cases_async};
+    use http::{Method, Request, Response, StatusCode};
+    use tower::{Layer, ServiceExt};
+    use tracing::instrument::WithSubscriber;
+    use tracing_subscriber::layer::SubscriberExt;
+
+    use super::LogLayer;
+
+    // Capture the final request status written by the shipping middleware,
+    // rather than duplicating its response-classification logic in the test.
+    #[derive(Clone, Default)]
+    struct StatusCapture(Arc<Mutex<Vec<String>>>);
+
+    impl tracing::field::Visit for StatusCapture {
+        fn record_debug(&mut self, _: &tracing::field::Field, _: &dyn std::fmt::Debug) {}
+
+        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+            if field.name() == "otel.status_code" {
+                self.0.lock().unwrap().push(value.to_owned());
+            }
+        }
+    }
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for StatusCapture {
+        fn on_record(
+            &self,
+            _: &tracing::span::Id,
+            values: &tracing::span::Record<'_>,
+            _: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            values.record(&mut self.clone());
+        }
+    }
+
+    /// HTTP pending is a success, while HTTP failure and a gRPC error carried
+    /// by HTTP200 must retain their error status.
+    #[tokio::test]
+    async fn http_pending_logs_success_without_hiding_grpc_failures() {
+        carbide_instrument::testing::keep_callsites_enabled();
+        check_cases_async(
+            [
+                Case {
+                    scenario: "pending artifact poll",
+                    input: (Method::GET, StatusCode::ACCEPTED, None),
+                    expect: Yields(vec!["ok".to_owned()]),
+                },
+                Case {
+                    scenario: "artifact service unavailable",
+                    input: (Method::GET, StatusCode::SERVICE_UNAVAILABLE, None),
+                    expect: Yields(vec!["error".to_owned()]),
+                },
+                Case {
+                    scenario: "non-200 gRPC response remains an error",
+                    input: (Method::POST, StatusCode::ACCEPTED, None),
+                    expect: Yields(vec!["error".to_owned()]),
+                },
+                Case {
+                    scenario: "other successful HTTP statuses",
+                    input: (Method::GET, StatusCode::CREATED, None),
+                    expect: Yields(vec!["ok".to_owned()]),
+                },
+                Case {
+                    scenario: "gRPC error inside HTTP success",
+                    input: (
+                        Method::POST,
+                        StatusCode::OK,
+                        Some(tonic::Status::internal("test failure")),
+                    ),
+                    expect: Yields(vec!["error".to_owned()]),
+                },
+            ],
+            |(method, status, grpc_error)| async move {
+                let captured = StatusCapture::default();
+                let subscriber = tracing_subscriber::registry().with(captured.clone());
+                let service = LogLayer::new(opentelemetry::global::meter("http_logging_test"))
+                    .layer(tower::service_fn(move |_: Request<Body>| {
+                        let mut response = Response::new(Body::empty());
+                        *response.status_mut() = status;
+                        if let Some(error) = &grpc_error {
+                            response.extensions_mut().insert(error.clone());
+                        }
+                        std::future::ready(Ok::<_, Infallible>(response))
+                    }));
+                service
+                    .oneshot(
+                        Request::builder()
+                            .method(method)
+                            .uri("/firmware/nic")
+                            .body(Body::empty())
+                            .unwrap(),
+                    )
+                    .with_subscriber(subscriber)
+                    .await?;
+                let statuses = captured.0.lock().unwrap().clone();
+                Ok::<_, Infallible>(statuses)
+            },
+        )
+        .await;
     }
 }

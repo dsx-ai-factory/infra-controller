@@ -160,7 +160,7 @@ func TestCreateExpectedMachineHandler_Handle(t *testing.T) {
 		run  func(*testing.T)
 	}{
 		{name: "complete mutation conflict", run: func(t *testing.T) {
-			testExpectedMachineMutationRejectsCompleteMutationLock(t, "single create")
+			testExpectedMachineMutationRejectsInventoryLock(t, expectedMachineMutationLockCase{mutation: "single create"})
 		}},
 		{name: "SKU recreated on another Site before attachment", run: func(t *testing.T) {
 			testExpectedMachineRejectsRecreatedSKU(t, "single create")
@@ -1616,7 +1616,7 @@ func TestBmcMacUnchanged(t *testing.T) {
 
 func TestUpdateExpectedMachineHandler_Handle(t *testing.T) {
 	t.Run("complete mutation conflict", func(t *testing.T) {
-		testExpectedMachineMutationRejectsCompleteMutationLock(t, "single update")
+		testExpectedMachineMutationRejectsInventoryLock(t, expectedMachineMutationLockCase{mutation: "single update"})
 	})
 	t.Run("SKU recreated on another Site before attachment", func(t *testing.T) {
 		testExpectedMachineRejectsRecreatedSKU(t, "single update")
@@ -2268,7 +2268,7 @@ func testUpdateExpectedMachineBmcIpAddress(t *testing.T) {
 
 func TestDeleteExpectedMachineHandler_Handle(t *testing.T) {
 	t.Run("complete mutation conflict", func(t *testing.T) {
-		testExpectedMachineMutationRejectsCompleteMutationLock(t, "single delete")
+		testExpectedMachineMutationRejectsInventoryLock(t, expectedMachineMutationLockCase{mutation: "single delete"})
 	})
 
 	// Setup
@@ -2852,12 +2852,40 @@ func TestTenantWithTargetedInstanceCreationCapability(t *testing.T) {
 
 // TestCreateExpectedMachinesHandler_Handle tests the batch create handler
 func TestCreateExpectedMachinesHandler_Handle(t *testing.T) {
-	t.Run("complete mutation conflict", func(t *testing.T) {
-		testExpectedMachineMutationRejectsCompleteMutationLock(t, "batch create")
-	})
-	t.Run("SKU recreated on another Site before attachment", func(t *testing.T) {
-		testExpectedMachineRejectsRecreatedSKU(t, "batch create")
-	})
+	mutationTests := []struct {
+		name string
+		run  func(*testing.T)
+	}{
+		{name: "complete mutation conflict", run: func(t *testing.T) {
+			testExpectedMachineMutationRejectsInventoryLock(t, expectedMachineMutationLockCase{mutation: "batch create"})
+		}},
+		{name: "SKU recreated on another Site before attachment", run: func(t *testing.T) {
+			testExpectedMachineRejectsRecreatedSKU(t, "batch create")
+		}},
+		{name: "shared inventory lock rejects batch serial admission", run: func(t *testing.T) {
+			testExpectedMachineMutationRejectsInventoryLock(t, expectedMachineMutationLockCase{mutation: "batch create", shared: true})
+		}},
+		{name: "workflow context bounds start and result wait", run: testExpectedMachineBatchCreateWorkflowDeadline},
+		{name: "stored serial differing only in case remains accepted", run: func(t *testing.T) {
+			testExpectedMachineBatchCreateStoredIdentity(t, expectedMachineStoredIdentityCase{
+				bmcMacAddress: "00:11:22:33:44:11", chassisSerialNumber: "ORIGINAL", status: http.StatusCreated,
+			})
+		}},
+		{name: "stored MAC duplicate is rejected", run: func(t *testing.T) {
+			testExpectedMachineBatchCreateStoredIdentity(t, expectedMachineStoredIdentityCase{
+				bmcMacAddress: "00:11:22:33:44:10", chassisSerialNumber: "new-serial", status: http.StatusBadRequest,
+			})
+		}},
+		{name: "serial admission sees batch committed before transaction", run: func(t *testing.T) {
+			testExpectedMachineBatchSerialAdmission(t, expectedMachineSerialAdmissionCase{mutation: "batch create"})
+		}},
+		{name: "serial admission refreshes snapshot after lock retry", run: func(t *testing.T) {
+			testExpectedMachineBatchSerialAdmission(t, expectedMachineSerialAdmissionCase{mutation: "batch create", commitAfterLockFailure: true})
+		}},
+	}
+	for _, test := range mutationTests {
+		t.Run(test.name, test.run)
+	}
 
 	// Setup
 	e := echo.New()
@@ -3717,17 +3745,26 @@ func TestExpectedMachineUpdateFields(t *testing.T) {
 }
 
 func TestUpdateExpectedMachinesHandler_Handle(t *testing.T) {
-	t.Run("complete mutation conflict", func(t *testing.T) {
-		testExpectedMachineMutationRejectsCompleteMutationLock(t, "batch update")
-	})
-	t.Run("SKU recreated on another Site before attachment", func(t *testing.T) {
-		testExpectedMachineRejectsRecreatedSKU(t, "batch update")
-	})
-
 	tests := []struct {
 		name string
 		run  func(*testing.T)
 	}{
+		{name: "complete mutation conflict", run: func(t *testing.T) {
+			testExpectedMachineMutationRejectsInventoryLock(t, expectedMachineMutationLockCase{mutation: "batch update"})
+		}},
+		{name: "SKU recreated on another Site before attachment", run: func(t *testing.T) {
+			testExpectedMachineRejectsRecreatedSKU(t, "batch update")
+		}},
+		{name: "shared inventory lock rejects batch serial admission", run: func(t *testing.T) {
+			testExpectedMachineMutationRejectsInventoryLock(t, expectedMachineMutationLockCase{mutation: "batch update", shared: true})
+		}},
+		{name: "serial admission sees batch committed before transaction", run: func(t *testing.T) {
+			testExpectedMachineBatchSerialAdmission(t, expectedMachineSerialAdmissionCase{mutation: "batch update"})
+		}},
+		{name: "serial admission refreshes snapshot after lock retry", run: func(t *testing.T) {
+			testExpectedMachineBatchSerialAdmission(t, expectedMachineSerialAdmissionCase{mutation: "batch update", commitAfterLockFailure: true})
+		}},
+		{name: "legacy duplicate serial metadata and reassertion", run: testExpectedMachineBatchLegacySerial},
 		{name: "request validation and metadata", run: testUpdateExpectedMachinesRequest},
 		{name: "mixed BMC address presence", run: testUpdateExpectedMachinesBmcIpAddress},
 	}

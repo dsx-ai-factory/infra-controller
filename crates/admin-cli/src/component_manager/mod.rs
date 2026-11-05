@@ -18,6 +18,7 @@
 pub(crate) mod common;
 mod configure_switch_certificate;
 mod power_control;
+mod reset;
 mod status;
 mod update_firmware;
 mod versions;
@@ -54,4 +55,10 @@ pub(crate) enum Cmd {
         visible_alias = "rotate-switch-certificate"
     )]
     ConfigureSwitchCertificate(configure_switch_certificate::Args),
+
+    #[clap(about = "Dispatch a component reset directly (SDN reset disrupts fabric traffic)")]
+    ComponentReset(reset::ResetArgs),
+
+    #[clap(about = "Get reset status by component and action")]
+    GetResetStatus(reset::StatusArgs),
 }

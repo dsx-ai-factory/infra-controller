@@ -36,7 +36,9 @@ use model::machine::ManagedHostStateSnapshot;
 use model::machine::nvlink::nvlink_config_synced;
 
 use crate::metrics::NmxcMetrics;
-use crate::{ProcessMachineGroupInput, managed_host_chassis_serial};
+use crate::{
+    ProcessMachineGroupInput, is_marked_for_nvlink_isolation, managed_host_chassis_serial,
+};
 
 /// What the monitor remembers about one machine group between iterations.
 pub(super) struct GroupReconcileState {
@@ -161,6 +163,7 @@ pub(super) fn group_fingerprint(input: &ProcessMachineGroupInput<'_>) -> u64 {
         let host_id = snapshot.host_snapshot.id;
         host_id.hash(&mut hasher);
         snapshot.use_admin_network().hash(&mut hasher);
+        is_marked_for_nvlink_isolation(snapshot).hash(&mut hasher);
         managed_host_chassis_serial(snapshot).hash(&mut hasher);
         match &snapshot.instance {
             None => false.hash(&mut hasher),

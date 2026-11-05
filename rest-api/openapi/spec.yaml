@@ -4643,7 +4643,7 @@ paths:
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '409':
-          description: An Expected Machine with a conflicting identity already exists, or another complete Expected Inventory mutation is in progress for the same Site. Lock conflicts are rejected before data is mutated and can be retried.
+          description: An Expected Machine with a conflicting identity already exists, or an Expected Inventory mutation requiring exclusive access is in progress for the same Site. Lock conflicts are rejected before data is mutated and can be retried. Exclusive access is required for complete inventory replacements or deletions, batch Expected Machine creation, and batch Expected Machine updates that set chassis serial numbers.
           $ref: '#/components/responses/ConflictError'
         '422':
           description: The supplied `skuId` does not identify a SKU at this Expected Machine's Site. REST checks your access to the Site before looking up the SKU.
@@ -4779,7 +4779,7 @@ paths:
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '409':
-          description: Another Expected Inventory mutation is already in progress for the same Site. This complete Expected Machine replacement is rejected before data is mutated and can be retried.
+          description: Another Expected Inventory mutation or Expected Machine inventory reconciliation is already in progress for the same Site. This complete Expected Machine replacement is rejected before data is mutated and can be retried.
           $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Machine
@@ -4808,7 +4808,7 @@ paths:
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '409':
-          description: Another Expected Inventory mutation is already in progress for the same Site. This complete Expected Machine deletion is rejected before data is mutated and can be retried.
+          description: Another Expected Inventory mutation or Expected Machine inventory reconciliation is already in progress for the same Site. This complete Expected Machine deletion is rejected before data is mutated and can be retried.
           $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Machine
@@ -5058,7 +5058,7 @@ paths:
         '404':
           $ref: '#/components/responses/NotFoundError'
         '409':
-          description: Another complete Expected Inventory mutation is already in progress for the same Site. This Expected Machine update is rejected before data is mutated and can be retried.
+          description: An Expected Inventory mutation requiring exclusive access is already in progress for the same Site. This Expected Machine update is rejected before data is mutated and can be retried. Exclusive access is required for complete inventory replacements or deletions, batch Expected Machine creation, and batch Expected Machine updates that set chassis serial numbers.
           $ref: '#/components/responses/ConflictError'
         '422':
           description: The supplied `skuId` does not identify a SKU at this Expected Machine's Site. REST checks your access to the Site before looking up the SKU.
@@ -5104,7 +5104,7 @@ paths:
         '404':
           $ref: '#/components/responses/NotFoundError'
         '409':
-          description: Another complete Expected Inventory mutation is already in progress for the same Site. This Expected Machine deletion is rejected before data is mutated and can be retried.
+          description: An Expected Inventory mutation requiring exclusive access is already in progress for the same Site. This Expected Machine deletion is rejected before data is mutated and can be retried. Exclusive access is required for complete inventory replacements or deletions, batch Expected Machine creation, and batch Expected Machine updates that set chassis serial numbers.
           $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Machine
@@ -5177,7 +5177,7 @@ paths:
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '409':
-          description: Another complete Expected Inventory mutation is already in progress for the same Site. This batch Expected Machine creation is rejected before data is mutated and can be retried.
+          description: Another Expected Inventory mutation or Expected Machine inventory reconciliation is already in progress for the same Site. This batch Expected Machine creation is rejected before data is mutated and can be retried.
           $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Machine
@@ -5247,7 +5247,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/NICoAPIError'
         '409':
-          description: One or more target Expected Machines changed before they could be locked, or another complete Expected Inventory mutation is in progress for the same Site. The batch can be retried.
+          description: One or more target Expected Machines changed before they could be locked, or a conflicting Expected Inventory mutation is in progress for the same Site. Batches that set chassis serial numbers require exclusive access and can conflict with other Expected Inventory mutations or Expected Machine inventory reconciliation. Batches that omit `chassisSerialNumber` or set it to null use shared access and can conflict with complete inventory replacements or deletions and Expected Machine batches that set serial numbers. The batch can be retried.
           $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Machine
@@ -5299,7 +5299,7 @@ paths:
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '409':
-          description: An Expected Power Shelf with a conflicting identity already exists, or another complete Expected Inventory mutation is in progress for the same Site. Lock conflicts are rejected before data is mutated and can be retried.
+          description: An Expected Power Shelf with a conflicting identity already exists, or an Expected Inventory mutation requiring exclusive access is in progress for the same Site. Lock conflicts are rejected before data is mutated and can be retried. Exclusive access is required for complete inventory replacements or deletions, batch Expected Machine creation, and batch Expected Machine updates that set chassis serial numbers.
           $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Power Shelf
@@ -5415,7 +5415,7 @@ paths:
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '409':
-          description: Another Expected Inventory mutation is already in progress for the same Site. This complete Expected Power Shelf replacement is rejected before data is mutated and can be retried.
+          description: Another Expected Inventory mutation or Expected Machine inventory reconciliation is already in progress for the same Site. This complete Expected Power Shelf replacement is rejected before data is mutated and can be retried.
           $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Power Shelf
@@ -5444,7 +5444,7 @@ paths:
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '409':
-          description: Another Expected Inventory mutation is already in progress for the same Site. This complete Expected Power Shelf deletion is rejected before data is mutated and can be retried.
+          description: Another Expected Inventory mutation or Expected Machine inventory reconciliation is already in progress for the same Site. This complete Expected Power Shelf deletion is rejected before data is mutated and can be retried.
           $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Power Shelf
@@ -5540,7 +5540,7 @@ paths:
         '404':
           $ref: '#/components/responses/NotFoundError'
         '409':
-          description: Another complete Expected Inventory mutation is already in progress for the same Site. This Expected Power Shelf update is rejected before data is mutated and can be retried.
+          description: An Expected Inventory mutation requiring exclusive access is already in progress for the same Site. This Expected Power Shelf update is rejected before data is mutated and can be retried. Exclusive access is required for complete inventory replacements or deletions, batch Expected Machine creation, and batch Expected Machine updates that set chassis serial numbers.
           $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Power Shelf
@@ -5566,7 +5566,7 @@ paths:
         '404':
           $ref: '#/components/responses/NotFoundError'
         '409':
-          description: Another complete Expected Inventory mutation is already in progress for the same Site. This Expected Power Shelf deletion is rejected before data is mutated and can be retried.
+          description: An Expected Inventory mutation requiring exclusive access is already in progress for the same Site. This Expected Power Shelf deletion is rejected before data is mutated and can be retried. Exclusive access is required for complete inventory replacements or deletions, batch Expected Machine creation, and batch Expected Machine updates that set chassis serial numbers.
           $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Power Shelf
@@ -5625,7 +5625,7 @@ paths:
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '409':
-          description: An Expected Rack with a conflicting identity already exists, or another complete Expected Inventory mutation is in progress for the same Site. Lock conflicts are rejected before data is mutated and can be retried.
+          description: An Expected Rack with a conflicting identity already exists, or an Expected Inventory mutation requiring exclusive access is in progress for the same Site. Lock conflicts are rejected before data is mutated and can be retried. Exclusive access is required for complete inventory replacements or deletions, batch Expected Machine creation, and batch Expected Machine updates that set chassis serial numbers.
           $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Rack
@@ -5762,7 +5762,7 @@ paths:
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '409':
-          description: Another Expected Inventory mutation is already in progress for the same Site. This complete Expected Rack replacement is rejected before data is mutated and can be retried.
+          description: Another Expected Inventory mutation or Expected Machine inventory reconciliation is already in progress for the same Site. This complete Expected Rack replacement is rejected before data is mutated and can be retried.
           $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Rack
@@ -5806,7 +5806,7 @@ paths:
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '409':
-          description: Another Expected Inventory mutation is already in progress for the same Site. This complete Expected Rack replacement is rejected before data is mutated and can be retried.
+          description: Another Expected Inventory mutation or Expected Machine inventory reconciliation is already in progress for the same Site. This complete Expected Rack replacement is rejected before data is mutated and can be retried.
           $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Rack
@@ -5837,7 +5837,7 @@ paths:
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '409':
-          description: Another Expected Inventory mutation is already in progress for the same Site. This complete Expected Rack deletion is rejected before data is mutated and can be retried.
+          description: Another Expected Inventory mutation or Expected Machine inventory reconciliation is already in progress for the same Site. This complete Expected Rack deletion is rejected before data is mutated and can be retried.
           $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Rack
@@ -5936,7 +5936,7 @@ paths:
         '404':
           $ref: '#/components/responses/NotFoundError'
         '409':
-          description: Another complete Expected Inventory mutation is already in progress for the same Site. This Expected Rack update is rejected before data is mutated and can be retried.
+          description: An Expected Inventory mutation requiring exclusive access is already in progress for the same Site. This Expected Rack update is rejected before data is mutated and can be retried. Exclusive access is required for complete inventory replacements or deletions, batch Expected Machine creation, and batch Expected Machine updates that set chassis serial numbers.
           $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Rack
@@ -5961,7 +5961,7 @@ paths:
         '404':
           $ref: '#/components/responses/NotFoundError'
         '409':
-          description: Another complete Expected Inventory mutation is already in progress for the same Site. This Expected Rack deletion is rejected before data is mutated and can be retried.
+          description: An Expected Inventory mutation requiring exclusive access is already in progress for the same Site. This Expected Rack deletion is rejected before data is mutated and can be retried. Exclusive access is required for complete inventory replacements or deletions, batch Expected Machine creation, and batch Expected Machine updates that set chassis serial numbers.
           $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Rack
@@ -6023,7 +6023,7 @@ paths:
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '409':
-          description: An Expected Rack Group with a conflicting identity already exists, or another complete Expected Inventory mutation is in progress for the same Site. Lock conflicts are rejected before data is mutated and can be retried.
+          description: An Expected Rack Group with a conflicting identity already exists, or an Expected Inventory mutation requiring exclusive access is in progress for the same Site. Lock conflicts are rejected before data is mutated and can be retried. Exclusive access is required for complete inventory replacements or deletions, batch Expected Machine creation, and batch Expected Machine updates that set chassis serial numbers.
           $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Rack Group
@@ -6173,7 +6173,7 @@ paths:
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '409':
-          description: Another Expected Inventory mutation is already in progress for the same Site. This complete Expected Rack Group replacement is rejected before data is mutated and can be retried.
+          description: Another Expected Inventory mutation or Expected Machine inventory reconciliation is already in progress for the same Site. This complete Expected Rack Group replacement is rejected before data is mutated and can be retried.
           $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Rack Group
@@ -6217,7 +6217,7 @@ paths:
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '409':
-          description: Another Expected Inventory mutation is already in progress for the same Site. This complete Expected Rack Group replacement is rejected before data is mutated and can be retried.
+          description: Another Expected Inventory mutation or Expected Machine inventory reconciliation is already in progress for the same Site. This complete Expected Rack Group replacement is rejected before data is mutated and can be retried.
           $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Rack Group
@@ -6248,7 +6248,7 @@ paths:
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '409':
-          description: Another Expected Inventory mutation is already in progress for the same Site. This complete Expected Rack Group deletion is rejected before data is mutated and can be retried.
+          description: Another Expected Inventory mutation or Expected Machine inventory reconciliation is already in progress for the same Site. This complete Expected Rack Group deletion is rejected before data is mutated and can be retried.
           $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Rack Group
@@ -6351,7 +6351,7 @@ paths:
         '404':
           $ref: '#/components/responses/NotFoundError'
         '409':
-          description: Another complete Expected Inventory mutation is already in progress for the same Site. This Expected Rack Group update is rejected before data is mutated and can be retried.
+          description: An Expected Inventory mutation requiring exclusive access is already in progress for the same Site. This Expected Rack Group update is rejected before data is mutated and can be retried. Exclusive access is required for complete inventory replacements or deletions, batch Expected Machine creation, and batch Expected Machine updates that set chassis serial numbers.
           $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Rack Group
@@ -6376,7 +6376,7 @@ paths:
         '404':
           $ref: '#/components/responses/NotFoundError'
         '409':
-          description: Another complete Expected Inventory mutation is already in progress for the same Site. This Expected Rack Group deletion is rejected before data is mutated and can be retried.
+          description: An Expected Inventory mutation requiring exclusive access is already in progress for the same Site. This Expected Rack Group deletion is rejected before data is mutated and can be retried. Exclusive access is required for complete inventory replacements or deletions, batch Expected Machine creation, and batch Expected Machine updates that set chassis serial numbers.
           $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Rack Group
@@ -6434,7 +6434,7 @@ paths:
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '409':
-          description: An Expected Switch with a conflicting BMC or NVOS identity already exists, or another complete Expected Inventory mutation is in progress for the same Site. Lock conflicts are rejected before data is mutated and can be retried.
+          description: An Expected Switch with a conflicting BMC or NVOS identity already exists, or an Expected Inventory mutation requiring exclusive access is in progress for the same Site. Lock conflicts are rejected before data is mutated and can be retried. Exclusive access is required for complete inventory replacements or deletions, batch Expected Machine creation, and batch Expected Machine updates that set chassis serial numbers.
           $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Switch
@@ -6550,7 +6550,7 @@ paths:
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '409':
-          description: Another Expected Inventory mutation is already in progress for the same Site. This complete Expected Switch replacement is rejected before data is mutated and can be retried.
+          description: Another Expected Inventory mutation or Expected Machine inventory reconciliation is already in progress for the same Site. This complete Expected Switch replacement is rejected before data is mutated and can be retried.
           $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Switch
@@ -6579,7 +6579,7 @@ paths:
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '409':
-          description: Another Expected Inventory mutation is already in progress for the same Site. This complete Expected Switch deletion is rejected before data is mutated and can be retried.
+          description: Another Expected Inventory mutation or Expected Machine inventory reconciliation is already in progress for the same Site. This complete Expected Switch deletion is rejected before data is mutated and can be retried.
           $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Switch
@@ -6681,7 +6681,7 @@ paths:
         '404':
           $ref: '#/components/responses/NotFoundError'
         '409':
-          description: An Expected Switch with a conflicting NVOS identity already exists, or another complete Expected Inventory mutation is in progress for the same Site. Lock conflicts are rejected before data is mutated and can be retried.
+          description: An Expected Switch with a conflicting NVOS identity already exists, or an Expected Inventory mutation requiring exclusive access is in progress for the same Site. Lock conflicts are rejected before data is mutated and can be retried. Exclusive access is required for complete inventory replacements or deletions, batch Expected Machine creation, and batch Expected Machine updates that set chassis serial numbers.
           $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Switch
@@ -6707,7 +6707,7 @@ paths:
         '404':
           $ref: '#/components/responses/NotFoundError'
         '409':
-          description: Another complete Expected Inventory mutation is already in progress for the same Site. This Expected Switch deletion is rejected before data is mutated and can be retried.
+          description: An Expected Inventory mutation requiring exclusive access is already in progress for the same Site. This Expected Switch deletion is rejected before data is mutated and can be retried. Exclusive access is required for complete inventory replacements or deletions, batch Expected Machine creation, and batch Expected Machine updates that set chassis serial numbers.
           $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Switch
@@ -7839,6 +7839,8 @@ paths:
                 example-1:
                   value:
                     message: Deletion request was accepted
+        '404':
+          $ref: '#/components/responses/NotFoundError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
       description: |-
@@ -11948,6 +11950,32 @@ paths:
         - Machine
       summary: Delete a Machine from a Site
       operationId: delete-machine
+      parameters:
+        - schema:
+            type: boolean
+            default: false
+          in: query
+          name: force
+          description: Request forced deletion on the Site, including host, DPU, and BMC interfaces. Starting a new attempt requires a Registered Site; a confirmed-complete retained request is replayed locally. Machines marked missing on Site can be force deleted without waiting 24 hours, including when their missing-status history is unavailable. This alone does not override attached Instances, assigned Instance Types, or Allocation Constraints. BMC credentials, discovery suppressions, and retained boot-interface pairs are preserved; orphaned DPF resources are not overridden.
+        - schema:
+            type: boolean
+            default: false
+          in: query
+          name: allowDeleteWithInstanceType
+          description: Requires force=true when enabled. Authorize removing an assigned Instance Type on the Site. This does not authorize deletion of an attached Instance or violating Allocation Constraints.
+        - schema:
+            type: boolean
+            default: false
+          in: query
+          name: allowDeleteWithInstance
+          description: Requires force=true when enabled. Authorize deletion of the attached Instance control-plane record on the Site without first requesting a graceful workload shutdown; cleanup may forcibly restart the host. Also authorizes removal of its Instance Type, even if allowDeleteWithInstanceType=false. REST Machine, Instance, interfaces, capabilities, and Instance Type associations are retained for deliberate cleanup by their owners. Allocation Constraints require a separate acknowledgment.
+        - schema:
+            type: boolean
+            default: false
+          in: query
+          name: allowDeleteWithAllocation
+          description: Requires force=true when enabled. Acknowledge that removing this Machine may leave fewer Machines than existing Instance Type Allocation Constraints require. Without this acknowledgment, such a request is rejected before Site deletion. When capacity would be insufficient, the Site deletion proceeds while REST Machine records and Instance Type associations are retained and Allocation Constraints remain unchanged. Machines with a recorded force-deletion attempt do not count toward capacity in later Allocation or deletion checks, even before inventory marks them missing. Does not imply either Instance or Instance Type deletion permission.
+
       responses:
         '202':
           description: Deletion request was accepted
@@ -11956,7 +11984,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/MessageResponse'
               examples:
-                example-1:
+                normal-deletion:
                   value:
                     message: Deletion request was accepted
         '400':
@@ -11966,13 +11994,84 @@ paths:
         '404':
           description: Describes an error response for 404 Not Found
           $ref: '#/components/responses/GenericHttpError'
+        '409':
+          description: Site cleanup is incomplete, an attempt changed concurrently, or ordinary REST-only cleanup lacks confirmed completion. A Retry-After header of 5 indicates a confirmed incomplete Core result; wait at least 5 seconds and repeat the forced DELETE with the same options. A pending attempt is recovered by its recorded workflow ID. No automatic continuation is scheduled, and the Machine remains unavailable for placement.
+          headers:
+            Retry-After:
+              description: Minimum delay in seconds before repeating a forced deletion after a confirmed incomplete Core result. Other conflicts may omit this header.
+              schema:
+                type: integer
+                example: 5
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NICoAPIError'
+        '412':
+          description: The Machine deletion preconditions were not met.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NICoAPIError'
+        '429':
+          $ref: '#/components/responses/ResourceExhaustedError'
         '422':
           description: Describes an error response for 422 Unprocessable Content
           $ref: '#/components/responses/GenericHttpError'
         '500':
           description: Describes an error response for 500 Internal Server Error
           $ref: '#/components/responses/GenericHttpError'
-      description: Org must have an Infrastructure Provider entity. Machine must belong to the Provider. User must have authorization role with `PROVIDER_ADMIN` suffix. Machine must meet certain criteria to be eligible for deletion.
+        '503':
+          description: A dependency required to delete the Machine is temporarily unavailable.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NICoAPIError'
+        '504':
+          description: The Machine deletion request timed out.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NICoAPIError'
+      description: >-
+        Requires Provider Admin access to the Machine's Infrastructure Provider.
+        Regular deletion requires the Machine to be missing on Site for at least 24 hours,
+        with no attached Instance or assigned Instance Type. The confirmed-complete
+        retained-deletion recovery exception is described below.
+
+        Starting forced deletion requires a Registered Site and the applicable overrides.
+        Authoritative Core Instance-consent enforcement and the Instance Type override
+        require Core builds containing https://github.com/dsx-ai-factory/infra-controller/pull/5394.
+        Older Core ignores the new protobuf fields; REST-side checks against REST records
+        do not establish Core's current ownership state or replace server-side enforcement.
+        It also supports missing Machines without waiting 24 hours. Before contacting Core,
+        REST records an attempt ID and makes the Machine unavailable for every Instance
+        placement path and for new Allocation capacity. A timeout, transport failure, or
+        unavailable workflow history keeps that attempt and quarantine. Retrying retrieves
+        the exact recorded execution instead of issuing another Core deletion. If no result
+        is available, including after a crash before dispatch, provide the attempt ID from
+        the error to the Site operator; ordinary deletion remains blocked.
+
+        A definitive Core precondition or validation rejection allows a corrected forced
+        request to start a new attempt. A confirmed incomplete result returns HTTP 409 with
+        `Retry-After: 5`; repeat the same forced DELETE after at least 5 seconds. No automatic
+        continuation is scheduled. Only a confirmed complete result or an actual Core
+        NotFound response records completion. Missing Temporal history is not completion.
+
+        Forced deletion returns HTTP 202 only after confirmed Site completion. REST records
+        are removed only when no Instance deletion was requested, no Instance remains
+        attached, and remaining Allocation capacity is sufficient. Otherwise, owner records
+        remain. Allocation Constraints are never deleted by this operation. Present inventory
+        cannot clear the retained marker, and completed forced requests replay locally
+        without deleting a newly rediscovered Core Machine. A later REST cleanup failure
+        preserves completion proof for local replay without workflow history.
+
+        After confirmed completion, owners may remove the retained Instance and all Machine
+        Instance Type associations; existing quota guards may require them to reduce or
+        rebalance Allocation Constraints before unlinking. Ordinary DELETE, with force omitted or false and no
+        overrides, then removes only REST Machine records even if Core reports the Machine
+        present and no missing inventory was observed. The Machine must be unassigned and
+        have neither an Instance Type ID nor association rows. This cleanup never calls Core
+        and returns HTTP 202; a later fresh inventory may restore the rediscovered Machine.
   '/v2/org/{org}/nico/machine/{machineId}/bmc/reset':
     parameters:
       - schema:
@@ -27737,7 +27836,7 @@ components:
           - Unknown
         operation:
           type: string
-          description: Recorded operation. `Reset` does not preserve the original graceful/forced/AC-cycle distinction.
+          description: Recorded operation. For `Reset`, graceful=true identifies an explicit graceful host reboot; legacy records do not preserve the original restart mode.
           enum:
           - PowerOn
           - PowerOff
@@ -27759,7 +27858,7 @@ components:
           type:
           - boolean
           - 'null'
-          description: 'Present for `PowerOff` only: true is graceful, false is forced. Null for other operations.'
+          description: 'For `PowerOff`, true is graceful and false is forced. For an explicit graceful host reboot, operation is `Reset` and graceful is true. Null for legacy Reset records and other operations.'
         chassisId:
           type:
           - string
