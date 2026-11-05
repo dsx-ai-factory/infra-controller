@@ -6,13 +6,14 @@
     "probe" (dict "binary" "/tests/probe.test" "run" "^TestAgainstARealProbe$")
     "inventory" (dict "binary" "/tests/inventory.test" "run" "^TestAcceptance$")
     "history" (dict "binary" "/tests/history.test" "run" "^TestAcceptanceReplaysARealProbeCapture$")
+    "lock" (dict "binary" "/tests/lock.test" "run" "^(TestEnvLock|TestEnvCleanupIsBounded)$")
     "store" (dict "binary" "/tests/store.test" "run" "^TestAgainstARealStore$")
     "store-transition" (dict "binary" "/tests/store.test" "run" "^TestControlledTransition$") -}}
 {{- $enabled := list -}}
 {{- range $name, $suite := .Values.suites -}}
 {{- if $suite.enabled -}}
 {{- if not (hasKey $known $name) -}}
-{{- fail (printf "unknown suite %q; the known suites are cluster, probe, inventory, history, store and store-transition" $name) -}}
+{{- fail (printf "unknown suite %q; the known suites are cluster, probe, inventory, history, lock, store and store-transition" $name) -}}
 {{- end -}}
 {{- $enabled = append $enabled $name -}}
 {{- end -}}
