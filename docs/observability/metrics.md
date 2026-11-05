@@ -12,8 +12,7 @@ Each NICo component runs an HTTP server exposing a `/metrics` endpoint in Promet
 format. The OpenTelemetry SDK creates metrics using the Meter API, then the
 `opentelemetry-prometheus` exporter bridges them to a Prometheus registry served over HTTP.
 
-Components also expose `/health` (liveness) and `/ready` (readiness) endpoints on the same
-metrics port for each component:
+The following components expose metrics at `/metrics`. Ports shown are defaults:
 
 | Component | Port | Primary metrics |
 |-----------|------|-----------------|
@@ -24,8 +23,18 @@ metrics port for each component:
 | nico-dhcp | 1089 | IPv4 lease counts, request handling |
 | nico-dhcp6 (opt-in) | 1089 | IPv6 request, drop, and reply counts |
 | nico-dns | 8053 | Query rates, resolution latency |
+| nico-dsx-exchange-consumer | 9009 | Exchange message processing, queue drops |
+| nico-machine-a-tron (UFM mock) | 9090 | UFM mock inventory reconciliation |
 | nico-pxe | 8080 | Boot request counts |
 | nico-ssh-console-rs | 9009 | Console sessions, BMC connections |
+| nico-unbound (exporter) | 9167 | DNS resolver statistics |
+
+The machine-a-tron metrics listener requires `ufmMock.enabled`, and the Unbound exporter
+requires `exporter.enabled` in their respective subcharts. Both are enabled by default.
+
+Health-probe routes vary by component. The nico-api main metrics listener exposes `/health`
+for liveness and `/ready` for readiness. The nico-hardware-health metrics listener (default
+port 9009) exposes `/livez` for liveness and has no readiness endpoint.
 
 Metrics in the [generated Core catalogue](core_metrics.md) use the `carbide_` prefix. A small
 number of legacy Core metrics (such as `site_explorer_create_switches_latency_seconds` and
@@ -164,7 +173,7 @@ here cascade to certificate issuance and machine provisioning.
 
 ### Hardware health service
 
-The nico-hardware-health component has two separate endpoints. The `/metrics` endpoint
+The nico-hardware-health component has two separate metrics endpoints. The `/metrics` endpoint
 exposes service-level metrics (probe success rates, scrape latency). The `/telemetry`
 endpoint exposes raw sensor readings (temperatures, power, fan speeds) collected via
 Redfish from BMCs.

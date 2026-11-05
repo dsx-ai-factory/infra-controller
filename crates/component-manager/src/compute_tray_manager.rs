@@ -10,6 +10,7 @@ use model::component_manager::{ComputeTrayComponent, FirmwareState, PowerAction}
 
 use crate::component_common::{ComponentPowerStateResult, PowerStateSource};
 use crate::error::ComponentManagerError;
+use crate::firmware_inventory::{ComponentFirmwareInventoryResult, FirmwareInventorySource};
 use crate::types::FirmwareUpdateOptions;
 
 /// Physical network identifiers for a compute tray, used to register with and
@@ -103,9 +104,9 @@ impl std::fmt::Display for Backend {
 /// Backend trait for compute tray management operations.
 ///
 /// Implementations receive physical endpoint information (BMC IP/MAC + vendor).
-/// Mutation and firmware results echo both `bmc_ip` and `bmc_mac`; power
-/// observations identify the requested BMC MAC in `mac_address`. The BMC IP can
-/// change before ingestion as leases churn.
+/// Mutation and firmware-update results echo both `bmc_ip` and `bmc_mac`; power
+/// and firmware observations identify the requested BMC MAC in `mac_address`.
+/// The BMC IP can change before ingestion as leases churn.
 #[async_trait::async_trait]
 pub trait ComputeTrayManager: Send + Sync + Debug + 'static {
     fn name(&self) -> &str;
@@ -115,6 +116,30 @@ pub trait ComputeTrayManager: Send + Sync + Debug + 'static {
     /// or invoking the getter; its default implementation is unsupported.
     fn power_state_source(&self) -> Option<PowerStateSource> {
         None
+    }
+
+    /// Identifies a backend that can read firmware inventory without registering
+    /// devices or advancing updates. `None` means callers must skip credential
+    /// lookup and report [`ComponentManagerError::Unsupported`]; existing update/status
+    /// methods are not substitutes.
+    fn firmware_inventory_source(&self) -> Option<FirmwareInventorySource> {
+        None
+    }
+
+    /// Reads each endpoint's firmware inventory in caller order, preserving repeated
+    /// endpoints and inventory members. Member errors must not discard healthy peers.
+    /// Versions describe backend observations, not proof of an active image.
+    /// Whole-call failures use [`ComponentManagerError`], including `Unsupported`
+    /// without I/O for backends lacking this capability and `InvalidArgument` for
+    /// oversized input. Collection/member failures stay nested in their endpoint result.
+    async fn get_firmware_inventory(
+        &self,
+        _endpoints: &[ComputeTrayEndpoint],
+    ) -> Result<Vec<ComponentFirmwareInventoryResult>, ComponentManagerError> {
+        Err(ComponentManagerError::Unsupported(format!(
+            "firmware inventory is not supported by the {} backend",
+            self.name()
+        )))
     }
 
     fn backend(&self) -> Backend;

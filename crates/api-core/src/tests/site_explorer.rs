@@ -185,12 +185,15 @@ async fn admin_address_reconciliation_republishes_a_config_changed_under_it(
     winning_config.use_admin_network = Some(!winning_config.use_admin_network.unwrap_or(true));
 
     let metrics = MetricsCapture::start();
-    let reconcile = creator.create_managed_host(
+    // Box `create_managed_host` to keep this test within libtest's default
+    // thread stack. Its inline future enlarges the test and SQLx runner
+    // frames even during fixture setup, before reconciliation starts.
+    let reconcile = Box::pin(creator.create_managed_host(
         &explored_host,
         &mut host_report,
         Some(&expected_machine),
         &env.pool,
-    );
+    ));
     let competing_write = async {
         // Reconciliation has repaired the address rows and read the old version.
         // Change the config before releasing the machine row it needs to update.

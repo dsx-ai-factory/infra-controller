@@ -961,7 +961,7 @@ async fn power_policy_uses_the_machine_snapshot_during_concurrent_updates(
         &mut writer,
         host.0,
         "concurrent request",
-        model::machine::MachineMaintenanceOperation::PowerOn,
+        model::machine::MachineMaintenanceOperation::Reboot,
     )
     .await?;
     db::power_options::update_desired_state(
@@ -1011,9 +1011,10 @@ async fn power_policy_uses_the_machine_snapshot_during_concurrent_updates(
         &rpc::ComponentPowerActionDetails {
             actions: vec![rpc::ComponentPowerAction {
                 status: rpc::ComponentPowerActionStatus::Pending as i32,
-                operation: rpc::ComponentPowerActionOperation::PowerOn as i32,
+                operation: rpc::ComponentPowerActionOperation::Reset as i32,
                 requested_at: submitted_at,
                 initiator: Some("concurrent request".into()),
+                graceful: Some(true),
                 ..Default::default()
             }],
             error: None,
@@ -1158,7 +1159,7 @@ async fn blocked_snapshots_release_pool_capacity(pool: sqlx::PgPool) -> TestResu
             env.test_credential_manager.clone(),
         ));
 
-        // The setup case blocks inside `begin`, before it can install the
+        // The setup case blocks inside `begin_read_only_snapshot`, before it can install the
         // server cap. The other cases stop an inventory read after setup.
         let (lock_statement, query_fragment) = match cancellation {
             Cancellation::SetupCallerDrop => (

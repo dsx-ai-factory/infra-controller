@@ -205,9 +205,11 @@ async fn bounded_access_calls_reap_stalled_vendors_and_redact_output() {
         // Unlock must not forward to the synchronous enable method.
         ("unlock", Operation::Unlock),
     ];
-    let executor = crate::runner::test_firmware_executor();
+    let executor = &crate::runner::test_firmware_executor();
     let key = "0123aBcD4567eF89";
-    for (name, operation) in cases {
+    // Each case owns its directory and process family, so their deadlines can
+    // run together without sharing fixture state.
+    let [query, lock, unlock] = cases.map(|(name, operation)| async move {
         let directory = tempfile::tempdir().unwrap();
         let executable = directory.path().join("flint");
         write_fixture_script(
@@ -228,7 +230,7 @@ async fn bounded_access_calls_reap_stalled_vendors_and_redact_output() {
         let timeout = Duration::from_secs(6);
         let error = tokio::time::timeout(
             Duration::from_secs(20),
-            operation.run(&manager, "0000:03:00.0", key, &executor, timeout),
+            operation.run(&manager, "0000:03:00.0", key, executor, timeout),
         )
         .await
         .unwrap_or_else(|_| panic!("{name}: bounded call exceeded its test watchdog"))
@@ -277,7 +279,8 @@ async fn bounded_access_calls_reap_stalled_vendors_and_redact_output() {
                 "{name}: bounded call left process {pid} behind"
             );
         }
-    }
+    });
+    tokio::join!(query, lock, unlock);
 }
 
 /// Public device validation and the separate query dry-run guard must return

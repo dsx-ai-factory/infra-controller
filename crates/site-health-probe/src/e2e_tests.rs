@@ -105,11 +105,7 @@ async fn fake_site_counts_match_the_site() {
     let store = Arc::new(SnapshotStore::new(&cfg.paging));
     setup
         .registry
-        .register(Box::new(StateCollector::new(
-            Arc::clone(&store),
-            t0,
-            cfg.nico_api.host_read,
-        )))
+        .register(Box::new(StateCollector::new(Arc::clone(&store), t0)))
         .expect("register");
     let sink: Arc<dyn SnapshotSink> = Arc::new(CountingSink::new(Arc::clone(&store), &setup.meter));
 
@@ -121,6 +117,7 @@ async fn fake_site_counts_match_the_site() {
             timeout: Duration::from_secs(600),
         },
         cfg.nico_api.batch_size,
+        cfg.nico_api.host_read,
         Arc::new(FakeConnector(Arc::clone(&nico))),
         Arc::new(CallGate::new(
             "nico-api",

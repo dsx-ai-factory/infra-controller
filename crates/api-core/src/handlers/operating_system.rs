@@ -301,12 +301,8 @@ pub(crate) async fn create_operating_system(
         ipxe_definition_hash,
     };
 
-    let row = db::operating_system::create(&mut txn, &input)
-        .await
-        .map_err(|e| Status::internal(e.to_string()))?;
-    txn.commit()
-        .await
-        .map_err(|e| Status::internal(e.to_string()))?;
+    let row = db::operating_system::create(&mut txn, &input).await?;
+    txn.commit().await?;
 
     let def: rpc::OperatingSystem =
         model::operating_system_definition::OperatingSystem::from(&row).into();
@@ -325,7 +321,7 @@ pub(crate) async fn get_operating_system(
             if e.is_not_found() {
                 Status::not_found(format!("operating system {id} not found"))
             } else {
-                Status::internal(e.to_string())
+                e.into()
             }
         })?;
 
@@ -346,13 +342,15 @@ pub(crate) async fn update_operating_system(
         .ok_or_else(|| Status::invalid_argument("id is required"))?;
     let id = Uuid::from(id_proto);
 
-    let existing = db::operating_system::get(&mut txn, id).await.map_err(|e| {
-        if e.is_not_found() {
-            Status::not_found(format!("operating system {id} not found"))
-        } else {
-            Status::internal(e.to_string())
-        }
-    })?;
+    let existing = db::operating_system::get_for_update(&mut txn, id)
+        .await
+        .map_err(|e| {
+            if e.is_not_found() {
+                Status::not_found(format!("operating system {id} not found"))
+            } else {
+                e.into()
+            }
+        })?;
 
     let req_template_id: Option<String> = req.ipxe_template_id.map(|id| id.to_string());
 
@@ -468,12 +466,8 @@ pub(crate) async fn update_operating_system(
         status,
     };
 
-    let row = db::operating_system::update(&mut txn, &existing, &input)
-        .await
-        .map_err(|e| Status::internal(e.to_string()))?;
-    txn.commit()
-        .await
-        .map_err(|e| Status::internal(e.to_string()))?;
+    let row = db::operating_system::update(&mut txn, &existing, &input).await?;
+    txn.commit().await?;
 
     let def: rpc::OperatingSystem =
         model::operating_system_definition::OperatingSystem::from(&row).into();
@@ -498,12 +492,10 @@ pub(crate) async fn delete_operating_system(
             if e.is_not_found() {
                 Status::not_found(format!("operating system {id} not found"))
             } else {
-                Status::internal(e.to_string())
+                e.into()
             }
         })?;
-    txn.commit()
-        .await
-        .map_err(|e| Status::internal(e.to_string()))?;
+    txn.commit().await?;
 
     Ok(Response::new(rpc::DeleteOperatingSystemResponse {}))
 }
@@ -518,8 +510,7 @@ pub(crate) async fn find_operating_system_ids(
         &mut api.db_reader(),
         filter.tenant_organization_id.as_deref(),
     )
-    .await
-    .map_err(|e| Status::internal(e.to_string()))?;
+    .await?;
 
     let ids = ids.into_iter().map(OperatingSystemId::from).collect();
 
@@ -543,7 +534,7 @@ pub(crate) async fn get_operating_system_cachable_ipxe_script_artifacts(
             if e.is_not_found() {
                 Status::not_found(format!("operating system {id} not found"))
             } else {
-                Status::internal(e.to_string())
+                e.into()
             }
         })?;
 
@@ -563,13 +554,15 @@ pub(crate) async fn update_operating_system_cachable_ipxe_script_artifacts(
         .ok_or_else(|| Status::invalid_argument("id is required"))?;
     let id = Uuid::from(id_proto);
 
-    let existing = db::operating_system::get(&mut txn, id).await.map_err(|e| {
-        if e.is_not_found() {
-            Status::not_found(format!("operating system {id} not found"))
-        } else {
-            Status::internal(e.to_string())
-        }
-    })?;
+    let existing = db::operating_system::get_for_update(&mut txn, id)
+        .await
+        .map_err(|e| {
+            if e.is_not_found() {
+                Status::not_found(format!("operating system {id} not found"))
+            } else {
+                e.into()
+            }
+        })?;
 
     let mut artifacts = artifacts_from_json(existing.ipxe_artifacts.as_ref().map(|j| &j.0));
 
@@ -640,12 +633,8 @@ pub(crate) async fn update_operating_system_cachable_ipxe_script_artifacts(
         status: new_status,
     };
 
-    let row = db::operating_system::update(&mut txn, &existing, &input)
-        .await
-        .map_err(|e| Status::internal(e.to_string()))?;
-    txn.commit()
-        .await
-        .map_err(|e| Status::internal(e.to_string()))?;
+    let row = db::operating_system::update(&mut txn, &existing, &input).await?;
+    txn.commit().await?;
 
     let artifacts = artifacts_from_json(row.ipxe_artifacts.as_ref().map(|j| &j.0));
     Ok(Response::new(rpc::IpxeTemplateArtifactList { artifacts }))
@@ -659,9 +648,7 @@ pub(crate) async fn find_operating_systems_by_ids(
 
     let ids: Vec<Uuid> = req.ids.iter().copied().map(Uuid::from).collect();
 
-    let rows = db::operating_system::get_many(&mut api.db_reader(), &ids)
-        .await
-        .map_err(|e| Status::internal(e.to_string()))?;
+    let rows = db::operating_system::get_many(&mut api.db_reader(), &ids).await?;
 
     let operating_systems: Vec<rpc::OperatingSystem> = rows
         .iter()

@@ -516,26 +516,25 @@ impl<'a> MockExploredHost<'a> {
                 .await
                 .unwrap()[&dpu_machine_id];
 
+        // Scout discovery below needs this intermediate state. Requeued
+        // transitions can otherwise advance to network configuration first.
         self.test_env
-            .run_machine_state_controller_iteration_until_state_matches(
+            .run_machine_state_controller_iteration_until_state_condition_with_requeue(
                 &host_machine_id,
                 10 + (10 * self.dpu_machine_ids.len() as u32),
-                ManagedHostState::DPUInit {
-                    dpu_states: model::machine::DpuInitStates {
-                        states: self
-                            .dpu_machine_ids
-                            .clone()
-                            .into_values()
-                            .map(|machine_id| {
-                                (
-                                    machine_id,
-                                    DpuInitState::DpfStates {
-                                        state: DpfState::WaitingForReady { phase_detail: None },
-                                    },
-                                )
-                            })
-                            .collect::<HashMap<DpuMachineId, DpuInitState>>(),
-                    },
+                false,
+                |machine| match machine.current_state() {
+                    ManagedHostState::DPUInit { dpu_states } => {
+                        self.dpu_machine_ids.values().all(|machine_id| {
+                            matches!(
+                                dpu_states.states.get(machine_id),
+                                Some(DpuInitState::DpfStates {
+                                    state: DpfState::WaitingForReady { phase_detail: None },
+                                })
+                            )
+                        })
+                    }
+                    _ => false,
                 },
             )
             .await;

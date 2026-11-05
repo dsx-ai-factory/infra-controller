@@ -40,6 +40,15 @@ pub(crate) struct Bluefield4<'a> {
 }
 
 impl Bluefield4<'_> {
+    pub(crate) fn service_root_config(&self) -> redfish::service_root::Config {
+        redfish::service_root::Config {
+            vendor: redfish::oem::BmcVendor::Nvidia(redfish::oem::NvidiaNamestyle::Capitalized),
+            product: Some("BlueField-4"),
+            redfish_version: "1.17.0",
+            exposes_computer_systems: true,
+        }
+    }
+
     const SYSTEM_ID: &'static str = "BlueField_0";
     const MANAGER_ID: &'static str = "BlueField_BMC_0";
     const BMC_CHASSIS_ID: &'static str = "BlueField_BMC_0";

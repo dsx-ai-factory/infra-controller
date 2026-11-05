@@ -71,6 +71,8 @@ async fn create_device_report_request(
     let config = SupervisorConfig::from_env()
         .map_err(|_| "firmware supervisor configuration is invalid".to_string())?;
     create_device_report_request_with_query(machine_id, &config, async {
+        // Core compares collection time with its post-activation boundary. Keep
+        // it before the query so an in-flight inventory cannot appear fresh.
         let mut report = MlxDeviceReport::new();
         report.devices = discovery::discover_pci_devices_bounded().await?;
         Ok(report)
@@ -3191,6 +3193,7 @@ mod tests {
         );
 
         let mut inventory = MlxDeviceReport::new();
+        inventory.timestamp = "2026-10-01T00:00:00Z".parse().unwrap();
         inventory.devices = discovery::parse_mlxfwmanager_xml(
             r#"<Devices><Device pciName="0000:03:00.0" type="BlueField3"/></Devices>"#,
         )

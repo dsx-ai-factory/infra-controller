@@ -2505,8 +2505,11 @@ impl SiteExplorer {
 
                     if !self.config.create_machines.load(Ordering::Relaxed)
                         || power_shelf_manual_ingestion
+                        || is_endpoint_in_managed_host(address, txn.as_pgconn()).await?
                     {
-                        // We're using manual ingestion, making preingestion updates risky.  Go ahead and skip them.
+                        // Manual ingestion must not run automatic setup, and managed BMCs
+                        // must not repeat preingestion for another address. Keep this in the
+                        // insert branch so refreshes preserve explicit preingestion retries.
                         db::explored_endpoints::set_preingestion_complete(address, &mut txn).await?
                     }
                 }

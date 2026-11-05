@@ -1267,6 +1267,11 @@ func (cih CreateInstanceHandler) Handle(c echo.Context) error {
 				allowUnhealthyMachine = *apiRequest.AllowUnhealthyMachine
 			}
 
+			// A retained deletion record is unavailable even with an unhealthy override.
+			if machine.IsForceDeletionQuarantined() {
+				return cutil.NewAPIError(http.StatusBadRequest, fmt.Sprintf("Machine: %s has a force-deletion request and cannot be used for a new Instance", machine.ID), nil)
+			}
+
 			// Check if Machine is missing on site
 			if machine.IsMissingOnSite {
 				logger.Warn().Str("MachineID", machine.ID).Msg("Machine is missing on site, cannot be used for new Instance")
@@ -4088,8 +4093,11 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 					newIbIfcs = append(newIbIfcs, *dbibifc)
 				}
 
-				// Update status of existing InfiniBand Interfaces to Deleting
+				// Keep Updated unchanged for deleting rows so reissues do not defer inventory cleanup.
 				for i := range existingIbIfcs {
+					if existingIbIfcs[i].Status == cdbm.InfiniBandInterfaceStatusDeleting {
+						continue
+					}
 					existingIbIfcs[i].Status = cdbm.InfiniBandInterfaceStatusDeleting
 					_, err = ibiDAO.Update(ctx, tx, cdbm.InfiniBandInterfaceUpdateInput{
 						InfiniBandInterfaceID: existingIbIfcs[i].ID,
@@ -4430,16 +4438,19 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 					}
 					newNvlIfcs = append(newNvlIfcs, *newNvlIfc)
 				}
-				// Update status of existing NVLink interfaces to Deleting
-				if len(existingNvlIfcs) > 0 {
-					nvlIfcUpdateInputs := make([]cdbm.NVLinkInterfaceUpdateInput, len(existingNvlIfcs))
-					for i := range existingNvlIfcs {
-						existingNvlIfcs[i].Status = cdbm.NVLinkInterfaceStatusDeleting
-						nvlIfcUpdateInputs[i] = cdbm.NVLinkInterfaceUpdateInput{
-							NVLinkInterfaceID: existingNvlIfcs[i].ID,
-							Status:            cutil.GetPtr(cdbm.NVLinkInterfaceStatusDeleting),
-						}
+				// Keep Updated unchanged for deleting rows so reissues do not defer inventory cleanup.
+				nvlIfcUpdateInputs := make([]cdbm.NVLinkInterfaceUpdateInput, 0, len(existingNvlIfcs))
+				for i := range existingNvlIfcs {
+					if existingNvlIfcs[i].Status == cdbm.NVLinkInterfaceStatusDeleting {
+						continue
 					}
+					existingNvlIfcs[i].Status = cdbm.NVLinkInterfaceStatusDeleting
+					nvlIfcUpdateInputs = append(nvlIfcUpdateInputs, cdbm.NVLinkInterfaceUpdateInput{
+						NVLinkInterfaceID: existingNvlIfcs[i].ID,
+						Status:            cutil.GetPtr(cdbm.NVLinkInterfaceStatusDeleting),
+					})
+				}
+				if len(nvlIfcUpdateInputs) > 0 {
 					_, err := nvlIfcDAO.UpdateMultiple(ctx, tx, nvlIfcUpdateInputs)
 					if err != nil {
 						logger.Error().Err(err).Msg("failed to update NVLink Interface records in DB")

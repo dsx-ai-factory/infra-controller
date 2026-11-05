@@ -194,6 +194,27 @@ pub mod test_support {
             self._hello_fails.store(fails, Ordering::SeqCst);
         }
 
+        /// Serves one partition named `name` holding `gpu_uids`.
+        pub fn with_partition(
+            partition_id: u32,
+            name: impl Into<String>,
+            gpu_uids: Vec<u64>,
+        ) -> Self {
+            let client = Self::default();
+            client.push_partition(partition_id, name, gpu_uids);
+            client
+        }
+
+        /// The name and members of each partition currently held, in creation order.
+        pub fn partitions(&self) -> Vec<(String, Vec<u64>)> {
+            self._partitions
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|p| (p.name.clone(), p.gpu_uids.clone()))
+                .collect()
+        }
+
         /// Number of `get_partition_info_list` calls served in memory so far.
         pub fn partition_info_list_calls(&self) -> usize {
             self._partition_info_list_calls.load(Ordering::SeqCst)

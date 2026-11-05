@@ -707,6 +707,7 @@ for common workflows:
 | `HostUpdate` | Mark host as in DPU reprovision or host update. |
 | `InternalMaintenance` | Internal maintenance window. |
 | `OutForRepair` | Host removed from service for repair. |
+| `ComputeTrayDueForSwap` | Compute tray about to be moved or replaced. Also removes the host's GPUs from every NVLink partition, and the NVLink partition monitor reports progress under the `nvlink-isolation` source (`NvlinkIsolationPending` or `NvlinkIsolated`); see [Moving or Replacing a Compute Tray](../manuals/nvlink_partitioning.md#moving-or-replacing-a-compute-tray). |
 | `Degraded` | Mark host as degraded. |
 | `Validation` | Mark host for validation. |
 | `SuppressExternalAlerting` | Suppress external alerting behavior. |

@@ -55,20 +55,22 @@ fn second_card() -> NicFirmwareTarget {
 }
 
 #[test]
-fn missing_receipt_freezes_helper_identity_without_regrant() {
+fn helper_restart_before_submission_does_not_renew_uncertain_work() {
     let mut operation = operation();
     assert!(operation.accept_missing_receipt(WORKFLOW, WORKFLOW, CARD, "helper-a".into()));
 
-    // A process replacement must not reopen the admission gate, even while the
-    // controller is still persisting its initial observation phase.
+    // Initial observation cannot dispatch an update, so a helper can restart
+    // there. Once the execution phase commits, missing evidence cannot renew it.
     assert!(operation.accept_missing_receipt(WORKFLOW, WORKFLOW, CARD, "helper-b".into()));
     operation.phase = NicFirmwarePhase::UpdatingFirmware { target_index: 0 };
-    let before = operation.clone();
-    assert!(!operation.accept_missing_receipt(WORKFLOW, WORKFLOW, CARD, "helper-b".into()));
-    assert_eq!(operation, before);
+    assert!(operation.accept_missing_receipt(WORKFLOW, WORKFLOW, CARD, "helper-c".into()));
     assert_eq!(
         operation.targets[0].supervisor_instance_id.as_deref(),
-        Some("helper-a")
+        Some("helper-b")
+    );
+    assert_eq!(
+        operation.targets[0].delivery_error_code,
+        Some(NicFirmwareDeliveryErrorCode::Conflict)
     );
     assert!(
         operation.targets[0]
@@ -81,10 +83,9 @@ fn missing_receipt_freezes_helper_identity_without_regrant() {
 
 #[test]
 fn missing_receipt_grants_a_helper_only_during_a_clean_first_observation() {
-    // Only the first answer, during initial observation and before any receipt,
-    // may freeze the helper that later submissions name. Every other missing
-    // read records uncertainty without granting submission, and a repeat of
-    // the same answer changes nothing.
+    // Only receipt-free initial observation may refresh the helper that later
+    // submissions name. Other missing reads retain uncertainty without granting
+    // submission, and a repeat of the same answer changes nothing.
     struct Answer {
         scenario: &'static str,
         phase: NicFirmwarePhase,
@@ -278,6 +279,7 @@ fn receipt_intake_matches_the_whole_request_and_preserves_terminal_evidence() {
             operation.phase = report.phase;
             operation.targets[0].receipt = report.previous.map(receipt);
             operation.targets[0].diagnostic = Some("earlier delivery error".into());
+            operation.targets[0].delivery_error_code = Some(NicFirmwareDeliveryErrorCode::Conflict);
             let before = operation.clone();
             let mut incoming = receipt(report.state);
             incoming.operation_id = report.receipt_operation_id.to_string();
@@ -292,6 +294,7 @@ fn receipt_intake_matches_the_whole_request_and_preserves_terminal_evidence() {
             if accepted {
                 assert_eq!(operation.targets[0].receipt, Some(incoming));
                 assert_eq!(operation.targets[0].diagnostic, None);
+                assert_eq!(operation.targets[0].delivery_error_code, None);
             } else {
                 assert_eq!(
                     operation, before,
@@ -311,14 +314,18 @@ fn delivery_errors_are_kept_only_for_the_active_unsettled_request() {
     struct Delivery {
         operation_id: &'static str,
         diagnostic: String,
+        code: NicFirmwareDeliveryErrorCode,
         previous: FirmwareOperationState,
         stored: Option<&'static str>,
+        stored_code: NicFirmwareDeliveryErrorCode,
     }
     let correlated = || Delivery {
         operation_id: WORKFLOW,
         diagnostic: "delivery failed".into(),
+        code: NicFirmwareDeliveryErrorCode::Unavailable,
         previous: FirmwareOperationState::Running,
         stored: None,
+        stored_code: NicFirmwareDeliveryErrorCode::Unavailable,
     };
     check_values(
         [
@@ -339,6 +346,24 @@ fn delivery_errors_are_kept_only_for_the_active_unsettled_request() {
                 scenario: "error after a terminal receipt",
                 input: Delivery {
                     previous: FirmwareOperationState::Complete,
+                    ..correlated()
+                },
+                expect: false,
+            },
+            Check {
+                scenario: "a changed classification is not a duplicate diagnostic",
+                input: Delivery {
+                    stored: Some("delivery failed"),
+                    code: NicFirmwareDeliveryErrorCode::Conflict,
+                    ..correlated()
+                },
+                expect: true,
+            },
+            Check {
+                scenario: "unavailable cannot downgrade a permanent failure or its diagnostic",
+                input: Delivery {
+                    stored: Some("immutable request conflict"),
+                    stored_code: NicFirmwareDeliveryErrorCode::Conflict,
                     ..correlated()
                 },
                 expect: false,
@@ -374,18 +399,22 @@ fn delivery_errors_are_kept_only_for_the_active_unsettled_request() {
             operation.targets[0].receipt = Some(receipt(delivery.previous));
             operation.targets[0].supervisor_instance_id = Some("helper-a".into());
             operation.targets[0].diagnostic = delivery.stored.map(String::from);
+            operation.targets[0].delivery_error_code =
+                delivery.stored.map(|_| delivery.stored_code);
             let before = operation.clone();
 
             let kept = operation.accept_error(
                 delivery.operation_id,
                 WORKFLOW,
                 CARD,
+                delivery.code,
                 delivery.diagnostic.clone(),
             );
 
             if kept {
                 let mut expected = before;
                 expected.targets[0].diagnostic = Some(delivery.diagnostic);
+                expected.targets[0].delivery_error_code = Some(delivery.code);
                 assert_eq!(operation, expected);
             } else {
                 assert_eq!(operation, before);
@@ -988,9 +1017,90 @@ fn populated_operation_round_trips_through_json() {
     card.supervisor_instance_id = Some("helper-a".into());
     card.receipt = Some(receipt(FirmwareOperationState::Complete));
     card.diagnostic = Some("receipt replayed".into());
+    card.delivery_error_code = Some(NicFirmwareDeliveryErrorCode::Unavailable);
 
     let encoded = serde_json::to_string(&operation).expect("encode operation");
     let decoded: NicFirmwareOperation = serde_json::from_str(&encoded).expect("decode operation");
 
     assert_eq!(decoded, operation);
+}
+
+/// A future effect or ownership field must not disappear while reopening work.
+/// Keep each structural rejection in the model rather than repeating it at RPC.
+#[test]
+fn unknown_durable_effect_fields_are_rejected() {
+    type Edit = fn(&mut serde_json::Value);
+    let edits: [(&str, Edit); 6] = [
+        ("workflow effect", |value| {
+            value["future_effect"] = true.into()
+        }),
+        ("target evidence", |value| {
+            value["targets"][0]["future_receipt"] = true.into()
+        }),
+        ("execution choice", |value| {
+            value["options"]["future_activation"] = true.into()
+        }),
+        ("lifecycle owner payload", |value| {
+            value["purpose"]["Baseline"]["future_owner"] = true.into()
+        }),
+        ("baseline continuation payload", |value| {
+            let mut continuation =
+                serde_json::to_value(NicFirmwareBaselineContinuation::InitialPreparation {
+                    skip_reboot_wait: true,
+                })
+                .expect("encode valid continuation");
+            continuation["InitialPreparation"]["future_boot_choice"] = true.into();
+            value["purpose"]["Baseline"]["continuation"] = continuation;
+        }),
+        ("resume phase payload", |value| {
+            value["phase"]["ObservingSupervisor"]["future_resume"] = true.into()
+        }),
+    ];
+    check_cases(
+        edits.map(|(scenario, input)| Case {
+            scenario,
+            input,
+            expect: Outcome::Fails,
+        }),
+        |edit| {
+            let mut value = serde_json::to_value(operation()).expect("encode fixture");
+            edit(&mut value);
+            serde_json::from_value::<NicFirmwareOperation>(value)
+                .map(|_| ())
+                .map_err(drop)
+        },
+    );
+}
+
+/// Each lifecycle has a different ownership boundary even when no replacement
+/// instance is involved.
+#[test]
+fn lifecycle_purpose_rejects_an_incompatible_owner() {
+    let instance_id = uuid::Uuid::nil().into();
+    check_values(
+        [
+            Check {
+                scenario: "allocation requires its attached live instance",
+                input: (NicFirmwarePurpose::Allocation { instance_id }, None),
+                expect: false,
+            },
+            Check {
+                scenario: "baseline restoration cannot take over a live allocation",
+                input: (
+                    NicFirmwarePurpose::RestoreBaseline {
+                        instance_id,
+                        cleanup_context: CleanupContext::Reset,
+                    },
+                    Some((instance_id, false)),
+                ),
+                expect: false,
+            },
+            Check {
+                scenario: "tenant-free baseline cannot own an attached instance",
+                input: (operation().purpose, Some((instance_id, false))),
+                expect: false,
+            },
+        ],
+        |(purpose, owner)| purpose.matches_owner(owner),
+    );
 }

@@ -33,6 +33,15 @@ pub(crate) struct WiwynnGB200Nvl<'a> {
 }
 
 impl WiwynnGB200Nvl<'_> {
+    pub(crate) fn service_root_config(&self) -> redfish::service_root::Config {
+        redfish::service_root::Config {
+            vendor: redfish::oem::BmcVendor::Wiwynn,
+            product: Some("GB200 NVL"),
+            redfish_version: "1.17.0",
+            exposes_computer_systems: true,
+        }
+    }
+
     fn sensor_layout() -> redfish::sensor::Layout {
         redfish::sensor::Layout {
             temperature: 40,
