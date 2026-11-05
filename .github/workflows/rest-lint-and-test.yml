@@ -25,12 +25,20 @@ jobs:
         with:
           persist-credentials: false
 
+      # setup-go's own cache saves on every ref, so these jobs restore and
+      # save through go-cache-restore and go-cache-save instead.
       - name: Set up Go
         uses: actions/setup-go@v7
         with:
           go-version: ${{ env.GO_VERSION }}
-          cache: true
-          cache-dependency-path: rest-api/go.sum
+          cache: false
+
+      - name: Restore Go caches
+        id: go-cache
+        uses: ./.github/actions/go-cache-restore
+        with:
+          scope: rest-style
+          dependency-path: rest-api/go.sum
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -63,6 +71,13 @@ jobs:
       - name: Test local nico-api address configuration
         run: python3 -B scripts/test_local_core_address.py
 
+      - name: Save Go caches
+        if: ${{ !cancelled() }}
+        uses: ./.github/actions/go-cache-save
+        with:
+          key: ${{ steps.go-cache.outputs.key }}
+          cache-hit: ${{ steps.go-cache.outputs.cache-hit }}
+
   lint-go:
     name: Lint Go
     runs-on: linux-amd64-cpu8
@@ -77,8 +92,14 @@ jobs:
         uses: actions/setup-go@v7
         with:
           go-version: ${{ env.GO_VERSION }}
-          cache: true
-          cache-dependency-path: rest-api/go.sum
+          cache: false
+
+      - name: Restore Go caches
+        id: go-cache
+        uses: ./.github/actions/go-cache-restore
+        with:
+          scope: rest-lint-go
+          dependency-path: rest-api/go.sum
 
       - name: Download dependencies
         uses: ./.github/actions/go-mod-download
@@ -92,6 +113,13 @@ jobs:
           version: v2.14.0
           args: --timeout=10m --issues-exit-code=0 ./...
           working-directory: rest-api
+
+      - name: Save Go caches
+        if: ${{ !cancelled() }}
+        uses: ./.github/actions/go-cache-save
+        with:
+          key: ${{ steps.go-cache.outputs.key }}
+          cache-hit: ${{ steps.go-cache.outputs.cache-hit }}
 
   lint-openapi:
     name: Lint OpenAPI
@@ -165,8 +193,14 @@ jobs:
         uses: actions/setup-go@v7
         with:
           go-version: ${{ env.GO_VERSION }}
-          cache: true
-          cache-dependency-path: rest-api/go.sum
+          cache: false
+
+      - name: Restore Go caches
+        id: go-cache
+        uses: ./.github/actions/go-cache-restore
+        with:
+          scope: rest-check-generated-sdk
+          dependency-path: rest-api/go.sum
 
       # The generator version itself is pinned in rest-api/Makefile.
       - name: Set up Java
@@ -189,6 +223,13 @@ jobs:
           bash ../scripts/check-repo-clean.sh "REST SDK generation"
           "make rest-api/generate-sdk (from the repository root)"
 
+      - name: Save Go caches
+        if: ${{ !cancelled() }}
+        uses: ./.github/actions/go-cache-save
+        with:
+          key: ${{ steps.go-cache.outputs.key }}
+          cache-hit: ${{ steps.go-cache.outputs.cache-hit }}
+
   check-protobuf-generated:
     name: Check Protobuf Generated Code
     runs-on: linux-amd64-cpu4
@@ -205,8 +246,14 @@ jobs:
         uses: actions/setup-go@v7
         with:
           go-version: ${{ env.GO_VERSION }}
-          cache: true
-          cache-dependency-path: rest-api/go.sum
+          cache: false
+
+      - name: Restore Go caches
+        id: go-cache
+        uses: ./.github/actions/go-cache-restore
+        with:
+          scope: rest-check-protobuf-generated
+          dependency-path: rest-api/go.sum
 
       - name: Download dependencies
         uses: ./.github/actions/go-mod-download
@@ -218,6 +265,13 @@ jobs:
         run: >-
           bash ../scripts/check-repo-clean.sh "REST protobuf generation"
           "make sync-protobuf (from the repository root)"
+
+      - name: Save Go caches
+        if: ${{ !cancelled() }}
+        uses: ./.github/actions/go-cache-save
+        with:
+          key: ${{ steps.go-cache.outputs.key }}
+          cache-hit: ${{ steps.go-cache.outputs.cache-hit }}
 
   test:
     name: Test (${{ matrix.module }})
@@ -265,8 +319,17 @@ jobs:
         uses: actions/setup-go@v7
         with:
           go-version: ${{ env.GO_VERSION }}
-          cache: true
-          cache-dependency-path: rest-api/go.sum
+          cache: false
+
+      # One scope for every module: per-module entries would multiply the
+      # storage each go.sum change saves, and the modules share most of their
+      # dependency packages.
+      - name: Restore Go caches
+        id: go-cache
+        uses: ./.github/actions/go-cache-restore
+        with:
+          scope: rest-test
+          dependency-path: rest-api/go.sum
 
       - name: Download dependencies
         uses: ./.github/actions/go-mod-download
@@ -274,3 +337,10 @@ jobs:
       - name: Run unit tests for ${{ matrix.module }}
         working-directory: .
         run: make rest-api/test-${{ matrix.module }}
+
+      - name: Save Go caches
+        if: ${{ !cancelled() }}
+        uses: ./.github/actions/go-cache-save
+        with:
+          key: ${{ steps.go-cache.outputs.key }}
+          cache-hit: ${{ steps.go-cache.outputs.cache-hit }}
