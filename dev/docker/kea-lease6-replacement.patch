@@ -8,7 +8,7 @@
  
  #include <algorithm>
  #include <sstream>
-@@ -54,7 +55,35 @@
+@@ -54,7 +55,42 @@
  using namespace isc::data;
  namespace ph = std::placeholders;
  
@@ -20,7 +20,8 @@
 +// A SELECT hook may redirect an allocation onto an existing lease only by
 +// supplying the snapshot it explicitly approved. Keep that row until the
 +// replacement write succeeds; an absent snapshot retains INSERT collision checks.
-+bool persistLease6Replacement(const Lease6Ptr& lease, const Lease6Ptr& replacement) {
++bool persistLease6Replacement(AllocEngine::ClientContext6& ctx,
++                              const Lease6Ptr& lease, const Lease6Ptr& replacement) {
 +    auto& leases = LeaseMgrFactory::instance();
 +    if (!replacement) {
 +        return (leases.addLease(lease));
@@ -36,15 +37,21 @@
 +    lease->current_cltt_ = replacement->cltt_;
 +    lease->current_valid_lft_ = replacement->valid_lft_;
 +    leases.updateLease6(lease);
-+    // Remove the previous DUID/FQDN ownership only after durable replacement.
-+    // Native response processing queues the new identity's ADD afterward.
-+    queueNCR(CHG_REMOVE, replacement);
++    if (lease->fqdn_fwd_ || lease->fqdn_rev_) {
++        // Kea 3 checks DUID changes and chains REMOVE/ADD in one NCR. Preserve
++        // that native ordering contract, including for an unchanged hostname.
++        ctx.currentIA().changed_leases_.push_back(replacement);
++    } else {
++        // Without new DNS updates the response path may have no FQDN option.
++        // Remove the old ownership after persistence even in that case.
++        queueNCR(CHG_REMOVE, replacement);
++    }
 +    return (true);
 +}
  
  /// Structure that holds registered hook indexes
  struct AllocEngineHooks {
-@@ -62,6 +91,7 @@
+@@ -62,6 +98,7 @@
      int hook_index_lease4_renew_;  ///< index for "lease4_renew" hook point
      int hook_index_lease4_expire_; ///< index for "lease4_expire" hook point
      int hook_index_lease4_recover_;///< index for "lease4_recover" hook point
@@ -52,7 +59,7 @@
      int hook_index_lease6_select_; ///< index for "lease6_select" hook point
      int hook_index_lease6_renew_;  ///< index for "lease6_renew" hook point
      int hook_index_lease6_rebind_; ///< index for "lease6_rebind" hook point
-@@ -74,6 +104,7 @@
+@@ -74,6 +111,7 @@
          hook_index_lease4_renew_  = HooksManager::registerHook("lease4_renew");
          hook_index_lease4_expire_ = HooksManager::registerHook("lease4_expire");
          hook_index_lease4_recover_= HooksManager::registerHook("lease4_recover");
@@ -60,7 +67,7 @@
          hook_index_lease6_select_ = HooksManager::registerHook("lease6_select");
          hook_index_lease6_renew_  = HooksManager::registerHook("lease6_renew");
          hook_index_lease6_rebind_ = HooksManager::registerHook("lease6_rebind");
-@@ -87,6 +118,24 @@
+@@ -87,6 +125,24 @@
  // As a result, the hook indexes will be defined before any method in this
  // module is called.
  AllocEngineHooks Hooks;
@@ -85,7 +92,7 @@
  
  }  // namespace
  
-@@ -483,6 +532,17 @@
+@@ -483,6 +539,17 @@
          Lease6Collection leases;
          while (subnet) {
              for (auto const& l : all_leases) {
@@ -103,7 +110,7 @@
                  if (((l)->state_ != Lease::STATE_REGISTERED) &&
                      ((l)->subnet_id_ == subnet->getID())) {
                      leases.push_back(l);
-@@ -491,6 +551,8 @@
+@@ -491,6 +558,8 @@
  
              subnet = subnet->getNextSubnet(ctx.subnet_);
          }
@@ -112,7 +119,7 @@
  
          // Now do the checks:
          // Case 1. if there are no leases, and there are reservations...
-@@ -1760,6 +1822,10 @@
+@@ -1760,6 +1829,10 @@
                                 uint8_t prefix_len,
                                 CalloutHandle::CalloutNextStep& callout_status) {
  
@@ -123,7 +130,7 @@
      if (!expired->expired()) {
          isc_throw(BadValue, "Attempt to recycle lease that is still valid");
      }
-@@ -1826,6 +1892,8 @@
+@@ -1826,6 +1899,8 @@
  
          // The lease that will be assigned to a client
          ctx.callout_handle_->setArgument("lease6", expired);
@@ -132,7 +139,7 @@
  
          // Call the callouts
          HooksManager::callCallouts(hook_index_lease6_select_, *ctx.callout_handle_);
-@@ -1848,6 +1916,8 @@
+@@ -1848,6 +1923,8 @@
          // Let's use whatever callout returned. Hopefully it is the same lease
          // we handed to it.
          ctx.callout_handle_->getArgument("lease6", expired);
@@ -141,13 +148,13 @@
      }
  
      if (!ctx.fake_allocation_) {
-@@ -1860,7 +1930,14 @@
+@@ -1860,7 +1937,14 @@
          }
  
          // for REQUEST we do update the lease
 -        LeaseMgrFactory::instance().updateLease6(expired);
 +        if (original_address != expired->addr_) {
-+            if (!persistLease6Replacement(expired, replacement)) {
++            if (!persistLease6Replacement(ctx, expired, replacement)) {
 +                return (Lease6Ptr());
 +            }
 +            ctx.currentIA().addNewResource(expired->addr_, prefix_len);
@@ -157,7 +164,7 @@
  
          // If the lease is in the current subnet we need to account
          // for the re-assignment of The lease.
-@@ -1898,6 +1975,9 @@
+@@ -1898,6 +1982,9 @@
              StatsMgr::instance().addValue(ctx.currentIA().type_ == Lease::TYPE_NA ?
                                            "cumulative-assigned-nas" : "cumulative-assigned-pds",
                                            static_cast<int64_t>(1));
@@ -167,7 +174,7 @@
          }
      }
  
-@@ -1987,6 +2067,8 @@
+@@ -1987,6 +2074,8 @@
          prefix_len = 128; // non-PD lease types must be always /128
      }
  
@@ -176,7 +183,7 @@
      uint32_t preferred = 0;
      uint32_t valid = 0;
      getLifetimes6(ctx, preferred, valid);
-@@ -2026,6 +2108,8 @@
+@@ -2026,6 +2115,8 @@
  
          // The lease that will be assigned to a client
          ctx.callout_handle_->setArgument("lease6", lease);
@@ -185,7 +192,7 @@
  
          // This is the first callout, so no need to clear any arguments
          HooksManager::callCallouts(hook_index_lease6_select_, *ctx.callout_handle_);
-@@ -2043,6 +2127,8 @@
+@@ -2043,6 +2134,8 @@
          // Let's use whatever callout returned. Hopefully it is the same lease
          // we handed to it.
          ctx.callout_handle_->getArgument("lease6", lease);
@@ -194,17 +201,17 @@
      }
  
      if (!ctx.fake_allocation_) {
-@@ -2055,7 +2141,8 @@
+@@ -2055,7 +2148,8 @@
          }
  
          // That is a real (REQUEST) allocation
 -        bool status = LeaseMgrFactory::instance().addLease(lease);
-+        bool status = addr != lease->addr_ ? persistLease6Replacement(lease, replacement)
++        bool status = addr != lease->addr_ ? persistLease6Replacement(ctx, lease, replacement)
 +                                          : LeaseMgrFactory::instance().addLease(lease);
  
          if (status) {
              // The lease insertion succeeded - if the lease is in the
-@@ -2096,8 +2183,12 @@
+@@ -2096,8 +2190,12 @@
                                                static_cast<int64_t>(1));
              }
  
@@ -218,7 +225,7 @@
  
              return (lease);
          } else {
-@@ -2143,6 +2234,8 @@
+@@ -2143,6 +2241,8 @@
              }
              subnet = subnet->getNextSubnet(ctx.subnet_);
          }
@@ -227,7 +234,7 @@
  
          if (!leases.empty()) {
              LOG_DEBUG(alloc_engine_logger, ALLOC_ENGINE_DBG_TRACE,
-@@ -2916,8 +3009,16 @@
+@@ -2916,8 +3016,16 @@
          callout_handle->setArgument("lease6", lease);
          callout_handle->setArgument("remove_lease", reclaim_mode == DB_RECLAIM_REMOVE);
  

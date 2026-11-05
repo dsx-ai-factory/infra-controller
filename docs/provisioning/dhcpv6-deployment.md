@@ -138,11 +138,12 @@ can return an IA-scoped failure. Inspect the `reason` label on
 `carbide_dhcp_v6_requests_dropped_total` when diagnosing retries across boot stages.
 
 The chart does not enable native D2 updates. If a custom configuration enables
-D2, successful replacement queues removal using the old target's DUID and FQDN
-before native response processing adds the new identity. This applies when the
-hostname stays the same as well as when it changes. Failed persistence queues
-no replacement cleanup. D2 delivery and DNS-server acceptance remain subject to
-Kea's configured queue, transport, and DNS policy.
+D2, successful replacement uses Kea 3's native chained request to remove the
+old target's DUID/FQDN ownership before adding the new identity. This applies
+when the hostname stays the same as well as when it changes. If the new lease
+does not request DNS updates, replacement queues only the old owner's removal.
+Failed persistence queues no replacement cleanup. D2 delivery and DNS-server
+acceptance remain subject to Kea's configured queue, transport, and DNS policy.
 
 ## Deployment Verification and Metrics
 
