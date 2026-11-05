@@ -6,10 +6,12 @@ package nico
 import (
 	"context"
 	"fmt"
+
+	"go.temporal.io/sdk/temporal"
+
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/executor/temporalworkflow/common"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/types"
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
-	"go.temporal.io/sdk/temporal"
 )
 
 // ResetNVOS submits once after the rack-host readiness gate. Success only means
@@ -52,7 +54,7 @@ func (m *Manager) ResetNVOS(ctx context.Context, target common.Target) error {
 // Core tracks the latest accepted reference; external submissions may replace it.
 func (m *Manager) NVOSResetCompleted(ctx context.Context, target common.Target) (bool, error) {
 	if m.nicoClient == nil {
-		return fmt.Errorf("nico client is not configured")
+		return false, fmt.Errorf("nico client is not configured")
 	}
 	if target.UsesMACAddresses() || target.Len() != 1 {
 		return false, fmt.Errorf("NVOS reset requires one ingested switch")

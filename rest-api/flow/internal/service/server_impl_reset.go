@@ -5,11 +5,15 @@ package service
 
 import (
 	"context"
-	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/converter/protobuf"
-	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/operations"
-	pb "github.com/NVIDIA/infra-controller/rest-api/proto/flow/gen/v1"
+	"errors"
+
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+
+	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/converter/protobuf"
+	taskmanager "github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/manager"
+	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/operations"
+	pb "github.com/NVIDIA/infra-controller/rest-api/flow/pkg/proto/v1"
 )
 
 // ResetSwitches submits fixed NVOS reset work through the existing rack conflict
@@ -27,6 +31,9 @@ func (rs *FlowServerImpl) ResetSwitches(ctx context.Context, req *pb.ResetSwitch
 	}
 	ids, err := rs.taskManager.SubmitTask(ctx, request)
 	if err != nil {
+		if errors.Is(err, taskmanager.ErrRackConflict) {
+			return nil, status.Error(codes.Aborted, "a conflicting rack task prevents NVOS reset")
+		}
 		return nil, err
 	}
 	if len(ids) == 0 {

@@ -4,28 +4,37 @@
 package handler
 
 import (
+	"context"
 	"fmt"
-	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
-	flowv1 "github.com/NVIDIA/infra-controller/rest-api/proto/flow/gen/v1"
+	"net/http"
+	"testing"
+
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/encoding/protojson"
-	"net/http"
-	"testing"
+
+	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
+	flowv1 "github.com/NVIDIA/infra-controller/rest-api/proto/flow/gen/v1"
 )
 
 func TestNVOSFactoryResetHandler_Handle(t *testing.T) {
 	fixture := newNVLinkDomainHandlerTestFixture(t)
 	for _, tc := range []struct {
-		name        string
-		scope       resetScope
-		invalidBody bool
-		tenant      bool
-		siteStatus  string
-		status      int
+		name         string
+		scope        resetScope
+		invalidBody  bool
+		foreignSite  bool
+		missingUser  bool
+		invalidTasks bool
+		tenant       bool
+		siteStatus   string
+		status       int
 	}{
 		{name: "domain switches only", scope: resetDomain, status: http.StatusAccepted},
 		{name: "tray external ID", scope: resetTray, status: http.StatusAccepted},
+		{name: "foreign provider site", scope: resetTray, foreignSite: true, status: http.StatusForbidden},
+		{name: "missing user", scope: resetTray, missingUser: true, status: http.StatusInternalServerError},
+		{name: "invalid task reference", scope: resetTray, invalidTasks: true, status: http.StatusBadGateway},
 		{name: "missing site", scope: resetTray, invalidBody: true, status: http.StatusBadRequest},
 		{name: "tenant forbidden", scope: resetDomain, tenant: true, status: http.StatusForbidden},
 		{name: "unregistered site", scope: resetDomain, siteStatus: cdbm.SiteStatusPending, status: http.StatusBadRequest},
@@ -35,6 +44,17 @@ func TestNVOSFactoryResetHandler_Handle(t *testing.T) {
 			if tc.siteStatus != "" {
 				fixture.setSiteStatus(t, tc.siteStatus)
 			}
+			if tc.foreignSite {
+				otherProvider := &cdbm.InfrastructureProvider{ID: uuid.New(), Name: "other-provider", Org: "other-org"}
+				_, err := fixture.dbSession.DB.NewInsert().Model(otherProvider).Exec(context.Background())
+				require.NoError(t, err)
+				_, err = fixture.dbSession.DB.NewUpdate().Model((*cdbm.Site)(nil)).Set("infrastructure_provider_id = ?", otherProvider.ID).Where("id = ?", fixture.site.ID).Exec(context.Background())
+				require.NoError(t, err)
+				defer func() {
+					_, err := fixture.dbSession.DB.NewUpdate().Model((*cdbm.Site)(nil)).Set("infrastructure_provider_id = ?", fixture.site.InfrastructureProviderID).Where("id = ?", fixture.site.ID).Exec(context.Background())
+					require.NoError(t, err)
+				}()
+			}
 			user := fixture.providerUser
 			if tc.tenant {
 				user = fixture.tenantUser
@@ -43,15 +63,25 @@ func TestNVOSFactoryResetHandler_Handle(t *testing.T) {
 			if tc.invalidBody {
 				body = `{}`
 			}
+			if tc.missingUser {
+				user = nil
+			}
 			taskID := uuid.NewString()
+			if tc.invalidTasks {
+				taskID = "invalid"
+			}
 			captured := fixture.installFlowReply(t, &flowv1.SubmitTaskResponse{TaskIds: []*flowv1.UUID{{Id: taskID}}})
 			ec, rec := fixture.echoContext(t, "/reset", body, user, "target-1")
 			ec.Request().Method = http.MethodPost
 			handler := NVOSFactoryResetHandler{dbSession: fixture.dbSession, scp: fixture.scp, scope: tc.scope}
 			require.NoError(t, handler.Handle(ec))
 			require.Equal(t, tc.status, rec.Code, rec.Body.String())
-			if tc.status != http.StatusAccepted {
+			if tc.status != http.StatusAccepted && !tc.invalidTasks {
 				require.Empty(t, captured.request.FullMethod)
+				return
+			}
+			if tc.invalidTasks {
+				require.NotEmpty(t, captured.request.FullMethod)
 				return
 			}
 			require.JSONEq(t, fmt.Sprintf(`{"taskIds":[%q]}`, taskID), rec.Body.String())

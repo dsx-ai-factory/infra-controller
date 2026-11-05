@@ -18828,7 +18828,7 @@ paths:
         inspect existing tasks and hardware before submitting again. Core status observes the latest
         recorded device/action reference; another out-of-band reset can replace that reference.
       security:
-        - ApiKeyAuth: []
+        - JWTBearerToken: []
       parameters:
         - name: org
           in: path
@@ -18837,7 +18837,7 @@ paths:
         - name: id
           in: path
           required: true
-          description: Core switch ID
+          description: Switch inventory identifier
           schema: {type: string}
       requestBody:
         required: true
@@ -18884,7 +18884,7 @@ paths:
         inspect existing tasks and hardware before submitting again. Core status observes the latest
         recorded device/action reference; another out-of-band reset can replace that reference.
       security:
-        - ApiKeyAuth: []
+        - JWTBearerToken: []
       parameters:
         - name: org
           in: path
@@ -28764,7 +28764,6 @@ components:
             - BringUpControl
             - WaitBringUp
             - InjectExpectation
-          - ComponentReset
           description: |-
             Executor-agnostic action name. Server-side validated; unknown names
             fail the rule definition.

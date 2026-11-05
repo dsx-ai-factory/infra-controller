@@ -6,6 +6,11 @@ package workflow
 import (
 	"errors"
 	"fmt"
+	"time"
+
+	"go.temporal.io/sdk/temporal"
+	"go.temporal.io/sdk/workflow"
+
 	taskcommon "github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/common"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/executor/temporalworkflow/activity"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/executor/temporalworkflow/common"
@@ -13,9 +18,6 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/report"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/task"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/devicetypes"
-	"go.temporal.io/sdk/temporal"
-	"go.temporal.io/sdk/workflow"
-	"time"
 )
 
 func init() {
@@ -51,7 +53,7 @@ func componentReset(ctx workflow.Context, info task.ExecutionInfo, _ *operations
 			continue
 		}
 		submitCtx := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{StartToCloseTimeout: min(remaining, 31*time.Minute), RetryPolicy: &temporal.RetryPolicy{MaximumAttempts: 1}})
-		err = workflow.ExecuteActivity(submitCtx, activity.NameResetNVOS, single).Get(ctx, nil)
+		err = executeActivityBeforeDeadline(submitCtx, deadline, nil, activity.NameResetNVOS, single)
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
@@ -75,7 +77,7 @@ func componentReset(ctx workflow.Context, info task.ExecutionInfo, _ *operations
 				err = fmt.Errorf("NVOS reset observation timed out; outcome is unknown")
 			} else {
 				pollCtx := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{StartToCloseTimeout: min(remaining, time.Minute), RetryPolicy: &temporal.RetryPolicy{MaximumAttempts: 1}})
-				err = workflow.ExecuteActivity(pollCtx, activity.NameNVOSResetCompleted, single).Get(ctx, &completed)
+				err = executeActivityBeforeDeadline(pollCtx, deadline, &completed, activity.NameNVOSResetCompleted, single)
 			}
 			if ctx.Err() != nil {
 				return ctx.Err()

@@ -1809,3 +1809,64 @@ func (e *managerExecutor) TerminateTask(
 func (s *managerTaskStore) ListTaskContextForRack(_ context.Context, _ uuid.UUID) ([]taskdef.TaskContextMetadata, error) {
 	panic("unexpected task context read")
 }
+
+func TestValidateResolvedRackTargets_ComponentReset(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		typ        devicetypes.ComponentType
+		externalID string
+		wantError  bool
+	}{
+		{name: "ingested switch", typ: devicetypes.ComponentTypeNVSwitch, externalID: "switch-1"},
+		{name: "compute rejected", typ: devicetypes.ComponentTypeCompute, externalID: "host-1", wantError: true},
+		{name: "unlinked switch rejected", typ: devicetypes.ComponentTypeNVSwitch, wantError: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rackID := uuid.New()
+			r := newTestRack(rackID, "rack-1")
+			r.Components = []component.Component{newTestComponent(uuid.New(), rackID, tc.typ, tc.externalID)}
+			err := validateResolvedRackTargets(operation.Wrapper{Type: taskcommon.TaskTypeComponentReset, Code: taskcommon.OpCodeNVOSFactoryReset}, nil, map[uuid.UUID]*rack.Rack{rackID: r})
+			require.Equal(t, tc.wantError, err != nil)
+		})
+	}
+}
+
+func TestManagerImpl_CreateResetTasks(t *testing.T) {
+	for _, conflictOnSecond := range []bool{false, true} {
+		name := "all rack tasks returned"
+		if conflictOnSecond {
+			name = "conflicting rack prevents every dispatch"
+		}
+		t.Run(name, func(t *testing.T) {
+			first := uuid.MustParse("00000000-0000-0000-0000-000000000001")
+			second := uuid.MustParse("00000000-0000-0000-0000-000000000002")
+			racks := map[uuid.UUID]*rack.Rack{}
+			for _, id := range []uuid.UUID{first, second} {
+				r := newTestRack(id, id.String())
+				r.Components = []component.Component{newTestComponent(uuid.New(), id, devicetypes.ComponentTypeNVSwitch, "switch-"+id.String())}
+				racks[id] = r
+			}
+			store := &managerTaskStore{activeTasksByRack: map[uuid.UUID][]*taskdef.Task{}}
+			if conflictOnSecond {
+				store.activeTasksByRack[second] = []*taskdef.Task{{Operation: operation.Wrapper{Type: taskcommon.TaskTypeBringUp}}}
+			}
+			executor := &managerExecutor{}
+			manager := &ManagerImpl{taskStore: store, conflictResolver: conflict.NewResolver(store), executor: executor}
+			info := &operations.ComponentResetTaskInfo{}
+			raw, err := info.Marshal()
+			require.NoError(t, err)
+			ids, err := manager.createResetTasks(context.Background(), &operation.Request{Operation: operation.Wrapper{Type: info.Type(), Code: info.CodeString(), Info: raw}}, racks)
+			if conflictOnSecond {
+				require.ErrorIs(t, err, ErrRackConflict)
+				require.Empty(t, ids)
+				require.Zero(t, store.createTaskCalls)
+				require.Zero(t, store.updateScheduledCalls)
+			} else {
+				require.NoError(t, err)
+				require.Len(t, ids, 2)
+				require.Equal(t, 2, store.createTaskCalls)
+				require.Equal(t, 2, store.updateScheduledCalls)
+			}
+		})
+	}
+}

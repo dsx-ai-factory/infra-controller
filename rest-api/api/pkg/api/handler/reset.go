@@ -6,6 +6,13 @@ package handler
 import (
 	"errors"
 	"fmt"
+	"net/http"
+	"strings"
+
+	"github.com/google/uuid"
+	"github.com/labstack/echo/v4"
+	temporalEnums "go.temporal.io/api/enums/v1"
+
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/handler/util/common"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
 	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
@@ -14,10 +21,6 @@ import (
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
 	flowv1 "github.com/NVIDIA/infra-controller/rest-api/proto/flow/gen/v1"
-	"github.com/google/uuid"
-	"github.com/labstack/echo/v4"
-	temporalEnums "go.temporal.io/api/enums/v1"
-	"net/http"
 )
 
 type resetScope string
@@ -98,6 +101,12 @@ func (h NVOSFactoryResetHandler) Handle(c echo.Context) error {
 	}
 	if len(response.TaskIds) == 0 {
 		return cutil.NewAPIErrorResponse(c, http.StatusBadGateway, "Flow returned no reset tasks", nil)
+	}
+	for _, taskID := range response.TaskIds {
+		parsed, err := uuid.Parse(taskID.GetId())
+		if err != nil || parsed == uuid.Nil {
+			return cutil.NewAPIErrorResponse(c, http.StatusBadGateway, "Flow returned an invalid task reference", nil)
+		}
 	}
 	result := &model.APINVOSFactoryResetResponse{}
 	result.FromProto(&response)

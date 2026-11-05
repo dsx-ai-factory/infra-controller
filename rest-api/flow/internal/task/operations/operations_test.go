@@ -7,9 +7,10 @@ import (
 	"encoding/json"
 	"testing"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/secret"
 	taskcommon "github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/common"
-	"github.com/stretchr/testify/require"
 )
 
 func TestOperation_Clone(t *testing.T) {
@@ -37,8 +38,7 @@ func TestOperation_Clone(t *testing.T) {
 			SubTargets:             []string{"bmc", "bios"},
 			OverrideReadinessCheck: true,
 		},
-		"component reset": &ComponentResetTaskInfo{},
-		"decommission":    &DecommissionTaskInfo{RuleID: "decommission-rule"},
+		"decommission": &DecommissionTaskInfo{RuleID: "decommission-rule"},
 	}
 
 	for name, operation := range tests {

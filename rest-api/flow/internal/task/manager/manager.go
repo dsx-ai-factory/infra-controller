@@ -240,6 +240,10 @@ func (m *ManagerImpl) SubmitTask(
 		return nil, err
 	}
 
+	if req.Operation.Type == taskcommon.TaskTypeComponentReset {
+		return m.createResetTasks(ctx, req, rackMap)
+	}
+
 	// Create and execute task for each rack.
 	var taskIDs []uuid.UUID
 	for _, targetRack := range rackMap {
@@ -1056,7 +1060,7 @@ func (m *ManagerImpl) resolveOperationRule(
 	// Reset has fixed execution semantics; user rules must not add retries or
 	// unrelated actions around this destructive operation.
 	if op.Type == taskcommon.TaskTypeComponentReset {
-		return operationrules.NewResolver(nil).ResolveRule(ctx, op.Type, op.Code, rackID, nil)
+		return &operationrules.OperationRule{Name: "Fixed NVOS factory reset", OperationType: op.Type, OperationCode: op.Code, RuleDefinition: operationrules.RuleDefinition{Version: operationrules.CurrentRuleDefinitionVersion}}, nil
 	}
 	ruleID, err := operations.ExtractRuleID(op.Info)
 	if err != nil {

@@ -17,6 +17,8 @@ func TestActivities_All_ContainsAllActivities(t *testing.T) {
 	all := acts.All()
 
 	expectedNames := []string{
+		NameResetNVOS,
+		NameNVOSResetCompleted,
 		NameInjectExpectation,
 		NamePowerControl,
 		NameGetPowerStatus,
