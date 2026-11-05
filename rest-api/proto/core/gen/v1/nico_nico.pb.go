@@ -83053,12 +83053,11 @@ const file_nico_nico_proto_rawDesc = "" +
 	"observedAt\x88\x01\x01\x128\n" +
 	"\atargets\x18\x02 \x03(\v2\x1e.forge.NicFirmwareDeviceTargetR\atargets\x12\x1a\n" +
 	"\bwarnings\x18\x03 \x03(\tR\bwarningsB\x0e\n" +
-	"\f_observed_at\"\xfa\x01\n" +
+	"\f_observed_at\"\xbd\x01\n" +
 	"%ListMachineAttestationStatusesRequest\x12A\n" +
 	"\x05fleet\x18\x04 \x01(\v2).forge.SpdmMachineAttestationFleetRequestH\x00R\x05fleet\x12G\n" +
 	"\amachine\x18\x05 \x01(\v2+.forge.SpdmMachineAttestationMachineRequestH\x00R\amachineB\b\n" +
-	"\x06targetJ\x04\b\x01\x10\x02J\x04\b\x02\x10\x03J\x04\b\x03\x10\x04R\x12attestation_statusR\tpage_sizeR\n" +
-	"page_token\"\xc9\x01\n" +
+	"\x06target\"\xc9\x01\n" +
 	"\"SpdmMachineAttestationFleetRequest\x12P\n" +
 	"\x12attestation_status\x18\x01 \x01(\x0e2\x1c.forge.SpdmAttestationStatusH\x00R\x11attestationStatus\x88\x01\x01\x12\x1b\n" +
 	"\tpage_size\x18\x02 \x01(\rR\bpageSize\x12\x1d\n" +
@@ -83069,14 +83068,14 @@ const file_nico_nico_proto_rawDesc = "" +
 	"\n" +
 	"machine_id\x18\x01 \x01(\v2\x11.common.MachineIdR\tmachineId\x125\n" +
 	"\x14redfish_timeout_secs\x18\x02 \x01(\rH\x00R\x12redfishTimeoutSecs\x88\x01\x01B\x17\n" +
-	"\x15_redfish_timeout_secs\"\xdb\x02\n" +
+	"\x15_redfish_timeout_secs\"\xbc\x02\n" +
 	"\x1cSpdmMachineAttestationStatus\x120\n" +
 	"\n" +
 	"machine_id\x18\x01 \x01(\v2\x11.common.MachineIdR\tmachineId\x12P\n" +
 	"\x12attestation_status\x18\x02 \x01(\x0e2\x1c.forge.SpdmAttestationStatusH\x00R\x11attestationStatus\x88\x01\x01\x12c\n" +
 	"\x19attester_selection_status\x18\x05 \x01(\x0e2\".forge.SpdmAttesterSelectionStatusH\x01R\x17attesterSelectionStatus\x88\x01\x01B\x15\n" +
 	"\x13_attestation_statusB\x1c\n" +
-	"\x1a_attester_selection_statusJ\x04\b\x03\x10\x04J\x04\b\x04\x10\x05R\x06job_idR\tselection\"\x91\x01\n" +
+	"\x1a_attester_selection_status\"\x91\x01\n" +
 	"&ListMachineAttestationStatusesResponse\x12?\n" +
 	"\bstatuses\x18\x01 \x03(\v2#.forge.SpdmMachineAttestationStatusR\bstatuses\x12&\n" +
 	"\x0fnext_page_token\x18\x02 \x01(\tR\rnextPageToken\"\xc8\x01\n" +

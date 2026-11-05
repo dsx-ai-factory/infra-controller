@@ -12975,8 +12975,6 @@ message GetDesiredNicFirmwareResponse {
 // Lists either fleet predictions or a definitive assessment of one machine.
 // The target must be supplied; an omitted target returns INVALID_ARGUMENT.
 message ListMachineAttestationStatusesRequest {
-  reserved 1, 2, 3;
-  reserved "attestation_status", "page_size", "page_token";
   oneof target {
     // Database-only predictions, with filtering and pagination.
     SpdmMachineAttestationFleetRequest fleet = 4;
@@ -13026,8 +13024,6 @@ enum SpdmAttesterSelectionStatus {
 }
 
 message SpdmMachineAttestationStatus {
-  reserved 3, 4;
-  reserved "job_id", "selection";
   option (carbide.codegen.v1.message_derive) = "serde::Serialize";
   // Always present: the machine whose status is reported.
   common.MachineId machine_id = 1;
