@@ -251,6 +251,7 @@ pub(crate) async fn forge_agent_control(
                         machine.current_version(),
                         operation,
                         submission_permitted,
+                        request.nic_firmware_site_cache_supported,
                     )
                     .await?,
                     None,

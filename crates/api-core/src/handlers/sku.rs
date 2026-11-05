@@ -57,6 +57,17 @@ pub(crate) async fn delete(api: &Api, request: Request<SkuIdList>) -> Result<Res
     let mut skus = db::sku::find(&mut txn, &sku_id_list).await?;
 
     let Some(sku) = skus.pop() else {
+        // REST relies on `NotFound` for one ID to remove its stale SKU projection.
+        // Keep the existing behavior for other inputs and ID counts.
+        if let [sku_id] = sku_id_list.as_slice()
+            && !sku_id.is_empty()
+        {
+            return Err(CarbideError::NotFoundError {
+                kind: "SKU",
+                id: sku_id.clone(),
+            }
+            .into());
+        }
         return Err(CarbideError::InvalidArgument(format!(
             "the SKU {} does not exist",
             sku_id_list

@@ -1238,19 +1238,19 @@ func (rs *FlowServerImpl) CancelTask(
 		return nil, errors.New("task manager is not available")
 	}
 
-	taskID, err := uuid.Parse(req.GetTaskId().GetId())
-	if err != nil {
-		return nil, fmt.Errorf("invalid task ID: %w", err)
+	taskID, err := protobuf.OptionalUUIDFrom(req.GetTaskId())
+	if err != nil || taskID == nil {
+		return nil, status.Error(codes.InvalidArgument, "task_id must be a valid non-zero UUID")
 	}
 
-	if err := rs.taskManager.CancelTask(ctx, taskID); err != nil {
+	if err := rs.taskManager.CancelTask(ctx, *taskID); err != nil {
 		if errors.Is(err, taskmanager.ErrTaskNotCancellable) {
 			return nil, status.Error(codes.FailedPrecondition, err.Error())
 		}
 		return nil, err
 	}
 
-	task, err := rs.taskStore.GetTask(ctx, taskID)
+	task, err := rs.taskStore.GetTask(ctx, *taskID)
 	if err != nil {
 		return &pb.CancelTaskResponse{}, nil
 	}

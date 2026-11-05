@@ -128,3 +128,67 @@ async fn libvirt_unready_power_request_times_out_without_a_late_reset() {
     }
     assert_eq!(observed, [ResourceResetType::GracefulRestart]);
 }
+
+#[tokio::test]
+async fn libvirt_manager_reset_to_defaults_restores_and_saves_factory_accounts() {
+    let (domain, actor) = unstarted();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("bmc-state.json");
+    // Run the real backend without virsh: the reset touches only BMC state.
+    let backend = LibvirtBackend {
+        persistence: Some(StateFile::load(path.clone(), &domain.state).unwrap()),
+        persistence_retry: None,
+        config: actor.config,
+        restore_boot_after_power_on: false,
+        system_state: None,
+        bmc_state: Arc::downgrade(&domain.state),
+        last_observed_power: None,
+        boot_pending: None,
+        initialized: actor.initialized,
+        applied_state: AppliedState::default(),
+        refresh_pending: actor.refresh_pending,
+        power_state: actor.power_state,
+    };
+    let running = tokio::spawn(actor.actor.run(backend));
+
+    let accounts = &domain.state.account_service_state;
+    let factory_accounts = accounts.accounts();
+    let account_id = serde_json::to_value(domain.state.persisted()).unwrap()["accounts"][0]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(
+        accounts
+            .update_password(&account_id, "rotated")
+            .await
+            .unwrap()
+    );
+    assert_ne!(accounts.accounts(), factory_accounts);
+
+    let manager = domain.state.manager.primary_odata_id().unwrap();
+    let response = domain
+        .router
+        .clone()
+        .oneshot(
+            Request::post(format!("{manager}/Actions/Manager.ResetToDefaults"))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"ResetType":"ResetAll"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(accounts.accounts(), factory_accounts);
+    assert_eq!(domain.state.factory_reset_generation(), 1);
+    let saved: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert_eq!(
+        saved,
+        serde_json::to_value(domain.state.persisted()).unwrap(),
+        "the reset state is saved before the action reports success"
+    );
+
+    let (stop, stopped) = oneshot::channel();
+    actor.mailbox.send(LibvirtMessage::Stop(stop)).unwrap();
+    stopped.await.unwrap().unwrap();
+    running.await.unwrap();
+}

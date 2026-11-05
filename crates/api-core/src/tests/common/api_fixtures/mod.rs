@@ -1453,7 +1453,7 @@ async fn create_test_env_with_overrides_inner(
     let eth_virt_data = EthVirtData {
         asn: 65535,
         dhcp_servers: vec![FIXTURE_DHCP_RELAY_ADDRESS.parse().unwrap()],
-        deny_prefixes: vec![],
+        deny_prefixes: config.deny_prefixes.clone(),
         site_fabric_prefixes,
     };
 
@@ -2621,6 +2621,7 @@ pub(in crate::tests) async fn forge_agent_control(
     env.api
         .forge_agent_control(Request::new(rpc::forge::ForgeAgentControlRequest {
             machine_id: Some(machine_id.into()),
+            nic_firmware_site_cache_supported: false,
         }))
         .await
         .unwrap()

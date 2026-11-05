@@ -973,7 +973,8 @@ service Forge {
   // Remove a SKU assignemnt from a machine.  Must be in the Ready or SkuVerifyFailed states.
   // The machine will move to the WaitingForSkuAssignment state.
   rpc RemoveSkuAssociation(RemoveSkuRequest) returns (google.protobuf.Empty);
-  // Removes an unused SKU
+  // Removes an unused SKU. If the initial lookup finds no match, a request
+  // containing exactly one nonempty SKU ID returns `NOT_FOUND`.
   rpc DeleteSku(SkuIdList) returns (google.protobuf.Empty);
   rpc GetAllSkuIds(google.protobuf.Empty) returns (SkuIdList);
   rpc FindSkusByIds(SkusByIdsRequest) returns (SkuList);
@@ -5711,6 +5712,11 @@ message ManagedHostServiceInterfaceConfig {
   string mac_address = 15;
   // Stable identity used to correlate this service interface across reconciliation.
   common.UUID internal_uuid = 16;
+  // Administrative loopback assigned to the selected VPC's tenant VRF on this DPU.
+  // Unlike ManagedHostNetworkConfig.loopback_ip, this address is not the DPU VXLAN VTEP.
+  // Host and service interfaces selecting the same VPC on this DPU reuse this address.
+  // Omitted when fnn.use_vpc_vrf_loopback is false.
+  optional string tenant_vrf_loopback_ip = 17;
 }
 
 // Complete fixed service-slot inventory for one DPU deployment.
@@ -6293,6 +6299,12 @@ message ForgeAgentControlRequest {
   common.MachineId machine_id = 1;
   reserved 2;
   reserved "capabilities";
+  // This Scout can pass authenticated SiteCache delivery to the durable
+  // firmware supervisor. Omission is false. This advertises code support, not
+  // transport readiness. Unsupported SiteCache polls return FAILED_PRECONDITION
+  // without changing saved progress or selecting anonymous Direct delivery.
+  // Receipt observation and recovery do not require current download settings.
+  bool nic_firmware_site_cache_supported = 3;
 }
 
 message ForgeAgentControlResponse {
@@ -6457,6 +6469,10 @@ message ForgeAgentControlResponse {
     // Physical card this update is for, checked by the supervisor before any
     // mutation. Omission targets the PCI address alone.
     mlx_device.MlxDeviceSelector expected_device = 6;
+    // Frozen delivery choice. Omission retains Direct behavior. SiteCache
+    // requires the request's nic_firmware_site_cache_supported advertisement;
+    // Scout supplies its own Core client configuration only over the local UDS.
+    mlx_device.FirmwareDeliveryMode delivery_mode = 7;
   }
 
   // Read the receipt for an earlier MlxDeviceUpdateFirmware without submitting,
@@ -6471,6 +6487,9 @@ message ForgeAgentControlResponse {
     mlx_device.FirmwareFlasherProfile profile = 3;
     mlx_device.FirmwareArtifactDigests expected_digests = 4;
     mlx_device.MlxDeviceSelector expected_device = 5;
+    // Repeat the original delivery choice without requiring current credentials
+    // or downloading files merely to observe an existing receipt.
+    mlx_device.FirmwareDeliveryMode delivery_mode = 6;
   }
 
   // Read or change the lockdown state of one physical card for the controller

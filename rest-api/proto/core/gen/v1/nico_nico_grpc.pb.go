@@ -1391,7 +1391,8 @@ type ForgeClient interface {
 	// Remove a SKU assignemnt from a machine.  Must be in the Ready or SkuVerifyFailed states.
 	// The machine will move to the WaitingForSkuAssignment state.
 	RemoveSkuAssociation(ctx context.Context, in *RemoveSkuRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
-	// Removes an unused SKU
+	// Removes an unused SKU. If the initial lookup finds no match, a request
+	// containing exactly one nonempty SKU ID returns `NOT_FOUND`.
 	DeleteSku(ctx context.Context, in *SkuIdList, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	GetAllSkuIds(ctx context.Context, in *emptypb.Empty, opts ...grpc.CallOption) (*SkuIdList, error)
 	FindSkusByIds(ctx context.Context, in *SkusByIdsRequest, opts ...grpc.CallOption) (*SkuList, error)
@@ -8147,7 +8148,8 @@ type ForgeServer interface {
 	// Remove a SKU assignemnt from a machine.  Must be in the Ready or SkuVerifyFailed states.
 	// The machine will move to the WaitingForSkuAssignment state.
 	RemoveSkuAssociation(context.Context, *RemoveSkuRequest) (*emptypb.Empty, error)
-	// Removes an unused SKU
+	// Removes an unused SKU. If the initial lookup finds no match, a request
+	// containing exactly one nonempty SKU ID returns `NOT_FOUND`.
 	DeleteSku(context.Context, *SkuIdList) (*emptypb.Empty, error)
 	GetAllSkuIds(context.Context, *emptypb.Empty) (*SkuIdList, error)
 	FindSkusByIds(context.Context, *SkusByIdsRequest) (*SkuList, error)
