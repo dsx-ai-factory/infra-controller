@@ -487,6 +487,8 @@ func TestMachine_NewAPIMachine(t *testing.T) {
 			assert.Equal(t, *apimi.Metadata.GPUs[0].PciBusId, machineInfo1.Machine.GetStatus().GetDiscoveryInfo().Gpus[0].PciBusId)
 		}
 
+		require.NotEmpty(t, apimi.Metadata.Disks)
+
 		if apimi.Metadata.NetworkInterfaces != nil {
 			assert.Equal(t, len(apimi.Metadata.NetworkInterfaces), len(machineInfo1.Machine.GetStatus().GetDiscoveryInfo().NetworkInterfaces))
 		}
