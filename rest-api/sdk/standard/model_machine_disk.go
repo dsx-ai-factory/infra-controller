@@ -22,7 +22,7 @@ var _ MappedNullable = &MachineDisk{}
 
 // MachineDisk Describes a disk of a Machine
 type MachineDisk struct {
-	// Kind of disk reported by the Machine, for example nvme
+	// Kind of disk reported by the Machine
 	Type *string `json:"type,omitempty"`
 	// Model of the disk
 	Model *string `json:"model,omitempty"`
