@@ -2283,3 +2283,7 @@ func NewMockFlowGrpcClient() *FlowGrpcClient {
 		grpcServiceClient: &MockFlowGrpcServiceClient{},
 	}
 }
+
+func (mfgsc *MockFlowGrpcServiceClient) ResetSwitches(ctx context.Context, in *flowv1.ResetSwitchesRequest, opts ...grpc.CallOption) (*flowv1.SubmitTaskResponse, error) {
+	return &flowv1.SubmitTaskResponse{TaskIds: []*flowv1.UUID{{Id: uuid.NewString()}}}, nil
+}

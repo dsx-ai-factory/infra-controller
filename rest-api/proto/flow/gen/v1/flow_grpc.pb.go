@@ -52,6 +52,7 @@ const (
 	Flow_PowerOffRack_FullMethodName             = "/v1.Flow/PowerOffRack"
 	Flow_PowerResetRack_FullMethodName           = "/v1.Flow/PowerResetRack"
 	Flow_ACPowerCycleRack_FullMethodName         = "/v1.Flow/ACPowerCycleRack"
+	Flow_ResetSwitches_FullMethodName            = "/v1.Flow/ResetSwitches"
 	Flow_GetComponentInfoByID_FullMethodName     = "/v1.Flow/GetComponentInfoByID"
 	Flow_GetComponentInfoBySerial_FullMethodName = "/v1.Flow/GetComponentInfoBySerial"
 	Flow_GetComponents_FullMethodName            = "/v1.Flow/GetComponents"
@@ -139,6 +140,9 @@ type FlowClient interface {
 	PowerOffRack(ctx context.Context, in *PowerOffRackRequest, opts ...grpc.CallOption) (*SubmitTaskResponse, error)
 	PowerResetRack(ctx context.Context, in *PowerResetRackRequest, opts ...grpc.CallOption) (*SubmitTaskResponse, error)
 	ACPowerCycleRack(ctx context.Context, in *ACPowerCycleRackRequest, opts ...grpc.CallOption) (*SubmitTaskResponse, error)
+	// Restores NVOS configuration defaults on switches. Accepted work is polled;
+	// uncertain submissions are never automatically repeated. No reprovisioning.
+	ResetSwitches(ctx context.Context, in *ResetSwitchesRequest, opts ...grpc.CallOption) (*SubmitTaskResponse, error)
 	// Component CRUD
 	GetComponentInfoByID(ctx context.Context, in *GetComponentInfoByIDRequest, opts ...grpc.CallOption) (*GetComponentInfoResponse, error)
 	GetComponentInfoBySerial(ctx context.Context, in *GetComponentInfoBySerialRequest, opts ...grpc.CallOption) (*GetComponentInfoResponse, error)
@@ -498,6 +502,16 @@ func (c *flowClient) ACPowerCycleRack(ctx context.Context, in *ACPowerCycleRackR
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(SubmitTaskResponse)
 	err := c.cc.Invoke(ctx, Flow_ACPowerCycleRack_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *flowClient) ResetSwitches(ctx context.Context, in *ResetSwitchesRequest, opts ...grpc.CallOption) (*SubmitTaskResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(SubmitTaskResponse)
+	err := c.cc.Invoke(ctx, Flow_ResetSwitches_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -1021,6 +1035,9 @@ type FlowServer interface {
 	PowerOffRack(context.Context, *PowerOffRackRequest) (*SubmitTaskResponse, error)
 	PowerResetRack(context.Context, *PowerResetRackRequest) (*SubmitTaskResponse, error)
 	ACPowerCycleRack(context.Context, *ACPowerCycleRackRequest) (*SubmitTaskResponse, error)
+	// Restores NVOS configuration defaults on switches. Accepted work is polled;
+	// uncertain submissions are never automatically repeated. No reprovisioning.
+	ResetSwitches(context.Context, *ResetSwitchesRequest) (*SubmitTaskResponse, error)
 	// Component CRUD
 	GetComponentInfoByID(context.Context, *GetComponentInfoByIDRequest) (*GetComponentInfoResponse, error)
 	GetComponentInfoBySerial(context.Context, *GetComponentInfoBySerialRequest) (*GetComponentInfoResponse, error)
@@ -1181,6 +1198,9 @@ func (UnimplementedFlowServer) PowerResetRack(context.Context, *PowerResetRackRe
 }
 func (UnimplementedFlowServer) ACPowerCycleRack(context.Context, *ACPowerCycleRackRequest) (*SubmitTaskResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ACPowerCycleRack not implemented")
+}
+func (UnimplementedFlowServer) ResetSwitches(context.Context, *ResetSwitchesRequest) (*SubmitTaskResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ResetSwitches not implemented")
 }
 func (UnimplementedFlowServer) GetComponentInfoByID(context.Context, *GetComponentInfoByIDRequest) (*GetComponentInfoResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetComponentInfoByID not implemented")
@@ -1864,6 +1884,24 @@ func _Flow_ACPowerCycleRack_Handler(srv interface{}, ctx context.Context, dec fu
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(FlowServer).ACPowerCycleRack(ctx, req.(*ACPowerCycleRackRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Flow_ResetSwitches_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ResetSwitchesRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(FlowServer).ResetSwitches(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Flow_ResetSwitches_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(FlowServer).ResetSwitches(ctx, req.(*ResetSwitchesRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -2854,6 +2892,10 @@ var Flow_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ACPowerCycleRack",
 			Handler:    _Flow_ACPowerCycleRack_Handler,
+		},
+		{
+			MethodName: "ResetSwitches",
+			Handler:    _Flow_ResetSwitches_Handler,
 		},
 		{
 			MethodName: "GetComponentInfoByID",

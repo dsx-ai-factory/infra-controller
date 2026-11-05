@@ -37,7 +37,8 @@ func TestOperation_Clone(t *testing.T) {
 			SubTargets:             []string{"bmc", "bios"},
 			OverrideReadinessCheck: true,
 		},
-		"decommission": &DecommissionTaskInfo{RuleID: "decommission-rule"},
+		"component reset": &ComponentResetTaskInfo{},
+		"decommission":    &DecommissionTaskInfo{RuleID: "decommission-rule"},
 	}
 
 	for name, operation := range tests {
