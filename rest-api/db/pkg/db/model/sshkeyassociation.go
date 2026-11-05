@@ -63,6 +63,13 @@ type SSHKeyAssociationUpdateInput struct {
 type SSHKeyAssociationFilterInput struct {
 	SSHKeyIDs      []uuid.UUID
 	SSHKeyGroupIDs []uuid.UUID
+	IncludeDeleted bool
+}
+
+// SSHKeyAssociationClearInput identifies nullable association fields to clear.
+type SSHKeyAssociationClearInput struct {
+	SSHKeyAssociationID uuid.UUID
+	Deleted             bool
 }
 
 var _ bun.BeforeAppendModelHook = (*SSHKeyAssociation)(nil)
@@ -98,6 +105,8 @@ type SSHKeyAssociationDAO interface {
 	GetAll(ctx context.Context, tx *db.Tx, filter SSHKeyAssociationFilterInput, page paginator.PageInput, includeRelations []string) ([]SSHKeyAssociation, int, error)
 	//
 	Update(ctx context.Context, tx *db.Tx, input SSHKeyAssociationUpdateInput) (*SSHKeyAssociation, error)
+	//
+	Clear(ctx context.Context, tx *db.Tx, input SSHKeyAssociationClearInput) (*SSHKeyAssociation, error)
 	//
 	Delete(ctx context.Context, tx *db.Tx, id uuid.UUID) error
 }
@@ -176,6 +185,9 @@ func (skasd SSHKeyAssociationSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filt
 	skas := []SSHKeyAssociation{}
 
 	query := db.GetIDB(tx, skasd.dbSession).NewSelect().Model(&skas)
+	if filter.IncludeDeleted {
+		query = query.WhereAllWithDeleted()
+	}
 	if filter.SSHKeyIDs != nil {
 		query = query.Where("ska.ssh_key_id IN (?)", bun.In(filter.SSHKeyIDs))
 	}
@@ -244,6 +256,40 @@ func (skasd SSHKeyAssociationSQLDAO) Update(ctx context.Context, tx *db.Tx, inpu
 		return nil, err
 	}
 	return nv, nil
+}
+
+// Clear clears selected nullable fields on an SSHKeyAssociation.
+func (skasd SSHKeyAssociationSQLDAO) Clear(ctx context.Context, tx *db.Tx, input SSHKeyAssociationClearInput) (_ *SSHKeyAssociation, retErr error) {
+	ctx, sshKeyAssociationDAOSpan := cotel.StartSpan(ctx, "SSHKeyAssociationDAO.Clear")
+	defer func() { cotel.EndSpan(sshKeyAssociationDAOSpan, retErr) }()
+	cotel.SetAttribute(sshKeyAssociationDAOSpan, attribute.String("id", input.SSHKeyAssociationID.String()))
+
+	association := &SSHKeyAssociation{ID: input.SSHKeyAssociationID}
+	updatedFields := []string{}
+	if input.Deleted {
+		updatedFields = append(updatedFields, "deleted")
+	}
+	if len(updatedFields) > 0 {
+		updatedFields = append(updatedFields, "updated")
+		query := db.GetIDB(tx, skasd.dbSession).
+			NewUpdate().
+			Model(association).
+			Column(updatedFields...).
+			Where("ska.id = ?", input.SSHKeyAssociationID)
+		if input.Deleted {
+			query = query.WhereAllWithDeleted()
+		}
+		_, err := query.Exec(ctx)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	updated, err := skasd.GetByID(ctx, tx, input.SSHKeyAssociationID, nil)
+	if err != nil {
+		return nil, err
+	}
+	return updated, nil
 }
 
 // Delete deletes an SSHKeyAssociation by ID
