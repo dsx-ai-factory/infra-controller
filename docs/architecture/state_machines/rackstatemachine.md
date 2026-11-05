@@ -83,7 +83,7 @@ stateDiagram-v2
             R_Maintenance_PowerSequence --> R_Maintenance_ConfigureNmxCluster : reboot barrier passed, NMX selected
             R_Maintenance_PowerSequence --> R_Maintenance_Completed : reboot barrier passed, NMX not selected
             R_Maintenance_ConfigureNmxCluster --> R_Maintenance_Completed
-            R_Maintenance_Completed --> R_Maintenance_FirmwareUpgrade : ingestion has unsubmitted compute or pending firmware
+            R_Maintenance_Completed --> R_Maintenance_FirmwareUpgrade : ingestion has unsubmitted non-Assigned compute or pending firmware
             state "FirmwareUpgrade" as R_Maintenance_FirmwareUpgrade
             state "NVOSUpdate" as R_Maintenance_NVOSUpdate
             state "ConfigureNmxCluster" as R_Maintenance_ConfigureNmxCluster
@@ -281,7 +281,7 @@ those requests do not acquire graceful semantics from this change.
 | **NVOSUpdate** | NVOS image update and NVOS admin password recovery for scoped switches. Sets `nvos_update_status` and drives switch `ReProvisioning::WaitingForNVOSUpgrade`. |
 | **ConfigureNmxCluster** | Rotates switch-local certificates on every rack switch, submits the asynchronous RMS ScaleUpFabricManager job, then optionally binds nmx-telemetry on the selected primary. RMS V2 binds NMX-C. See sub-states below. |
 | **PowerSequence** | Graceful compute-host reboot barrier before NMX-C configuration, under the ingestion or explicit-selection policy above. |
-| **Completed** | Rechecks compute admission for an automatic ingestion firmware job; returns to firmware waiting while hosts are unsubmitted or the job is pending, otherwise clears ingestion state and validation labels and advances to validation. |
+| **Completed** | Rechecks compute admission for an automatic ingestion firmware job; returns to firmware waiting while non-`Assigned` hosts are unsubmitted or the job is pending, otherwise clears ingestion state and validation labels and advances to validation. |
 
 #### ConfigureNmxCluster sub-states
 

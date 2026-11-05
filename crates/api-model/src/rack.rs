@@ -458,6 +458,9 @@ pub enum RackErrorRecoveryPolicy {
 /// ```text
 /// FirmwareUpgrade -> NVOSUpdate -> [PowerSequence(PowerReset)]
 ///   -> ConfigureNmxCluster -> Completed -> Validating(Pending)
+///
+/// Completed -> FirmwareUpgrade(WaitForComplete) -> Completed
+///   (supplemental compute firmware during automatic ingestion)
 /// ```
 ///
 /// During automatic ingestion, Completed may re-enter FirmwareUpgrade for
