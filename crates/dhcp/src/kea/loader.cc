@@ -16,6 +16,7 @@
  */
 
 #include <csignal>
+#include <dlfcn.h>
 
 #include <asiolink/io_address.h>
 #include <asiolink/io_error.h>
@@ -236,7 +237,24 @@ extern "C" int dhcp6_srv_configured(CalloutHandle &handle) {
   return 0;
 }
 
+bool require_runtime_capability(const char *name) {
+  const auto capability = reinterpret_cast<int (*)()>(dlsym(RTLD_DEFAULT, name));
+  if (capability && capability() == 1) {
+    return true;
+  }
+  LOG_ERROR(loader_logger, isc::log::LOG_CARBIDE_GENERIC)
+      .arg(std::string("NICo DHCPv6 requires patched Kea; missing runtime capability: ") +
+           name + ". Use the repository build/runtime images and matching hook library.");
+  return false;
+}
+
 bool configure_v6(LibraryHandle *handle) {
+  // Package versions do not distinguish stock Kea from our native backports.
+  // Reject incompatible runtimes before starting metrics or serving packets.
+  if (!require_runtime_capability("nico_kea_lease6_handoff_contract")) {
+    return false;
+  }
+
   const auto nico_pxe_service_url = handle->getParameter("nico-pxe-service-url");
   if (nico_pxe_service_url &&
       nico_pxe_service_url->getType() == Element::string &&
@@ -264,6 +282,7 @@ bool configure_v6(LibraryHandle *handle) {
   handle->registerCallout("dhcp6_srv_configured", dhcp6_srv_configured);
 
   handle->registerCallout("pkt6_receive", pkt6_receive);
+  handle->registerCallout("lease6_existing", lease6_existing);
   handle->registerCallout("lease6_select", lease6_select);
   handle->registerCallout("lease6_renew", lease6_renew);
   handle->registerCallout("lease6_rebind", lease6_rebind);
