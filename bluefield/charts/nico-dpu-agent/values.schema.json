@@ -165,9 +165,13 @@
       "description": "Configuration for the LLDP snapshot sidecar",
       "required": ["resources"],
       "properties": {
+        "hostLibraryPath": {
+          "type": "string",
+          "description": "Optional host library directory to mount read-only at /host/lib64. When set, /host/lib64 is used as the default LD_LIBRARY_PATH for the sidecar."
+        },
         "ldLibraryPath": {
           "type": "string",
-          "description": "Optional LD_LIBRARY_PATH for the sidecar. Set when the host /lib mount does not provide libudev.so.1; omitted or empty preserves default library lookup."
+          "description": "Optional explicit LD_LIBRARY_PATH for the sidecar. When empty, hostLibraryPath enables /host/lib64 as the library path; when both are empty, default library lookup is unchanged."
         },
         "resources": {
           "type": "object",

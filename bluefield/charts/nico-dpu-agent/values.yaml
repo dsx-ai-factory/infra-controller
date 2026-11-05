@@ -60,6 +60,9 @@ securityContext:
 tolerations: []
 
 lldpSidecar:
+  # Optional host library directory mounted read-only at /host/lib64. When set,
+  # it is used as the default LD_LIBRARY_PATH for the sidecar.
+  hostLibraryPath: ""
   # Optional LD_LIBRARY_PATH for the sidecar. Set this when the host /lib mount
   # does not provide libudev.so.1; empty keeps the image's default lookup behavior.
   ldLibraryPath: ""
