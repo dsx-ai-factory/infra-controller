@@ -7780,11 +7780,13 @@ async fn test_error_stays_in_error_when_components_not_all_ready(
     Ok(())
 }
 
-/// Asserts a steady-state iteration emitted nothing at WARN or ERROR, so a
-/// persisted failure is not re-reported every controller iteration.
+/// Asserts a steady-state iteration emitted nothing at WARN or ERROR from the
+/// rack controller, so a persisted failure is not re-reported every controller
+/// iteration. Other targets are ignored, such as SQLx's slow-statement WARN.
 fn assert_no_warn_or_error_logs(logs: &[CapturedLog]) {
     let loud: Vec<_> = logs
         .iter()
+        .filter(|log| log.target.split("::").next() == Some("carbide_rack_controller"))
         .filter(|log| matches!(log.level, tracing::Level::WARN | tracing::Level::ERROR))
         .collect();
     assert!(loud.is_empty(), "unexpected WARN/ERROR logs: {loud:?}");
