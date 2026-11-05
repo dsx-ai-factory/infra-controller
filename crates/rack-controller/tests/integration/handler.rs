@@ -3202,7 +3202,8 @@ async fn test_rack_maintenance_termination_unwinds_all_scoped_device_state_body(
         },
     )
     .await;
-    let (rack_id, ready_host, active_host) = create_two_compute_rack(&env, &pool).await?;
+    // Keep the two-host fixture future off libtest's default thread stack.
+    let (rack_id, ready_host, active_host) = Box::pin(create_two_compute_rack(&env, &pool)).await?;
     let switch_id = attach_switch_with_nvos_credentials(&env, &rack_id).await?;
     let initiator = format!("rack-{rack_id}");
     let now = chrono::Utc::now();

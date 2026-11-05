@@ -23,7 +23,7 @@ use std::path::Path;
 use ::rpc::forge as rpc;
 use carbide_network::ip::prefix::IpNet;
 use carbide_network::sanitized_mac;
-use carbide_network::virtualization::VpcVirtualizationType;
+use carbide_network::virtualization::{RouteTargetContributions, VpcVirtualizationType};
 use eyre::WrapErr;
 use gtmpl_derive::Gtmpl;
 use ipnetwork::Ipv6Network;
@@ -650,6 +650,9 @@ pub fn build(conf: NvueConfig) -> eyre::Result<String> {
                     .map(|vni| TmplVni { Vni: *vni })
                     .collect(),
                 RoutingProfile: routing_profile.clone(),
+                EvpnRouteTargetImports: Vec::new(),
+                EvpnRouteTargetExports: Vec::new(),
+                ImportRouteTargetsAutomatically: false,
             });
 
         port_configs.push(port);
@@ -681,6 +684,61 @@ pub fn build(conf: NvueConfig) -> eyre::Result<String> {
 
     let mut vpcs = vpc_configs.into_values().collect::<Vec<TmplVpc>>();
     vpcs.sort_by_key(|a| a.L3VNI);
+
+    if !is_etv {
+        let common_export =
+            conf.common_internal_route_target
+                .as_ref()
+                .map(|target| TmplRouteTargetConfig {
+                    ASN: target.asn,
+                    VNI: target.vni,
+                });
+        let site_imports = conf
+            .additional_route_target_imports
+            .iter()
+            .map(|target| TmplRouteTargetConfig {
+                ASN: target.asn,
+                VNI: target.vni,
+            })
+            .collect::<Vec<_>>();
+
+        // The VPC's VRF uses the first selected routing profile.
+        // Compose targets from that shared profile after grouping the ports.
+        for vpc in &mut vpcs {
+            let contributions = RouteTargetContributions {
+                profile_imports: vpc
+                    .RoutingProfile
+                    .as_ref()
+                    .map(|profile| profile.RouteTargetImports.as_slice())
+                    .unwrap_or_default(),
+                profile_exports: vpc
+                    .RoutingProfile
+                    .as_ref()
+                    .map(|profile| profile.RouteTargetsOnExports.as_slice())
+                    .unwrap_or_default(),
+                common_export: common_export.as_ref(),
+                site_imports: &site_imports,
+            };
+            let peers = vpc
+                .VpcPeerVnis
+                .iter()
+                .map(|peer| TmplRouteTargetConfig {
+                    ASN: conf.datacenter_asn,
+                    VNI: peer.Vni,
+                })
+                .collect::<Vec<_>>();
+            let targets = contributions.compose(
+                TmplRouteTargetConfig {
+                    ASN: conf.datacenter_asn,
+                    VNI: vpc.L3VNI,
+                },
+                &peers,
+            );
+            vpc.EvpnRouteTargetImports = targets.imports;
+            vpc.EvpnRouteTargetExports = targets.exports;
+            vpc.ImportRouteTargetsAutomatically = targets.import_automatically;
+        }
+    }
 
     let (vpc_isolation_prefixes, etv_isolation_next_index) = if is_etv {
         let PreparedAclPrefixes {
@@ -805,22 +863,6 @@ pub fn build(conf: NvueConfig) -> eyre::Result<String> {
         TenantHostRoutesToUnderlayIpv6: tenant_host_routes_to_underlay_ipv6,
         HasAnyVpcVrfLoopback: has_any_vpc_vrf_loopback,
         ASN: conf.asn,
-        DatacenterASN: conf.datacenter_asn,
-        UseCommonInternalTenantRouteTarget: conf.common_internal_route_target.is_some(),
-        CommonInternalRouteTarget: conf.common_internal_route_target.map(|rt| {
-            TmplRouteTargetConfig {
-                ASN: rt.asn,
-                VNI: rt.vni,
-            }
-        }),
-        AdditionalRouteTargetImports: conf
-            .additional_route_target_imports
-            .iter()
-            .map(|rt| TmplRouteTargetConfig {
-                ASN: rt.asn,
-                VNI: rt.vni,
-            })
-            .collect(),
         DPUHostname: conf.dpu_hostname,
         SearchDomain: conf.dpu_search_domain,
         Uplinks: conf.uplinks.clone(),
@@ -1640,10 +1682,6 @@ struct TmplNvue {
     HasAnyVpcVrfLoopback: bool,
 
     ASN: u32,
-    DatacenterASN: u32,
-    UseCommonInternalTenantRouteTarget: bool,
-    CommonInternalRouteTarget: Option<TmplRouteTargetConfig>,
-    AdditionalRouteTargetImports: Vec<TmplRouteTargetConfig>,
 
     DPUHostname: String,  // The first part of the FQDN
     SearchDomain: String, // The rest of the FQDN
@@ -1889,6 +1927,12 @@ struct TmplVpc {
     VpcPeerVnis: Vec<TmplVni>,
 
     RoutingProfile: Option<TmplRoutingProfile>,
+    /// Imports from the VPC's own target, authorized peers, profile, and site.
+    EvpnRouteTargetImports: Vec<TmplRouteTargetConfig>,
+    /// Exports carrying the VPC's own target plus site and profile additions.
+    EvpnRouteTargetExports: Vec<TmplRouteTargetConfig>,
+    /// Whether to include NVUE's automatic EVPN imports; FNN enables them.
+    ImportRouteTargetsAutomatically: bool,
 }
 
 #[allow(non_snake_case)]
@@ -2694,6 +2738,80 @@ mod tests {
 
         // Require the loopback error so an unrelated fixture failure cannot satisfy the test.
         assert!(error.to_string().contains("invalid tenant VRF loopback"));
+    }
+
+    /// Verifies the VPC uses its first selected profile, including when a later
+    /// interface supplies different import and export targets.
+    #[test]
+    fn fnn_route_targets_follow_first_vpc_profile() {
+        let mut conf = dual_stack_fnn_config();
+        conf.ct_routing_profile = None;
+        conf.ct_port_configs[0].vpc_peer_vnis = vec![200];
+        conf.common_internal_route_target = Some(RouteTargetConfig {
+            asn: 65002,
+            vni: 22,
+        });
+        conf.additional_route_target_imports = vec![RouteTargetConfig {
+            asn: 65003,
+            vni: 33,
+        }];
+
+        // A later interface disagrees, but the first profile remains the VPC's
+        // policy. Site settings and peer imports still apply to that policy.
+        let mut profile = minimal_fnn_routing_profile();
+        profile.route_target_imports = vec![RouteTargetConfig {
+            asn: 65001,
+            vni: 11,
+        }];
+        profile.route_targets_on_exports = vec![RouteTargetConfig {
+            asn: 65001,
+            vni: 44,
+        }];
+        conf.ct_port_configs[0].routing_profile = Some(profile);
+        let mut later_profile = minimal_fnn_routing_profile();
+        later_profile.route_target_imports = vec![RouteTargetConfig {
+            asn: 65004,
+            vni: 55,
+        }];
+        later_profile.route_targets_on_exports = vec![RouteTargetConfig {
+            asn: 65004,
+            vni: 66,
+        }];
+        let mut later_port = dual_stack_fnn_config().ct_port_configs.swap_remove(0);
+        later_port.interface_name = "pf0vf1_if".into();
+        later_port.vlan = 101;
+        later_port.vni = Some(1001);
+        later_port.host_ip = "10.0.2.1".into();
+        later_port.host_route = "10.0.2.0/31".into();
+        later_port.gateway_cidrs = vec!["10.0.2.0/31".into()];
+        later_port.svi_ip = Some("10.0.2.254".into());
+        later_port.host_ipv6 = None;
+        later_port.host_ipv6_route = None;
+        later_port.ipv6_port_config = None;
+        later_port.routing_profile = Some(later_profile);
+        conf.ct_port_configs.push(later_port);
+
+        let output = build(conf).expect("FNN with all route-target sources must render");
+        let documents: serde_yaml::Value =
+            serde_yaml::from_str(&output).expect("rendered route targets must be unique YAML keys");
+        let set = &documents.as_sequence().expect("NVUE YAML documents")[1]["set"];
+        assert_eq!(set["interface"]["pf0vf1_if"]["ip"]["vrf"], "vpc_100");
+        let bgp = &set["vrf"]["vpc_100"]["router"]["bgp"];
+
+        assert_eq!(
+            yaml_mapping_keys(&bgp["route-export"]["to-evpn"]["route-target"]),
+            ["11414:100", "65002:22", "65001:44"]
+                .map(String::from)
+                .into_iter()
+                .collect()
+        );
+        assert_eq!(
+            yaml_mapping_keys(&bgp["route-import"]["from-evpn"]["route-target"]),
+            ["11414:100", "11414:200", "65001:11", "65003:33", "auto"]
+                .map(String::from)
+                .into_iter()
+                .collect()
+        );
     }
 
     /// Verifies FNN isolates every VPC with site-prefix blackholes while peering remains

@@ -37,6 +37,7 @@ use carbide_machine_controller::config::{
     MachineStateHandlerSiteConfig, MachineValidationConfig, PowerManagerOptions, TimePeriod,
 };
 use carbide_network::ip::prefix::{IpNet, aggregate};
+use carbide_network::virtualization::RouteTargetContributions;
 use carbide_nvlink_manager::config::NvLinkConfig;
 use carbide_preingestion_manager::PreingestionManagerConfig;
 use carbide_rack_controller::config::{RackValidationConfig, RmsConfig};
@@ -3341,9 +3342,15 @@ impl FnnRoutingProfileConfig {
             access_tier: _,
         } = self;
 
+        let contributions = RouteTargetContributions {
+            profile_imports: route_target_imports.as_deref().unwrap_or_default(),
+            profile_exports: route_targets_on_exports.as_deref().unwrap_or_default(),
+            common_export: None,
+            site_imports: &[],
+        };
+
         *internal == Some(true)
-            && route_target_imports.as_ref().is_none_or(Vec::is_empty)
-            && route_targets_on_exports.as_ref().is_none_or(Vec::is_empty)
+            && !contributions.has_additional_targets()
             && !leak_default_route_from_underlay.unwrap_or_default()
             && !leak_tenant_host_routes_to_underlay.unwrap_or_default()
             && !tenant_leak_communities_accepted.unwrap_or_default()
@@ -5746,41 +5753,70 @@ path = "credentials.yaml"
         );
     }
 
+    /// Verifies admission checks the resolved profile: configured targets prevent
+    /// prefix reuse, while an explicit empty override clears inherited targets.
     #[test]
     fn resolved_profile_overlap_eligibility_includes_vpc_overrides() {
-        let fnn = FnnConfig {
-            admin_vpc: None,
-            common_internal_route_target: None,
-            additional_route_target_imports: vec![],
-            routing_profiles: HashMap::from([(
-                "BASE".to_string(),
-                FnnRoutingProfileConfig {
-                    tenant_prefix_overlap_eligible: true,
-                    internal: Some(true),
-                    ..Default::default()
-                },
-            )]),
-            use_vpc_vrf_loopback: false,
+        let base = FnnRoutingProfileConfig {
+            tenant_prefix_overlap_eligible: true,
+            internal: Some(true),
+            ..Default::default()
         };
-        assert!(
-            fnn.routing_profiles["BASE"].is_eligible_for_tenant_prefix_overlap(),
-            "base profile should be eligible before VPC overrides"
-        );
-
-        let vpc = vpc_config(
-            Some("BASE"),
-            Some(VpcRoutingProfileOverrides {
-                leak_default_route_from_underlay: Some(true),
-                ..Default::default()
-            }),
-        );
-        let resolved = fnn
-            .resolve_vpc_routing_profile(&vpc)
-            .expect("base profile must resolve");
-
-        assert!(
-            !resolved.is_eligible_for_tenant_prefix_overlap(),
-            "resolved VPC leak must make the profile ineligible"
+        let target = RouteTargetConfig {
+            asn: 65000,
+            vni: Some(100),
+            vni_self: false,
+        };
+        value_scenarios!(
+            run = |(profile, overrides)| {
+                let fnn = FnnConfig {
+                    admin_vpc: None,
+                    common_internal_route_target: None,
+                    additional_route_target_imports: vec![],
+                    routing_profiles: HashMap::from([("BASE".to_string(), profile)]),
+                    use_vpc_vrf_loopback: false,
+                };
+                fnn.resolve_vpc_routing_profile(&vpc_config(Some("BASE"), overrides))
+                    .expect("base profile must resolve")
+                    .is_eligible_for_tenant_prefix_overlap()
+            };
+            "no additions" {
+                // A profile with no route leaks is the eligible positive control.
+                (base.clone(), None) => true,
+            }
+            "inherited imports" {
+                // Omitted overrides retain the import that makes reuse unsafe.
+                (FnnRoutingProfileConfig {
+                    route_target_imports: Some(vec![target.clone()]),
+                    ..base.clone()
+                }, None) => false,
+            }
+            "inherited exports" {
+                // Export tagging alone also prevents isolated prefix reuse.
+                (FnnRoutingProfileConfig {
+                    route_targets_on_exports: Some(vec![target.clone()]),
+                    ..base.clone()
+                }, None) => false,
+            }
+            "cleared additions" {
+                // Explicit empty lists remove both inherited contributions.
+                (FnnRoutingProfileConfig {
+                    route_target_imports: Some(vec![target.clone()]),
+                    route_targets_on_exports: Some(vec![target]),
+                    ..base.clone()
+                }, Some(VpcRoutingProfileOverrides {
+                    route_target_imports: Some(vec![]),
+                    route_targets_on_exports: Some(vec![]),
+                    ..Default::default()
+                })) => true,
+            }
+            "VPC leak override" {
+                // Resolving a leak override must still reject an otherwise safe base.
+                (base, Some(VpcRoutingProfileOverrides {
+                    leak_default_route_from_underlay: Some(true),
+                    ..Default::default()
+                })) => false,
+            }
         );
     }
 
