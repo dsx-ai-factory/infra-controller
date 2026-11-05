@@ -643,10 +643,10 @@ func TestRunGeneratedCommand(t *testing.T) {
 					spec,
 					client,
 					"vpc-peering list",
-					[]string{"--status", " Ready,Error ", "--status", "Pending"},
+					[]string{"--status", " Ready,Error ", "--status", "Pending", "--status=-Leading"},
 				)
 				require.NoError(t, err)
-				assert.Equal(t, []string{" Ready,Error ", "Pending"}, observed["status"])
+				assert.Equal(t, []string{" Ready,Error ", "Pending", "-Leading"}, observed["status"])
 			},
 		},
 	}
@@ -1805,6 +1805,13 @@ func testNewAppPreservesRepeatedQueryFlags(t *testing.T) {
 			command:   []string{"machine", "list", "--hw-sku-device-type", "gpu", "--hw-sku-device-type", "storage"},
 			wantPath:  "/v2/org/test-org/nico/machine",
 			wantQuery: url.Values{"hwSkuDeviceType": {"gpu", "storage"}},
+		},
+		// The equals form must preserve a value that begins with a dash.
+		{
+			name:      "explicit leading-dash value",
+			command:   []string{"machine", "list", "--hw-sku-device-type=-gpu"},
+			wantPath:  "/v2/org/test-org/nico/machine",
+			wantQuery: url.Values{"hwSkuDeviceType": {"-gpu"}},
 		},
 		{
 			name:      "rack names and manufacturers",
