@@ -30,14 +30,14 @@ use crate::json::JsonExt;
 use crate::redfish::ModelExt;
 use crate::{Callbacks, redfish};
 
-/// Identity and optional collection support published by the service root.
+/// Identity and navigation properties published by the service root.
 #[derive(Clone, Copy)]
 pub(crate) struct Config {
     pub(crate) vendor: redfish::oem::BmcVendor,
     pub(crate) product: Option<&'static str>,
     pub(crate) redfish_version: &'static str,
-    /// Omit Systems and return 404 for its collection when false.
-    pub(crate) exposes_computer_systems: bool,
+    /// Include the Systems navigation property independently of endpoint support.
+    pub(crate) advertises_computer_systems: bool,
 }
 
 pub(crate) fn resource<'a>() -> redfish::Resource<'a> {
@@ -65,7 +65,6 @@ fn builder(resource: &redfish::Resource) -> ServiceRoot {
 /// Configured ServiceRoot resource shared by the BMC handlers.
 pub(crate) struct ServiceRootState {
     pub(crate) vendor: redfish::oem::BmcVendor,
-    pub(crate) exposes_computer_systems: bool,
     response: serde_json::Value,
 }
 
@@ -90,7 +89,7 @@ impl ServiceRootState {
                     .as_ref(),
             )
             .chassis(redfish::chassis::collection().odata_id.as_ref());
-        let builder = if config.exposes_computer_systems {
+        let builder = if config.advertises_computer_systems {
             builder.systems(redfish::computer_system::collection().odata_id.as_ref())
         } else {
             builder
@@ -116,7 +115,6 @@ impl ServiceRootState {
 
         Self {
             vendor: config.vendor,
-            exposes_computer_systems: config.exposes_computer_systems,
             response,
         }
     }
@@ -137,12 +135,13 @@ mod tests {
 
     #[tokio::test]
     async fn profiles_publish_service_root_identity_and_systems_support() {
-        for (hardware, vendor, product, version, systems) in [
+        for (hardware, vendor, product, version, advertises, serves) in [
             (
                 HardwareType::DellPowerEdgeR750,
                 Some("Dell"),
                 None,
                 "1.18.0",
+                true,
                 true,
             ),
             (
@@ -151,12 +150,14 @@ mod tests {
                 Some("Integrated Dell Remote Access Controller"),
                 "1.18.0",
                 true,
+                true,
             ),
             (
                 HardwareType::WiwynnGB200Nvl,
                 Some("WIWYNN"),
                 Some("GB200 NVL"),
                 "1.17.0",
+                true,
                 true,
             ),
             (
@@ -165,12 +166,14 @@ mod tests {
                 Some("AMI Redfish Server"),
                 "1.21.1",
                 true,
+                true,
             ),
             (
                 HardwareType::NvidiaDgxGb300,
                 Some("NVIDIA"),
                 Some("GB BMC"),
                 "1.17.0",
+                true,
                 true,
             ),
             (
@@ -179,6 +182,7 @@ mod tests {
                 Some("GB NVL"),
                 "1.17.0",
                 true,
+                true,
             ),
             (
                 HardwareType::NvidiaDgxVr,
@@ -186,14 +190,30 @@ mod tests {
                 Some("VR NVL72"),
                 "1.17.0",
                 true,
+                true,
             ),
-            (HardwareType::LiteOnPowerShelf, None, None, "1.9.0", true),
-            (HardwareType::DeltaPowerShelf, None, None, "1.9.0", false),
+            (
+                HardwareType::LiteOnPowerShelf,
+                None,
+                None,
+                "1.9.0",
+                false,
+                true,
+            ),
+            (
+                HardwareType::DeltaPowerShelf,
+                None,
+                None,
+                "1.9.0",
+                false,
+                false,
+            ),
             (
                 HardwareType::NvidiaSwitchNd5200Ld,
                 Some("NVIDIA"),
                 Some("P3809"),
                 "1.17.0",
+                true,
                 true,
             ),
             (
@@ -202,12 +222,14 @@ mod tests {
                 Some("P3809"),
                 "1.17.0",
                 true,
+                true,
             ),
             (
                 HardwareType::NvidiaDgxH100,
                 Some("AMI"),
                 Some("AMI Redfish Server"),
                 "1.11.0",
+                true,
                 true,
             ),
             (
@@ -216,12 +238,14 @@ mod tests {
                 Some("AMI Redfish Server"),
                 "1.17.0",
                 true,
+                true,
             ),
             (
                 HardwareType::HpeProliantDl380aGen11,
                 Some("HPE"),
                 Some("ProLiant DL380a Gen11"),
                 "1.13.0",
+                true,
                 true,
             ),
             (
@@ -230,9 +254,18 @@ mod tests {
                 Some("Super Server"),
                 "1.17.0",
                 true,
+                true,
             ),
         ] {
-            check_root(host_info(hardware), vendor, product, version, systems).await;
+            check_root(
+                host_info(hardware),
+                vendor,
+                product,
+                version,
+                advertises,
+                serves,
+            )
+            .await;
         }
 
         for (hardware, product) in [
@@ -248,6 +281,7 @@ mod tests {
                 Some(product),
                 "1.17.0",
                 true,
+                true,
             )
             .await;
         }
@@ -258,7 +292,8 @@ mod tests {
         vendor: Option<&str>,
         product: Option<&str>,
         version: &str,
-        systems: bool,
+        advertises: bool,
+        serves: bool,
     ) {
         let (router, state) = create_test_bmc(
             &machine,
@@ -293,7 +328,7 @@ mod tests {
             "{machine:?}"
         );
         assert_eq!(root["RedfishVersion"], version, "{machine:?}");
-        assert_eq!(root.get("Systems").is_some(), systems, "{machine:?}");
+        assert_eq!(root.get("Systems").is_some(), advertises, "{machine:?}");
         assert_eq!(
             root.get("EventService").is_some(),
             state.event_service.is_some(),
@@ -305,6 +340,7 @@ mod tests {
             "{machine:?}"
         );
         let response = router
+            .clone()
             .oneshot(
                 Request::builder()
                     .uri("/redfish/v1/Systems")
@@ -315,12 +351,38 @@ mod tests {
             .unwrap();
         assert_eq!(
             response.status(),
-            if systems {
+            if serves {
                 StatusCode::OK
             } else {
                 StatusCode::NOT_FOUND
             },
             "{machine:?}"
         );
+        if !advertises && serves {
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let collection: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(collection["Members@odata.count"], 1);
+            assert_eq!(
+                collection["Members"][0]["@odata.id"],
+                "/redfish/v1/Systems/system"
+            );
+            let response = router
+                .oneshot(
+                    Request::builder()
+                        .uri("/redfish/v1/Systems/system")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let system: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(system["Id"], "system");
+        }
     }
 }

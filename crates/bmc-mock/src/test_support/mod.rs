@@ -531,6 +531,7 @@ pub fn liteon_powershelf_router_with_auth() -> (Router, BmcState<TestCallbacks>)
     )
 }
 
+/// Lite-On power shelf with an undeclared but available Systems collection.
 pub async fn liteon_powershelf_bmc() -> TestBmcHandle {
     test_bmc(create_test_bmc(
         &host_info(HardwareType::LiteOnPowerShelf),
