@@ -3704,7 +3704,7 @@ async fn test_ingestion_reconciles_late_compute_firmware_body(
     let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
     assert!(matches!(rack.controller_state_outcome,
         Some(model::controller_outcome::PersistentStateHandlerOutcome::Error { ref err, .. })
-        if err.contains("desired power state is Off")
+        if err.contains("desired power state is off")
     ));
     assert_eq!(
         env.rms_sim

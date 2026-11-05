@@ -752,7 +752,7 @@ async fn reconcile_ingestion_firmware_machines(
     let desired_off = desired_off_machine_ids(conn.as_mut(), &ready_ids).await?;
     if !desired_off.is_empty() {
         return Err(StateHandlerError::GenericError(eyre::eyre!(
-            "ingestion firmware cannot target newly discovered machines whose desired power state is Off: {}",
+            "ingestion firmware cannot target newly discovered machines whose desired power state is off: {}",
             format_machine_ids(&desired_off),
         )));
     }
