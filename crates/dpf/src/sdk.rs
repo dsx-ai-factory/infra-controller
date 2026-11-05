@@ -1136,8 +1136,7 @@ pub fn build_service_configuration(
             deployment_service_name: svc.name.clone(),
             interfaces: interfaces.none_if_empty(),
             service_configuration,
-            // NICo-owned services can update independently; other services wait
-            // for the DPU service sync handler to open the NodeEffect gate.
+            // Service upgrades wait for the NodeEffect gate unless explicitly overridden.
             upgrade_policy: DpuServiceConfigurationUpgradePolicy {
                 apply_node_effect: Some(svc.apply_node_effect.unwrap_or(true)),
             },
@@ -1333,7 +1332,7 @@ pub fn build_deployment(
                 flavor_template: matches!(deployment_type, DpuDeploymentType::Bf4Astra)
                     .then(|| flavor_name.to_string()),
             },
-            revision_history_limit: None,
+            revision_history_limit: Some(1000),
             service_chains,
             services: services_map,
         },
@@ -6486,7 +6485,7 @@ mod tests {
     }
 
     #[test]
-    fn deployment_disables_secure_boot() {
+    fn deployment_defaults() {
         let deployment = build_deployment(
             &[],
             "deployment",
@@ -6498,6 +6497,7 @@ mod tests {
             DpuDeploymentType::Bf3,
         );
 
+        assert_eq!(deployment.spec.revision_history_limit, Some(1000));
         assert_eq!(deployment.spec.dpus.secure_boot, Some(false));
         assert_eq!(
             serde_json::to_value(deployment).unwrap()["spec"]["dpus"]["secureBoot"],
