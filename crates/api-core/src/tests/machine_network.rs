@@ -252,6 +252,7 @@ async fn create_dual_stack_admin_segment(
                         svi_ip: None,
                         free_ip_count_v2: None,
                         free_ip_count_saturated: false,
+                        dhcpv6_link_address: None,
                     },
                     rpc::forge::NetworkPrefix {
                         id: None,
@@ -262,6 +263,7 @@ async fn create_dual_stack_admin_segment(
                         svi_ip: None,
                         free_ip_count_v2: None,
                         free_ip_count_saturated: false,
+                        dhcpv6_link_address: None,
                     },
                 ],
                 subdomain_id: Some(env.domain.into()),

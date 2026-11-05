@@ -124,6 +124,7 @@ impl InternalRBACRules {
             vec![ForgeAdminCLI, Machineatron, SiteAgent],
         );
         x.perm("AttachNetworkSegmentToVpc", vec![ForgeAdminCLI]);
+        x.perm("AddNetworkSegmentPrefix", vec![ForgeAdminCLI]);
         x.perm(
             "DeleteNetworkSegment",
             vec![ForgeAdminCLI, Machineatron, SiteAgent],
@@ -1332,6 +1333,46 @@ mod rbac_rule_tests {
             ],
             |principals| {
                 InternalRBACRules::allowed_from_static("AdminInspectResourcePools", &principals)
+            },
+        );
+    }
+
+    /// Prefix mutation is operator-only even though existing segment creation
+    /// also permits site-agent callers. Missing authentication never grants it.
+    #[test]
+    fn add_network_segment_prefix_operator_permissions() {
+        // Check the whole grant set, including the absence of Machineatron.
+        assert_eq!(
+            INTERNAL_RBAC_RULES.perms["AddNetworkSegmentPrefix"].principals,
+            RuleInfo::new(vec![ForgeAdminCLI]).principals,
+        );
+        check_values(
+            [
+                Check {
+                    scenario: "operator certificate",
+                    input: vec![Principal::ExternalUser(ExternalUserInfo::new(
+                        None,
+                        "nico-cli-client".to_string(),
+                        None,
+                    ))],
+                    expect: true,
+                },
+                // Do not inherit the broader CreateNetworkSegment permission list.
+                Check {
+                    scenario: "site agent cannot append infrastructure prefixes",
+                    input: vec![Principal::SpiffeServiceIdentifier(
+                        "elektra-site-agent".to_string(),
+                    )],
+                    expect: false,
+                },
+                Check {
+                    scenario: "unauthenticated",
+                    input: vec![],
+                    expect: false,
+                },
+            ],
+            |principals| {
+                InternalRBACRules::allowed_from_static("AddNetworkSegmentPrefix", &principals)
             },
         );
     }

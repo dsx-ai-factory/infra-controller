@@ -300,6 +300,7 @@ async fn test_overlapping_prefix(pool: sqlx::PgPool) -> Result<(), eyre::Report>
             svi_ip: None,
             free_ip_count_v2: None,
             free_ip_count_saturated: false,
+            dhcpv6_link_address: None,
         }],
         subdomain_id: None,
         vpc_id: None,
@@ -580,6 +581,19 @@ async fn test_initial_network_reverse_zones_follow_persisted_config_drift(
         persist_initial_network_without_reverse_zone(&db_pool, "drifted-underlay", &original)
             .await?;
 
+    // A live addition is not part of the immutable seed. Startup must preserve
+    // it while repairing the original zone and rejecting the TOML CIDR drift.
+    let added_prefix = "2001:db8:55::/64";
+    let applied = env
+        .api
+        .add_network_segment_prefix(Request::new(rpc::forge::AddNetworkSegmentPrefixRequest {
+            network_segment_id: Some(original_segment.id),
+            prefix: added_prefix.to_string(),
+            ..Default::default()
+        }))
+        .await?
+        .into_inner();
+
     crate::db_init::create_initial_networks(
         &env.api,
         &env.pool,
@@ -590,8 +604,22 @@ async fn test_initial_network_reverse_zones_follow_persisted_config_drift(
     let mut txn = db_pool.begin().await?;
     let segment = db::network_segment::find_by_name(&mut txn, "drifted-underlay").await?;
     assert_eq!(segment.id, original_segment.id);
-    assert_eq!(segment.prefixes.len(), 1);
-    assert_eq!(segment.prefixes[0].prefix, original.prefix);
+    assert_eq!(segment.prefixes.len(), 2);
+    assert!(
+        segment
+            .prefixes
+            .iter()
+            .any(|prefix| prefix.id == original_segment.prefixes[0].id
+                && prefix.prefix == original.prefix)
+    );
+    assert!(
+        segment
+            .prefixes
+            .iter()
+            .any(|prefix| prefix.prefix.to_string() == added_prefix)
+    );
+    let persisted: rpc::forge::NetworkSegment = segment.clone().into();
+    assert_eq!(persisted.config, applied.config);
     assert_eq!(
         db::network_segment::stored_def(txn.as_mut(), "drifted-underlay").await?,
         Some(original.clone()),
@@ -605,6 +633,14 @@ async fn test_initial_network_reverse_zones_follow_persisted_config_drift(
         original_domains.len(),
         1,
         "startup should create the zone for the persisted prefix",
+    );
+    // Drift must retain the added prefix's zone as well as its stored metadata.
+    let added_zone = db::dns::cidr_to_reverse_zone(added_prefix.parse()?).expect("aligned prefix");
+    assert_eq!(
+        db::dns::domain::find_reverse_zone_by_normalized_name(txn.as_mut(), &added_zone)
+            .await?
+            .len(),
+        1
     );
 
     let drifted_zone = db::dns::cidr_to_reverse_zone(drifted.prefix).unwrap();
@@ -1179,6 +1215,7 @@ async fn test_31_prefix_not_allowed(pool: sqlx::PgPool) -> Result<(), eyre::Repo
             svi_ip: None,
             free_ip_count_v2: None,
             free_ip_count_saturated: false,
+            dhcpv6_link_address: None,
         }],
         subdomain_id: None,
         vpc_id: None,
@@ -2023,6 +2060,7 @@ async fn test_create_network_segment_with_ipv6_prefix(
             svi_ip: None,
             free_ip_count_v2: None,
             free_ip_count_saturated: false,
+            dhcpv6_link_address: None,
         }],
         subdomain_id: None,
         vpc_id: None,
@@ -2103,6 +2141,7 @@ async fn test_create_dual_stack_tenant_segment(pool: sqlx::PgPool) -> Result<(),
                 svi_ip: None,
                 free_ip_count_v2: None,
                 free_ip_count_saturated: false,
+                dhcpv6_link_address: None,
             },
             rpc::forge::NetworkPrefix {
                 id: None,
@@ -2113,6 +2152,7 @@ async fn test_create_dual_stack_tenant_segment(pool: sqlx::PgPool) -> Result<(),
                 svi_ip: None,
                 free_ip_count_v2: None,
                 free_ip_count_saturated: false,
+                dhcpv6_link_address: None,
             },
         ],
         subdomain_id: None,
@@ -2202,6 +2242,7 @@ async fn test_ipv6_tenant_prefix_rejected_when_not_in_site_fabric(
             svi_ip: None,
             free_ip_count_v2: None,
             free_ip_count_saturated: false,
+            dhcpv6_link_address: None,
         }],
         subdomain_id: None,
         vpc_id: vpc.id,
@@ -2376,6 +2417,7 @@ async fn flat_vpc_accepts_host_inband_segment(
             svi_ip: None,
             free_ip_count_v2: None,
             free_ip_count_saturated: false,
+            dhcpv6_link_address: None,
         }],
         subdomain_id: None,
         vpc_id: vpc.id,
@@ -2433,6 +2475,7 @@ async fn flat_vpc_rejects_tenant_segment(
             svi_ip: None,
             free_ip_count_v2: None,
             free_ip_count_saturated: false,
+            dhcpv6_link_address: None,
         }],
         subdomain_id: None,
         vpc_id: vpc.id,
@@ -2488,6 +2531,7 @@ async fn etv_vpc_rejects_host_inband_segment(
             svi_ip: None,
             free_ip_count_v2: None,
             free_ip_count_saturated: false,
+            dhcpv6_link_address: None,
         }],
         subdomain_id: None,
         vpc_id: vpc.id,
@@ -2697,6 +2741,7 @@ async fn create_unattached_segment(
                 svi_ip: None,
                 free_ip_count_v2: None,
                 free_ip_count_saturated: false,
+                dhcpv6_link_address: None,
             }],
             subdomain_id: None,
             vpc_id: None,
