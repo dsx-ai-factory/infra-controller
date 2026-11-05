@@ -343,6 +343,11 @@ pub fn parse_carbide_config_with_deferred_diagnostics(
             config.deprecated_rack_management_enabled.is_some(),
             None,
         ),
+        (
+            "site_explorer.explore_mode",
+            config.site_explorer.deprecated_explore_mode.is_some(),
+            None,
+        ),
     ]
     .into_iter()
     .filter(|(_, is_set, _)| *is_set)
@@ -1000,10 +1005,11 @@ route_target_imports = [{ asn = 429000000, vni = 0, vni_self = true }]"#,
 
     #[test]
     #[allow(clippy::result_large_err)]
-    fn legacy_rack_management_key_is_accepted_warned_and_omitted() {
+    fn legacy_keys_without_a_replacement_are_accepted_warned_and_omitted() {
         figment::Jail::expect_with(|jail| {
             let config_text = format!(
-                "{}\ndeny_unknown_fields = true\nrack_management_enabled = true\n",
+                "{}\ndeny_unknown_fields = true\nrack_management_enabled = true\n\
+                 [site_explorer]\nexplore_mode = \"libredfish\"\n",
                 include_str!("test_data/min_config.toml")
             );
             jail.create_file("config.toml", &config_text)?;
@@ -1017,22 +1023,32 @@ route_target_imports = [{ asn = 429000000, vni = 0, vni_self = true }]"#,
             .expect("strict configuration with the deprecated key must load");
 
             assert_eq!(config.deprecated_rack_management_enabled, Some(true));
+            assert_eq!(
+                config.site_explorer.deprecated_explore_mode.as_deref(),
+                Some("libredfish")
+            );
             let serialized =
                 toml::to_string(config.as_ref()).expect("loaded configuration must serialize");
             assert!(!serialized.contains("rack_management_enabled"));
+            assert!(!serialized.contains("explore_mode"));
 
-            let warning = std::iter::from_fn(|| logs.try_recv().ok())
-                .find(|line| line.message == "Ignoring deprecated configuration key")
-                .expect("deprecated key warning");
-            assert_eq!(warning.level, "WARN");
+            let warnings = std::iter::from_fn(|| logs.try_recv().ok())
+                .filter(|line| line.message == "Ignoring deprecated configuration key")
+                .collect::<Vec<_>>();
             assert_eq!(
-                warning.fields.get("config_key").map(String::as_str),
-                Some("rack_management_enabled")
+                warnings
+                    .iter()
+                    .map(|line| line.fields.get("config_key").map(String::as_str))
+                    .collect::<Vec<_>>(),
+                vec![
+                    Some("rack_management_enabled"),
+                    Some("site_explorer.explore_mode"),
+                ]
             );
-            assert_eq!(
-                warning.fields.get("config_source").map(String::as_str),
-                Some("config.toml")
-            );
+            assert!(warnings.iter().all(|line| {
+                line.level == "WARN"
+                    && line.fields.get("config_source").map(String::as_str) == Some("config.toml")
+            }));
             Ok(())
         })
     }

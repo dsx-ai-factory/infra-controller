@@ -123,7 +123,6 @@ use self::metrics::{
     DpuMigrationSignal, PairingBlockerReason, SiteExplorerIterationFinished,
     exploration_error_to_metric_label,
 };
-use crate::config::SiteExplorerExploreMode;
 use crate::explored_endpoint_index::ExploredEndpointIndex;
 
 /// Return whether a HostInband row can be treated as a Redfish endpoint.
@@ -158,14 +157,12 @@ fn should_scan_underlay_interface_for_redfish(
 pub fn new_bmc_explorer(
     bmc_client: Arc<AuthenticatedBmcClient>,
     rotate_switch_nvos_credentials: Arc<AtomicBool>,
-    mode: SiteExplorerExploreMode,
     explore_drive_firmware: bool,
     database_connection: PgPool,
 ) -> Arc<BmcEndpointExplorer> {
     BmcEndpointExplorer::new(
         bmc_client,
         rotate_switch_nvos_credentials,
-        mode,
         Some(database_connection),
     )
     .with_drive_firmware(explore_drive_firmware)
