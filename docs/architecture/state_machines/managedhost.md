@@ -199,6 +199,10 @@ In `Rebooting`, Core completes the persisted activation handshake, including reb
 
 ### Phase Behavior
 
+For saved `site_cache` operations, Core rejects unsupported Scout polls in
+`ObservingSupervisor`, `Unlocking`, and `UpdatingFirmware`. Refer to [Scout NIC firmware delivery](../../operations/firmware-updates/configuration.md#scout-nic-firmware-delivery)
+for capability and upgrade requirements.
+
 - **`ObservingSupervisor`:** Core polls for the current card's receipt. During receipt-free initial observation, Core can establish or refresh `supervisor_instance_id` before permitting `Unlocking`. After leaving that phase, a missing receipt from a replacement supervisor cannot renew submission permission. A retained receipt resumes `UpdatingFirmware`. Without a stop reason or retained receipt, `InvalidTask`, `Conflict`, and `Unsupported` delivery errors require operator intervention. Unresolved terminal evidence also requires intervention.
 - **`Unlocking`:** Core observes lockdown and changes it only when needed and the saved key identity permits it. An independent unlocked readback advances to `UpdatingFirmware`. Missing replies wait; change acknowledgements and reported errors return to observation.
 - **`UpdatingFirmware`:** Core delivers the frozen request under the saved operation and supervisor identities. Without a receipt, an eligible retry resends that identical request only to the saved supervisor instance, which deduplicates it. Scout checks that instance before submitting; a replacement without the receipt blocks resubmission and requires reconciliation. Once a receipt exists or submission is prohibited, delivery only observes accepted work. Successful evidence for every requested step advances to the next card, or after the last card to `Rebooting` or `Reobserving`. A safely settled unsuccessful execution enters `RestoringLockdown` with a failure; unavailable or missing receipts alone never establish safe settlement.
