@@ -36,6 +36,17 @@ It is applied automatically (together with `PreventAllocations` and `SuppressExt
 For hosts with this classification, the NICo state machine will not automatically
 execute certain recovery actions (like reboots). The classification can be used to prevent NICo from interacting with hosts while datacenter operators manually perform certain actions.
 
+## `IsolateFromNvLinkPartitions`
+
+For hosts with this classification, the NVLink partition monitor removes every
+GPU on the host from every NVLink partition, tenant or tray default, and keeps
+them out until the classification is cleared. This applies even if the host has
+an instance, which loses NVLink connectivity to the rest of its partition. The
+monitor reports progress under the `nvlink-isolation` source; see
+[NVLink isolation health probe identifiers](health_probe_ids.md#nvlink-isolation-health-probe-identifiers).
+The admin CLI `compute-tray-due-for-swap` template applies it before a compute
+tray is moved or replaced.
+
 ## `Hardware`
 
 Indicates a hardware-related issue and is used as a broad bucket for hardware/BMC alerts.

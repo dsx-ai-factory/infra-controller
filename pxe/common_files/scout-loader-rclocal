@@ -22,7 +22,8 @@ ROOTFS_INFO_FILE="/run/nextroot/rootfs_info.txt"
 ROOTFS_INFO_TMP="/tmp/rootfs_info.txt"
 ROOTFS_DIGEST_FILE="/tmp/rootfs.digest"
 ROOTFS_DIGEST_FIFO="/tmp/rootfs.digest.fifo"
-ROOTFS_IMAGE_FILE="/run/scout-rootfs.squashfs"
+ROOTFS_IMAGE_DIR="/run/scout-rootfs"
+ROOTFS_IMAGE_FILE="${ROOTFS_IMAGE_DIR}/scout.squashfs"
 SQUASHFS_LOWER="/run/scout-rootfs.lower"
 OVERLAY_ROOT="/run/scout-rootfs.overlay"
 OVERLAY_UPPER="${OVERLAY_ROOT}/upper"
@@ -147,6 +148,15 @@ prepare_squashfs_rootfs() {
 
     cleanup_squashfs_mounts
     rm -f "${ROOTFS_DIGEST_FILE}"
+
+    # /run is limited to 20% of RAM, which can be smaller than Scout itself.
+    # A separate tmpfs retains the image across soft reboot and uses the
+    # normal 50% limit without reserving that memory up front.
+    mkdir -p "${ROOTFS_IMAGE_DIR}" || return 1
+    if ! mountpoint -q "${ROOTFS_IMAGE_DIR}"
+    then
+        mount -t tmpfs -o mode=0700,nodev,nosuid,noexec tmpfs "${ROOTFS_IMAGE_DIR}" 2> "${MOUNT_ERR}" || return 1
+    fi
 
     curl -sSf -o "${ROOTFS_IMAGE_FILE}" "${rootfsurl}" 2> "${CURL_ERR}"
     if (( $? != 0 ))

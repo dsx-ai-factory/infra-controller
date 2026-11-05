@@ -130,6 +130,37 @@ Indicates that NMX-C reported `Unhealthy` or `UnhealthyDbCorrupted` controller
 health for an NVLink domain. A `Healthy` report clears the probe. `Degraded` and
 `Unknown` do not generate a domain health report.
 
+## NVLink rack health probe identifiers
+
+### `NmxcUnreachable`
+
+Raised on a rack when the NVLink partition monitor could not use the rack's
+NMX-C for `nvlink_config.partition_monitor_unreachable_alert_after` consecutive
+passes (default `3`): no switch yielded an endpoint, the endpoint URL was
+invalid, the client could not be created, `Hello` failed, or `Hello` returned
+no usable domain UUID. The monitor writes a `Merge` report on the rack under the
+source `nvlink-partition-monitor`, with one alert whose `target` is the NMX-C
+endpoint URL the monitor resolved, absent when none resolved, and whose
+`message` names the failing step. The alert carries
+[`Hardware`](health_alert_classifications.md#hardware) only; it does not block
+allocations. A single failed pass is not reported, since a keepalive timeout on
+a loaded site is routine, and the stored alert is not rewritten while the outage
+continues. Only passes that contact the rack count: a rack skipped by change
+detection is not checked, so an outage on an otherwise unchanged rack is first
+noticed at its next full check, up to
+`nvlink_config.partition_monitor_full_check_interval` later (default `10m`),
+and the consecutive-pass count starts there. The first pass that reaches NMX-C
+removes the report, as does a rack that no longer has managed hosts for the
+monitor to reconcile. Only passes without a stored report count towards the
+threshold, so removing the report by hand during an ongoing outage suppresses
+it for another `partition_monitor_unreachable_alert_after` consecutive failed
+passes. The alert's `in_alert_since` is the first failed pass of the run that
+raised it, not the pass that wrote it. A report write that fails is retried on
+the next pass, including the removal of a report from a rack that has since
+recovered and is being skipped by change detection. Standalone chassis mapped
+through
+`nvlink_nmxc_endpoints` have no rack and receive no such alert.
+
 ## NVLink GPU health probe identifiers
 
 ### `NvlinkUnhealthy`
@@ -201,6 +232,40 @@ unhealthy GPU matching the host's inventory, the monitor re-asserts the alert
 with a new `in_alert_since` after manual removal. Use removal for resolved
 faults whose alerts the monitor can no longer clear, such as a replaced GPU or
 a host that has left the NVLink inventory.
+
+## NVLink isolation health probe identifiers
+
+A host whose aggregate health carries the `IsolateFromNvLinkPartitions`
+classification, for example from the admin CLI `compute-tray-due-for-swap`
+template, is marked for NVLink isolation. On each check of the host's machine
+group, the NVLink partition monitor removes the host's GPUs from every NVLink
+partition and records the progress as a `Merge` report under the source
+`nvlink-isolation`. The report states the membership NMX-C listed when the check
+started, so a host reads as isolated on the check after its removals complete.
+A check that applies changes is repeated on the next pass
+(`nvlink_config.monitor_run_interval`, default `60s`).
+
+The monitor rewrites the report only when the status changes. A failed write
+leaves the stored report unchanged, is logged with the machine ID, and keeps
+the machine group from being skipped until the next pass retries it. When the
+host is no longer marked, the monitor removes the report.
+
+See [Moving or Replacing a Compute Tray](../../manuals/nvlink_partitioning.md#moving-or-replacing-a-compute-tray)
+for the operator steps.
+
+### `NvlinkIsolationPending`
+
+An alert that names the GPUs NMX-C still lists in a partition, or states that
+isolation cannot be confirmed because the host's NVLink GPU inventory is empty
+or contains a GPU whose stored UID is `0`. The alert carries
+[`PreventAllocations`](health_alert_classifications.md#preventallocations) and
+[`SuppressExternalAlerting`](health_alert_classifications.md#suppressexternalalerting).
+
+### `NvlinkIsolated`
+
+A success that the monitor reports once the host's NVLink GPU inventory is
+known and NMX-C lists none of those GPUs in any partition. The report then has
+no alerts.
 
 ## DPU related health probe identifiers
 

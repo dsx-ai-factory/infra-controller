@@ -3,10 +3,9 @@
 
 .PHONY: test postgres-up postgres-down ensure-postgres postgres-wait clean check-source-headers fix-source-headers check-command-bundle
 .PHONY: build docker-build docker-build-local
-.PHONY: test-ipam test-site-agent test-site-manager test-workflow test-db test-api test-auth test-common test-cert-manager test-cli-commands test-site-workflow test-flow test-powershelf-manager test-nvswitch-manager test-proto test-sdk-simple test-mcp migrate core-mock-server-build core-mock-server-start core-mock-server-stop flow-mock-server-build flow-mock-server-start flow-mock-server-stop
+.PHONY: test-ipam test-site-agent test-site-manager test-workflow test-db test-api test-auth test-common test-cert-manager test-cli-commands test-site-workflow test-cli test-flow test-powershelf-manager test-nvswitch-manager test-proto test-sdk-simple test-mcp migrate core-mock-server-build core-mock-server-start core-mock-server-stop flow-mock-server-build flow-mock-server-start flow-mock-server-stop
 .PHONY: validate-openapi preview-openapi generate-client
-.PHONY: core-proto core-proto-clean core-proto-fetch core-proto-fmt core-protogen flow-proto flow-protogen tools-build tools-clean
-.PHONY: pre-commit-install pre-commit-run pre-commit-update
+.PHONY: core-proto core-proto-clean core-proto-fetch core-proto-fmt core-protogen flow-proto flow-protogen ipam-protogen tools-build tools-clean
 
 # CLI tool versions are pinned in go.mod's tool (...) stanza (Go 1.24+).
 # Tools that can be invoked directly use `go tool` so the exact pinned version
@@ -214,9 +213,12 @@ test-site-agent: core-mock-server-start flow-mock-server-start
 	cd site-agent/pkg/components && CGO_ENABLED=1 go test -race -p 1 ./... -count=1 ; \
 	ret=$$? ; cd ../../.. && $(MAKE) core-mock-server-stop flow-mock-server-stop ; exit $$ret
 
+# Optional package scope for the API and Flow test targets.
+TEST_PACKAGES ?= ./...
+
 test-api:
 	$(MAKE) ensure-postgres
-	cd api && go test -p 1 ./... -count=1
+	cd api && go test -p 1 $(TEST_PACKAGES) -count=1
 
 test-auth:
 	$(MAKE) ensure-postgres
@@ -235,6 +237,9 @@ test-cli-commands:
 test-site-workflow:
 	cd site-workflow && go test -p 1 ./... -count=1
 
+test-cli:
+	cd cli && go test -p 1 ./... -count=1
+
 test-flow:
 	$(MAKE) ensure-postgres
 	cd flow && \
@@ -243,7 +248,7 @@ test-flow:
 		DB_USER=$(POSTGRES_USER) \
 		DB_PASSWORD=$(POSTGRES_PASSWORD) \
 		DB_NAME=$(POSTGRES_DB) \
-		go test -p 1 ./... -count=1
+		go test -p 1 $(TEST_PACKAGES) -count=1
 
 test-powershelf-manager:
 	$(MAKE) ensure-postgres
@@ -271,7 +276,7 @@ test-sdk-simple:
 test-mcp:
 	cd mcp && go test -p 1 ./... -count=1
 
-test: test-ipam test-db test-api test-auth test-common test-cert-manager test-site-workflow test-site-manager test-workflow test-site-agent test-flow test-powershelf-manager test-nvswitch-manager test-proto test-sdk-simple test-mcp
+test: test-ipam test-db test-api test-auth test-common test-cert-manager test-site-workflow test-cli test-site-manager test-workflow test-site-agent test-flow test-powershelf-manager test-nvswitch-manager test-proto test-sdk-simple test-mcp
 
 build:
 	mkdir -p $(BUILD_DIR)
@@ -385,6 +390,13 @@ flow-protogen: .tools-stamp
 	echo "Generating protobuf for Flow"
 	cd proto/flow && PATH="$(TOOLS_DIR):$$PATH" $(BUF) generate
 	go fmt ./...
+
+# buf.gen.yaml pins the remote buf.build plugins that produced the checked-in
+# ipam/api/ code, so this target needs network access to buf.build.
+ipam-protogen:
+	echo "Generating protobuf for IPAM"
+	cd ipam/proto && $(BUF) format -w && $(BUF) lint && $(BUF) generate
+	python3 scripts/check_source_headers.py --fix
 
 # =============================================================================
 # Kind Local Deployment Targets
@@ -922,23 +934,3 @@ lint-openapi:
 preview-openapi:
 	@echo "Starting Redoc UI at http://127.0.0.1:8090"
 	docker run -it --rm -p 8090:80 -v ./openapi/spec.yaml:/usr/share/nginx/html/openapi.yaml -e SPEC_URL=openapi.yaml -e REDOC_OPTIONS="expand-responses=200,201 schemas-expansion-level=2" redocly/redoc:v2.5.1
-
-# =============================================================================
-# Pre-commit Hooks (TruffleHog Secret Detection)
-# =============================================================================
-
-# Install pre-commit hooks
-pre-commit-install:
-	@command -v pre-commit >/dev/null 2>&1 || { echo "Installing pre-commit..."; pip install pre-commit; }
-	@command -v trufflehog >/dev/null 2>&1 || { echo "Installing trufflehog..."; brew install trufflehog || go install github.com/trufflesecurity/trufflehog/v3@latest; }
-	pre-commit install
-	pre-commit install --hook-type pre-push
-	@echo "Pre-commit hooks installed successfully!"
-
-# Run pre-commit on all files
-pre-commit-run:
-	pre-commit run --all-files
-
-# Update pre-commit hooks to latest versions
-pre-commit-update:
-	pre-commit autoupdate

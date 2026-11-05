@@ -81,10 +81,10 @@ const ROTATED_PATH: &str = "/redfish/v1/Rotated";
 const REJECTING_PATH: &str = "/redfish/v1/UpdateService/rejecting";
 /// Answers after [`SLOW_ANSWER_DELAY`].
 const SLOW_PATH: &str = "/redfish/v1/Slow";
-/// Answers after two and a half seconds.
+/// Answers after [`BRIEFLY_SLOW_DELAY`].
 const BRIEFLY_SLOW_PATH: &str = "/redfish/v1/BrieflySlow";
 /// Rejects the cached credential at once, and answers [`FRESH_PASSWORD`]
-/// after two and a half seconds.
+/// after [`BRIEFLY_SLOW_DELAY`].
 const BRIEFLY_SLOW_ROTATED_PATH: &str = "/redfish/v1/BrieflySlowRotated";
 /// Rejects the cached credential at once, and answers [`FRESH_PASSWORD`]
 /// after [`SLOW_ANSWER_DELAY`].
@@ -92,11 +92,14 @@ const SLOW_ROTATED_PATH: &str = "/redfish/v1/SlowRotated";
 /// Answers at once with part of its body, and sends the rest after
 /// [`SLOW_ANSWER_DELAY`].
 const SLOW_BODY_PATH: &str = "/redfish/v1/SlowBody";
-/// Ten times [`QUICK_CLASS`]'s budget, and a third of the default budget:
+/// Far longer than [`QUICK_CLASS`]'s budget, and shorter than the default:
 /// a request held to its class's budget is cut off long before the BMC
 /// answers, and one held to the default budget gets the answer. A test
 /// waits only for the budget, never for this.
 const SLOW_ANSWER_DELAY: Duration = Duration::from_secs(20);
+/// Longer than a queued first attempt has left, but shorter than a fresh
+/// replay's budget, so the same BMC response distinguishes the two.
+const BRIEFLY_SLOW_DELAY: Duration = Duration::from_millis(500);
 
 fn fake_bmc_mac() -> MacAddress {
     MacAddress::new([0x02, 0, 0, 0, 0, 0x08])
@@ -187,13 +190,13 @@ async fn fake_bmc_handler(
         }
         (Method::GET, ROTATED_PATH) => StatusCode::UNAUTHORIZED.into_response(),
         (Method::GET, BRIEFLY_SLOW_PATH) => {
-            tokio::time::sleep(Duration::from_millis(2500)).await;
+            tokio::time::sleep(BRIEFLY_SLOW_DELAY).await;
             SYSTEM_BODY.into_response()
         }
         (Method::GET, BRIEFLY_SLOW_ROTATED_PATH)
             if authorization == Some(basic(FRESH_PASSWORD).as_str()) =>
         {
-            tokio::time::sleep(Duration::from_millis(2500)).await;
+            tokio::time::sleep(BRIEFLY_SLOW_DELAY).await;
             SYSTEM_BODY.into_response()
         }
         (Method::GET, BRIEFLY_SLOW_ROTATED_PATH) => StatusCode::UNAUTHORIZED.into_response(),
@@ -1527,8 +1530,8 @@ async fn requests_the_proxy_does_not_deliver() {
 
 /// A class for `GET`s of the slow paths, and of [`ROTATED_PATH`], whose
 /// replay can wait on nico-api. Its budget is far shorter than
-/// [`SLOW_ANSWER_DELAY`], and long enough for an attempt to reach the BMC
-/// even on a loaded machine.
+/// [`SLOW_ANSWER_DELAY`]. Credential lookup and admission must leave at
+/// least half the budget for a timeout to count against the BMC's breaker.
 const QUICK_CLASS: &str = r#"
     [[class]]
     name = "quick"
@@ -1538,7 +1541,7 @@ const QUICK_CLASS: &str = r#"
         "GET /redfish/v1/SlowBody",
         "GET /redfish/v1/Rotated",
     ]
-    upstream_timeout = "2s"
+    upstream_timeout = "800ms"
 "#;
 
 /// How nico-api answers the proxy's lookups of the BMC's credentials.
@@ -1763,7 +1766,7 @@ const ONE_AT_A_TIME: &str = r#"
     name = "one_at_a_time"
     match = ["GET /redfish/v1/Systems/System_0"]
     max_in_flight = 1
-    upstream_timeout = "2s"
+    upstream_timeout = "800ms"
 "#;
 
 /// A request holds its slot at its BMC until its response body has been
@@ -1790,7 +1793,9 @@ async fn a_slot_is_held_until_the_response_body_is_sent() {
     drop(unread);
     let sent_at = tokio::time::Instant::now();
     let after = answer(&state, get(SYSTEM_PATH)).await.status().as_u16();
-    let after_at_once = sent_at.elapsed() < Duration::from_secs(1);
+    // A dropped body must release its slot before the two-budget hold
+    // bound reclaims it; keep the promptness bound below one class budget.
+    let after_at_once = sent_at.elapsed() < Duration::from_millis(400);
 
     assert_eq!(
         (
@@ -1804,8 +1809,8 @@ async fn a_slot_is_held_until_the_response_body_is_sent() {
     );
 }
 
-/// What a request for `path` gets from a class of one at a time with a
-/// 3-second budget, once it has waited 1.5 seconds for its slot.
+/// What a request for `path` gets from a class of one at a time with an
+/// 800-millisecond budget, once it has waited 400 milliseconds for its slot.
 async fn after_waiting_for_a_slot(path: &'static str) -> u16 {
     let _metrics = MetricsCapture::start();
     let (addr, _bmc) = spawn_fake_bmc();
@@ -1818,7 +1823,7 @@ async fn after_waiting_for_a_slot(path: &'static str) -> u16 {
             name = "one_at_a_time"
             match = ["GET {SYSTEM_PATH}", "GET {BRIEFLY_SLOW_PATH}", "GET {BRIEFLY_SLOW_ROTATED_PATH}"]
             max_in_flight = 1
-            upstream_timeout = "3s"
+            upstream_timeout = "800ms"
             "#
         ),
         root_password(),
@@ -1829,7 +1834,7 @@ async fn after_waiting_for_a_slot(path: &'static str) -> u16 {
     let unread = answer(&state, get(SYSTEM_PATH)).await;
     let waiting = answer(&state, get(path));
     let release = async {
-        tokio::time::sleep(Duration::from_millis(1500)).await;
+        tokio::time::sleep(Duration::from_millis(400)).await;
         drop(unread);
     };
     let (response, ()) = tokio::join!(waiting, release);
@@ -1838,8 +1843,8 @@ async fn after_waiting_for_a_slot(path: &'static str) -> u16 {
 
 /// Time a request spends waiting for its slot comes out of its first
 /// attempt's budget, and not out of a replay's with fresh credentials. With
-/// 1.5 of its 3 seconds left, a BMC that answers in 2.5 seconds is cut off,
-/// unless it answers a replay.
+/// at most 400 of its 800 milliseconds left, a BMC that answers in 500
+/// milliseconds is cut off, unless it answers a replay.
 #[tokio::test]
 async fn waiting_for_a_slot_spends_the_first_attempts_budget() {
     check_cases_async(
@@ -1876,7 +1881,7 @@ async fn a_replay_keeps_its_slot() {
             name = "one_at_a_time"
             match = ["GET {SYSTEM_PATH}", "GET {ROTATED_PATH}"]
             max_in_flight = 1
-            upstream_timeout = "2s"
+            upstream_timeout = "800ms"
             "#
         ),
         root_password(),
@@ -2053,9 +2058,10 @@ async fn what_trips_a_bmcs_breaker() {
 }
 
 /// A request cut short by its wait for a slot does not count against the
-/// BMC: the BMC answers in 2.5 seconds, a class of one at a time has 3, and
-/// the request that waited for the first one's slot runs out of time. With
-/// a breaker that opens on one failure, the next request is still served.
+/// BMC: the unread first response holds the slot for 500 milliseconds,
+/// leaving at most 300 of the next request's 800-millisecond budget. That
+/// is below the half-budget cutoff for a BMC failure, so even a breaker
+/// that opens on one failure still serves the request after it.
 #[tokio::test]
 async fn a_timeout_from_waiting_is_not_the_bmcs() {
     let metrics = MetricsCapture::start();
@@ -2067,9 +2073,9 @@ async fn a_timeout_from_waiting_is_not_the_bmcs() {
             r#"
             [[class]]
             name = "one_at_a_time"
-            match = ["GET {BRIEFLY_SLOW_PATH}"]
+            match = ["GET {SYSTEM_PATH}", "GET {BRIEFLY_SLOW_PATH}"]
             max_in_flight = 1
-            upstream_timeout = "3s"
+            upstream_timeout = "800ms"
 
             [admission.breaker]
             window = 1
@@ -2081,15 +2087,17 @@ async fn a_timeout_from_waiting_is_not_the_bmcs() {
         "follow_same_origin",
     )
     .await;
-    let first = exchange(&metrics, &state, get(BRIEFLY_SLOW_PATH));
-    let waiting = async {
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        exchange(&metrics, &state, get(BRIEFLY_SLOW_PATH)).await
+    let unread = answer(&state, get(SYSTEM_PATH)).await;
+    let first_status = unread.status().as_u16();
+    let waiting = exchange(&metrics, &state, get(BRIEFLY_SLOW_PATH));
+    let release = async {
+        tokio::time::sleep(BRIEFLY_SLOW_DELAY).await;
+        drop(unread);
     };
-    let (first, waiting) = tokio::join!(first, waiting);
+    let (waiting, ()) = tokio::join!(waiting, release);
     tokio::time::sleep(Duration::from_millis(20)).await;
     let next = exchange(&metrics, &state, get(BRIEFLY_SLOW_PATH)).await;
-    assert_eq!((first.status, waiting.status, next.status), (200, 502, 200));
+    assert_eq!((first_status, waiting.status, next.status), (200, 502, 200));
 }
 
 /// Only the BMC's answer to a request's last attempt counts: the 401 that
@@ -2120,9 +2128,10 @@ async fn only_the_last_attempts_answer_counts() {
     assert_eq!((replayed.status, next.status), (200, 200));
 }
 
-/// The misses counted for a class with a one-second latency target, judged
-/// on each answer, after one request for `path` with a three-second budget.
-async fn slo_misses_after(path: &'static str) -> f64 {
+/// The misses counted for a class with a 200-millisecond latency target,
+/// judged on each answer, and the HTTP status after one request for `path`
+/// with an 800-millisecond budget.
+async fn slo_misses_after(path: &'static str) -> (u16, f64) {
     let metrics = MetricsCapture::start();
     let (addr, _bmc) = spawn_fake_bmc();
     let state = proxy_configured(
@@ -2139,20 +2148,23 @@ async fn slo_misses_after(path: &'static str) -> f64 {
             [[class]]
             name = "targeted"
             match = ["GET {SYSTEM_PATH}", "GET {BRIEFLY_SLOW_PATH}", "GET {SLOW_PATH}"]
-            upstream_timeout = "3s"
-            slo = {{ latency = "1s" }}
+            upstream_timeout = "800ms"
+            slo = {{ latency = "200ms" }}
             "#
         ),
         root_password(),
         "follow_same_origin",
     )
     .await;
-    exchange(&metrics, &state, get(path)).await;
+    let answer = exchange(&metrics, &state, get(path)).await;
     // The BMC's runtime weighs the answer once it sees the slot freed.
     tokio::time::sleep(Duration::from_millis(20)).await;
-    metrics.counter_delta(
-        "carbide_bmc_proxy_slo_missed_total",
-        &[("class", "targeted")],
+    (
+        answer.status,
+        metrics.counter_delta(
+            "carbide_bmc_proxy_slo_missed_total",
+            &[("class", "targeted")],
+        ),
     )
 }
 
@@ -2163,14 +2175,14 @@ async fn latency_counts_until_the_bmc_answers() {
     check_cases_async(
         [
             Case {
-                scenario: "the BMC answers after 2.5 seconds",
+                scenario: "the BMC answers after 500 milliseconds",
                 input: BRIEFLY_SLOW_PATH,
-                expect: Yields(1.0),
+                expect: Yields((200, 1.0)),
             },
             Case {
                 scenario: "the BMC does not answer within the budget",
                 input: SLOW_PATH,
-                expect: Yields(1.0),
+                expect: Yields((502, 1.0)),
             },
         ],
         |path| async move { Ok::<_, Infallible>(slo_misses_after(path).await) },

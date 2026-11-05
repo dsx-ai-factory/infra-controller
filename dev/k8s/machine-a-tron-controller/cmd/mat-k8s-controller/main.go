@@ -133,7 +133,8 @@ func parseOptions(args []string, lookupEnv func(string) (string, bool)) (*option
 	fs.DurationVar(&opts.healthStaleAfter, "health-stale-after", durationOrDefault("HEALTH_STALE_AFTER", defaultHealthStaleAfter),
 		"How long the reconcile loop may go without completing a pass before /healthz reports a stall (0 disables the check)")
 	fs.BoolVar(&opts.enableStateAnnotations, "enable-state-annotations", envBoolOrDefault("ENABLE_STATE_ANNOTATIONS", false),
-		"Include machine state annotations (api-state, power-state) on Services; causes frequent updates")
+		"Include power-state annotations on individual device Services, including fallbacks in pod mode; "+
+			"shared per-pod Services omit them; causes frequent updates")
 	var serviceGranularity string
 	fs.StringVar(&serviceGranularity, "service-granularity", envOrDefault("SERVICE_GRANULARITY", string(controller.ServiceGranularityDevice)),
 		"Services per machine-a-tron pod: \"device\" publishes one Service per BMC and per switch NVOS endpoint, "+

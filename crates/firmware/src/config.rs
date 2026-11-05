@@ -35,6 +35,18 @@ pub struct FirmwareConfigSnapshot {
 }
 
 impl FirmwareConfigSnapshot {
+    /// Apply runtime configurations after this catalog's static entries, in
+    /// iteration order. This composition performs no filesystem reads.
+    pub fn with_overrides(
+        mut self,
+        overrides: impl IntoIterator<Item = HostFirmwareConfig>,
+    ) -> Self {
+        for firmware in overrides {
+            merge_firmware_override(&mut self.data, firmware);
+        }
+        self
+    }
+
     pub fn values(&self) -> impl Iterator<Item = &Firmware> {
         self.data.values()
     }
@@ -159,11 +171,7 @@ impl FirmwareConfig {
         &self,
         overrides: impl IntoIterator<Item = HostFirmwareConfig>,
     ) -> FirmwareConfigSnapshot {
-        let mut snapshot = self.create_snapshot();
-        for firmware in overrides {
-            merge_firmware_override(&mut snapshot.data, firmware);
-        }
-        snapshot
+        self.create_snapshot().with_overrides(overrides)
     }
 
     pub fn config_update_time(&self) -> Option<std::time::SystemTime> {

@@ -160,6 +160,14 @@ async fn authenticated_callers(pool: sqlx::PgPool) {
     let cancel = CancellationToken::new();
     let _cancel_guard = cancel.clone().drop_guard();
     let mut tasks = JoinSet::new();
+    let firmware_artifact_cache = carbide_firmware::FirmwareArtifactCache::new(
+        dir.path().join("firmware-artifacts"),
+        4 * 1024 * 1024 * 1024,
+        carbide_firmware::FirmwareDownloader::new(),
+        cancel.clone(),
+        &mut tasks,
+    )
+    .unwrap();
     let address = crate::listener::start(
         &mut tasks,
         api.clone(),
@@ -168,6 +176,7 @@ async fn authenticated_callers(pool: sqlx::PgPool) {
         &config.auth,
         env.test_meter.meter(),
         None,
+        firmware_artifact_cache,
         cancel.clone(),
     )
     .await

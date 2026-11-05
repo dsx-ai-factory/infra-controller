@@ -38,7 +38,6 @@ func TestClient_GetMachinesStatus(t *testing.T) {
 					{
 						MatID:      "host-uuid-1",
 						MachineID:  ptr("machine-123"),
-						APIState:   "Ready",
 						PowerState: "On",
 						BMC: BMCStatus{
 							IP: ptr("192.168.1.100"),
@@ -51,7 +50,6 @@ func TestClient_GetMachinesStatus(t *testing.T) {
 							{
 								MatID:      "dpu-uuid-1",
 								MachineID:  ptr("dpu-456"),
-								APIState:   "Ready",
 								PowerState: "On",
 								BMC: BMCStatus{
 									IP: ptr("192.168.1.101"),

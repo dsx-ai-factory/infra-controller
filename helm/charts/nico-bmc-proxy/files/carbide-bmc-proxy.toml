@@ -60,6 +60,7 @@ additional_issuer_cns = []
   "DELETE /redfish/v1/SessionService/Sessions/*",
   "GET /redfish/v1/Systems",
   "GET /redfish/v1/Systems/HGX_Baseboard_0",
+  "POST /redfish/v1/Systems/HGX_Baseboard_0/Actions/Oem/NvidiaComputerSystem.SetProcessorPowerLimits",
   "GET /redfish/v1/Systems/HGX_Baseboard_0/Processors",
   "GET /redfish/v1/Systems/HGX_Baseboard_0/Processors/CPU_*",
   "GET,PATCH /redfish/v1/Systems/HGX_Baseboard_0/Processors/CPU_*/EnvironmentMetrics",

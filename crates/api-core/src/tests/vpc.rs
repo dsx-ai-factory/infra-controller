@@ -421,16 +421,17 @@ async fn vpc_creation_rolls_back_allocation_on_entity_write_failure(
                     .expect_err("injected VPC insert failure");
                 assert_eq!(error.code(), tonic::Code::Internal, "{name}");
                 assert_eq!(error.message(), "internal database error", "{name}");
-                std::error::Error::source(&error)
+                let source = std::error::Error::source(&error)
                     .expect("database status source")
-                    .source()
-                    .expect("original database error")
-                    .downcast_ref::<db::DatabaseError>()
-                    .expect("typed database error")
-                    .to_string()
+                    .downcast_ref::<crate::errors::CarbideErrorWithLocation>()
+                    .expect("Carbide error source");
+                let crate::CarbideError::DBError(annotated) = &source.error else {
+                    panic!("expected the original database error: {source:?}");
+                };
+                annotated.to_string()
             }
             Creation::Configured => db_init::create_initial_vpcs(
-                &env.pool,
+                &env.api,
                 &HashMap::from([(
                     name.to_string(),
                     VpcDefinition {
@@ -441,8 +442,6 @@ async fn vpc_creation_rolls_back_allocation_on_entity_write_failure(
                         vni: None,
                     },
                 )]),
-                &env.common_pools.ethernet.pool_vpc_vni,
-                &env.api.resource_pool_registry,
             )
             .await
             .expect_err("injected configured VPC insert failure")
@@ -1108,6 +1107,12 @@ async fn vpc_binding_read_failures_preserve_allocations_and_report_errors(
     let vpcs_before: Vec<serde_json::Value> = sqlx::query_scalar(vpc_query)
         .fetch_all(&mut *observer)
         .await?;
+    let configured_api = TestApiBuilder::new(
+        env.pool.clone(),
+        env.common_pools.clone(),
+        env.api.work_lock_manager_handle.clone(),
+    )
+    .build();
     // Keep inventory readable so routing gets as far as loading the binding.
     sqlx::query("ALTER TABLE resource_pool_binding RENAME TO unavailable_resource_pool_binding")
         .execute(&env.pool)
@@ -1146,7 +1151,7 @@ async fn vpc_binding_read_failures_preserve_allocations_and_report_errors(
                     .await
                     .map(drop),
                 Allocation::ConfiguredCreation => db_init::create_initial_vpcs(
-                    &env.pool,
+                    &configured_api,
                     &HashMap::from([(
                         "binding-read-configured".to_string(),
                         VpcDefinition {
@@ -1157,8 +1162,6 @@ async fn vpc_binding_read_failures_preserve_allocations_and_report_errors(
                             vni: None,
                         },
                     )]),
-                    &env.common_pools.ethernet.pool_vpc_vni,
-                    &ResourcePoolRegistry::default(),
                 )
                 .await
                 .map_err(tonic::Status::from),
@@ -4225,13 +4228,7 @@ async fn initial_vpc_inline_overrides_are_rejected_before_existing_vpc_check(
             vni: None,
         },
     )]);
-    db_init::create_initial_vpcs(
-        &env.pool,
-        &initial_vpcs,
-        env.common_pools.ethernet.pool_vpc_vni.as_ref(),
-        &env.api.resource_pool_registry,
-    )
-    .await?;
+    db_init::create_initial_vpcs(&env.api, &initial_vpcs).await?;
 
     // Re-submit the same name with an override and a valid-looking named base.
     let vpcs = HashMap::from([(
@@ -4249,14 +4246,9 @@ async fn initial_vpc_inline_overrides_are_rejected_before_existing_vpc_check(
     )]);
 
     // Reject the unsupported override before the existing-VPC short-circuit.
-    let error = db_init::create_initial_vpcs(
-        &env.pool,
-        &vpcs,
-        env.common_pools.ethernet.pool_vpc_vni.as_ref(),
-        &env.api.resource_pool_registry,
-    )
-    .await
-    .expect_err("seeded inline overrides must always be rejected");
+    let error = db_init::create_initial_vpcs(&env.api, &vpcs)
+        .await
+        .expect_err("seeded inline overrides must always be rejected");
     assert!(
         error
             .to_string()

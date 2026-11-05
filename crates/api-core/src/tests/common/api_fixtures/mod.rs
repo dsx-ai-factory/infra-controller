@@ -222,7 +222,6 @@ pub(in crate::tests) struct TestEnvOverrides {
     pub(in crate::tests) nmxc_fail_after_n_creates: Option<usize>,
     pub(in crate::tests) compute_allocation_enforcement: Option<ComputeAllocationEnforcement>,
     pub(in crate::tests) nmxc_simulator: Option<bool>,
-    pub(in crate::tests) rack_component_manager_enabled: Option<bool>,
 
     /// Optional compute-tray backend injected into the component manager.
     pub(in crate::tests) compute_tray_manager:
@@ -339,9 +338,6 @@ pub(crate) struct TestEnv {
     pub(in crate::tests) test_component_manager:
         Option<Arc<component_manager::component_manager::ComponentManager>>,
 
-    /// Firmware-object fetcher used by this environment's rack state handler.
-    pub(in crate::tests) firmware_object_fetcher: Arc<dyn FirmwareObjectFetcher>,
-
     _drop_guard: DropGuard,
     // Background tasks are spawned here, hold it so they don't get dropped.
     _join_set: JoinSet<()>,
@@ -411,31 +407,6 @@ impl TestEnv {
         )
     }
 
-    /// Creates an instance of RackStateHandlerServices that are suitable for this
-    /// test environment
-    pub(in crate::tests) fn rack_state_handler_services(&self) -> RackStateHandlerServices {
-        RackStateHandlerServices {
-            db_pool: self.pool.clone(),
-            site_config: RackConfig {
-                rms: self.config.rms.clone(),
-                rack_validation_config: self.config.rack_validation_config.clone(),
-                rack_profiles: self.config.rack_profiles.clone(),
-            }
-            .into(),
-            nvos_update_manager: test_nvos_update_manager(&self.rms_sim),
-            rack_firmware_update_manager: test_rack_firmware_update_manager(&self.rms_sim),
-            credential_manager: self.test_credential_manager.clone(),
-            component_manager: self.test_component_manager.clone(),
-            switch_mtls_services: self
-                .config
-                .switch_state_controller
-                .switch_mtls_services
-                .clone(),
-            firmware_object_fetcher: self.firmware_object_fetcher.clone(),
-            per_object_metrics_registry: self.per_object_metrics_registry(),
-        }
-    }
-
     /// Generates a config for Host+DPU pair
     pub(in crate::tests) fn managed_host_config(&self) -> ManagedHostConfig {
         ManagedHostConfig::default()
@@ -482,6 +453,7 @@ impl TestEnv {
             ManagedHostState::Ready => state.clone(),
             ManagedHostState::BootConfiguring { .. } => state.clone(),
             ManagedHostState::Maintenance { .. } => state.clone(),
+            ManagedHostState::NicFirmwareUpdating { .. } => state.clone(),
             ManagedHostState::Assigned { .. } => state.clone(),
             ManagedHostState::WaitingForCleanup { .. } => state.clone(),
             ManagedHostState::Created => state.clone(),
@@ -587,11 +559,35 @@ impl TestEnv {
         ID: MachineIdSubtypeTrait,
         db::DatabaseError: From<<ID as TryFrom<MachineId>>::Error>,
     {
+        self.run_machine_state_controller_iteration_until_state_condition_with_requeue(
+            host_machine_id,
+            max_iterations,
+            true,
+            state_check,
+        )
+        .await
+    }
+
+    /// Disabling requeue lets fixtures observe intermediate states before the
+    /// controller handles the next transition.
+    pub(in crate::tests) async fn run_machine_state_controller_iteration_until_state_condition_with_requeue<
+        ID,
+    >(
+        &self,
+        host_machine_id: &ID,
+        max_iterations: u32,
+        allow_requeue: bool,
+        state_check: impl Fn(&Machine<ID>) -> bool,
+    ) -> ManagedHostState
+    where
+        ID: MachineIdSubtypeTrait,
+        db::DatabaseError: From<<ID as TryFrom<MachineId>>::Error>,
+    {
         for _ in 0..max_iterations {
             self.machine_state_controller
                 .lock()
                 .await
-                .run_single_iteration()
+                .run_single_iteration_ext(allow_requeue)
                 .boxed()
                 .await;
 
@@ -1457,7 +1453,7 @@ async fn create_test_env_with_overrides_inner(
     let eth_virt_data = EthVirtData {
         asn: 65535,
         dhcp_servers: vec![FIXTURE_DHCP_RELAY_ADDRESS.parse().unwrap()],
-        deny_prefixes: vec![],
+        deny_prefixes: config.deny_prefixes.clone(),
         site_fabric_prefixes,
     };
 
@@ -1850,11 +1846,7 @@ async fn create_test_env_with_overrides_inner(
                 nvos_update_manager: test_nvos_update_manager(&rms_sim),
                 rack_firmware_update_manager: test_rack_firmware_update_manager(&rms_sim),
                 credential_manager: credential_manager.clone(),
-                component_manager: if overrides.rack_component_manager_enabled.unwrap_or(true) {
-                    test_component_manager.clone()
-                } else {
-                    None
-                },
+                component_manager: test_component_manager.clone(),
                 switch_mtls_services: config.switch_state_controller.switch_mtls_services.clone(),
                 firmware_object_fetcher: firmware_object_fetcher.clone(),
                 per_object_metrics_registry: per_object_metrics_registry.clone(),
@@ -1911,6 +1903,7 @@ async fn create_test_env_with_overrides_inner(
         test_meter.meter(),
         api.endpoint_exploration_service.clone(),
         api.bmc_client.clone(),
+        api.resource_pool_registry.clone(),
         common_pools.clone(),
         api.work_lock_manager_handle.clone(),
         site_explorer_rack_profiles,
@@ -2025,7 +2018,6 @@ async fn create_test_env_with_overrides_inner(
         test_credential_manager: credential_manager.clone(),
         rms_sim,
         test_component_manager,
-        firmware_object_fetcher,
         _drop_guard: cancel_token.drop_guard(),
         _join_set: join_set,
     }
@@ -2630,6 +2622,7 @@ pub(in crate::tests) async fn forge_agent_control(
     env.api
         .forge_agent_control(Request::new(rpc::forge::ForgeAgentControlRequest {
             machine_id: Some(machine_id.into()),
+            nic_firmware_site_cache_supported: false,
         }))
         .await
         .unwrap()

@@ -36,8 +36,9 @@ use tonic::transport::{Channel, Endpoint, Uri};
 use tower::service_fn;
 
 use crate::firmware::config::{FirmwareFlasherProfile, FirmwareUpdateContext};
+use crate::firmware::core_download::CoreFirmwareDownloadConfig;
 
-pub(super) const PROTOCOL_VERSION: u32 = 4;
+pub(super) const PROTOCOL_VERSION: u32 = 5;
 pub(super) const MESSAGE_LIMIT: usize = 128 * 1024;
 // Local admission and receipt reads are short operations. This cumulative bound
 // includes channel readiness and reconnection, not the firmware job's lifetime.
@@ -189,6 +190,7 @@ impl FirmwareSupervisorClient {
             observer_exit_behavior: ObserverExitBehaviorPb::from(observer_exit_behavior).into(),
             expected_identity: Some(self.identity.clone().into()),
             update_context: None,
+            core_download_config: None,
             expected_supervisor_instance_id: None,
         };
         self.submit_request(request).await
@@ -222,6 +224,7 @@ impl FirmwareSupervisorClient {
             context,
             observer_exit_behavior,
             None,
+            None,
         )
         .await
     }
@@ -247,6 +250,31 @@ impl FirmwareSupervisorClient {
             context,
             observer_exit_behavior,
             Some(expected_supervisor_instance_id),
+            None,
+        )
+        .await
+    }
+
+    /// Submit a SiteCache update using Scout's resolved Core transport settings.
+    /// These runtime settings are not fingerprinted or journaled. The instance
+    /// token guards admission after a read-first lookup, as for other updates.
+    /// A matching receipt never replaces the accepted worker's configuration.
+    pub async fn submit_update_via_core(
+        &mut self,
+        operation_id: &str,
+        profile: FirmwareFlasherProfile,
+        context: FirmwareUpdateContext,
+        observer_exit_behavior: ObserverExitBehavior,
+        expected_supervisor_instance_id: &str,
+        config: CoreFirmwareDownloadConfig,
+    ) -> Result<FirmwareOperation, FirmwareSupervisorClientError> {
+        self.submit_update_with_instance(
+            operation_id,
+            profile,
+            context,
+            observer_exit_behavior,
+            Some(expected_supervisor_instance_id),
+            Some(config),
         )
         .await
     }
@@ -258,6 +286,7 @@ impl FirmwareSupervisorClient {
         context: FirmwareUpdateContext,
         observer_exit_behavior: ObserverExitBehavior,
         expected_supervisor_instance_id: Option<&str>,
+        core_download_config: Option<CoreFirmwareDownloadConfig>,
     ) -> Result<FirmwareOperation, FirmwareSupervisorClientError> {
         if expected_supervisor_instance_id.is_some_and(|id| !is_valid_supervisor_instance_id(id)) {
             return Err(FirmwareSupervisorClientError::InvalidRequest(
@@ -274,6 +303,12 @@ impl FirmwareSupervisorClient {
             expected_identity: Some(self.identity.clone().into()),
             update_context: Some(context.into()),
             expected_supervisor_instance_id: expected_supervisor_instance_id.map(str::to_owned),
+            core_download_config: core_download_config
+                .map(TryInto::try_into)
+                .transpose()
+                .map_err(|error: crate::firmware::error::FirmwareError| {
+                    FirmwareSupervisorClientError::InvalidRequest(error.to_string())
+                })?,
         })
         .await
     }
@@ -413,6 +448,10 @@ impl From<FirmwareUpdateContext> for rpc::protos::firmware_supervisor::FirmwareU
     fn from(context: FirmwareUpdateContext) -> Self {
         Self {
             phase_id: context.phase_id,
+            delivery_mode: rpc::protos::mlx_device::FirmwareDeliveryMode::from(
+                context.delivery_mode,
+            )
+            .into(),
             expected_digests: Some(context.expected_digests.into()),
             expected_device: context.expected_device.map(Into::into),
         }
@@ -676,6 +715,7 @@ firmware_url = "https://host/image.bin"
                 )
                 .expect("parse valid checked profile");
                 let context = FirmwareUpdateContext {
+                    delivery_mode: Default::default(),
                     phase_id: "dispatch".into(),
                     expected_digests: FirmwareArtifactDigests {
                         image_sha256: [0; 32],

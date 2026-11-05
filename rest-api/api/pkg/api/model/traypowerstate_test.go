@@ -36,6 +36,22 @@ func TestAPITrayPowerState_FromProto(t *testing.T) {
 		decodeSDK bool
 	}{
 		{
+			name:      "graceful reboot mode survives the REST and SDK boundary",
+			decodeSDK: true,
+			mutate: func(p *flowv1.TrayPowerDetails) {
+				action := p.Operations.Actions.GetValue().Actions[0]
+				action.Operation = corev1.ComponentPowerActionOperation_COMPONENT_POWER_ACTION_OPERATION_RESET
+				action.Graceful = cutil.GetPtr(true)
+			},
+			check: func(t *testing.T, got APITrayPowerState, encoded string) {
+				require.NotEmpty(t, got.Operations.Actions)
+				assert.Equal(t, APIPowerActionOperation("Reset"), got.Operations.Actions[0].Operation)
+				require.NotNil(t, got.Operations.Actions[0].Graceful)
+				assert.True(t, *got.Operations.Actions[0].Graceful)
+				assert.Contains(t, encoded, `"graceful":true`)
+			},
+		},
+		{
 			// Keep every recorded field, including false, empty string and non-power context.
 			name:      "complete independent sections",
 			decodeSDK: true,

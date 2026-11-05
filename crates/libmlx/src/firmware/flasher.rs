@@ -33,6 +33,7 @@ use crate::device::discovery::{
 use crate::firmware::config::{
     FirmwareFlasherProfile, FirmwareSpec, FlashSpec, PostResetVerificationPolicy,
 };
+use crate::firmware::core_download::{CoreArtifactRole, CoreFirmwareDelivery};
 use crate::firmware::error::{
     AttemptError, FirmwareApplyError, FirmwareError, FirmwarePhase, FirmwareResult,
 };
@@ -176,6 +177,7 @@ pub struct FirmwareFlasher {
     progress: Option<Arc<dyn FirmwareProgress>>,
     preparation_cancel: Option<(String, watch::Receiver<Option<String>>)>,
     checked_update: bool,
+    core_delivery: Option<CoreFirmwareDelivery>,
     expected_device: Option<MlxDeviceSelector>,
 }
 
@@ -207,6 +209,7 @@ impl FirmwareFlasher {
             progress: None,
             preparation_cancel: None,
             checked_update: false,
+            core_delivery: None,
             expected_device: None,
         })
     }
@@ -232,6 +235,14 @@ impl FirmwareFlasher {
         self
     }
 
+    /// Use the accepted operation's Core transport without replacing its frozen
+    /// source identity or the shared staging, hashing and preflight pipeline.
+    #[cfg(target_os = "linux")]
+    pub(super) fn with_core_delivery(mut self, delivery: CoreFirmwareDelivery) -> Self {
+        self.core_delivery = Some(delivery);
+        self
+    }
+
     /// `with_preparation_cancel` permits dropping pre-mutation staging and
     /// interrupting verification retry waits. In-flight tools remain awaited.
     /// The operation owner sends this signal after persisting cancellation.
@@ -250,6 +261,44 @@ impl FirmwareFlasher {
     pub fn with_dry_run(mut self, dry_run: bool) -> Self {
         self.dry_run = dry_run;
         self
+    }
+
+    /// Remote sources resolve into this owned directory, while local sources return
+    /// their original path. Copy those local bytes too so later phases use the staged
+    /// input rather than a source the caller could replace between commands.
+    async fn stage_source(
+        &self,
+        source: &FirmwareSource,
+        directory: &Path,
+        role: CoreArtifactRole,
+    ) -> FirmwareResult<PathBuf> {
+        tokio::fs::create_dir(directory).await?;
+        let resolved = if let Some(delivery) = &self.core_delivery {
+            let FirmwareSource::Http {
+                url,
+                credentials: None,
+            } = source
+            else {
+                return Err(FirmwareError::ConfigError(
+                    "core delivery requires an anonymous HTTP(S) source identity".into(),
+                ));
+            };
+            delivery.resolve(url, directory, role).await?
+        } else if self.checked_update {
+            source.resolve_for_update(directory).await?
+        } else {
+            source.resolve(directory).await?
+        };
+        check_readable_file(&resolved).await?;
+        if resolved.parent() == Some(directory) {
+            return Ok(resolved);
+        }
+        let filename = resolved
+            .file_name()
+            .ok_or_else(|| FirmwareError::ConfigError("firmware source has no filename".into()))?;
+        let staged = directory.join(filename);
+        tokio::fs::copy(&resolved, &staged).await?;
+        Ok(staged)
     }
 
     /// `prepare` resolves both inputs into distinct owned directories before
@@ -278,10 +327,14 @@ impl FirmwareFlasher {
             retain: true,
         };
         let staging = async {
-            prepared.image = stage_source(&firmware, &prepared.image, self.checked_update).await?;
+            prepared.image = self
+                .stage_source(&firmware, &prepared.image, CoreArtifactRole::Image)
+                .await?;
             if let (Some(source), Some(directory)) = (configuration, &prepared.device_config) {
-                prepared.device_config =
-                    Some(stage_source(&source, directory, self.checked_update).await?);
+                prepared.device_config = Some(
+                    self.stage_source(&source, directory, CoreArtifactRole::Configuration)
+                        .await?,
+                );
             }
             check_readable_file(&prepared.image).await?;
             if let Some(configuration) = &prepared.device_config {
@@ -775,32 +828,6 @@ impl FirmwareFlasher {
         }
         Ok(())
     }
-}
-
-// Remote sources resolve into this owned directory, while local sources return
-// their original path. Copy those local bytes too so later phases use the staged
-// input rather than a source the caller could replace between commands.
-async fn stage_source(
-    source: &FirmwareSource,
-    directory: &Path,
-    checked_update: bool,
-) -> FirmwareResult<PathBuf> {
-    tokio::fs::create_dir(directory).await?;
-    let resolved = if checked_update {
-        source.resolve_for_update(directory).await?
-    } else {
-        source.resolve(directory).await?
-    };
-    check_readable_file(&resolved).await?;
-    if resolved.parent() == Some(directory) {
-        return Ok(resolved);
-    }
-    let filename = resolved
-        .file_name()
-        .ok_or_else(|| FirmwareError::ConfigError("firmware source has no filename".into()))?;
-    let staged = directory.join(filename);
-    tokio::fs::copy(&resolved, &staged).await?;
-    Ok(staged)
 }
 
 #[cfg(test)]
@@ -2258,6 +2285,7 @@ esac
             progress: None,
             preparation_cancel: None,
             checked_update: false,
+            core_delivery: None,
             expected_device: None,
         }
         .with_dry_run(true)

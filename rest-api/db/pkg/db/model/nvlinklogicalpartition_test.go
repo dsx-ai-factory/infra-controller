@@ -712,6 +712,39 @@ func TestNVLinkLogicalPartition_GetAll(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("include deleted returns a soft-deleted partition", func(t *testing.T) {
+		nvllpDAO := NewNVLinkLogicalPartitionDAO(dbSession)
+		deletedID := nvlinkLogicalPartitions[0].ID
+		err := nvllpDAO.Delete(ctx, nil, deletedID)
+		require.NoError(t, err)
+
+		active, _, err := nvllpDAO.GetAll(
+			ctx,
+			nil,
+			NVLinkLogicalPartitionFilterInput{NVLinkLogicalPartitionIDs: []uuid.UUID{deletedID}},
+			paginator.PageInput{},
+			nil,
+		)
+		require.NoError(t, err)
+		assert.Empty(t, active)
+
+		withDeleted, _, err := nvllpDAO.GetAll(
+			ctx,
+			nil,
+			NVLinkLogicalPartitionFilterInput{
+				NVLinkLogicalPartitionIDs: []uuid.UUID{deletedID},
+				IncludeDeleted:            true,
+			},
+			paginator.PageInput{},
+			nil,
+		)
+		require.NoError(t, err)
+
+		if assert.Len(t, withDeleted, 1) {
+			assert.NotNil(t, withDeleted[0].Deleted)
+		}
+	})
 }
 
 func TestNVLinkLogicalPartitionSQLDAO_Create(t *testing.T) {
@@ -1111,4 +1144,20 @@ func TestNVLinkLogicalPartitionSQLDAO_Clear(t *testing.T) {
 
 		})
 	}
+
+	t.Run("can clear soft-delete timestamp", func(t *testing.T) {
+		nvllpDAO := NewNVLinkLogicalPartitionDAO(dbSession)
+		err := nvllpDAO.Delete(ctx, nil, nvllp.ID)
+		require.NoError(t, err)
+
+		restored, err := nvllpDAO.Clear(ctx, nil, NVLinkLogicalPartitionClearInput{
+			NVLinkLogicalPartitionID: nvllp.ID,
+			Deleted:                  true,
+		})
+		require.NoError(t, err)
+
+		if assert.NotNil(t, restored) {
+			assert.Nil(t, restored.Deleted)
+		}
+	})
 }

@@ -1,0 +1,86 @@
+# Acceptance test image holding the current scale-test suite binaries. Supply a
+# repository and either an exact digest (preferred) or a tag at install time;
+# rendering fails without them.
+image:
+  repository: ""
+  tag: ""
+  digest: ""
+  pullPolicy: IfNotPresent
+
+# References to existing image pull secrets in the release namespace.
+imagePullSecrets: []
+
+# The acceptance image is built for amd64 only, so the Jobs pin to amd64 nodes.
+# Override (or set to {}) to schedule elsewhere once a multi-arch image exists.
+nodeSelector:
+  kubernetes.io/arch: amd64
+
+# Default ServiceAccount, Role, Binding and Job names derive from the release
+# name. Set this to override that base name.
+fullnameOverride: ""
+
+# Suites. Each enabled entry renders one `helm test` Job that runs a fixed
+# binary and anchored test; only the suites the chart knows (cluster, probe,
+# history) may be enabled, and at least one must be. Lower weight runs first.
+suites:
+  cluster:
+    enabled: true
+    weight: 1
+  probe:
+    enabled: false
+    weight: 2
+  inventory:
+    enabled: false
+    weight: 3
+  history:
+    enabled: false
+    weight: 4
+
+# Base URL of the probe Service (SCALE_TEST_PROBE_URL) for the probe suite. When
+# unset, the enabled probe fixture fails rather than skipping.
+probeUrl: ""
+
+# The inventory suite reads MAT Pods and Services in a target namespace and
+# makes one verified nico-api Version call. When enabled, `namespace` and
+# `clientSecret` are required and a namespace-scoped read Role/Binding is made
+# there; the expected counts/release come from a precheck (the fixture fails if
+# any is unset). No secret values are set inline.
+inventory:
+  namespace: ""         # the MAT namespace to read and bind reads in
+  selector: "app.kubernetes.io/component=machine-a-tron"
+  clientSecret: ""      # existing Secret (tls.crt, tls.key, ca.crt) in the release namespace
+  spiffe:
+    trustDomain: ""
+    serviceBasePaths: "" # comma-separated
+    machineBasePath: ""
+    serverName: ""
+  # Each count defaults to empty so an omitted one fails the fixture, not passes
+  # as a supplied zero; set an explicit 0 only where a type is genuinely absent.
+  expected:
+    racks: ""
+    hosts: ""
+    switches: ""
+    powerShelves: ""
+    dpus: ""
+    minServices: ""
+    release: ""
+
+# The history suite replays a real probe capture mounted into the test pod. The
+# source is required when the suite is enabled: a ConfigMap (name plus key) or
+# an existing read PVC (claimName plus subPath), not both, else rendering fails.
+# The capture mounts read-only at /capture as SCALE_TEST_HISTORY_CAPTURE.
+# producerImage and producerRevision are the provenance of the probe that
+# produced it, logged by the test with the capture's SHA-256.
+historyCapture:
+  configMap: ""
+  key: capture.json
+  existingClaim: ""
+  subPath: capture.json
+  producerImage: ""
+  producerRevision: ""
+
+# The Job deadline and the go test timeout for each suite, both positive
+# integer seconds (the timeout renders as a Go duration such as 480s).
+testBudget:
+  activeDeadlineSeconds: 600
+  testTimeoutSeconds: 480

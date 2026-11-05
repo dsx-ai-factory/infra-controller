@@ -1,0 +1,66 @@
+#
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+
+[package]
+name = "bmc-drivers"
+version = "0.1.0"
+description = "Compiled BMC operation drivers and selection rules"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+async-trait = { workspace = true }
+blake3 = { workspace = true }
+bmc-platform = { path = "../bmc-platform" }
+carbide-utils = { path = "../utils", default-features = false }
+hex = { workspace = true }
+nv-redfish = { features = [
+    "accounts",
+    "bios",
+    "boot-options",
+    "chassis",
+    "component-integrity",
+    "computer-systems",
+    "ethernet-interfaces",
+    "host-interfaces",
+    "job-service",
+    "manager-network-protocol",
+    "managers",
+    "network-adapters",
+    "network-device-functions",
+    "oem-ami",
+    "oem-delta",
+    "oem-dell-attributes",
+    "oem-hpe",
+    "oem-lenovo",
+    "oem-liteon",
+    "oem-nvidia",
+    "oem-supermicro",
+    "power-equipment",
+    "power-supplies",
+    "secure-boot",
+    "serial-interfaces",
+    "storages",
+    "update-service",
+], workspace = true }
+serde = { features = ["derive"], workspace = true }
+serde_json = { workspace = true }
+strum = { workspace = true }
+thiserror = { workspace = true }
+tokio = { features = ["time"], workspace = true }
+toml = { workspace = true }
+
+[dev-dependencies]
+axum = { workspace = true }
+bmc-mock = { path = "../bmc-mock" }
+carbide-test-support = { path = "../test-support" }
+nv-redfish = { features = ["bmc-http"], workspace = true }
+tokio = { features = ["macros", "rt", "test-util"], workspace = true }
+url = { workspace = true }
+
+[lints]
+workspace = true

@@ -18,7 +18,6 @@
 use std::collections::HashMap;
 
 use carbide_network::virtualization::VpcVirtualizationType;
-use carbide_resource_pool::{ResourcePoolRegistry, ResourcePoolRegistryError};
 use carbide_uuid::domain::DomainId;
 use carbide_uuid::vpc::VpcId;
 use db::dns::domain;
@@ -32,8 +31,6 @@ use model::machine::upgrade_policy::AgentUpgradePolicy;
 use model::metadata::Metadata;
 use model::network_prefix::NewNetworkPrefix;
 use model::network_segment::{NetworkDefinition, NetworkSegmentType, NewNetworkSegment};
-use model::resource_pool;
-use model::resource_pool::ResourcePool;
 use model::vpc::{NewVpc, VpcDefinition, VpcStatus, VpcVirtualizationTypeCapabilities};
 use sqlx::{Pool, Postgres};
 
@@ -243,74 +240,35 @@ pub(crate) fn validate_initial_vpcs(
     Ok(())
 }
 
+/// Creates each configured VPC independently and skips names already present.
+/// Earlier commits survive a later failure, so startup can resume next time.
 pub(crate) async fn create_initial_vpcs(
-    db_pool: &Pool<Postgres>,
+    api: &Api,
     vpcs: &HashMap<String, VpcDefinition>,
-    vni_pool: &ResourcePool<i32>,
-    resource_pool_registry: &ResourcePoolRegistry,
 ) -> Result<(), CarbideError> {
-    // Retain validation at the mutation boundary as defense in depth. Startup
-    // also validates during SeedData resolution, before any reconciliation.
+    // Validate here as well as during SeedData resolution, before any
+    // existing-name shortcut or creation through this entry point.
     validate_initial_vpcs(vpcs).map_err(CarbideError::InvalidConfiguration)?;
 
-    let mut txn = Transaction::begin(db_pool).await?;
-    for (name, def) in vpcs {
-        if db::vpc::find_by_name(&mut txn, name)
-            .await
-            .is_ok_and(|v| !v.is_empty())
+    for (name, def) in vpcs.iter().sorted_by_key(|(name, _)| *name) {
+        if !db::vpc::find_by_name(&api.database_connection, name)
+            .await?
+            .is_empty()
         {
-            tracing::debug!(
-                vpc_name = %name,
-                "VPC exists",
-            );
+            tracing::debug!(vpc_name = %name, "VPC exists");
             continue;
         }
-
-        let vpc_id = VpcId::new();
-        let tenant_organization_id = def
-            .organization_id
-            .clone()
-            .unwrap_or(uuid::Uuid::new_v4().into());
-        let owner_id = vpc_id.to_string();
-
-        let allocation = match resource_pool_registry
-            .get_or_load_backend(&mut txn, vni_pool.name())
-            .await
-        {
-            Ok(Some(backend)) => {
-                backend
-                    .require_integrated()?
-                    .allocate(
-                        vni_pool,
-                        &mut txn,
-                        resource_pool::OwnerType::Vpc,
-                        &owner_id,
-                        def.vni,
-                    )
-                    .await
-            }
-            // A pool with neither a binding nor values has nothing to allocate.
-            Ok(None) => Err(resource_pool::ResourcePoolError::MissingAllocationRange {
-                pool_name: vni_pool.name().to_string(),
-                auto_assign: def.vni.is_none(),
-            }
-            .into()),
-            Err(ResourcePoolRegistryError::Database(error)) => Err(error.into()),
-            Err(error) => return Err(error.into()),
-        };
-        let vni = allocation.inspect_err(|error| {
-            db::resource_pool::emit_allocation_failure(
-                vni_pool.value_type,
-                &owner_id,
-                def.vni.is_some(),
-                vni_pool.name(),
-                error,
-            );
-        })?;
-
-        let vpc = NewVpc {
-            id: vpc_id,
-            tenant_organization_id,
+        if def.routing_profile_type.is_some() || def.routing_profile_overrides.is_some() {
+            def.network_virtualization_type
+                .ensure_supports_routing_profiles()
+                .map_err(CarbideError::from)?;
+        }
+        let new_vpc = NewVpc {
+            id: VpcId::new(),
+            tenant_organization_id: def
+                .organization_id
+                .clone()
+                .unwrap_or_else(|| uuid::Uuid::new_v4().into()),
             network_virtualization_type: def.network_virtualization_type,
             metadata: Metadata {
                 name: name.to_owned(),
@@ -320,25 +278,13 @@ pub(crate) async fn create_initial_vpcs(
             routing_profile_type: def.routing_profile_type.clone(),
             routing_profile_overrides: def.routing_profile_overrides.clone(),
             power_resource_group: None,
-            vni: Some(vni),
+            vni: def.vni,
             slaac_enabled: false,
         };
-
-        // Validation
-        if def.routing_profile_type.is_some() || def.routing_profile_overrides.is_some() {
-            def.network_virtualization_type
-                .ensure_supports_routing_profiles()
-                .map_err(CarbideError::from)?;
+        if crate::handlers::vpc::create_configured(api, new_vpc).await? {
+            tracing::info!(vpc_name = %name, "Created VPC");
         }
-
-        db::vpc::persist(vpc, VpcStatus { vni: Some(vni) }, &mut txn).await?;
-        tracing::info!(
-            vpc_name = %name,
-            "Created VPC",
-        );
     }
-
-    txn.commit().await?;
     Ok(())
 }
 

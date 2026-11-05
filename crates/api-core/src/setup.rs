@@ -31,7 +31,7 @@ use carbide_extension_service_controller::context::{
 };
 use carbide_extension_service_controller::handler::ExtensionServiceStateHandler;
 use carbide_extension_service_controller::io::ExtensionServiceStateControllerIO;
-use carbide_firmware::FirmwareDownloader;
+use carbide_firmware::{FirmwareArtifactCache, FirmwareDownloader};
 use carbide_health_metrics::PerObjectMetricsRegistry;
 use carbide_ib_fabric::IbFabricMonitor;
 use carbide_ib_fabric::ib::{self, IBFabricManager};
@@ -508,6 +508,23 @@ pub async fn start_runtime(runtime_inputs: RuntimeInputs<'_>) -> eyre::Result<So
         // ordering invariants), not seeded here.
     };
 
+    // Controllers and artifact serving share the same bounded transfer pool.
+    // The cache constructor leaves disk untouched until an authorized request.
+    let firmware_downloader =
+        FirmwareDownloader::with_config(carbide_config.firmware_global.downloads.clone())?;
+    let firmware_artifact_cache = FirmwareArtifactCache::new(
+        carbide_config
+            .firmware_global
+            .firmware_download_cache_directory
+            .clone(),
+        carbide_config
+            .firmware_global
+            .nic_firmware_cache_capacity_bytes,
+        firmware_downloader.clone(),
+        cancel_token.clone(),
+        join_set,
+    )?;
+
     // A listen-only replica trusts another instance to reconcile configuration,
     // but it must reject every unassigned row that the corresponding
     // authoritative startup would require to be repaired.
@@ -810,6 +827,7 @@ pub async fn start_runtime(runtime_inputs: RuntimeInputs<'_>) -> eyre::Result<So
             per_object_metrics,
             ipmi_tool.clone(),
             seed_data,
+            firmware_downloader,
             cancel_token.clone(),
         )
         .await?;
@@ -834,6 +852,7 @@ pub async fn start_runtime(runtime_inputs: RuntimeInputs<'_>) -> eyre::Result<So
         &carbide_config.auth,
         meter,
         admin_ui_routes_builder,
+        firmware_artifact_cache,
         cancel_token.clone(),
     )
     .await?;
@@ -1721,6 +1740,7 @@ async fn initialize_and_start_controllers<'a>(
     per_object_prometheus_registry: Option<prometheus::Registry>,
     ipmi_tool: Arc<dyn IPMITool>,
     seed_data: Option<SeedData<'a>>,
+    downloader: FirmwareDownloader,
     cancel_token: CancellationToken,
 ) -> eyre::Result<()> {
     let Api {
@@ -1856,13 +1876,7 @@ async fn initialize_and_start_controllers<'a>(
 
     if let Some(seed_data) = seed_data {
         if !seed_data.initial_vpcs.is_empty() {
-            db_init::create_initial_vpcs(
-                db_pool,
-                &seed_data.initial_vpcs,
-                common_pools.ethernet.pool_vpc_vni.as_ref(),
-                &api_service.resource_pool_registry,
-            )
-            .await?;
+            db_init::create_initial_vpcs(&api_service, &seed_data.initial_vpcs).await?;
         }
 
         if !seed_data.initial_networks.is_empty() {
@@ -1902,8 +1916,6 @@ async fn initialize_and_start_controllers<'a>(
         );
     }
 
-    let downloader =
-        FirmwareDownloader::with_config(carbide_config.firmware_global.downloads.clone())?;
     let upload_limiter = Arc::new(Semaphore::new(carbide_config.firmware_global.max_uploads));
 
     // Create state change emitter with DSX Exchange Event Bus hook if enabled
@@ -2533,6 +2545,7 @@ async fn initialize_and_start_controllers<'a>(
         meter.clone(),
         endpoint_exploration_service.clone(),
         api_service.bmc_client.clone(),
+        api_service.resource_pool_registry.clone(),
         common_pools.clone(),
         work_lock_manager_handle.clone(),
         carbide_config.rack_profiles.clone(),

@@ -93,15 +93,18 @@ impl ColumnInfo<'_> for EnabledColumn {
     }
 }
 
+/// `find_remediation_ids` returns every remediation ID, including disabled and
+/// unapproved remediations, in no particular order. An empty table returns no IDs.
+/// Only `id` is read, so incompatible `metadata_labels` JSON does not fail this
+/// lookup. [`find_remediations_by_ids`] still reports that data as an error.
 pub async fn find_remediation_ids(
     txn: &mut sqlx::Transaction<'_, Postgres>,
 ) -> Result<Vec<RemediationId>, DatabaseError> {
-    let ids = find_remediations_by(txn, ObjectColumnFilter::<RemediationIdColumn>::All)
-        .await?
-        .into_iter()
-        .map(|x| x.id)
-        .collect();
-    Ok(ids)
+    let query = "SELECT id FROM dpu_remediations";
+    sqlx::query_scalar::<_, RemediationId>(query)
+        .fetch_all(txn.deref_mut())
+        .await
+        .map_err(|e| DatabaseError::new(query, e))
 }
 
 pub async fn find_remediations_by_ids(
@@ -209,62 +212,44 @@ pub async fn persist_applied_remediation(
         .map_err(|err| DatabaseError::new(&query, err))
 }
 
-#[derive(Clone, Copy)]
-pub struct AppliedRemediationIdColumn;
-impl ColumnInfo<'_> for AppliedRemediationIdColumn {
-    type TableType = AppliedRemediation;
-    type ColumnType = RemediationId;
-
-    fn column_name(&self) -> &'static str {
-        "id"
-    }
-}
-
-#[derive(Clone, Copy)]
-pub struct AppliedRemediationDpuMachineIdColumn;
-impl ColumnInfo<'_> for AppliedRemediationDpuMachineIdColumn {
-    type TableType = AppliedRemediation;
-    type ColumnType = String;
-
-    fn column_name(&self) -> &'static str {
-        "dpu_machine_id"
-    }
-}
-
 pub enum AppliedRemediationIdQueryType {
     Machine(DpuMachineId),
     RemediationId(RemediationId),
 }
 
+/// `find_applied_remediation_ids` returns IDs for attempts matching the supplied ID.
+/// `AppliedRemediationIdQueryType::Machine` returns
+/// `(matching remediation IDs, [supplied machine ID])`.
+/// `AppliedRemediationIdQueryType::RemediationId` returns
+/// `([supplied remediation ID], matching DPU IDs)`.
+///
+/// The supplied ID is returned even when no attempts match. Matching IDs have one
+/// entry per attempt, in no particular order, so retries can repeat an ID.
+/// Only ID columns are read, so incompatible `status` JSON does not fail this
+/// lookup. [`find_remediations_by_remediation_id_and_machine`] still reports it
+/// as an error.
 pub async fn find_applied_remediation_ids(
     txn: &mut sqlx::Transaction<'_, Postgres>,
     id_query_args: AppliedRemediationIdQueryType,
 ) -> Result<(Vec<RemediationId>, Vec<DpuMachineId>), DatabaseError> {
     let ids = match id_query_args {
         AppliedRemediationIdQueryType::Machine(machine_id) => {
-            let remediation_ids = find_applied_remediations_by(
-                txn,
-                ObjectColumnFilter::List(
-                    AppliedRemediationDpuMachineIdColumn,
-                    &[machine_id.to_string()],
-                ),
-            )
-            .await?
-            .into_iter()
-            .map(|x| x.id)
-            .collect();
+            let query = "SELECT id FROM applied_dpu_remediations WHERE dpu_machine_id = $1";
+            let remediation_ids = sqlx::query_scalar::<_, RemediationId>(query)
+                .bind(machine_id)
+                .fetch_all(txn.deref_mut())
+                .await
+                .map_err(|e| DatabaseError::new(query, e))?;
 
             (remediation_ids, vec![machine_id])
         }
         AppliedRemediationIdQueryType::RemediationId(remediation_id) => {
-            let machine_ids = find_applied_remediations_by(
-                txn,
-                ObjectColumnFilter::List(AppliedRemediationIdColumn, &[remediation_id]),
-            )
-            .await?
-            .into_iter()
-            .map(|x| x.dpu_machine_id)
-            .collect();
+            let query = "SELECT dpu_machine_id FROM applied_dpu_remediations WHERE id = $1";
+            let machine_ids = sqlx::query_scalar::<_, DpuMachineId>(query)
+                .bind(remediation_id)
+                .fetch_all(txn.deref_mut())
+                .await
+                .map_err(|e| DatabaseError::new(query, e))?;
 
             (vec![remediation_id], machine_ids)
         }
@@ -273,24 +258,6 @@ pub async fn find_applied_remediation_ids(
     Ok(ids)
 }
 
-pub async fn find_applied_remediations_by<'a, C: ColumnInfo<'a, TableType = AppliedRemediation>>(
-    txn: &mut sqlx::Transaction<'_, Postgres>,
-    filter: ObjectColumnFilter<'a, C>,
-) -> Result<Vec<AppliedRemediation>, DatabaseError> {
-    let mut query = FilterableQueryBuilder::new(format!(
-        "SELECT {}
-        FROM applied_dpu_remediations",
-        AppliedRemediation::db_table_columns(),
-    ))
-    .filter(&filter);
-    query
-        .build_query_as()
-        .fetch_all(txn.deref_mut())
-        .await
-        .map_err(|e| DatabaseError::new(query.sql(), e))
-}
-
-// we cannot use the generic query for this one because we can't limit it to _two_ columns, unfortunately.
 pub async fn find_remediations_by_remediation_id_and_machine(
     txn: &mut sqlx::Transaction<'_, Postgres>,
     remediation_id: RemediationId,

@@ -16,7 +16,6 @@
  */
 use std::net::Ipv4Addr;
 use std::sync::Arc;
-use std::time::Duration;
 
 use bmc_mock::injection::InjectionStore;
 use bmc_mock::{ActionError, HostMachineInfo, ResourceResetType};
@@ -95,28 +94,14 @@ impl DeviceHandle {
         }
     }
 
-    pub async fn api_state(&self) -> eyre::Result<String> {
+    /// `is_up` reads the host's local up flag from its latest snapshot.
+    /// Returns an error for stopped actors, switches, or power shelves.
+    /// This does not read Core's lifecycle state.
+    pub fn is_up(&self) -> eyre::Result<bool> {
         match &self.0 {
-            DeviceHandleInner::Machine(handle) => handle.api_state().await,
+            DeviceHandleInner::Machine(handle) => handle.is_up(),
             DeviceHandleInner::Switch(_) | DeviceHandleInner::PowerShelf(_) => {
-                eyre::bail!("API machine state is unavailable for {}", self.kind())
-            }
-        }
-    }
-
-    pub async fn wait_until_machine_up_with_api_state(
-        &self,
-        state: &str,
-        timeout: Duration,
-    ) -> eyre::Result<()> {
-        match &self.0 {
-            DeviceHandleInner::Machine(handle) => {
-                handle
-                    .wait_until_machine_up_with_api_state(state, timeout)
-                    .await
-            }
-            DeviceHandleInner::Switch(_) | DeviceHandleInner::PowerShelf(_) => {
-                eyre::bail!("cannot wait for machine state on {}", self.kind())
+                eyre::bail!("cannot read host readiness on {}", self.kind())
             }
         }
     }

@@ -51,7 +51,8 @@ The gRPC probe authenticates as
 namespace segment defaults to the release namespace (nico-api accepts SPIFFE
 identities under its own namespace; set `certificate.identityNamespace` when
 nico-api runs elsewhere). nico-api's internal RBAC grants exactly this
-service identity read-only access to `FindMachineIds`/`FindMachinesByIds`.
+service identity read-only access to `FindMachineIds`, `FindMachinesByIds`
+and `FindHostStatesByIds`.
 
 ## Metrics
 
@@ -87,6 +88,17 @@ Service, named
 independent of the Helm release name; with `nameOverride` set it is
 `<nameOverride>-metrics`).
 
+With state on and the ServiceMonitor enabled, `/v1/config` tells clients
+where the probe's series are stored: a selector and the scrape interval. The
+selector defaults to `job=<metrics Service>` and `namespace=<release
+namespace>`, the labels the ServiceMonitor's scrape gives the series. Set
+`state.metrics.selector` only when the store relabels them. For a scraper
+other than the ServiceMonitor, set `state.metrics.scrapeInterval` (a quoted
+Prometheus duration) and the selector its series carry; the chart refuses
+one without the other. Label names starting with `__`, the probe's own
+series labels (`type`, `family`, `state` and the rest) and blank values are
+refused. The probe never reads the store itself.
+
 ## Site state readers and the /v1 API
 
 With `state.enabled`, the probe also reads the site's state on a schedule
@@ -121,12 +133,37 @@ one snapshot per family.
 
 The state readers need a nico-api client certificate that maps to an external
 user (`nicoApiClientCert.existingSecret`, keys `ca.crt`, `tls.crt`,
-`tls.key`): the SPIFFE identity may call only `FindMachineIds` and
-`FindMachinesByIds`. REST identities take client credentials, a bearer token
-in a Secret, or a token file.
+`tls.key`): the SPIFFE identity may call only `FindMachineIds`,
+`FindMachinesByIds` and `FindHostStatesByIds`. REST identities take client
+credentials, a bearer token in a Secret, or a token file.
 
 The nico-api reader runs by default once state is on; the REST reader stays
-off until its inputs exist. A complete REST-enabled state section:
+off until its inputs exist. Hosts are read with the compact host read
+(`FindHostStatesByIds`) under the default `state.nicoApi.hostRead: auto`.
+On a nico-api without it (`UNIMPLEMENTED`) the probe warns once ("falling
+back to full host read", with the code) and reads `FindMachinesByIds` until it
+restarts. `PERMISSION_DENIED`, which an older RBAC table answers for an
+unknown method but a rolling upgrade or an identity problem answers too, warns
+once and reads in full for 10 sweeps. The probe then tries the compact read
+again, and goes back to it when nico-api answers. Check that warning and
+`host_read_mode`, which shows which read the current host snapshot used.
+A host snapshot is always one read: a fallback part way through a sweep reads
+every host in full again. `full` and `compact` pin one read. Under `compact`
+an unserved read fails the host family.
+
+The compact read changes where `vendor`, `model` and the versions come from.
+The full read takes them from the machine's DMI data and BMC record. The
+compact read takes them from the BMC's explored report, and a host with no
+report has none of them. `vendor` is nico-api's name of the maker under both
+reads, such as `nvidia` or `lenovo`, and `null` for a maker DMI cannot name.
+`model` is a label of the host metrics, so on a site that upgrades from
+`full`, or that falls back, the series change names once. Pin `hostRead: full`
+to keep the DMI values. An explored report may hold no UEFI version, so
+`uefiVersion` can be `null` under the compact read: firmware checks read the
+full firmware inventory, not these fields. `reportError` is the explored
+report's error type only, such as `Unauthorized`, or `other`.
+
+A complete REST-enabled state section:
 
 ```yaml
 nico-site-health-probe:
@@ -165,13 +202,14 @@ unknown parameters are 400. Errors carry
 | `GET /v1/count` | Units matching a filter in the newest complete sweep, with its snapshot ID and sweep times | 400, 422 `unsupported_filter` and `field_unavailable`, 503 `no_complete_sweep` |
 | `GET /v1/units` | Units with state, reason and type fields, 100 per page (max 1,000), cursor paging pinned to one snapshot | As count, 409 `snapshot_expired` |
 | `POST /v1/units/query` | The same, with a JSON body that can ask for up to 10,000 IDs (`missingIds` lists absent ones) | As `/v1/units` |
-| `GET /v1/config` | `restSite`: the REST site checked against the device census (`match`, `mismatch` or `unknown`; always `unknown` with the devices reader off), with its read times. With the devices reader enabled, a nonempty page with controller IDs waits for the first device census. Empty or ID-less pages publish `unknown`. `null` while the REST inventory reader is off, which is not a site match. `nicoApi` and `rest` are `null` until their readers return | 400, 503 while the REST inventory reader is on and waits for its first site check |
+| `GET /v1/config` | `restSite`: the REST site checked against the device census (`match`, `mismatch` or `unknown`; always `unknown` with the devices reader off), with its read times. With the devices reader enabled, a nonempty page with controller IDs waits for the first device census. Empty or ID-less pages publish `unknown`. `null` while the REST inventory reader is off, which is not a site match. `nicoApi` and `rest` are `null` until their readers return. `metrics`, with a declared scrape cadence: the metric contract version, the selector, the scrape interval, the interval of each family an enabled reader sweeps, and the process start time the probe publishes | 400, 503 while the REST inventory reader is on and waits for its first site check |
 
 At shutdown, requests still running after 10 s are cut short with 503 and
 their connections close.
 
 Allocatability and update eligibility filters are 422 `field_unavailable`
-until nico-api serves a compact host read; exact version filters
+while the current host snapshot was read without the compact host read, or
+some host in it has no answer; exact version filters
 (`bmcVersion`, `uefiVersion`) and the tenant's REST instances
 (`type=instance&source=rest`) are 422 `field_unavailable` until the firmware
 and instance tests; rack and tray totals are 422 on a site without NICo
@@ -179,11 +217,15 @@ Flow, and the instance total is always 422.
 
 ### State metrics
 
+Names, labels and the filter rules behind `/v1/count` are declared in
+`crates/site-health-probe-api/src/metrics.rs`, shared with clients that read
+the series back.
+
 | Metric | Type | Labels | Meaning |
 |---|---|---|---|
 | `carbide_site_health_probe_units` | gauge | `type`, `stage`, `state` | Units per type and state; every unit counts under `registered`, ready and error units also under their stage |
 | `carbide_site_health_probe_hosts` | gauge | `model`, `instance_type`, `state`, `allocatable`, `update_complete` | Hosts |
-| `carbide_site_health_probe_hosts_update_eligible` | gauge | `model`, `eligible`, `reason` | Firmware update eligibility (`unknown` before the compact host read) |
+| `carbide_site_health_probe_hosts_update_eligible` | gauge | `model`, `eligible`, `reason` | Firmware update eligibility (`unknown` without the compact host read). `reason` is a nico-api code, or `other` for a code the probe does not know |
 | `carbide_site_health_probe_host_firmware_requests` | gauge | `model`, `initiator` | Open host firmware requests |
 | `carbide_site_health_probe_unresolved_units` | gauge | `type` | DPUs no host lists |
 | `carbide_site_health_probe_expected_records` | gauge | `type`, `linked` | Expected records, linked when exactly one census device links to them |
@@ -194,7 +236,8 @@ Flow, and the instance total is always 422.
 | `carbide_site_health_probe_sweep_start_timestamp_seconds`, `sweep_complete_timestamp_seconds`, `sweep_duration_seconds` | gauge | `reader`, `family` | The sweep behind each family's current snapshot |
 | `carbide_site_health_probe_last_attempt_failed` | gauge | `reader`, `family`, `kind` | Why the newest attempt failed (`none`, `timeout`, `pushback`, `rpc`, `unresolved`, `decode`), one-hot |
 | `carbide_site_health_probe_process_start_timestamp_seconds` | gauge | none | Process start, tells restarts apart |
-| `carbide_site_health_probe_host_read_mode` | gauge | `mode` | `full` or `compact`, one-hot |
+| `carbide_site_health_probe_host_read_mode` | gauge | `mode` | How the current host snapshot was read, `full` or `compact`, one-hot |
+| `carbide_site_health_probe_host_predicates_known` | gauge | `predicate` | 1 when the current host snapshot has the predicate (`allocatable`, `updateEligible`) for every host, else 0. Their filters answer 422 while it is 0 |
 | `carbide_site_health_probe_sweeps_total` | counter | `reader`, `family`, `result` | Sweeps that published (`complete`) or kept the last snapshot (`incomplete`) |
 | `carbide_site_health_probe_unknown_states_total` | counter | `metric`, `type` | States outside the pinned tables |
 

@@ -55,6 +55,7 @@ use futures_util::FutureExt;
 use libredfish::model::task::TaskState;
 use libredfish::model::update_service::TransferProtocolType;
 use libredfish::{PowerState, Redfish, RedfishError, SystemPowerControl};
+use model::DpuModel;
 use model::firmware::{Firmware, FirmwareComponent, FirmwareComponentType, FirmwareEntry};
 use model::rack_type::RackProfileConfig;
 use model::site_explorer::{
@@ -100,6 +101,9 @@ const INITIAL_BMC_RESET_MAX_ATTEMPTS: u32 = 3;
 const SET_NTP_SERVERS_MAX_ATTEMPTS: u32 = 3;
 /// How long to wait for NTP servers to converge before checking time sync.
 const SET_NTP_SERVERS_CONVERGENCE_WAIT: chrono::TimeDelta = chrono::TimeDelta::minutes(1);
+/// How long after a BMC reset the host may fail to power on before the reset
+/// cycle is treated as failed. The clock starts when the BMC reset is recorded.
+const BMC_RESET_POWER_ON_TIMEOUT: chrono::TimeDelta = chrono::TimeDelta::minutes(30);
 
 pub struct PreingestionManager {
     static_info: Arc<PreingestionManagerStatic>,
@@ -422,6 +426,13 @@ async fn one_endpoint(
                 .set_ntp_servers(db, endpoint, set_at.as_ref(), *attempts)
                 .await?
         }
+        // The work list returns this endpoint again only once the explorer has
+        // written the refreshed report it asked for: decide on that report.
+        PreingestionState::FirmwareCheckRefreshWait => {
+            static_info
+                .check_firmware_versions_below_preingestion(db, endpoint, false)
+                .await?
+        }
         PreingestionState::RecheckVersionsAfterFailure { .. } => {
             static_info
                 .start_firmware_uploads_or_continue(db, endpoint, true)
@@ -581,24 +592,55 @@ impl PreingestionManagerStatic {
 
     /// check_firmware_versions_below_preingestion will check if we actually need to do firmware upgrades before
     /// ingestion can happen, and either kick them off if so otherwise move on.
+    /// `repeat`: if true and the report is incomplete, park the endpoint in
+    /// `FirmwareCheckRefreshWait` and repeat the check once on a fresh report;
+    /// if false, decide on this report as it is. False from that state (this is
+    /// the fresh report), from the time-out-of-sync path for an already ingested
+    /// host, and whenever `firmware_global.autoupdate` is off (the outcome is
+    /// Complete regardless).
     async fn check_firmware_versions_below_preingestion(
         &self,
         db: &PgPool,
         endpoint: &ExploredEndpoint,
+        repeat: bool,
     ) -> PreingestionManagerResult<bool> {
         if self.start_rack_firmware(db, endpoint).await? {
             return Ok(false);
         }
+        let repeat = repeat && self.config.autoupdate;
 
         // First, we need to check if it's appropriate to upgrade at this point or wait until later.
+        // Every decision is logged at info; an incomplete report is deferred once.
         let fw_info = match self.find_fw_info_for_host(db, endpoint).await? {
             None => {
-                tracing::debug!(
-                    bmc_ip_address = %endpoint.address,
-                    "No matching firmware info found during preingestion check"
-                );
                 // No desired firmware description found for this host, nothing to do.
                 // This is the expected path for DPUs.
+                // A known vendor with no model may be a BMC still recovering from the
+                // reset this check follows: give it one refreshed report first. The
+                // model is resolved as the lookup resolves it (the explicit field,
+                // then the computed one).
+                let model = endpoint
+                    .report
+                    .model
+                    .clone()
+                    .or_else(|| endpoint.report.model());
+                if endpoint.report.vendor.is_some()
+                    && model.is_none()
+                    && !endpoint.report.is_dpu()
+                    && repeat
+                {
+                    self.defer_firmware_check(db, endpoint, "the report has no host model")
+                        .await?;
+                    return Ok(false);
+                }
+                tracing::info!(
+                    bmc_ip_address = %endpoint.address,
+                    vendor = ?endpoint.report.vendor,
+                    model = ?model,
+                    repeat,
+                    preingestion_state = ?endpoint.preingestion_state,
+                    "No host firmware definition matches this endpoint; firmware preingestion complete"
+                );
                 db.with_txn(|txn| {
                     db::explored_endpoints::set_preingestion_complete(endpoint.address, txn).boxed()
                 })
@@ -607,44 +649,96 @@ impl PreingestionManagerStatic {
             }
             Some(fw_info) => fw_info,
         };
+        let mut satisfied: Vec<String> = Vec::new();
+        let mut not_checked: Vec<String> = Vec::new();
         for (fwtype, desc) in &fw_info.components {
-            if let Some(min_preingestion) = &desc.preingest_upgrade_when_below
-                && let Some(current) = endpoint.find_version(&fw_info, *fwtype)
-            {
+            let Some(min_preingestion) = &desc.preingest_upgrade_when_below else {
+                continue;
+            };
+            let Some(inventory) = endpoint.find_inventory(&fw_info, *fwtype) else {
+                tracing::debug!(
+                    bmc_ip_address = %endpoint.address,
+                    firmware_type = ?fwtype,
+                    current_version_reported_as = desc
+                        .current_version_reported_as
+                        .as_ref()
+                        .map(|regex| regex.as_str())
+                        .unwrap_or("<none>"),
+                    "No inventory entry in the exploration report matches this component; its preingestion minimum cannot be checked"
+                );
+                not_checked.push(format!("{fwtype:?}: no matching inventory entry"));
+                continue;
+            };
+            let Some(current) = inventory.version.as_ref() else {
+                tracing::debug!(
+                    bmc_ip_address = %endpoint.address,
+                    firmware_type = ?fwtype,
+                    inventory_id = %inventory.id,
+                    "The matching inventory entry reports no version; this component's preingestion minimum cannot be checked"
+                );
+                not_checked.push(format!("{fwtype:?}: {} reports no version", inventory.id));
+                continue;
+            };
+            tracing::debug!(
+                bmc_ip_address = %endpoint.address,
+                firmware_type = ?fwtype,
+                inventory_id = %inventory.id,
+                ?min_preingestion,
+                ?current,
+                "Checking firmware version against preingestion minimum"
+            );
+
+            // The comparison fails only when one side has no numeric part: a
+            // placeholder such as "N/A" from a BMC that is still settling. That is
+            // not a satisfied minimum; treat it as a component that cannot be checked.
+            let Ok(cmp) = version_compare::compare(current, min_preingestion) else {
+                tracing::debug!(
+                    bmc_ip_address = %endpoint.address,
+                    firmware_type = ?fwtype,
+                    inventory_id = %inventory.id,
+                    ?current,
+                    ?min_preingestion,
+                    "The reported version cannot be compared with the preingestion minimum; this component cannot be checked"
+                );
+                not_checked.push(format!(
+                    "{fwtype:?}: {current} cannot be compared with {min_preingestion}"
+                ));
+                continue;
+            };
+            if cmp == version_compare::Cmp::Lt {
                 tracing::info!(
                     bmc_ip_address = %endpoint.address,
                     firmware_type = ?fwtype,
-                    ?min_preingestion,
-                    ?current,
-                    "Checking firmware version against preingestion minimum"
+                    "Starting firmware upload during preingestion check"
                 );
-
-                if version_compare::compare(current, min_preingestion)
-                    .is_ok_and(|c| c == version_compare::Cmp::Lt)
-                {
-                    tracing::info!(
-                        bmc_ip_address = %endpoint.address,
-                        firmware_type = ?fwtype,
-                        "Starting firmware upload during preingestion check"
-                    );
-                    // One or both of the versions are low enough to absolutely need upgrades first - do them both while we're at it.
-                    let delayed_upgrade = self
-                        .start_firmware_uploads_or_continue(db, endpoint, false)
-                        .await?;
-                    return Ok(delayed_upgrade);
-                } else {
-                    tracing::info!(
-                        bmc_ip_address = %endpoint.address,
-                        firmware_type = ?fwtype,
-                        "Firmware version satisfies preingestion minimum"
-                    );
-                }
+                // One or both of the versions are low enough to absolutely need upgrades first - do them both while we're at it.
+                let delayed_upgrade = self
+                    .start_firmware_uploads_or_continue(db, endpoint, false)
+                    .await?;
+                return Ok(delayed_upgrade);
+            } else {
+                tracing::debug!(
+                    bmc_ip_address = %endpoint.address,
+                    firmware_type = ?fwtype,
+                    "Firmware version satisfies preingestion minimum"
+                );
+                satisfied.push(format!("{fwtype:?} {current}"));
             }
         }
 
-        tracing::debug!(
+        // A component that could not be checked gets one refreshed report first.
+        if !not_checked.is_empty() && repeat {
+            self.defer_firmware_check(db, endpoint, &not_checked.join("; "))
+                .await?;
+            return Ok(false);
+        }
+        tracing::info!(
             bmc_ip_address = %endpoint.address,
-            "Firmware versions satisfy preingestion requirements; marking complete"
+            ?satisfied,
+            ?not_checked,
+            repeat,
+            preingestion_state = ?endpoint.preingestion_state,
+            "No listed component is below its preingestion minimum; firmware preingestion complete"
         );
         // Good enough for now at least, proceed with ingestion.
         db.with_txn(|txn| {
@@ -652,6 +746,36 @@ impl PreingestionManagerStatic {
         })
         .await??;
         Ok(false)
+    }
+
+    /// Moves the endpoint to `FirmwareCheckRefreshWait` until the explorer
+    /// writes one refreshed report. The waiting flag alone parks it: the
+    /// explorer's refresh-wait tier picks up this state within its budget.
+    async fn defer_firmware_check(
+        &self,
+        db: &PgPool,
+        endpoint: &ExploredEndpoint,
+        reason: &str,
+    ) -> PreingestionManagerResult<()> {
+        db.with_txn(|txn| {
+            async move {
+                db::explored_endpoints::set_preingestion_firmware_check_refresh_wait(
+                    endpoint.address,
+                    txn,
+                )
+                .await?;
+                db::explored_endpoints::set_waiting_for_explorer_refresh(endpoint.address, txn)
+                    .await
+            }
+            .boxed()
+        })
+        .await??;
+        tracing::info!(
+            bmc_ip_address = %endpoint.address,
+            reason,
+            "Exploration report is incomplete for the firmware check; waiting for one refreshed report"
+        );
+        Ok(())
     }
 
     /// start_firmware_uploads_or_continue will start a firmware upgrade if any of the endpoint's versions
@@ -1547,7 +1671,7 @@ impl PreingestionManagerStatic {
         match self.check_bmc_time_sync(db, endpoint).await {
             Ok(true) => {
                 // Time is in sync, proceed with firmware version check
-                self.check_firmware_versions_below_preingestion(db, endpoint)
+                self.check_firmware_versions_below_preingestion(db, endpoint, true)
                     .await
             }
             Ok(false) => {
@@ -1562,7 +1686,7 @@ impl PreingestionManagerStatic {
                         "BMC time is out of sync but the host is already ingested; skipping time-sync remediation"
                     );
                     return self
-                        .check_firmware_versions_below_preingestion(db, endpoint)
+                        .check_firmware_versions_below_preingestion(db, endpoint, false)
                         .await;
                 }
                 // The reset sequence powers off the host and resets the BMC,
@@ -1945,7 +2069,10 @@ impl PreingestionManagerStatic {
                 return false;
             }
         };
-        if status != PowerState::Off {
+        // BlueField-3 may report Paused after ForceOff; the resume helper handles it.
+        let is_bluefield3 = endpoint.report.identify_dpu() == Some(DpuModel::BlueField3);
+        let is_off = status == PowerState::Off || (status == PowerState::Paused && is_bluefield3);
+        if !is_off {
             tracing::warn!(
                 bmc_ip_address = %endpoint.address,
                 power_state = %status,
@@ -1982,6 +2109,38 @@ impl PreingestionManagerStatic {
                 "Waiting for BMC reset to complete"
             );
             return false;
+        }
+
+        // A BlueField-3 left Paused by the earlier ForceOff ignores On, so restart it
+        // directly, as the machine controller does.
+        if endpoint.report.identify_dpu() == Some(DpuModel::BlueField3) {
+            match redfish_client.get_power_state().await {
+                Ok(PowerState::Paused) => {
+                    tracing::warn!(
+                        bmc_ip_address = %endpoint.address,
+                        "BlueField-3 is Paused after BMC reset; force-restarting it"
+                    );
+                    // Returning true advances to the boot wait, which decides whether the restart worked.
+                    return instrument_power_op(
+                        PowerOperation::ForceRestart,
+                        redfish_client.power(SystemPowerControl::ForceRestart),
+                        PowerControlLog::RecoverySequence {
+                            bmc_ip_address: endpoint.address,
+                        },
+                    )
+                    .await
+                    .is_ok();
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::warn!(
+                        bmc_ip_address = %endpoint.address,
+                        error = %e,
+                        "Could not get power state"
+                    );
+                    return false;
+                }
+            }
         }
 
         match instrument_power_op(
@@ -2090,6 +2249,24 @@ impl PreingestionManagerStatic {
                     .execute_wait_bmc_and_power_on(redfish_client.as_ref(), endpoint)
                     .await
                 {
+                    if Utc::now().signed_duration_since(last_time.unwrap_or(&Utc::now()))
+                        > BMC_RESET_POWER_ON_TIMEOUT
+                    {
+                        tracing::warn!(
+                            bmc_ip_address = %endpoint.address,
+                            "Host did not power on within the BMC reset timeout; failing preingestion"
+                        );
+                        db.with_txn(|txn| {
+                            db::explored_endpoints::set_preingestion_failed(
+                                endpoint.address,
+                                "Host did not power on within 30 minutes of the BMC reset"
+                                    .to_string(),
+                                txn,
+                            )
+                            .boxed()
+                        })
+                        .await??;
+                    }
                     return Ok(());
                 }
                 tracing::info!(
@@ -2109,6 +2286,45 @@ impl PreingestionManagerStatic {
             }
             InitialResetPhase::WaitHostBoot => {
                 if !self.should_proceed_after_boot_wait(last_time, endpoint) {
+                    return Ok(());
+                }
+                let power_state = match redfish_client.get_power_state().await {
+                    Ok(power_state) => power_state,
+                    Err(error) => {
+                        tracing::warn!(
+                            bmc_ip_address = %endpoint.address,
+                            error = %error,
+                            "Could not verify host power state after restart"
+                        );
+                        return Ok(());
+                    }
+                };
+                if matches!(power_state, PowerState::PoweringOn | PowerState::Reset) {
+                    tracing::trace!(
+                        bmc_ip_address = %endpoint.address,
+                        power_state = %power_state,
+                        "Host still powering on after restart; rechecking next iteration"
+                    );
+                    return Ok(());
+                }
+                if power_state != PowerState::On {
+                    let reason =
+                        "Host never reached On after restart during firmware pre-update reset";
+                    tracing::error!(
+                        bmc_ip_address = %endpoint.address,
+                        power_state = %power_state,
+                        reason,
+                        "Host did not reach On after restart during pre-update reset"
+                    );
+                    db.with_txn(|txn| {
+                        db::explored_endpoints::set_preingestion_failed(
+                            endpoint.address,
+                            reason.to_string(),
+                            txn,
+                        )
+                        .boxed()
+                    })
+                    .await??;
                     return Ok(());
                 }
                 // Now we can actually proceed with the upgrade.  Go back to checking firmware so we don't have to store all of that info.
@@ -2192,6 +2408,40 @@ impl PreingestionManagerStatic {
                     .execute_wait_bmc_and_power_on(redfish_client.as_ref(), endpoint)
                     .await
                 {
+                    // Count a host that never turns on as a failed cycle so the attempt budget applies.
+                    if Utc::now().signed_duration_since(last_time.unwrap_or(&Utc::now()))
+                        > BMC_RESET_POWER_ON_TIMEOUT
+                    {
+                        let attempts_done = attempt + 1;
+                        tracing::warn!(
+                            bmc_ip_address = %endpoint.address,
+                            attempt = attempts_done,
+                            max_attempts = MAX_TIME_SYNC_RESET_ATTEMPTS,
+                            "Host did not power on within the BMC reset timeout"
+                        );
+                        if attempts_done < MAX_TIME_SYNC_RESET_ATTEMPTS {
+                            db.with_txn(|txn| {
+                                db::explored_endpoints::set_preingestion_time_sync_reset(
+                                    endpoint.address,
+                                    TimeSyncResetPhase::Start,
+                                    attempts_done,
+                                    txn,
+                                )
+                                .boxed()
+                            })
+                            .await??;
+                        } else {
+                            db.with_txn(|txn| {
+                                db::explored_endpoints::set_preingestion_failed(
+                                    endpoint.address,
+                                    format!("Host did not power on after BMC reset in {attempts_done} attempts"),
+                                    txn,
+                                )
+                                .boxed()
+                            })
+                            .await??;
+                        }
+                    }
                     return Ok(false);
                 }
                 tracing::info!(
@@ -2215,6 +2465,61 @@ impl PreingestionManagerStatic {
                     return Ok(false);
                 }
 
+                let power_state = match redfish_client.get_power_state().await {
+                    Ok(power_state) => power_state,
+                    Err(error) => {
+                        tracing::warn!(
+                            bmc_ip_address = %endpoint.address,
+                            error = %error,
+                            "Could not verify host power state after restart"
+                        );
+                        return Ok(false);
+                    }
+                };
+                if power_state != PowerState::On {
+                    let attempts_done = attempt + 1;
+                    if attempts_done < MAX_TIME_SYNC_RESET_ATTEMPTS {
+                        tracing::warn!(
+                            bmc_ip_address = %endpoint.address,
+                            power_state = %power_state,
+                            attempt = attempts_done,
+                            max_attempts = MAX_TIME_SYNC_RESET_ATTEMPTS,
+                            "Host did not reach On after restart; retrying time-sync reset"
+                        );
+                        db.with_txn(|txn| {
+                            db::explored_endpoints::set_preingestion_time_sync_reset(
+                                endpoint.address,
+                                TimeSyncResetPhase::Start,
+                                attempts_done,
+                                txn,
+                            )
+                            .boxed()
+                        })
+                        .await??;
+                    } else {
+                        let reason = format!(
+                            "Host never reached On after restart in {attempts_done} time-sync reset attempts"
+                        );
+                        tracing::error!(
+                            bmc_ip_address = %endpoint.address,
+                            power_state = %power_state,
+                            attempt = attempts_done,
+                            max_attempts = MAX_TIME_SYNC_RESET_ATTEMPTS,
+                            "Host did not reach On after restart; failing preingestion"
+                        );
+                        db.with_txn(|txn| {
+                            db::explored_endpoints::set_preingestion_failed(
+                                endpoint.address,
+                                reason,
+                                txn,
+                            )
+                            .boxed()
+                        })
+                        .await??;
+                    }
+                    return Ok(false);
+                }
+
                 // Host has booted, now check time sync again
                 tracing::info!(
                     bmc_ip_address = %endpoint.address,
@@ -2229,7 +2534,7 @@ impl PreingestionManagerStatic {
                             "BMC time is now in sync after reset"
                         );
                         let delayed_upgrade = self
-                            .check_firmware_versions_below_preingestion(db, endpoint)
+                            .check_firmware_versions_below_preingestion(db, endpoint, true)
                             .await?;
                         Ok(delayed_upgrade)
                     }

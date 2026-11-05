@@ -21,6 +21,8 @@ pub mod domain;
 pub mod dpa_interface;
 pub mod dpu_remediations;
 pub mod extension_service;
+/// Typed identities for the external-validation workflow.
+pub mod external_validation;
 pub mod infiniband;
 pub mod instance;
 pub mod instance_type;

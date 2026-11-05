@@ -37,6 +37,7 @@ use carbide_machine_controller::config::{
     MachineStateHandlerSiteConfig, MachineValidationConfig, PowerManagerOptions, TimePeriod,
 };
 use carbide_network::ip::prefix::{IpNet, aggregate};
+use carbide_network::virtualization::RouteTargetContributions;
 use carbide_nvlink_manager::config::NvLinkConfig;
 use carbide_preingestion_manager::PreingestionManagerConfig;
 use carbide_rack_controller::config::{RackValidationConfig, RmsConfig};
@@ -642,7 +643,8 @@ pub struct CarbideConfig {
     #[serde(default)]
     pub machine_updater: MachineUpdater,
 
-    /// Maximum number of IDs accepted by `find_*_by_ids` APIs and
+    /// Maximum number of IDs accepted by `find_*_by_ids` APIs,
+    /// routing profile names accepted by `FindRoutingProfilesByNames`, and
     /// card selections accepted by `SetMachineNicFirmwareConfig`.
     /// Default is 100.
     #[serde(default = "default_max_find_by_ids")]
@@ -2028,16 +2030,15 @@ pub struct DpfConfig {
     /// Whether carbide automatically releases DPF maintenance holds for changed
     /// DPUDeployment-owned DPUService revisions whose upgrade policy enables NodeEffect.
     ///
-    /// This selects *who* opens an existing gate; it does not add one. NICo sets
-    /// `upgradePolicy.applyNodeEffect=false` for the DPU agent, DHCP server, FMDS, and OTel
-    /// Collector, so this setting does not gate those revisions. HBN, DTS, and extra services use
-    /// the gated default. Direct, detached DPUService objects do not use this setting.
+    /// This selects *who* opens an existing gate; it does not add one. NICo services,
+    /// HBN, DTS, and extra services use the gated default. Direct, detached DPUService
+    /// objects do not use this setting.
     ///
-    /// On by default. Setting it to false does not resume unchecked rollout: it
-    /// means the held DPUs wait for an operator to release them deliberately,
-    /// rather than for carbide to do it on the host's next idle sweep. Hosts
-    /// still awaiting reprovisioning, and hosts carrying a live tenant instance,
-    /// keep their hold either way.
+    /// Enabled by default. When disabled, service-update holds wait for deliberate
+    /// operator release. Provisioning still releases its own NodeEffect holds and
+    /// clears pending service-sync markers regardless of this setting. Automatic
+    /// service synchronization does not release holds for hosts awaiting
+    /// reprovisioning or carrying a live tenant instance.
     #[serde(default = "default_to_true")]
     pub dpu_service_sync_enabled: bool,
     /// Optional override for the Kubernetes `imagePullSecrets` entry used to pull service
@@ -3341,9 +3342,15 @@ impl FnnRoutingProfileConfig {
             access_tier: _,
         } = self;
 
+        let contributions = RouteTargetContributions {
+            profile_imports: route_target_imports.as_deref().unwrap_or_default(),
+            profile_exports: route_targets_on_exports.as_deref().unwrap_or_default(),
+            common_export: None,
+            site_imports: &[],
+        };
+
         *internal == Some(true)
-            && route_target_imports.as_ref().is_none_or(Vec::is_empty)
-            && route_targets_on_exports.as_ref().is_none_or(Vec::is_empty)
+            && !contributions.has_additional_targets()
             && !leak_default_route_from_underlay.unwrap_or_default()
             && !leak_tenant_host_routes_to_underlay.unwrap_or_default()
             && !tenant_leak_communities_accepted.unwrap_or_default()
@@ -5746,41 +5753,70 @@ path = "credentials.yaml"
         );
     }
 
+    /// Verifies admission checks the resolved profile: configured targets prevent
+    /// prefix reuse, while an explicit empty override clears inherited targets.
     #[test]
     fn resolved_profile_overlap_eligibility_includes_vpc_overrides() {
-        let fnn = FnnConfig {
-            admin_vpc: None,
-            common_internal_route_target: None,
-            additional_route_target_imports: vec![],
-            routing_profiles: HashMap::from([(
-                "BASE".to_string(),
-                FnnRoutingProfileConfig {
-                    tenant_prefix_overlap_eligible: true,
-                    internal: Some(true),
-                    ..Default::default()
-                },
-            )]),
-            use_vpc_vrf_loopback: false,
+        let base = FnnRoutingProfileConfig {
+            tenant_prefix_overlap_eligible: true,
+            internal: Some(true),
+            ..Default::default()
         };
-        assert!(
-            fnn.routing_profiles["BASE"].is_eligible_for_tenant_prefix_overlap(),
-            "base profile should be eligible before VPC overrides"
-        );
-
-        let vpc = vpc_config(
-            Some("BASE"),
-            Some(VpcRoutingProfileOverrides {
-                leak_default_route_from_underlay: Some(true),
-                ..Default::default()
-            }),
-        );
-        let resolved = fnn
-            .resolve_vpc_routing_profile(&vpc)
-            .expect("base profile must resolve");
-
-        assert!(
-            !resolved.is_eligible_for_tenant_prefix_overlap(),
-            "resolved VPC leak must make the profile ineligible"
+        let target = RouteTargetConfig {
+            asn: 65000,
+            vni: Some(100),
+            vni_self: false,
+        };
+        value_scenarios!(
+            run = |(profile, overrides)| {
+                let fnn = FnnConfig {
+                    admin_vpc: None,
+                    common_internal_route_target: None,
+                    additional_route_target_imports: vec![],
+                    routing_profiles: HashMap::from([("BASE".to_string(), profile)]),
+                    use_vpc_vrf_loopback: false,
+                };
+                fnn.resolve_vpc_routing_profile(&vpc_config(Some("BASE"), overrides))
+                    .expect("base profile must resolve")
+                    .is_eligible_for_tenant_prefix_overlap()
+            };
+            "no additions" {
+                // A profile with no route leaks is the eligible positive control.
+                (base.clone(), None) => true,
+            }
+            "inherited imports" {
+                // Omitted overrides retain the import that makes reuse unsafe.
+                (FnnRoutingProfileConfig {
+                    route_target_imports: Some(vec![target.clone()]),
+                    ..base.clone()
+                }, None) => false,
+            }
+            "inherited exports" {
+                // Export tagging alone also prevents isolated prefix reuse.
+                (FnnRoutingProfileConfig {
+                    route_targets_on_exports: Some(vec![target.clone()]),
+                    ..base.clone()
+                }, None) => false,
+            }
+            "cleared additions" {
+                // Explicit empty lists remove both inherited contributions.
+                (FnnRoutingProfileConfig {
+                    route_target_imports: Some(vec![target.clone()]),
+                    route_targets_on_exports: Some(vec![target]),
+                    ..base.clone()
+                }, Some(VpcRoutingProfileOverrides {
+                    route_target_imports: Some(vec![]),
+                    route_targets_on_exports: Some(vec![]),
+                    ..Default::default()
+                })) => true,
+            }
+            "VPC leak override" {
+                // Resolving a leak override must still reject an otherwise safe base.
+                (base, Some(VpcRoutingProfileOverrides {
+                    leak_default_route_from_underlay: Some(true),
+                    ..Default::default()
+                })) => false,
+            }
         );
     }
 
@@ -7332,7 +7368,7 @@ path = "credentials.yaml"
         .unwrap();
         let profiles = &config.rack_profiles.rack_profiles;
         assert_eq!(profiles.len(), 14);
-        for (id, family, topology, name, compute_vendor, power_vendor, power_count) in [
+        for (id, family, topology, name, compute_vendor, power_vendor) in [
             (
                 "VR_NVL72R1_C2G4_NVIDIA",
                 "vrnvl72",
@@ -7340,7 +7376,6 @@ path = "credentials.yaml"
                 None,
                 "NVIDIA",
                 "LiteOn",
-                4,
             ),
             (
                 "GB300_NVL72R1_C2G4_NVIDIA",
@@ -7349,7 +7384,6 @@ path = "credentials.yaml"
                 Some("GB300"),
                 "NVIDIA",
                 "LiteOn",
-                6,
             ),
             (
                 "GB300_NVL72R1_C2G4_LENOVO",
@@ -7358,7 +7392,6 @@ path = "credentials.yaml"
                 Some("GB300"),
                 "Lenovo",
                 "LiteOn",
-                6,
             ),
             (
                 "GB300_NVL72R1_C2G4_SMC",
@@ -7367,7 +7400,6 @@ path = "credentials.yaml"
                 Some("GB300"),
                 "Supermicro",
                 "Delta",
-                6,
             ),
             (
                 "GB200_NVL72R1_C2G4_NVIDIA",
@@ -7376,7 +7408,6 @@ path = "credentials.yaml"
                 Some("GB200"),
                 "NVIDIA",
                 "LiteOn",
-                8,
             ),
             (
                 "GB200_NVL72R1_C2G4_WIWYNN",
@@ -7385,10 +7416,9 @@ path = "credentials.yaml"
                 Some("GB200"),
                 "WIWYNN",
                 "LiteOn",
-                8,
             ),
         ] {
-            for (suffix, count) in [("", power_count), ("_NO_POWERSHELF", 0)] {
+            for suffix in ["", "_NO_POWERSHELF"] {
                 let key = format!("{id}{suffix}");
                 let profile = profiles
                     .get(&key)
@@ -7410,7 +7440,7 @@ path = "credentials.yaml"
                     Some(compute_vendor),
                     "{key}"
                 );
-                assert_eq!(caps.compute.count, 18, "{key}");
+                assert_eq!(caps.compute.count, 0, "{key}");
                 assert_eq!(caps.switch.vendor.as_deref(), Some("NVIDIA"), "{key}");
                 assert_eq!(caps.switch.count, 9, "{key}");
                 assert_eq!(
@@ -7418,12 +7448,12 @@ path = "credentials.yaml"
                     Some(power_vendor),
                     "{key}"
                 );
-                assert_eq!(caps.power_shelf.count, count, "{key}");
+                assert_eq!(caps.power_shelf.count, 0, "{key}");
             }
         }
-        for (id, family, vendor, power_count) in [
-            ("NVL72", "gb200", "NVIDIA", 8),
-            ("NVL72_GB300", "gb300", "Lenovo", 6),
+        for (id, family, vendor) in [
+            ("NVL72", "gb200", "NVIDIA"),
+            ("NVL72_GB300", "gb300", "Lenovo"),
         ] {
             let profile = &profiles[id];
             assert_eq!(profile.product_family.as_ref().unwrap().as_str(), family);
@@ -7431,14 +7461,14 @@ path = "credentials.yaml"
                 profile.rack_capabilities.compute.vendor.as_deref(),
                 Some(vendor)
             );
-            assert_eq!(profile.rack_capabilities.compute.count, 18);
+            assert_eq!(profile.rack_capabilities.compute.count, 0);
             assert_eq!(profile.rack_capabilities.switch.count, 9);
-            assert_eq!(profile.rack_capabilities.power_shelf.count, power_count);
+            assert_eq!(profile.rack_capabilities.power_shelf.count, 0);
         }
         let overridden: CarbideConfig = Figment::new()
             .merge(Toml::string(&source))
             .merge(Toml::string(
-                "[rack_profiles.GB200_NVL72R1_C2G4_WIWYNN.rack_capabilities.compute]\nvendor = \"WiWynn\"",
+                "[rack_profiles.GB200_NVL72R1_C2G4_WIWYNN.rack_capabilities.compute]\nvendor = \"WiWynn\"\ncount = 18\n[rack_profiles.GB200_NVL72R1_C2G4_WIWYNN.rack_capabilities.power_shelf]\ncount = 8",
             ))
             .extract()
             .unwrap();

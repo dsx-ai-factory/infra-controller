@@ -146,7 +146,7 @@ func (cerh CreateExpectedRackGroupHandler) Handle(c echo.Context) error {
 		SiteID:              site.ID,
 		RackGroupID:         apiRequest.RackGroupID,
 		Topology:            apiRequest.Topology,
-		Protocol:            cutil.GetPtr(apiRequest.Protocol),
+		Protocol:            apiRequest.Protocol,
 		Labels:              apiRequest.Labels,
 		CreatedBy:           dbUser.ID,
 	}
@@ -882,7 +882,7 @@ func (raerh ReplaceAllExpectedRackGroupsHandler) Handle(c echo.Context) error {
 			SiteID:              site.ID,
 			RackGroupID:         er.RackGroupID,
 			Topology:            er.Topology,
-			Protocol:            cutil.GetPtr(er.Protocol),
+			Protocol:            er.Protocol,
 			Labels:              er.Labels,
 			CreatedBy:           dbUser.ID,
 		}

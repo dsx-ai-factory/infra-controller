@@ -24,6 +24,7 @@ use ::rpc::forge as rpc;
 use ::rpc::model::machine::ManagedHostStateSnapshotRpc;
 use carbide_redfish::libredfish::RedfishAuth;
 use carbide_secrets::credentials::{BmcCredentialType, CredentialKey, Credentials};
+use carbide_site_explorer::dpu_loopback::DPU_IPV4_LOOPBACK_SLOT;
 use carbide_uuid::machine::{
     DpuMachineId, HostMachineId, HostOrDpuId, MachineId, MachineIdSubtypeTrait,
 };
@@ -455,6 +456,7 @@ async fn force_delete_cleanup_txn(
     api: &Api,
     host_machine: Option<&HostMachine>,
     dpu_machines: &[DpuMachine],
+    identities: &HashMap<MachineId, db::machine::MachineCreationIdentity>,
     request: &rpc::AdminForceDeleteMachineRequest,
 ) -> Result<rpc::AdminForceDeleteMachineResponse, CarbideError> {
     let mut response = rpc::AdminForceDeleteMachineResponse::default();
@@ -557,28 +559,77 @@ async fn force_delete_cleanup_txn(
         }
     }
 
+    // Lock BMC interfaces before the machine guards. The deletion below
+    // reuses these locks after the guards exclude same-ID replacements.
+    for machine in &machines {
+        if let Some(address) = machine.status.bmc_info.ip {
+            let _interface =
+                db::machine_interface::find_optional_for_update_by_ip(&mut txn, address).await?;
+        }
+    }
+
+    // Cleanup can outlive another force-delete of this hardware ID. Lock the
+    // interfaces before machines, then exclude replacement rows before looking
+    // up ownership so their newer reservations cannot be released here.
+    let mut machine_ids = identities.keys().copied().collect::<Vec<_>>();
+    machine_ids.sort_unstable();
+    db::machine_interface::lock_for_machine_cleanup(&mut txn, &machine_ids).await?;
+    let mut current_machine_ids = HashSet::new();
+    for machine_id in &machine_ids {
+        if identities[machine_id]
+            .lock_force_deleting(&mut txn, machine_id)
+            .await?
+        {
+            current_machine_ids.insert(*machine_id);
+        }
+    }
+
     if let Some(machine) = host_machine {
         response.host_bmc_interface_associated =
             request.delete_bmc_interfaces && machine.status.bmc_info.ip.is_some();
-        response.host_bmc_interface_deleted = force_delete_bmc_records(
-            &mut txn,
-            &machine.id,
-            &machine.status.bmc_info,
-            request.delete_bmc_interfaces,
-            request.release_preserved_addresses,
-            locked_explored_host,
-            &locked_explored_endpoints,
-        )
-        .await?;
+        response.host_bmc_interface_deleted = current_machine_ids
+            .contains(machine.id.as_machine_id())
+            && force_delete_bmc_records(
+                &mut txn,
+                &machine.id,
+                &machine.status.bmc_info,
+                request.delete_bmc_interfaces,
+                request.release_preserved_addresses,
+                locked_explored_host,
+                &locked_explored_endpoints,
+            )
+            .await?;
+    }
+    for dpu_machine in dpu_machines {
+        response.dpu_bmc_interface_associated |=
+            request.delete_bmc_interfaces && dpu_machine.status.bmc_info.ip.is_some();
+        response.dpu_bmc_interface_deleted |= current_machine_ids
+            .contains(dpu_machine.id.as_machine_id())
+            && force_delete_bmc_records(
+                &mut txn,
+                &dpu_machine.id,
+                &dpu_machine.status.bmc_info,
+                request.delete_bmc_interfaces,
+                request.release_preserved_addresses,
+                None,
+                &locked_explored_endpoints,
+            )
+            .await?;
+    }
+
+    if let Some(machine) = host_machine {
+        let current = current_machine_ids.contains(machine.id.as_machine_id());
         // Lock current ownership before `force_cleanup` clears it, excluding
         // IDs already reassigned. Restrict deletion to captured IDs below:
         // the response identifies interfaces from this request's snapshot.
-        let owned_interfaces = if request.delete_interfaces {
+        let owned_interfaces = if request.delete_interfaces && current {
             db::machine_interface::find_by_machine_id_for_update(&mut txn, &machine.id).await?
         } else {
             Vec::new()
         };
-        db::machine::force_cleanup(&mut txn, &machine.id).await?;
+        if current {
+            db::machine::force_cleanup(&mut txn, &machine.id).await?;
+        }
 
         if request.delete_interfaces {
             for interface in owned_interfaces.iter().filter(|interface| {
@@ -601,21 +652,30 @@ async fn force_delete_cleanup_txn(
             response.host_interfaces_deleted = true;
         }
 
-        db::attestation::ek_cert_verification_status::delete_ca_verification_status_by_machine_id(
-            &mut txn,
-            &machine.id,
-        )
-        .await
-        .inspect_err(|e| {
-            tracing::error!(
-                machine_id = %machine.id,
-                error = %e,
-                "Could not remove EK certificate status",
-            );
-        })?;
+        if current {
+            db::attestation::ek_cert_verification_status::delete_ca_verification_status_by_machine_id(
+                &mut txn,
+                &machine.id,
+            )
+            .await
+            .inspect_err(|e| {
+                tracing::error!(
+                    machine_id = %machine.id,
+                    error = %e,
+                    "Could not remove EK certificate status",
+                );
+            })?;
+        }
     }
 
     for dpu_machine in dpu_machines {
+        if !current_machine_ids.contains(dpu_machine.id.as_machine_id()) {
+            // This captured machine row is gone or has been replaced. Skip its
+            // machine-scoped cleanup; this says nothing about earlier optional
+            // MAC-based cleanup. Do not select the replacement's pool ownership.
+            response.dpu_interfaces_deleted |= request.delete_interfaces;
+            continue;
+        }
         let owner_id = dpu_machine.id.to_string();
         // Free the DPU's loopbacks. Free or reassigned values leave this DPU
         // no reservation to release.
@@ -627,19 +687,38 @@ async fn force_delete_cleanup_txn(
         )
         .await?;
 
-        if let Some(loopback_ip) = dpu_machine.network_config.loopback_ip {
-            match db::resource_pool::release(
+        if let Some(owned) = api
+            .resource_pool_registry
+            .find_owned(
                 &api.common_pools.ethernet.pool_loopback_ip,
                 &mut txn,
-                loopback_ip,
                 model::resource_pool::OwnerType::Machine,
                 &owner_id,
+                DPU_IPV4_LOOPBACK_SLOT,
             )
             .await?
-            {
-                ConditionalWrite::Applied(())
-                | ConditionalWrite::NotApplied(ResourcePoolAllocationNotOwned) => {}
+        {
+            let loopback_ip = *owned.value();
+            match owned.release(&mut txn).await? {
+                ConditionalWrite::Applied(()) => {}
+                ConditionalWrite::NotApplied(ResourcePoolAllocationNotOwned) => {
+                    return Err(CarbideError::FailedPrecondition(format!(
+                        "DPU `{}` no longer owns loopback IP `{loopback_ip}`",
+                        dpu_machine.id,
+                    )));
+                }
             }
+        } else {
+            // A result that arrives during deletion belongs to the captured
+            // request. Recovery cancels it after this transaction commits.
+            api.resource_pool_registry
+                .request_cancellation(
+                    &mut txn,
+                    model::resource_pool::OwnerType::Machine,
+                    &owner_id,
+                    DPU_IPV4_LOOPBACK_SLOT,
+                )
+                .await?;
         }
 
         // The machine snapshot predates `ForceDeletion`, so a concurrent
@@ -677,18 +756,6 @@ async fn force_delete_cleanup_txn(
 
         db::network_devices::dpu_to_network_device_map::delete(&mut txn, &dpu_machine.id).await?;
 
-        response.dpu_bmc_interface_associated |=
-            request.delete_bmc_interfaces && dpu_machine.status.bmc_info.ip.is_some();
-        response.dpu_bmc_interface_deleted |= force_delete_bmc_records(
-            &mut txn,
-            &dpu_machine.id,
-            &dpu_machine.status.bmc_info,
-            request.delete_bmc_interfaces,
-            request.release_preserved_addresses,
-            None,
-            &locked_explored_endpoints,
-        )
-        .await?;
         if let Some(asn) = dpu_machine.asn {
             match db::resource_pool::release(
                 &api.common_pools.ethernet.pool_fnn_asn,
@@ -831,7 +898,7 @@ pub(crate) async fn admin_force_delete_machine(
         "Admin force-delete machine request",
     );
 
-    if machine.config.instance_type_id.is_some() {
+    if machine.config.instance_type_id.is_some() && !request.allow_delete_with_instance_type {
         return Err(CarbideError::FailedPrecondition(format!(
             "association with instance type must be removed before deleting machine {}",
             machine.id
@@ -841,7 +908,7 @@ pub(crate) async fn admin_force_delete_machine(
 
     // TODO: This should maybe just use the snapshot loading functionality that the
     // state controller will use - which already contains the combined state
-    let host_machine;
+    let mut host_machine;
     let dpu_machines;
     match machine.id.host_or_dpu_id() {
         HostOrDpuId::Dpu(dpu_machine_id) => {
@@ -875,6 +942,42 @@ pub(crate) async fn admin_force_delete_machine(
             host_machine = Some(machine.try_into().map_err(|error| {
                 CarbideError::internal(format!("invalid host machine: {error}"))
             })?);
+        }
+    }
+
+    if let Some(host_machine) = &mut host_machine {
+        let host_machine_id = host_machine.id;
+        *host_machine = db::machine::find_one(
+            &mut txn,
+            &host_machine_id,
+            MachineSearchConfig {
+                for_update: true,
+                ..MachineSearchConfig::default()
+            },
+        )
+        .await?
+        .ok_or_else(|| CarbideError::NotFoundError {
+            kind: "Machine",
+            id: host_machine_id.to_string(),
+        })?;
+
+        if host_machine.config.instance_type_id.is_some()
+            && !request.allow_delete_with_instance_type
+        {
+            return Err(CarbideError::FailedPrecondition(format!(
+                "association with instance type must be removed before deleting machine {}",
+                host_machine.id
+            ))
+            .into());
+        }
+
+        let instance_id = db::instance::find_id_by_machine_id(&mut txn, &host_machine.id).await?;
+        if instance_id.is_some() && !request.allow_delete_with_instance {
+            return Err(CarbideError::FailedPrecondition(format!(
+                "attached instance must be removed before deleting machine {}",
+                host_machine.id
+            ))
+            .into());
         }
     }
 
@@ -920,6 +1023,22 @@ pub(crate) async fn admin_force_delete_machine(
             machine.id
         ))
         .into());
+    }
+
+    let mut identities = HashMap::new();
+    for machine_id in host_machine
+        .iter()
+        .map(|machine| MachineId::from(machine.id))
+        .chain(
+            dpu_machines
+                .iter()
+                .map(|machine| MachineId::from(machine.id)),
+        )
+    {
+        identities.insert(
+            machine_id,
+            db::machine::MachineCreationIdentity::capture(&mut txn, &machine_id).await?,
+        );
     }
 
     // So far we only inspected state - now we start the deletion process
@@ -1266,7 +1385,15 @@ pub(crate) async fn admin_force_delete_machine(
     // each attempt (50, 100, 200, 400 ms) for up to five total attempts.
     const MAX_CLEANUP_ATTEMPTS: u32 = 5;
     for attempt in 0..MAX_CLEANUP_ATTEMPTS {
-        match force_delete_cleanup_txn(api, host_machine.as_ref(), &dpu_machines, &request).await {
+        match force_delete_cleanup_txn(
+            api,
+            host_machine.as_ref(),
+            &dpu_machines,
+            &identities,
+            &request,
+        )
+        .await
+        {
             Ok(cleanup) => {
                 response.host_bmc_interface_associated = cleanup.host_bmc_interface_associated;
                 response.host_bmc_interface_deleted = cleanup.host_bmc_interface_deleted;

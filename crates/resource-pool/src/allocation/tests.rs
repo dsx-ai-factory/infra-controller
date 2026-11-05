@@ -534,11 +534,12 @@ async fn rolled_back_allocation_cancels_and_resumes_pending_cleanup(
         domain: ResourcePoolValueDomain::Integer,
         entries: vec![entry(1, v1::AssignmentMode::Automatic)],
     };
+    let gate = Arc::new(Gate::default());
     let fixture = RemotePoolFixture::new(
         database,
         provider().with_pending_cancellation(),
         &eligibility,
-        Fault::None,
+        Fault::StallRecovery(gate.clone()),
     )
     .await?;
     let cancel = CancellationToken::new();
@@ -549,6 +550,8 @@ async fn rolled_back_allocation_cancels_and_resumes_pending_cleanup(
         .await?
         .expect("selected remote pool");
     txn.commit().await?;
+    // Let preparation finish its initial `Recover`; cleanup waits at later calls.
+    gate.release.notify_one();
     let allocation = selected
         .prepare_allocation(
             &fixture.database,
@@ -559,6 +562,8 @@ async fn rolled_back_allocation_cancels_and_resumes_pending_cleanup(
             &cancel,
         )
         .await?;
+    bounded(gate.entered.notified()).await;
+    bounded(gate.dropped.notified()).await;
     let pending = storage::latest_for_owner_slot(&fixture.database, OwnerType::Vpc, "vpc-1", "vni")
         .await?
         .expect("saved VPC allocation");
@@ -662,22 +667,32 @@ async fn rolled_back_allocation_cancels_and_resumes_pending_cleanup(
             .is_provisioned(&assignment(&pending).allocation_id)
     );
     drop(held);
-    single_connection.close().await;
 
-    let mut cleaning = Box::pin(cleanup.wait(&fixture.registry, &fixture.database, &cancel));
+    let cleanup_interval = Duration::from_millis(25);
+    let mut cleaning = Box::pin(cleanup.wait_with_test_timing(
+        &fixture.registry,
+        &fixture.database,
+        &cancel,
+        Duration::from_secs(30),
+        cleanup_interval,
+    ));
     tokio::select! {
         result = &mut cleaning => {
             panic!("cleanup finished before provider confirmation: {:?}", result.err());
         }
-        // A second call proves the helper waited through its five-second poll
-        // interval after the provider left cleanup pending.
-        result = tokio::time::timeout(Duration::from_secs(10), async {
-            while fixture.provider.cancel_calls.load(Ordering::SeqCst) < 2 {
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        }) => result?,
+        result = tokio::time::timeout(Duration::from_secs(10), gate.entered.notified()) => result?,
     }
-    assert_eq!(fixture.provider.cancel_calls.load(Ordering::SeqCst), 2);
+    gate.release.notify_one();
+    bounded(gate.dropped.notified()).await;
+    tokio::select! {
+        result = &mut cleaning => {
+            panic!("cleanup finished before provider confirmation: {:?}", result.err());
+        }
+        // A second call proves the helper retried after the provider left
+        // cleanup pending.
+        result = tokio::time::timeout(Duration::from_secs(10), gate.entered.notified()) => result?,
+    }
+    assert!(fixture.provider.cancel_calls.load(Ordering::SeqCst) >= 2);
     assert!(
         fixture
             .provider
@@ -691,6 +706,8 @@ async fn rolled_back_allocation_cancels_and_resumes_pending_cleanup(
             RemoteResourcePoolError::Cancelled
         ))
     ));
+    gate.release.notify_waiters();
+    bounded(gate.dropped.notified()).await;
     assert_eq!(
         storage::load(&fixture.database, pending.allocation_id)
             .await?
@@ -698,23 +715,34 @@ async fn rolled_back_allocation_cancels_and_resumes_pending_cleanup(
         Some(&cancelling)
     );
 
-    // The deadline is another interrupted wait, not proof of deprovisioning.
+    // Expiry while waiting for the only connection must leave cleanup pending.
+    // Holding it keeps the deadline out of an in-flight SQL transaction.
+    let held = single_connection.acquire().await?;
     let running = CancellationToken::new();
+    let cleanup_timeout = Duration::from_secs(1);
     let started = Instant::now();
     assert!(matches!(
         tokio::time::timeout(
-            Duration::from_secs(40),
-            cleanup.wait(&fixture.registry, &fixture.database, &running),
+            Duration::from_secs(10),
+            cleanup.wait_with_test_timing(
+                &fixture.registry,
+                &single_connection,
+                &running,
+                cleanup_timeout,
+                cleanup_interval,
+            ),
         )
         .await?,
         Err(ResourcePoolBackendError::Remote(
             RemoteResourcePoolError::Incomplete
         ))
     ));
-    assert!(started.elapsed() >= Duration::from_secs(30));
+    assert!(started.elapsed() >= cleanup_timeout);
     assert_eq!(
-        storage::load(&fixture.database, pending.allocation_id).await?,
-        Some(cancelling)
+        storage::load(&fixture.database, pending.allocation_id)
+            .await?
+            .as_ref(),
+        Some(&cancelling)
     );
     assert!(
         fixture
@@ -722,18 +750,75 @@ async fn rolled_back_allocation_cancels_and_resumes_pending_cleanup(
             .provider
             .is_provisioned(&assignment(&pending).allocation_id)
     );
+    drop(held);
+    single_connection.close().await;
+
+    // The cleanup deadline also bounds provider work after database admission.
+    // Hold `Recover` after `Cancel` so expiry interrupts a pending provider RPC.
     let cancel_calls = fixture.provider.cancel_calls.load(Ordering::SeqCst);
-    let mut cleaning = Box::pin(cleanup.wait(&fixture.registry, &fixture.database, &running));
+    let recover_calls = gate.calls.load(Ordering::SeqCst);
+    let provider_cleanup_timeout = Duration::from_secs(2);
+    let started = Instant::now();
+    let mut cleaning = Box::pin(cleanup.wait_with_test_timing(
+        &fixture.registry,
+        &fixture.database,
+        &running,
+        provider_cleanup_timeout,
+        cleanup_interval,
+    ));
+    tokio::select! {
+        result = &mut cleaning => {
+            panic!("cleanup expired before reaching the provider gate: {:?}", result.err());
+        }
+        result = tokio::time::timeout(Duration::from_secs(10), gate.entered.notified()) => result?,
+    }
+    assert_eq!(
+        fixture.provider.cancel_calls.load(Ordering::SeqCst),
+        cancel_calls + 1
+    );
+    assert_eq!(gate.calls.load(Ordering::SeqCst), recover_calls + 1);
+    assert!(matches!(
+        tokio::time::timeout(Duration::from_secs(10), cleaning).await?,
+        Err(ResourcePoolBackendError::Remote(
+            RemoteResourcePoolError::Incomplete
+        ))
+    ));
+    assert!(started.elapsed() >= provider_cleanup_timeout);
+    gate.release.notify_waiters();
+    bounded(gate.dropped.notified()).await;
+    assert_eq!(
+        storage::load(&fixture.database, pending.allocation_id)
+            .await?
+            .as_ref(),
+        Some(&cancelling)
+    );
+    assert!(
+        fixture
+            .provider
+            .provider
+            .is_provisioned(&assignment(&pending).allocation_id)
+    );
+
+    let cancel_calls = fixture.provider.cancel_calls.load(Ordering::SeqCst);
+    let recover_calls = gate.calls.load(Ordering::SeqCst);
+    let mut cleaning = Box::pin(cleanup.wait_with_test_timing(
+        &fixture.registry,
+        &fixture.database,
+        &running,
+        Duration::from_secs(30),
+        cleanup_interval,
+    ));
     tokio::select! {
         result = &mut cleaning => {
             panic!("retry finished before provider confirmation: {:?}", result.err());
         }
-        () = bounded(async {
-            while fixture.provider.cancel_calls.load(Ordering::SeqCst) == cancel_calls {
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        }) => {}
+        result = tokio::time::timeout(Duration::from_secs(10), gate.entered.notified()) => result?,
     }
+    assert_eq!(
+        fixture.provider.cancel_calls.load(Ordering::SeqCst),
+        cancel_calls + 1
+    );
+    assert_eq!(gate.calls.load(Ordering::SeqCst), recover_calls + 1);
     let operation = fixture
         .provider
         .committed
@@ -750,6 +835,8 @@ async fn rolled_back_allocation_cancels_and_resumes_pending_cleanup(
             pool: operation.pool,
             request_id: operation.request_id,
         })?;
+    gate.release.notify_one();
+    bounded(gate.dropped.notified()).await;
     tokio::time::timeout(Duration::from_secs(10), cleaning).await??;
     let cancelled = storage::load(&fixture.database, pending.allocation_id)
         .await?
@@ -845,7 +932,7 @@ async fn controller_replay_keeps_its_request_and_definition_until_cleanup(
     assert_eq!(fixture.saved().await?, pending);
     assert_eq!(fixture.provider.allocation_calls.load(Ordering::SeqCst), 0);
 
-    // Repeated WorkAlreadyLocked responses must also obey the enclosing budget.
+    // Waiting for the held work lease must also obey the enclosing budget.
     // Expiry leaves the same request available for a later resolution attempt.
     let mut txn = fixture.database.begin().await?;
     let prepared = selected
@@ -859,18 +946,21 @@ async fn controller_replay_keeps_its_request_and_definition_until_cleanup(
         )
         .await?;
     txn.commit().await?;
+    let allocation_timeout = Duration::from_secs(1);
     let started = Instant::now();
     assert!(matches!(
         tokio::time::timeout(
-            Duration::from_secs(40),
-            Box::pin(prepared.resolve(&fixture.database, &cancel))
+            Duration::from_secs(10),
+            Box::pin(
+                prepared.resolve_with_timeout(&fixture.database, &cancel, allocation_timeout,)
+            )
         )
         .await?,
         Err(ResourcePoolBackendError::Remote(
             RemoteResourcePoolError::Incomplete
         ))
     ));
-    assert!(started.elapsed() >= Duration::from_secs(30));
+    assert!(started.elapsed() >= allocation_timeout);
     assert_eq!(fixture.saved().await?, pending);
     assert_eq!(fixture.provider.allocation_calls.load(Ordering::SeqCst), 0);
 

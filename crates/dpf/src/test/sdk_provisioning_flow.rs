@@ -219,6 +219,10 @@ impl K8sConfigRepository for ProvisioningFlowMock {
 
 #[async_trait]
 impl DpfOperatorConfigRepository for ProvisioningFlowMock {
+    async fn get_version(&self, _: &str, _: &str) -> Result<String, DpfError> {
+        Ok(super::helpers::DPF_VERSION.to_string())
+    }
+
     async fn get(
         &self,
         _name: &str,

@@ -41,28 +41,26 @@ impl From<ExpectedRackGroup> for rpc::forge::ExpectedRackGroup {
     }
 }
 
-/// Whether a declaration must carry a protocol. Add and Update require one;
-/// groups stored before the protocol column are read back without it.
+/// Distinguishes declarations from legacy stored groups that may contain a blank protocol.
 #[derive(Clone, Copy)]
 enum Protocol {
-    Required,
-    Optional,
+    Declaration,
+    Stored,
 }
 
 impl TryFrom<rpc::forge::ExpectedRackGroup> for ExpectedRackGroup {
     type Error = RpcDataConversionError;
 
     fn try_from(value: rpc::forge::ExpectedRackGroup) -> Result<Self, Self::Error> {
-        convert(value, Protocol::Required)
+        convert(value, Protocol::Declaration)
     }
 }
 
-/// Convert a group read back from nico-api. An empty protocol means the
-/// group was stored before protocols were recorded, not an invalid value.
+/// Convert a group read back from nico-api, preserving an unspecified protocol.
 pub fn stored_expected_rack_group(
     value: rpc::forge::ExpectedRackGroup,
 ) -> Result<ExpectedRackGroup, RpcDataConversionError> {
-    convert(value, Protocol::Optional)
+    convert(value, Protocol::Stored)
 }
 
 fn convert(
@@ -80,7 +78,8 @@ fn convert(
         ));
     }
     let protocol = match protocol {
-        Protocol::Optional if value.protocol.trim().is_empty() => None,
+        Protocol::Stored if value.protocol.trim().is_empty() => None,
+        Protocol::Declaration if value.protocol.is_empty() => None,
         _ if value.protocol.trim().is_empty() || value.protocol.chars().count() > 128 => {
             return Err(invalid(
                 "protocol must contain 1 to 128 characters and not be blank",
@@ -227,13 +226,17 @@ mod tests {
         assert!(ExpectedRackGroup::try_from(empty).is_ok());
     }
 
-    /// Groups stored before the protocol column come back with an empty
-    /// protocol; the read path keeps them, the declaration path rejects them.
+    /// Missing protocols survive declaration and read conversion.
     #[test]
     fn stored_group_may_lack_a_protocol() {
         let mut legacy = wire();
         legacy.protocol.clear();
-        assert!(ExpectedRackGroup::try_from(legacy.clone()).is_err());
+        assert_eq!(
+            ExpectedRackGroup::try_from(legacy.clone())
+                .unwrap()
+                .protocol,
+            None
+        );
         let stored = stored_expected_rack_group(legacy).unwrap();
         assert_eq!(stored.protocol, None);
         let current = stored_expected_rack_group(wire()).unwrap();

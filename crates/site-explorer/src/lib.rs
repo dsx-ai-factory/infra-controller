@@ -27,6 +27,7 @@ use std::time::{Duration, Instant};
 
 use carbide_firmware::FirmwareConfigSnapshot;
 use carbide_redfish::libredfish::conv::IntoModel;
+use carbide_resource_pool::ResourcePoolRegistry;
 use carbide_secrets::credentials::CredentialManager;
 use carbide_utils::periodic_timer::PeriodicTimer;
 use carbide_uuid::machine::MachineType;
@@ -77,11 +78,15 @@ mod redfish;
 pub use bmc_endpoint_explorer::{AuthenticatedBmcClient, BmcEndpointExplorer};
 pub use redfish::{BmcAccess, EstablishedBmc, ProxiedPools};
 mod boot_interfaces;
+mod host_interfaces;
 use boot_interfaces::NicBootInterfaces;
 mod host_dpu_matches;
 use host_dpu_matches::{HostDpuMatches, MatchedDpu};
+mod host_reconciler;
+use host_reconciler::HostReconciler;
 mod boot_order_tracker;
 use boot_order_tracker::BootOrderTracker;
+pub mod dpu_loopback;
 mod inventory_creator;
 pub use inventory_creator::{
     Config as InventoryCreatorConfig, MachineCreator, PowerShelfCreator, SwitchCreator,
@@ -584,6 +589,7 @@ pub struct SiteExplorer {
     endpoint_exploration_service: Arc<EndpointExplorationService>,
     work_lock_manager_handle: WorkLockManagerHandle,
     inventory_creator: InventoryCreator,
+    host_reconciler: HostReconciler,
     machine_location_reconciler: MachineLocationReconciler,
     boot_order_tracker: BootOrderTracker,
     /// Backstops the persisted BMC-reset timestamps for the reset rate limit,
@@ -604,6 +610,10 @@ impl SiteExplorer {
     #[allow(clippy::too_many_arguments)]
     /// Creates a site explorer.
     ///
+    /// The registry selects each DPU's IPv4 loopback backend. Creation prepares
+    /// provider allocations before the machine transaction; `start` supplies
+    /// the shutdown token for that preparation.
+    ///
     /// When `dpf_enabled_at_site` is true, eligible hosts are marked for DPF-managed ingestion.
     /// Otherwise, hosts use the non-DPF ingestion path.
     pub fn new(
@@ -612,6 +622,7 @@ impl SiteExplorer {
         meter: opentelemetry::metrics::Meter,
         endpoint_exploration_service: Arc<EndpointExplorationService>,
         bmc_client: Arc<dyn AuthenticatedBmc>,
+        resource_pool_registry: ResourcePoolRegistry,
         common_pools: Arc<CommonPools>,
         work_lock_manager_handle: WorkLockManagerHandle,
         rack_profiles: RackProfileConfig,
@@ -624,6 +635,7 @@ impl SiteExplorer {
         let endpoint_explorer = endpoint_exploration_service.endpoint_explorer();
 
         SiteExplorer {
+            host_reconciler: HostReconciler::new(database_connection.clone()),
             machine_location_reconciler: MachineLocationReconciler::new(
                 database_connection.clone(),
                 rack_profiles.clone(),
@@ -633,6 +645,7 @@ impl SiteExplorer {
             inventory_creator: InventoryCreator::new(
                 database_connection.clone(),
                 (&explorer_config).into(),
+                resource_pool_registry,
                 common_pools,
                 rack_profiles,
                 machine_info_provider,
@@ -657,6 +670,8 @@ impl SiteExplorer {
         join_set: &mut JoinSet<()>,
         cancel_token: CancellationToken,
     ) -> io::Result<()> {
+        self.inventory_creator
+            .set_preparation_cancel_token(cancel_token.clone());
         join_set
             .build_task()
             .name("site_explorer")
@@ -728,6 +743,7 @@ impl SiteExplorer {
 
     fn run_failure_category(error: &SiteExplorerError) -> String {
         match error {
+            SiteExplorerError::ResourcePool(_) => "resource_pool",
             SiteExplorerError::DatabaseError(_) => "database_error",
             SiteExplorerError::ModelError(_) => "model_error",
             SiteExplorerError::AlreadyFoundError { .. } => "already_found",
@@ -1263,12 +1279,34 @@ impl SiteExplorer {
         );
 
         self.inventory_creator
-            .create_inventory(
+            .create_or_reconcile_hosts(
                 metrics,
                 &mut identified_hosts,
                 &expected_endpoint_index,
                 &already_ingested_bmc_ips,
                 &explored_this_run,
+                &run_context.suppressed_bmc_macs,
+            )
+            .await;
+
+        let reconcile_desired_boot_interfaces_start = Instant::now();
+        let reconcile_desired_boot_interfaces_res =
+            self.host_reconciler.run_single_iteration().await;
+        metrics.record_phase_latency(
+            "reconcile_desired_boot_interfaces",
+            reconcile_desired_boot_interfaces_start.elapsed(),
+        );
+        if let Err(error) = reconcile_desired_boot_interfaces_res {
+            tracing::warn!(
+                %error,
+                "Desired boot-interface reconciliation pass failed; a later Site Explorer run will retry"
+            );
+        }
+
+        self.inventory_creator
+            .create_switches_and_power_shelves(
+                metrics,
+                &expected_endpoint_index,
                 &run_context.suppressed_bmc_macs,
             )
             .await?;
@@ -2505,8 +2543,11 @@ impl SiteExplorer {
 
                     if !self.config.create_machines.load(Ordering::Relaxed)
                         || power_shelf_manual_ingestion
+                        || is_endpoint_in_managed_host(address, txn.as_pgconn()).await?
                     {
-                        // We're using manual ingestion, making preingestion updates risky.  Go ahead and skip them.
+                        // Manual ingestion must not run automatic setup, and managed BMCs
+                        // must not repeat preingestion for another address. Keep this in the
+                        // insert branch so refreshes preserve explicit preingestion retries.
                         db::explored_endpoints::set_preingestion_complete(address, &mut txn).await?
                     }
                 }

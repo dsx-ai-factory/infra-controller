@@ -20,7 +20,6 @@ use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use arc_swap::ArcSwapOption;
@@ -28,9 +27,9 @@ use carbide_uuid::machine::MachineId;
 use carbide_uuid::nvlink::NvLinkDomainId;
 use carbide_uuid::power_shelf::PowerShelfId;
 use carbide_uuid::rack::RackId;
-use futures::future::join_all;
 use prometheus::{Histogram, HistogramOpts};
 use tokio::sync::Notify;
+use tokio::task::JoinSet;
 
 use super::DiscoveryShutdown;
 use super::reachability::ReachabilitySpec;
@@ -145,6 +144,7 @@ pub(super) struct CollectorState {
     power_shelf_ids: HashMap<Cow<'static, str>, Option<PowerShelfId>>,
     endpoint_connections: HashMap<Cow<'static, str>, EndpointConnection>,
     pub(super) reachability_specs: HashMap<Cow<'static, str>, ReachabilitySpec>,
+    stopping: JoinSet<()>,
 }
 
 impl CollectorState {
@@ -190,7 +190,22 @@ impl CollectorState {
             power_shelf_ids: HashMap::new(),
             endpoint_connections: HashMap::new(),
             reachability_specs: HashMap::new(),
+            stopping: JoinSet::new(),
         }
+    }
+
+    /// Stops `collectors` in tasks this state owns, so a cancelled caller
+    /// leaves them for [`DiscoveryLoopContext::drain_collectors`].
+    pub(super) fn start_stopping(&mut self, collectors: Vec<Collector>) {
+        for collector in collectors {
+            self.stopping.spawn(collector.stop());
+        }
+    }
+
+    /// Stops `collectors` and waits for every stop this state has started.
+    pub(super) async fn stop(&mut self, collectors: Vec<Collector>) {
+        self.start_stopping(collectors);
+        while self.stopping.join_next().await.is_some() {}
     }
 
     fn map(&self, kind: CollectorKind) -> &HashMap<Cow<'static, str>, Collector> {
@@ -371,6 +386,17 @@ impl CollectorState {
         }
 
         collectors
+    }
+
+    /// Counts distinct endpoint keys with registered collectors.
+    /// Retained caches and inventory entries do not contribute.
+    pub(super) fn active_endpoint_count(&self) -> usize {
+        CollectorKind::ALL
+            .into_iter()
+            .chain([CollectorKind::Reachability])
+            .flat_map(|kind| self.map(kind).keys())
+            .collect::<HashSet<_>>()
+            .len()
     }
 
     pub(super) fn removed_keys(
@@ -564,29 +590,32 @@ impl DiscoveryLoopContext {
         })
     }
 
-    /// Stops every started collector concurrently within `timeout`; collectors
-    /// still running when it passes are abandoned and counted as `timed_out`.
+    /// Stops every started collector, including those discovery was already
+    /// stopping, concurrently within `timeout`; collectors still running when it
+    /// passes are abandoned and counted as `timed_out`.
     pub(crate) async fn drain_collectors(&mut self, timeout: Duration) -> DiscoveryShutdown {
         let collectors = self.collectors.take_all();
-        let total = collectors.len();
+        self.collectors.start_stopping(collectors);
+        let mut stopping = std::mem::take(&mut self.collectors.stopping);
+        let total = stopping.len();
 
         if total == 0 {
             return DiscoveryShutdown::default();
         }
 
-        let closed = AtomicUsize::new(0);
+        let mut closed = 0;
 
-        let stops = collectors.into_iter().map(|collector| async {
-            collector.stop().await;
-            closed.fetch_add(1, Ordering::SeqCst);
-        });
-
-        let finished = tokio::time::timeout(timeout, join_all(stops)).await.is_ok();
-        let closed = closed.load(Ordering::SeqCst);
+        tokio::time::timeout(timeout, async {
+            while stopping.join_next().await.is_some() {
+                closed += 1;
+            }
+        })
+        .await
+        .ok();
 
         DiscoveryShutdown {
             closed,
-            timed_out: if finished { 0 } else { total - closed },
+            timed_out: total - closed,
         }
     }
 }
@@ -634,12 +663,52 @@ mod tests {
     use std::borrow::Cow;
     use std::collections::HashSet;
 
+    use carbide_test_support::{Check, check_values};
+
     use super::*;
     use crate::collectors::Collector;
     use crate::config::MtlsProfileConfig;
 
     fn noop_collector() -> Collector {
         Collector::spawn_task(|_| async {})
+    }
+
+    #[tokio::test]
+    async fn active_endpoint_count_deduplicates_collectors_and_excludes_retained_state() {
+        check_values(
+            [
+                Check {
+                    scenario: "retained state without collectors",
+                    input: vec![],
+                    expect: 0,
+                },
+                Check {
+                    scenario: "distinct endpoints across overlapping collector types",
+                    input: vec![
+                        (CollectorKind::Sensor, "bmc"),
+                        (CollectorKind::Metrics, "bmc"),
+                        (CollectorKind::NvueRest, "switch"),
+                    ],
+                    expect: 2,
+                },
+                Check {
+                    scenario: "reachability without other collectors",
+                    input: vec![(CollectorKind::Reachability, "host")],
+                    expect: 1,
+                },
+            ],
+            |collectors| {
+                let mut state = CollectorState::new();
+                state.gnmi_cache_for("retained-gnmi");
+                state.inventory_for("retained-inventory");
+
+                for (kind, key) in collectors {
+                    state.insert(kind, Cow::Borrowed(key), noop_collector());
+                }
+
+                state.active_endpoint_count()
+            },
+        );
     }
 
     #[tokio::test]
