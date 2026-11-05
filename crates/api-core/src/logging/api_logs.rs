@@ -146,6 +146,7 @@ where
                 tracing::Level::INFO,
                 "request",
                 span_id,
+                otel.kind = "server",
                 carbide.trace_root = true,
                 http.url = %request.uri(),
                 http.response.status_code = tracing::field::Empty,
