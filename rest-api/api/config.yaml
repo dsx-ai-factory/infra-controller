@@ -16,6 +16,16 @@ api:
   name: nico
   route:
     version: v2
+  expectedMachineBatchRecovery:
+    # Default false. Upgrade every REST API and inventory worker with this off
+    # before enabling durable recovery for new Expected Machine create batches.
+    # Disabling leaves existing reservation guards and inventory recovery active.
+    # Before rollback to older binaries, pending_expected_machine must be empty.
+    # Check with SELECT count(*) FROM pending_expected_machine; let recovery
+    # resolve remaining batches instead of deleting unconfirmed reservations.
+    # API.EXPECTEDMACHINEBATCHRECOVERY.ENABLED overrides this file.
+    # File changes require restarting the REST API.
+    enabled: false
 
 db:
   host: localhost

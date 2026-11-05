@@ -294,6 +294,7 @@ func (tx *Tx) tryAcquireAdvisoryLock(ctx context.Context, lockID uint64, options
 	}
 	return retry.Do(
 		retriableFunc,
+		retry.Context(ctx),
 		retry.Attempts(retries),
 		retry.Delay(delay),
 		retry.MaxJitter(jitter),

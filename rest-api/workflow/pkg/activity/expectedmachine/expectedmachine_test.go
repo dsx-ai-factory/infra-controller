@@ -84,6 +84,8 @@ func testExpectedMachineSetupSchema(t *testing.T, dbSession *cdb.Session) {
 	// create ExpectedMachine table
 	err = dbSession.DB.ResetModel(context.Background(), (*cdbm.ExpectedMachine)(nil))
 	require.NoError(t, err)
+	err = dbSession.DB.ResetModel(context.Background(), (*cdbm.PendingExpectedMachine)(nil))
+	require.NoError(t, err)
 	// create User table
 	err = dbSession.DB.ResetModel(context.Background(), (*cdbm.User)(nil))
 	require.NoError(t, err)
@@ -171,6 +173,8 @@ func (h *testExpectedMachineWriteHook) AfterQuery(_ context.Context, event *bun.
 }
 
 func TestManageExpectedMachine_UpdateExpectedMachinesInDB(t *testing.T) {
+	t.Run("pending batch recovery", testExpectedMachinePendingRecovery)
+
 	ctx := context.Background()
 
 	dbSession := testExpectedMachineInitDB(t)
@@ -1856,6 +1860,8 @@ func TestNewManageExpectedMachine(t *testing.T) {
 			got := NewManageExpectedMachine(tt.args.dbSession, tt.args.siteClientPool)
 			assert.Equal(t, tt.want.dbSession, got.dbSession, "dbSession should match")
 			assert.Equal(t, tt.want.siteClientPool, got.siteClientPool, "siteClientPool should match")
+			assert.Equal(t, pendingBatchHistoryBudget, got.historyObservationBudget, "history observation must retain its aggregate bound")
+			assert.Equal(t, pendingBatchRecoveryBudget, got.recoveryBudget, "recovery must retain its activity-wide bound")
 		})
 	}
 }
