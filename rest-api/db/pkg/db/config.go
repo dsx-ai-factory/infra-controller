@@ -22,6 +22,29 @@ type Config struct {
 	DBName            string
 	Credential        credential.Credential
 	CACertificatePath string
+	// SSLMode is the libpq connection TLS mode. Empty means "prefer".
+	SSLMode string
+}
+
+// validSSLModes are the libpq sslmode values pgx accepts in a DSN.
+var validSSLModes = map[string]struct{}{
+	"disable":     {},
+	"allow":       {},
+	"prefer":      {},
+	"require":     {},
+	"verify-ca":   {},
+	"verify-full": {},
+}
+
+// ValidateSSLMode returns an error unless mode is a libpq sslmode value pgx
+// accepts. The empty string is left to the caller's default.
+func ValidateSSLMode(mode string) error {
+	_, ok := validSSLModes[mode]
+	if !ok {
+		return fmt.Errorf("invalid SSL mode %q: must be one of disable, allow, prefer, require, verify-ca, verify-full", mode)
+	}
+
+	return nil
 }
 
 // Validate checks if the Config fields are set correctly.
@@ -42,6 +65,12 @@ func (c *Config) Validate() error {
 		return errors.New("valid credential is required")
 	}
 
+	if c.SSLMode != "" {
+		if err := ValidateSSLMode(c.SSLMode); err != nil {
+			return err
+		}
+	}
+
 	return nil
 }
 
@@ -59,13 +88,18 @@ func ConfigFromEnv() (Config, error) {
 		return Config{}, ErrInvalidCredential
 	}
 
-	return Config{
+	cfg := Config{
 		Host:              os.Getenv("DB_HOST"),
 		Port:              port,
 		Credential:        cred,
 		DBName:            os.Getenv("DB_NAME"),
 		CACertificatePath: os.Getenv("DB_CERT_PATH"),
-	}, nil
+	}
+	if err := cfg.Validate(); err != nil {
+		return Config{}, err
+	}
+
+	return cfg, nil
 }
 
 // BuildDSN builds the Data Source Name (DSN) string for connecting to
@@ -84,12 +118,17 @@ func (c *Config) BuildDSN() string {
 		c.DBName,
 	)
 
-	// `sslmode=disable` broke hostssl-only servers in v1.3.1. Keep `prefer`
-	// explicit so a missing CA path still allows TLS negotiation.
+	// An unset SSLMode keeps the historical default: `sslmode=disable` broke
+	// hostssl-only servers in v1.3.1, so `prefer` stays explicit to let a
+	// missing CA path still allow TLS negotiation.
+	sslMode := c.SSLMode
+	if sslMode == "" {
+		sslMode = "prefer"
+	}
 	if len(c.CACertificatePath) > 0 {
-		dsn += fmt.Sprintf("prefer&sslrootcert=%v", c.CACertificatePath)
+		dsn += fmt.Sprintf("%v&sslrootcert=%v", sslMode, c.CACertificatePath)
 	} else {
-		dsn += "prefer"
+		dsn += sslMode
 	}
 
 	return dsn
