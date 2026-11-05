@@ -30663,6 +30663,12 @@ components:
       title: MachineDisk
       type: object
       description: Describes a disk of a Machine
+      required:
+        - type
+        - model
+        - serial
+        - sizeMb
+        - pciPath
       examples:
         - type: nvme
           model: Dell BOSS-N1
