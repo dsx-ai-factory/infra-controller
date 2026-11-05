@@ -453,8 +453,13 @@ pub(crate) async fn attach_to_vpc(
             .into());
         }
         _ => {
+            let (caller, allowed_segment_type) = if site_agent_call {
+                ("site-agent", "tenant")
+            } else {
+                ("admin", "host_inband")
+            };
             return Err(CarbideError::InvalidArgument(format!(
-                "admin callers can only attach host_inband network segments, got {}",
+                "{caller} callers can only attach {allowed_segment_type} network segments, got {}",
                 segment.config.segment_type
             ))
             .into());

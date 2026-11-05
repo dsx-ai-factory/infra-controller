@@ -2638,10 +2638,9 @@ async fn attach_non_host_inband_segment_fails(
         .expect_err("non-HostInband segments must be rejected");
 
     assert_eq!(err.code(), tonic::Code::InvalidArgument, "got: {err}");
-    assert!(
-        err.message().contains("host_inband"),
-        "error should mention host_inband validation, got: {}",
-        err.message()
+    assert_eq!(
+        err.message(),
+        "admin callers can only attach host_inband network segments, got admin"
     );
 
     Ok(())
@@ -3106,19 +3105,47 @@ async fn attach_network_segment_callers_are_limited_to_their_segment_types(
     let env = create_test_env_with_overrides(pool, TestEnvOverrides::no_network_segments()).await;
     let (flat_vpc_id, _vpc) =
         common::api_fixtures::vpc::create_flat_vpc(&env, "caller-flat".to_string(), None).await;
-    let host_inband = create_unattached_segment(
-        &env,
-        "SITE_AGENT_REJECT_HOST_INBAND",
-        "198.51.105.0/24",
-        "198.51.105.1",
-        rpc::forge::NetworkSegmentType::HostInband,
-    )
-    .await?;
-    let err =
-        attach_tenant_network_segment_to_vpc(&env, host_inband.id.unwrap(), flat_vpc_id, true)
+    for (segment_type, prefix, gateway, expected_message) in [
+        (
+            rpc::forge::NetworkSegmentType::HostInband,
+            "198.51.105.0/24",
+            "198.51.105.1",
+            "site-agent callers can only attach tenant network segments",
+        ),
+        (
+            rpc::forge::NetworkSegmentType::Admin,
+            "198.51.106.0/24",
+            "198.51.106.1",
+            "site-agent callers can only attach tenant network segments, got admin",
+        ),
+        (
+            rpc::forge::NetworkSegmentType::Underlay,
+            "198.51.107.0/24",
+            "198.51.107.1",
+            "site-agent callers can only attach tenant network segments, got tor",
+        ),
+    ] {
+        let segment = create_unattached_segment(
+            &env,
+            &format!("SITE_AGENT_REJECT_{segment_type:?}"),
+            prefix,
+            gateway,
+            segment_type,
+        )
+        .await?;
+        let id = segment.id.unwrap();
+        let intent = tenant_attach_intent(&env.pool, id).await;
+        let err = attach_tenant_network_segment_to_vpc(&env, id, flat_vpc_id, true)
             .await
-            .expect_err("SiteAgent must not gain the admin HostInband attachment path");
-    assert_eq!(err.code(), tonic::Code::InvalidArgument, "got: {err}");
+            .expect_err("SiteAgent attachment must reject non-Tenant segments");
+        assert_eq!(
+            err.code(),
+            tonic::Code::InvalidArgument,
+            "{segment_type:?}: {err}"
+        );
+        assert_eq!(err.message(), expected_message, "{segment_type:?}");
+        assert_eq!(tenant_attach_intent(&env.pool, id).await, intent);
+    }
 
     let etv_vpc_id = create_attach_test_vpc(
         &env,
@@ -3132,6 +3159,10 @@ async fn attach_network_segment_callers_are_limited_to_their_segment_types(
         .await
         .expect_err("admin callers must not gain the SiteAgent Tenant attachment path");
     assert_eq!(err.code(), tonic::Code::InvalidArgument, "got: {err}");
+    assert_eq!(
+        err.message(),
+        "admin callers can only attach host_inband network segments, got tenant"
+    );
 
     Ok(())
 }
