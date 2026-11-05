@@ -20,9 +20,9 @@ use std::collections::HashMap;
 use carbide_uuid::machine::{DpuMachineId as MachineId, DpuMachineId};
 use model::machine::{
     DpfState, DpuDiscoveringState, DpuDiscoveringStates, DpuInitNextStateResolver, DpuInitState,
-    DpuInitStates, DpuMachine, DpuReprovisionStates, HostMachine, HostReprovisionState,
-    InstallDpuOsState, InstanceNextStateResolver, InstanceState, MachineNextStateResolver,
-    MachineState, ManagedHostState, ManagedHostStateSnapshot, ReprovisionState,
+    DpuInitStates, DpuMachine, DpuReprovisionStates, HostReprovisionState, InstallDpuOsState,
+    InstanceNextStateResolver, InstanceState, MachineNextStateResolver, MachineState,
+    ManagedHostState, ManagedHostStateSnapshot, ReprovisionState,
 };
 use state_controller::state_handler::StateHandlerError;
 
@@ -38,7 +38,7 @@ pub(super) trait NextState {
         &self,
         current_state: &ManagedHostState,
         dpu_id: &MachineId,
-        host_snapshot: &HostMachine,
+        host_reprovision_requested: bool,
     ) -> Result<ManagedHostState, StateHandlerError>;
 
     fn next_state_with_all_dpus_updated(
@@ -284,7 +284,7 @@ impl NextState for MachineNextStateResolver {
         &self,
         current_state: &ManagedHostState,
         dpu_id: &MachineId,
-        _host_snapshot: &HostMachine,
+        _host_reprovision_requested: bool,
     ) -> Result<ManagedHostState, StateHandlerError> {
         let reprovision_state = current_state.as_reprovision_state(dpu_id).ok_or_else(|| {
             StateHandlerError::MissingData {
@@ -361,7 +361,7 @@ impl NextState for InstanceNextStateResolver {
         &self,
         current_state: &ManagedHostState,
         dpu_id: &MachineId,
-        host_snapshot: &HostMachine,
+        host_reprovision_requested: bool,
     ) -> Result<ManagedHostState, StateHandlerError> {
         let reprovision_state = current_state.as_reprovision_state(dpu_id).ok_or_else(|| {
             StateHandlerError::MissingData {
@@ -383,7 +383,7 @@ impl NextState for InstanceNextStateResolver {
 
         match reprovision_state {
             ReprovisionState::RebootHost => {
-                if host_snapshot.host_reprovision_requested.is_some() {
+                if host_reprovision_requested {
                     Ok(ManagedHostState::Assigned {
                         instance_state: InstanceState::HostReprovision {
                             reprovision_state: HostReprovisionState::CheckingFirmwareV2 {
@@ -459,7 +459,7 @@ impl NextState for DpuInitNextStateResolver {
         &self,
         current_state: &ManagedHostState,
         dpu_id: &MachineId,
-        _host_snapshot: &HostMachine,
+        _host_reprovision_requested: bool,
     ) -> Result<ManagedHostState, StateHandlerError> {
         DpuInitState::Init.next_state(current_state, dpu_id)
     }

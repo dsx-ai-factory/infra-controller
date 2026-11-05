@@ -922,6 +922,16 @@ type ForgeClient interface {
 	//
 	// AdminForceDeleteMachine is a lower level admin tool for cases where there is no
 	// appropriate customer-facing workflow available or where those workflows fail.
+	//
+	// Machine database preparation (connection-pool and lock waits, retries,
+	// and commit) is capped at 300 seconds from handler entry, or a shorter
+	// valid `grpc-timeout`.
+	// Use 1-8 decimal digits followed by H (hours), M (minutes), S (seconds),
+	// m (milliseconds), u (microseconds), or n (nanoseconds).
+	// Zero expires immediately.
+	// Missing or malformed metadata keeps that cap. Post-commit hardware and
+	// cleanup work is outside it. `DeadlineExceeded` does not prove an in-flight
+	// commit was rolled back.
 	AdminForceDeleteMachine(ctx context.Context, in *AdminForceDeleteMachineRequest, opts ...grpc.CallOption) (*AdminForceDeleteMachineResponse, error)
 	// List the IP addresses of parked reservations that outlived their interface,
 	// optionally filtered by owning MAC or by address. The IP addresses are ids for
@@ -942,7 +952,13 @@ type ForgeClient interface {
 	AdminListResourcePools(ctx context.Context, in *ListResourcePoolsRequest, opts ...grpc.CallOption) (*ResourcePools, error)
 	// Inspects local and remote pools without treating unknown capacity as zero.
 	AdminInspectResourcePools(ctx context.Context, in *InspectResourcePoolsRequest, opts ...grpc.CallOption) (*InspectResourcePoolsResponse, error)
-	// Add capacity to a resource pool
+	// Add capacity to a resource pool.
+	// Adding IPv6 loopback capacity commits the pool before DPU backfill.
+	// Backfill makes up to three fresh attempts per DPU. If the reported failure
+	// is lock contention, the call returns Unavailable; other backfill failures
+	// retain their existing status. Committed pool growth is retained in either
+	// case. Inspect current capacity and missing loopbacks before retrying the
+	// same growth request.
 	AdminGrowResourcePool(ctx context.Context, in *GrowResourcePoolRequest, opts ...grpc.CallOption) (*GrowResourcePoolResponse, error)
 	// Update the Metadata of a Machine
 	UpdateMachineMetadata(ctx context.Context, in *MachineMetadataUpdateRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
@@ -1001,7 +1017,17 @@ type ForgeClient interface {
 	// TODO: Remove when manual upgrade feature is removed
 	// Mark host as having completed manual firmware upgrade
 	MarkManualFirmwareUpgradeComplete(ctx context.Context, in *MachineId, opts ...grpc.CallOption) (*emptypb.Empty, error)
-	// Report the result of a scout-based firmware upgrade
+	// Report the result of a scout-based firmware upgrade.
+	//
+	// Machine database preparation (connection-pool and lock waits, retries,
+	// and commit) is capped at 300 seconds from handler entry, or a shorter
+	// valid `grpc-timeout`.
+	// Use 1-8 decimal digits followed by H (hours), M (minutes), S (seconds),
+	// m (milliseconds), u (microseconds), or n (nanoseconds).
+	// Zero expires immediately.
+	// Missing or malformed metadata keeps that cap. The post-commit controller
+	// wakeup is outside it. `DeadlineExceeded` does not prove an in-flight commit
+	// was rolled back.
 	ReportScoutFirmwareUpgradeStatus(ctx context.Context, in *ScoutFirmwareUpgradeStatusRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	GetDpuInfoList(ctx context.Context, in *GetDpuInfoListRequest, opts ...grpc.CallOption) (*GetDpuInfoListResponse, error)
 	GetMachineBootOverride(ctx context.Context, in *MachineInterfaceId, opts ...grpc.CallOption) (*MachineBootOverride, error)
@@ -1620,6 +1646,18 @@ type ForgeClient interface {
 	// Get position related information for machines
 	GetMachinePositionInfo(ctx context.Context, in *MachinePositionQuery, opts ...grpc.CallOption) (*MachinePositionInfoList, error)
 	NmxcBrowse(ctx context.Context, in *NmxcBrowseRequest, opts ...grpc.CallOption) (*NmxcBrowseResponse, error)
+	// Enable or disable DPF for a host and its attached DPUs.
+	// Disabling is rejected after the host was ingested through DPF.
+	//
+	// Machine database preparation (connection-pool and lock waits, retries,
+	// and commit) is capped at 300 seconds from handler entry, or a shorter
+	// valid `grpc-timeout`.
+	// Use 1-8 decimal digits followed by H (hours), M (minutes), S (seconds),
+	// m (milliseconds), u (microseconds), or n (nanoseconds).
+	// Zero expires immediately.
+	// Missing or malformed metadata keeps that cap. It does not bound later
+	// controller reconciliation. `DeadlineExceeded` does not prove an in-flight
+	// commit was rolled back.
 	ModifyDPFState(ctx context.Context, in *ModifyDPFStateRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	GetDPFState(ctx context.Context, in *GetDPFStateRequest, opts ...grpc.CallOption) (*DPFStateResponse, error)
 	// Curated snapshot of DPF CRs (DPUNode + DPUDevices + DPUs) for one host.
@@ -7677,6 +7715,16 @@ type ForgeServer interface {
 	//
 	// AdminForceDeleteMachine is a lower level admin tool for cases where there is no
 	// appropriate customer-facing workflow available or where those workflows fail.
+	//
+	// Machine database preparation (connection-pool and lock waits, retries,
+	// and commit) is capped at 300 seconds from handler entry, or a shorter
+	// valid `grpc-timeout`.
+	// Use 1-8 decimal digits followed by H (hours), M (minutes), S (seconds),
+	// m (milliseconds), u (microseconds), or n (nanoseconds).
+	// Zero expires immediately.
+	// Missing or malformed metadata keeps that cap. Post-commit hardware and
+	// cleanup work is outside it. `DeadlineExceeded` does not prove an in-flight
+	// commit was rolled back.
 	AdminForceDeleteMachine(context.Context, *AdminForceDeleteMachineRequest) (*AdminForceDeleteMachineResponse, error)
 	// List the IP addresses of parked reservations that outlived their interface,
 	// optionally filtered by owning MAC or by address. The IP addresses are ids for
@@ -7697,7 +7745,13 @@ type ForgeServer interface {
 	AdminListResourcePools(context.Context, *ListResourcePoolsRequest) (*ResourcePools, error)
 	// Inspects local and remote pools without treating unknown capacity as zero.
 	AdminInspectResourcePools(context.Context, *InspectResourcePoolsRequest) (*InspectResourcePoolsResponse, error)
-	// Add capacity to a resource pool
+	// Add capacity to a resource pool.
+	// Adding IPv6 loopback capacity commits the pool before DPU backfill.
+	// Backfill makes up to three fresh attempts per DPU. If the reported failure
+	// is lock contention, the call returns Unavailable; other backfill failures
+	// retain their existing status. Committed pool growth is retained in either
+	// case. Inspect current capacity and missing loopbacks before retrying the
+	// same growth request.
 	AdminGrowResourcePool(context.Context, *GrowResourcePoolRequest) (*GrowResourcePoolResponse, error)
 	// Update the Metadata of a Machine
 	UpdateMachineMetadata(context.Context, *MachineMetadataUpdateRequest) (*emptypb.Empty, error)
@@ -7756,7 +7810,17 @@ type ForgeServer interface {
 	// TODO: Remove when manual upgrade feature is removed
 	// Mark host as having completed manual firmware upgrade
 	MarkManualFirmwareUpgradeComplete(context.Context, *MachineId) (*emptypb.Empty, error)
-	// Report the result of a scout-based firmware upgrade
+	// Report the result of a scout-based firmware upgrade.
+	//
+	// Machine database preparation (connection-pool and lock waits, retries,
+	// and commit) is capped at 300 seconds from handler entry, or a shorter
+	// valid `grpc-timeout`.
+	// Use 1-8 decimal digits followed by H (hours), M (minutes), S (seconds),
+	// m (milliseconds), u (microseconds), or n (nanoseconds).
+	// Zero expires immediately.
+	// Missing or malformed metadata keeps that cap. The post-commit controller
+	// wakeup is outside it. `DeadlineExceeded` does not prove an in-flight commit
+	// was rolled back.
 	ReportScoutFirmwareUpgradeStatus(context.Context, *ScoutFirmwareUpgradeStatusRequest) (*emptypb.Empty, error)
 	GetDpuInfoList(context.Context, *GetDpuInfoListRequest) (*GetDpuInfoListResponse, error)
 	GetMachineBootOverride(context.Context, *MachineInterfaceId) (*MachineBootOverride, error)
@@ -8375,6 +8439,18 @@ type ForgeServer interface {
 	// Get position related information for machines
 	GetMachinePositionInfo(context.Context, *MachinePositionQuery) (*MachinePositionInfoList, error)
 	NmxcBrowse(context.Context, *NmxcBrowseRequest) (*NmxcBrowseResponse, error)
+	// Enable or disable DPF for a host and its attached DPUs.
+	// Disabling is rejected after the host was ingested through DPF.
+	//
+	// Machine database preparation (connection-pool and lock waits, retries,
+	// and commit) is capped at 300 seconds from handler entry, or a shorter
+	// valid `grpc-timeout`.
+	// Use 1-8 decimal digits followed by H (hours), M (minutes), S (seconds),
+	// m (milliseconds), u (microseconds), or n (nanoseconds).
+	// Zero expires immediately.
+	// Missing or malformed metadata keeps that cap. It does not bound later
+	// controller reconciliation. `DeadlineExceeded` does not prove an in-flight
+	// commit was rolled back.
 	ModifyDPFState(context.Context, *ModifyDPFStateRequest) (*emptypb.Empty, error)
 	GetDPFState(context.Context, *GetDPFStateRequest) (*DPFStateResponse, error)
 	// Curated snapshot of DPF CRs (DPUNode + DPUDevices + DPUs) for one host.

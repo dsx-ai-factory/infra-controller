@@ -191,6 +191,14 @@ pub enum CarbideError {
     #[error("resource pool database error: {0}")]
     ResourcePoolDatabaseError(#[source] ResourcePoolDatabaseError),
 
+    /// Pool growth committed, but contention left IPv6 loopback backfill incomplete.
+    #[error("resource pool growth committed; IPv6 loopback backfill is busy")]
+    Ipv6LoopbackBackfillContended {
+        /// The database contention that stopped the IPv6 loopback backfill.
+        #[source]
+        source: Box<DatabaseError>,
+    },
+
     /// A remote allocation could not complete; its saved request may need cleanup.
     #[error(transparent)]
     RemoteResourcePool(Box<RemoteResourcePoolError>),
@@ -278,6 +286,10 @@ pub enum CarbideError {
 
     #[error("DPF error: {0}")]
     DpfError(#[from] carbide_dpf::DpfError),
+
+    /// Machine database preparation exceeded its request budget.
+    #[error("machine database preparation deadline exceeded")]
+    MachinePreparationDeadlineExceeded,
 
     #[error("service unavailable: {0}")]
     UnavailableError(String),
@@ -592,9 +604,11 @@ impl OperatorError for CarbideError {
             | CarbideError::TenantSitePrefixQuotaExceeded { .. }
             | CarbideError::SitePrefixIsolationLimitExceeded { .. }
             | CarbideError::DhcpError(_) => ErrorCode::nico(Api, 429),
+            CarbideError::MachinePreparationDeadlineExceeded => ErrorCode::nico(Api, 504),
             CarbideError::UnavailableError(_) => ErrorCode::nico(Api, 503),
             CarbideError::ResourcePoolCancelled { .. } => ErrorCode::nico(Api, 499),
             CarbideError::ResourcePoolDeadlineExceeded { .. } => ErrorCode::nico(Api, 504),
+            CarbideError::Ipv6LoopbackBackfillContended { .. } => ErrorCode::nico(Api, 503),
             CarbideError::RemoteResourcePool(error) => ErrorCode::nico(
                 Api,
                 match remote_resource_pool_status_code(error) {
@@ -625,6 +639,11 @@ impl OperatorError for CarbideError {
             CarbideError::RedfishError(_) | CarbideError::RedfishClientCreation { .. } => {
                 Some("Check BMC reachability, credentials, and Redfish service health.")
             }
+            CarbideError::Ipv6LoopbackBackfillContended { .. } => Some(
+                "Pool growth has committed. Check the current pool configuration and remaining IPv6 \
+                 loopback assignments before retrying the same growth request after database \
+                 contention clears.",
+            ),
             CarbideError::UnavailableError(_) => Some(
                 "A dependent NICo service is temporarily unavailable. Retry the same request \
                  once it recovers: re-run the Admin CLI command, REST API call, or client \
@@ -773,6 +792,10 @@ impl From<CarbideError> for tonic::Status {
             e @ CarbideError::BmcMacIpMismatch { .. } => Status::invalid_argument(e.to_string()),
             CarbideError::UnhealthyHost => Status::failed_precondition(error.to_string()),
             CarbideError::ResourceExhausted(kind) => Status::resource_exhausted(kind),
+            CarbideError::Ipv6LoopbackBackfillContended { source } => {
+                tracing::error!(error = %source, "database error conversion");
+                Status::unavailable(error.to_string())
+            }
             CarbideError::RemoteResourcePool(remote) => {
                 Status::new(remote_resource_pool_status_code(remote), remote.to_string())
             }
@@ -797,6 +820,9 @@ impl From<CarbideError> for tonic::Status {
             }
             error @ CarbideError::ClientCertificateMissingInformation(_) => {
                 Status::unauthenticated(error.to_string())
+            }
+            error @ CarbideError::MachinePreparationDeadlineExceeded => {
+                Status::deadline_exceeded(error.to_string())
             }
             CarbideError::UnavailableError(msg) => Status::unavailable(msg),
             CarbideError::ResourcePoolCancelled { operation } => {

@@ -24,7 +24,9 @@ use tonic::{Request, Response, Status};
 
 use crate::CarbideError;
 use crate::api::{Api, log_request_data, truncate};
-use crate::handlers::utils::{StateHandlerWakeupFailed, WakeupTrigger, convert_and_log_machine_id};
+use crate::handlers::utils::{
+    MachinePreparationDeadline, StateHandlerWakeupFailed, WakeupTrigger, convert_and_log_machine_id,
+};
 
 pub(crate) async fn reset_host_reprovisioning(
     api: &Api,
@@ -166,100 +168,133 @@ pub(crate) async fn report_scout_firmware_upgrade_status(
     api: &Api,
     request: Request<rpc::ScoutFirmwareUpgradeStatusRequest>,
 ) -> Result<Response<()>, Status> {
+    let preparation = MachinePreparationDeadline::from_request(&request);
     log_request_data(&request);
 
     let req = request.into_inner();
     let machine_id: HostMachineId = convert_and_log_machine_id(req.machine_id.as_ref())?;
 
-    let (machine, mut txn) = api.load_machine(&machine_id, Default::default()).await?;
+    preparation
+        .run(|| async move {
+            let (machine, mut txn) = loop {
+                let mut txn = api.txn_begin().await?;
+                match db::machine::find_host_for_scout_firmware_update(&mut txn, &machine_id).await
+                {
+                    Ok(Some(machine)) => break (machine, txn),
+                    Ok(None) => {
+                        return Err(CarbideError::NotFoundError {
+                            kind: "machine",
+                            id: machine_id.to_string(),
+                        }
+                        .into());
+                    }
+                    Err(error) if error.is_lock_not_available() => {
+                        // A controller can own the host before history, even for a
+                        // valid current report. Release the whole attempt before
+                        // waiting so that writer can finish its history update.
+                        txn.rollback().await?;
+                        db::machine::wait_for_machine_nonkey_update(
+                            api.pg_pool(),
+                            &machine_id.into(),
+                        )
+                        .await?;
+                    }
+                    Err(error) => return Err(error.into()),
+                }
+            };
 
-    enum HostReprovisionContext {
-        Ready { retry_count: u32 },
-        Assigned,
-    }
+            enum HostReprovisionContext {
+                Ready { retry_count: u32 },
+                Assigned,
+            }
 
-    let (reprovision_state, context) = match machine.current_state().clone() {
-        ManagedHostState::HostReprovision {
-            reprovision_state,
-            retry_count,
-        } => (
-            reprovision_state,
-            HostReprovisionContext::Ready { retry_count },
-        ),
-        ManagedHostState::Assigned {
-            instance_state: InstanceState::HostReprovision { reprovision_state },
-        } => (reprovision_state, HostReprovisionContext::Assigned),
-        _ => {
-            return Err(CarbideError::FailedPrecondition(format!(
-                "machine {machine_id} is not in WaitingForScoutUpgrade state"
-            ))
-            .into());
-        }
-    };
+            let (reprovision_state, context) = match machine.current_state().clone() {
+                ManagedHostState::HostReprovision {
+                    reprovision_state,
+                    retry_count,
+                } => (
+                    reprovision_state,
+                    HostReprovisionContext::Ready { retry_count },
+                ),
+                ManagedHostState::Assigned {
+                    instance_state: InstanceState::HostReprovision { reprovision_state },
+                } => (reprovision_state, HostReprovisionContext::Assigned),
+                _ => {
+                    return Err(CarbideError::FailedPrecondition(format!(
+                        "machine {machine_id} is not in WaitingForScoutUpgrade state"
+                    ))
+                    .into());
+                }
+            };
 
-    let HostReprovisionState::WaitingForScoutUpgrade {
-        upgrade_task_id,
-        firmware_type,
-        final_version,
-        power_drains_needed,
-        started_at,
-        deadline,
-        task_json,
-        ..
-    } = reprovision_state
-    else {
-        return Err(CarbideError::FailedPrecondition(format!(
-            "machine {machine_id} is not in WaitingForScoutUpgrade state"
-        ))
-        .into());
-    };
+            let HostReprovisionState::WaitingForScoutUpgrade {
+                upgrade_task_id,
+                firmware_type,
+                final_version,
+                power_drains_needed,
+                started_at,
+                deadline,
+                task_json,
+                ..
+            } = reprovision_state
+            else {
+                return Err(CarbideError::FailedPrecondition(format!(
+                    "machine {machine_id} is not in WaitingForScoutUpgrade state"
+                ))
+                .into());
+            };
 
-    if req.upgrade_task_id != upgrade_task_id {
-        tracing::warn!(
-            %machine_id,
-            expected_upgrade_task_id = %upgrade_task_id,
-            reported_upgrade_task_id = %req.upgrade_task_id,
-            "Rejecting stale scout firmware upgrade status report",
-        );
-        return Err(CarbideError::FailedPrecondition(format!(
-            "scout firmware upgrade status task ID mismatch for machine {machine_id}"
-        ))
-        .into());
-    }
+            if req.upgrade_task_id != upgrade_task_id {
+                tracing::warn!(
+                    %machine_id,
+                    expected_upgrade_task_id = %upgrade_task_id,
+                    reported_upgrade_task_id = %req.upgrade_task_id,
+                    "Rejecting stale scout firmware upgrade status report",
+                );
+                return Err(CarbideError::FailedPrecondition(format!(
+                    "scout firmware upgrade status task ID mismatch for machine {machine_id}"
+                ))
+                .into());
+            }
 
-    // Cap stdout/stderr/error so the JSON state row stays small; full output
-    // is available in the scout logs if an operator needs to dig deeper.
-    const MAX_STORED_OUTPUT_SIZE: usize = 1500;
+            // Cap stdout/stderr/error so the JSON state row stays small; full output
+            // is available in the scout logs if an operator needs to dig deeper.
+            const MAX_STORED_OUTPUT_SIZE: usize = 1500;
 
-    let reprovision_state = HostReprovisionState::WaitingForScoutUpgrade {
-        upgrade_task_id,
-        firmware_type,
-        final_version,
-        power_drains_needed,
-        started_at,
-        deadline,
-        task_json,
-        result: Some(ScoutUpgradeResult {
-            success: req.success,
-            exit_code: req.exit_code,
-            stdout: truncate(req.stdout, MAX_STORED_OUTPUT_SIZE),
-            stderr: truncate(req.stderr, MAX_STORED_OUTPUT_SIZE),
-            error: truncate(req.error, MAX_STORED_OUTPUT_SIZE),
-        }),
-    };
-    let new_state = match context {
-        HostReprovisionContext::Ready { retry_count } => ManagedHostState::HostReprovision {
-            reprovision_state,
-            retry_count,
-        },
-        HostReprovisionContext::Assigned => ManagedHostState::Assigned {
-            instance_state: InstanceState::HostReprovision { reprovision_state },
-        },
-    };
+            let reprovision_state = HostReprovisionState::WaitingForScoutUpgrade {
+                upgrade_task_id,
+                firmware_type,
+                final_version,
+                power_drains_needed,
+                started_at,
+                deadline,
+                task_json,
+                result: Some(ScoutUpgradeResult {
+                    success: req.success,
+                    exit_code: req.exit_code,
+                    stdout: truncate(req.stdout, MAX_STORED_OUTPUT_SIZE),
+                    stderr: truncate(req.stderr, MAX_STORED_OUTPUT_SIZE),
+                    error: truncate(req.error, MAX_STORED_OUTPUT_SIZE),
+                }),
+            };
+            let new_state = match context {
+                HostReprovisionContext::Ready { retry_count } => {
+                    ManagedHostState::HostReprovision {
+                        reprovision_state,
+                        retry_count,
+                    }
+                }
+                HostReprovisionContext::Assigned => ManagedHostState::Assigned {
+                    instance_state: InstanceState::HostReprovision { reprovision_state },
+                },
+            };
 
-    db::machine::advance(&machine, &mut txn, &new_state, None).await?;
+            db::machine::advance(&machine, &mut txn, &new_state, None).await?;
 
-    txn.commit().await?;
+            txn.commit().await?;
+            Ok(())
+        })
+        .await?;
 
     if let Err(err) = api
         .machine_state_handler_enqueuer

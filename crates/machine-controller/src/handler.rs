@@ -877,6 +877,91 @@ impl MachineStateHandler {
         Self::clear_host_reprovision(mh_snaphost, txn).await
     }
 
+    /// Persists a selected DPU timeout while its host token and observation remain current.
+    /// Busy or missing rows roll back and return Wait before state handling; a
+    /// changed token or timeout that no longer qualifies invalidates the iteration.
+    async fn handle_dpu_heartbeat_timeout(
+        &self,
+        host_machine_id: &HostMachineId,
+        dpu_machine_id: &DpuMachineId,
+        expected_host_state_version: ConfigVersion,
+        ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
+    ) -> Result<StateHandlerOutcome<ManagedHostState>, StateHandlerError> {
+        let message = format!("Last seen over {} ago", self.dpu_up_threshold);
+        let health_report = health_report::HealthReport::heartbeat_timeout(
+            health_report::HealthReport::DPU_AGENT_SOURCE.to_string(),
+            health_report::HealthReport::DPU_AGENT_SOURCE.to_string(),
+            message,
+            true,
+            false,
+        );
+
+        let mut txn = ctx.services.db_pool.begin().await?;
+        // Framework outcome persistence writes the host. Take it
+        // before the DPU, and release both if either is busy so
+        // a writer holding the host cannot wait on our DPU.
+        for machine_id in [
+            host_machine_id.to_machine_id(),
+            dpu_machine_id.to_machine_id(),
+        ] {
+            if !db::machine::try_lock_by_id_for_no_key_update(txn.as_mut(), &machine_id).await? {
+                txn.rollback().await?;
+                return Ok(StateHandlerOutcome::wait(
+                    "DPU heartbeat check deferred because a Machine row is busy or missing"
+                        .to_string(),
+                ));
+            }
+        }
+
+        let current_version = db::machine::find_controller_state_version(
+            txn.as_mut(),
+            host_machine_id.as_machine_id(),
+        )
+        .await?;
+        if current_version != Some(expected_host_state_version) {
+            txn.rollback().await?;
+            return Err(StateHandlerError::IterationInvalidated {
+                source_ref: std::panic::Location::caller(),
+            });
+        }
+
+        // The snapshot only selected a timeout candidate. A
+        // report committed before admission wins over that
+        // observation and must survive this iteration.
+        let current_observation =
+            db::machine::find_dpu_network_status_inputs(txn.as_mut(), dpu_machine_id)
+                .await?
+                .filter(|inputs| {
+                    inputs
+                        .dpu_agent_health_report
+                        .as_ref()
+                        .is_some_and(|report| report.alerts.is_empty())
+                })
+                .and_then(|inputs| inputs.network_status_observation)
+                .filter(|observation| {
+                    Utc::now().signed_duration_since(observation.observed_at)
+                        > self.dpu_up_threshold
+                });
+        let Some(current_observation) = current_observation else {
+            txn.rollback().await?;
+            return Err(StateHandlerError::IterationInvalidated {
+                source_ref: std::panic::Location::caller(),
+            });
+        };
+
+        db::machine::update_dpu_agent_health_report(&mut txn, dpu_machine_id, &health_report)
+            .await?;
+
+        tracing::warn!(
+            host_machine_id = %host_machine_id,
+            dpu_machine_id = %dpu_machine_id,
+            last_seen = %current_observation.observed_at,
+            "DPU is not sending network status observations, marking unhealthy"
+        );
+        // The next iteration will run with the now unhealthy network
+        Ok(StateHandlerOutcome::do_nothing().with_txn(txn))
+    }
+
     async fn attempt_state_transition(
         &self,
         host_machine_id: &HostMachineId,
@@ -895,31 +980,14 @@ impl MachineStateHandler {
                     let observed_at = observation.observed_at;
                     let since_last_seen = Utc::now().signed_duration_since(observed_at);
                     if since_last_seen > self.dpu_up_threshold {
-                        let message = format!("Last seen over {} ago", self.dpu_up_threshold);
-                        let dpu_machine_id = &dpu_snapshot.id;
-                        let health_report = health_report::HealthReport::heartbeat_timeout(
-                            health_report::HealthReport::DPU_AGENT_SOURCE.to_string(),
-                            health_report::HealthReport::DPU_AGENT_SOURCE.to_string(),
-                            message,
-                            true,
-                            false,
-                        );
-
-                        let mut txn = ctx.services.db_pool.begin().await?;
-                        db::machine::update_dpu_agent_health_report(
-                            &mut txn,
-                            dpu_machine_id,
-                            &health_report,
-                        )
-                        .await?;
-
-                        tracing::warn!(
-                        host_machine_id = %host_machine_id,
-                        dpu_machine_id = %dpu_machine_id,
-                        last_seen = %observed_at,
-                        "DPU is not sending network status observations, marking unhealthy");
-                        // The next iteration will run with the now unhealthy network
-                        return Ok(StateHandlerOutcome::do_nothing().with_txn(txn));
+                        // Box heartbeat persistence to limit this transition future's stack use.
+                        return Box::pin(self.handle_dpu_heartbeat_timeout(
+                            host_machine_id,
+                            &dpu_snapshot.id,
+                            mh_snapshot.host_snapshot.state.version,
+                            ctx,
+                        ))
+                        .await;
                     }
                 }
             }
@@ -968,14 +1036,24 @@ impl MachineStateHandler {
         }
 
         // A reset preempts the reprovision hinge below and the failure parking after it.
-        if managed_host_reset_needed(mh_snapshot) {
+        if managed_host_reset_needed(mh_snapshot)
+            && let Some(reset_request) = mh_snapshot.host_snapshot.reset_requested.as_ref()
+        {
             // Stamping `started_at` closes the reset to `clear` and stops the hinge re-firing.
             let mut txn = ctx.services.db_pool.begin().await?;
-            db::machine::update_managed_host_reset_start_time(
+            if let db::ConditionalWrite::NotApplied(_) = db::machine::try_start_managed_host_reset(
                 &mut txn,
                 &mh_snapshot.host_snapshot.id,
+                mh_snapshot.host_snapshot.state.version,
+                reset_request,
             )
-            .await?;
+            .await?
+            {
+                txn.rollback().await?;
+                return Err(StateHandlerError::IterationInvalidated {
+                    source_ref: std::panic::Location::caller(),
+                });
+            }
 
             tracing::info!(
                 host_machine_id = %mh_snapshot.host_snapshot.id,
@@ -4117,7 +4195,7 @@ async fn handle_dpu_reprovision(
                 next_state_resolver.next_state(
                     &state.managed_state,
                     dpu_machine_id,
-                    &state.host_snapshot,
+                    state.host_snapshot.host_reprovision_requested.is_some(),
                 )?,
             ))
         }
@@ -4502,27 +4580,95 @@ async fn handle_dpu_reprovision(
             ))
         }
         ReprovisionState::RebootHost => {
+            use db::machine::ManagedHostTransitionAdmission;
+
+            let host_id = state.host_snapshot.id;
+            let expected_version = state.host_snapshot.state.version;
+            let captured_dpu_ids = state.dpu_snapshots.iter().map(|dpu| dpu.id).collect_vec();
+            let captured_requests = state
+                .dpu_snapshots
+                .iter()
+                .map(|dpu| (dpu.id, dpu.reprovision_requested.clone()))
+                .collect::<HashMap<_, _>>();
+
             // We can expect transient issues here in case we just rebooted the host's BMC and it has not come up yet
             handler_host_power_control(state, ctx, SystemPowerControl::ForceRestart).await?;
 
-            let mut txn = ctx.services.db_pool.begin().await?;
+            // The accepted reboot and its queued receipt belong to this
+            // invocation. Retry only database admission, leaving the original
+            // pending batch for the framework to apply once on this transaction.
+            loop {
+                let mut txn = ctx.services.db_pool.begin().await?;
+                match db::machine::try_prepare_managed_host_transition(
+                    txn.as_mut(),
+                    &host_id,
+                    expected_version,
+                    &captured_dpu_ids,
+                )
+                .await?
+                {
+                    ManagedHostTransitionAdmission::Acquired => {}
+                    ManagedHostTransitionAdmission::Contended(resource) => {
+                        txn.rollback().await?;
+                        tracing::debug!(
+                            host_machine_id = %host_id,
+                            operation = "terminal_dpu_reprovision",
+                            ?resource,
+                            "Waiting for terminal reprovision database completion"
+                        );
+                        db::machine::wait_for_managed_host_transition_lock(
+                            &ctx.services.db_pool,
+                            &resource,
+                        )
+                        .await?;
+                        continue;
+                    }
+                    ManagedHostTransitionAdmission::Stale => {
+                        txn.rollback().await?;
+                        return Err(StateHandlerError::IterationInvalidated {
+                            source_ref: std::panic::Location::caller(),
+                        });
+                    }
+                }
 
-            // Clear reprovisioning requests only after the terminal host reboot is accepted.
-            for dpu_snapshot in &state.dpu_snapshots {
-                db::machine::clear_dpu_reprovisioning_request(&mut txn, &dpu_snapshot.id, false)
-                    .await?;
+                let Some(current) =
+                    db::machine::find_dpu_reprovision_completion_inputs(txn.as_mut(), &host_id)
+                        .await?
+                else {
+                    txn.rollback().await?;
+                    return Err(StateHandlerError::IterationInvalidated {
+                        source_ref: std::panic::Location::caller(),
+                    });
+                };
+                // Restart can change only its timestamp without advancing the
+                // host token. Compare every full request Option before clearing
+                // any, including a new request on a previously idle DPU.
+                if current.host_state.version != expected_version
+                    || current.dpu_requests.len() != captured_requests.len()
+                    || current
+                        .dpu_requests
+                        .iter()
+                        .any(|(id, request)| captured_requests.get(id) != Some(request))
+                {
+                    txn.rollback().await?;
+                    return Err(StateHandlerError::IterationInvalidated {
+                        source_ref: std::panic::Location::caller(),
+                    });
+                }
+
+                for (dpu_id, _) in &current.dpu_requests {
+                    db::machine::clear_dpu_reprovisioning_request(&mut txn, dpu_id, false).await?;
+                }
+
+                return Ok(
+                    StateHandlerOutcome::transition(next_state_resolver.next_state(
+                        &current.host_state.value,
+                        dpu_machine_id,
+                        current.host_reprovision_requested,
+                    )?)
+                    .with_txn(txn),
+                );
             }
-
-            // We need to wait for the host to reboot and submit its new Hardware information in
-            // case of Ready.
-            Ok(
-                StateHandlerOutcome::transition(next_state_resolver.next_state(
-                    &state.managed_state,
-                    dpu_machine_id,
-                    &state.host_snapshot,
-                )?)
-                .with_txn(txn),
-            )
         }
         ReprovisionState::NotUnderReprovision => {
             if !dpf::deployment_migration_is_parked(state) {

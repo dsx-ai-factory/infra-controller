@@ -1738,6 +1738,689 @@ async fn test_dpu_heartbeat(pool: sqlx::PgPool) -> sqlx::Result<()> {
 }
 
 #[crate::sqlx_test]
+async fn dpu_heartbeat_rejects_stale_snapshot_inputs(pool: sqlx::PgPool) {
+    #[derive(Debug)]
+    enum ChangedInput {
+        FreshDpuReport,
+        RemovedDpuSourceReport,
+        AlreadyAlertedDpuReport,
+        HostStateVersion,
+    }
+
+    let env = create_test_env(pool).await;
+    let mh = create_managed_host(&env).await;
+    let host_id: HostMachineId = mh.id.into();
+
+    for case in [
+        ChangedInput::FreshDpuReport,
+        ChangedInput::RemovedDpuSourceReport,
+        ChangedInput::AlreadyAlertedDpuReport,
+        ChangedInput::HostStateVersion,
+    ] {
+        mh.network_configured(&env).await;
+        let mut txn = env.db_txn().await;
+        let dpu = mh.dpu().db_machine(&mut txn).await;
+        assert!(dpu.dpu_agent_health_report().unwrap().alerts.is_empty());
+        let mut observation = dpu.network_status_observation.unwrap();
+        observation.observed_at = Utc::now() - Duration::hours(1);
+        sqlx::query("UPDATE machines SET network_status_observation = $1 WHERE id = $2")
+            .bind(sqlx::types::Json(&observation))
+            .bind(mh.dpu_ids[0])
+            .execute(txn.as_mut())
+            .await
+            .unwrap();
+        let mut snapshot = mh.snapshot(&mut txn).await;
+        let captured_state = snapshot.managed_state.clone();
+        txn.commit().await.unwrap();
+
+        match case {
+            ChangedInput::FreshDpuReport => mh.network_configured(&env).await,
+            ChangedInput::RemovedDpuSourceReport => {
+                env.api
+                    .remove_machine_health_report(Request::new(
+                        rpc::forge::RemoveMachineHealthReportRequest {
+                            machine_id: Some(mh.dpu_ids[0].into()),
+                            source: HealthReport::DPU_AGENT_SOURCE.to_string(),
+                        },
+                    ))
+                    .await
+                    .unwrap();
+            }
+            ChangedInput::AlreadyAlertedDpuReport => {
+                // This public writer changes only the source health report,
+                // leaving the old observation and host token eligible.
+                let report = HealthReport::heartbeat_timeout(
+                    HealthReport::DPU_AGENT_SOURCE.to_string(),
+                    HealthReport::DPU_AGENT_SOURCE.to_string(),
+                    "winning alert before heartbeat admission".to_string(),
+                    true,
+                    false,
+                );
+                env.api
+                    .insert_machine_health_report(Request::new(InsertMachineHealthReportRequest {
+                        machine_id: Some(mh.dpu_ids[0].into()),
+                        health_report_entry: Some(HealthReportEntry {
+                            report: Some(report.into()),
+                            mode: rpc::forge::HealthReportApplyMode::Merge as i32,
+                        }),
+                    }))
+                    .await
+                    .unwrap();
+            }
+            ChangedInput::HostStateVersion => {
+                // Advancing the same state proves that the version, rather
+                // than a different state variant, invalidates the snapshot.
+                let mut txn = env.db_txn().await;
+                db::machine::update_state(&mut txn, &host_id, &captured_state)
+                    .await
+                    .unwrap();
+                txn.commit().await.unwrap();
+            }
+        }
+        let mut txn = env.db_txn().await;
+        db::machine::update_controller_state_outcome(
+            txn.as_mut(),
+            &mh.id.to_machine_id(),
+            PersistentStateHandlerOutcome::Wait {
+                reason: format!("winning write: {case:?}"),
+                source_ref: None,
+            },
+        )
+        .await
+        .unwrap();
+        let winning_host = mh.host().db_machine(&mut txn).await;
+        let winning_dpu = mh.dpu().db_machine(&mut txn).await;
+        match case {
+            ChangedInput::FreshDpuReport => {
+                assert_eq!(
+                    winning_host.state.version,
+                    snapshot.host_snapshot.state.version
+                );
+                assert_ne!(winning_dpu.network_status_observation, Some(observation));
+                assert!(
+                    winning_dpu
+                        .dpu_agent_health_report()
+                        .unwrap()
+                        .alerts
+                        .is_empty()
+                );
+            }
+            ChangedInput::RemovedDpuSourceReport => {
+                assert_eq!(winning_dpu.network_status_observation, Some(observation));
+                assert_eq!(
+                    winning_host.state.version,
+                    snapshot.host_snapshot.state.version
+                );
+                assert!(winning_dpu.dpu_agent_health_report().is_none());
+            }
+            ChangedInput::AlreadyAlertedDpuReport => {
+                assert_eq!(winning_dpu.network_status_observation, Some(observation));
+                assert_eq!(
+                    winning_host.state.version,
+                    snapshot.host_snapshot.state.version
+                );
+                let report = winning_dpu.dpu_agent_health_report().unwrap();
+                assert_eq!(report.alerts.len(), 1);
+                assert_eq!(
+                    report.alerts[0].message,
+                    "winning alert before heartbeat admission"
+                );
+            }
+            ChangedInput::HostStateVersion => {
+                assert_ne!(
+                    winning_host.state.version,
+                    snapshot.host_snapshot.state.version
+                );
+                assert_eq!(winning_dpu.network_status_observation, Some(observation));
+            }
+        }
+        txn.commit().await.unwrap();
+
+        let mut services = env.machine_state_handler_services();
+        let mut metrics = MachineMetrics::default();
+        let mut pending_db_writes = DbWriteBatch::new();
+        let mut ctx = StateHandlerContext {
+            services: &mut services,
+            metrics: &mut metrics,
+            pending_db_writes: &mut pending_db_writes,
+        };
+        let result = env
+            .machine_state_handler
+            .handle_object_state(&host_id, &mut snapshot, &captured_state, &mut ctx)
+            .await;
+        assert!(
+            matches!(result, Err(StateHandlerError::IterationInvalidated { .. })),
+            "{case:?}: obsolete heartbeat inputs must invalidate the iteration"
+        );
+
+        let mut txn = env.db_txn().await;
+        let host = mh.host().db_machine(&mut txn).await;
+        let dpu = mh.dpu().db_machine(&mut txn).await;
+        assert_eq!(host.state.value, winning_host.state.value, "{case:?}");
+        assert_eq!(host.state.version, winning_host.state.version, "{case:?}");
+        assert_eq!(
+            host.controller_state_outcome, winning_host.controller_state_outcome,
+            "{case:?}"
+        );
+        assert_eq!(dpu.state.value, winning_dpu.state.value, "{case:?}");
+        assert_eq!(dpu.state.version, winning_dpu.state.version, "{case:?}");
+        assert_eq!(dpu.health_reports, winning_dpu.health_reports, "{case:?}");
+        assert_eq!(
+            dpu.network_status_observation, winning_dpu.network_status_observation,
+            "{case:?}"
+        );
+        txn.commit().await.unwrap();
+    }
+}
+
+// The trigger pauses a real write after its owner has acquired the Machine
+// rows. The gate transaction itself holds only this test's advisory lock.
+pub(super) async fn gate_controller_machine_write(
+    pool: &sqlx::PgPool,
+    machine_id: MachineId,
+) -> Result<sqlx::PgTransaction<'static>, sqlx::Error> {
+    let statement = format!(
+        r#"
+        CREATE FUNCTION pause_controller_machine_write()
+        RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN
+            PERFORM pg_advisory_xact_lock(5333, 1);
+            RETURN NEW;
+        END;
+        $$;
+
+        CREATE TRIGGER pause_controller_machine_write
+        BEFORE UPDATE OF last_reboot_requested, health_reports ON machines
+        FOR EACH ROW
+        WHEN (OLD.id = '{machine_id}')
+        EXECUTE FUNCTION pause_controller_machine_write();
+        "#
+    );
+    // Only the canonical typed MachineId is interpolated into this test DDL.
+    sqlx::raw_sql(sqlx::AssertSqlSafe(statement))
+        .execute(pool)
+        .await?;
+    let mut gate = pool.begin().await?;
+    sqlx::query("SELECT pg_advisory_xact_lock(5333, 1)")
+        .execute(gate.as_mut())
+        .await?;
+    Ok(gate)
+}
+
+pub(super) async fn remove_controller_machine_write_gate(
+    pool: &sqlx::PgPool,
+) -> Result<(), sqlx::Error> {
+    sqlx::raw_sql(
+        "DROP TRIGGER pause_controller_machine_write ON machines;
+         DROP FUNCTION pause_controller_machine_write();",
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+#[crate::sqlx_test]
+async fn dpu_heartbeat_and_dpf_updates_do_not_deadlock(pool: sqlx::PgPool) {
+    use db::state_history::{StateHistoryTableId, find_by_object_ids};
+    use db::test_support::postgres::wait_for_blocked_query;
+    use futures_util::future::maybe_done;
+    use tokio::time::{Duration as TimeoutDuration, timeout};
+
+    let env = create_test_env(pool).await;
+    let mh = create_managed_host(&env).await;
+    let machine_ids = [mh.id.to_machine_id(), mh.dpu_ids[0].into()];
+
+    for (case, dpf_first) in [
+        ("heartbeat admitted, public DPF waits", false),
+        ("public DPF first, heartbeat deferred", true),
+    ] {
+        // Disabling DPF through the public API also proves this fixture accepts
+        // the action whose host/DPU writes will race with the controller.
+        env.api
+            .modify_dpf_state(Request::new(rpc::forge::ModifyDpfStateRequest {
+                machine_id: Some(mh.id.into()),
+                dpf_enabled: false,
+            }))
+            .await
+            .expect("fixture should accept a DPF state update");
+        mh.network_configured(&env).await;
+
+        let mut txn = env.db_txn().await;
+        let host_before = mh.host().db_machine(&mut txn).await;
+        let dpu_before = mh.dpu().db_machine(&mut txn).await;
+        assert_eq!(host_before.state.value, ManagedHostState::Ready, "{case}");
+        assert!(
+            dpu_before
+                .dpu_agent_health_report()
+                .expect("fixture should have a DPU health report")
+                .alerts
+                .is_empty(),
+            "{case}"
+        );
+        let mut observation = dpu_before
+            .network_status_observation
+            .clone()
+            .expect("fixture should have a DPU network observation");
+        observation.observed_at = Utc::now() - Duration::hours(1);
+        sqlx::query("UPDATE machines SET network_status_observation = $1 WHERE id = $2")
+            .bind(sqlx::types::Json(&observation))
+            .bind(mh.dpu_ids[0])
+            .execute(txn.as_mut())
+            .await
+            .unwrap();
+        // An old outcome could hide a failed framework write: the controller's
+        // test entry point logs processor errors and returns no Result.
+        sqlx::query("UPDATE machines SET controller_state_outcome = NULL WHERE id = $1")
+            .bind(mh.id)
+            .execute(txn.as_mut())
+            .await
+            .unwrap();
+        let history_before =
+            find_by_object_ids(txn.as_mut(), StateHistoryTableId::Machine, &machine_ids)
+                .await
+                .unwrap();
+        txn.commit().await.unwrap();
+        let redfish_timepoint = env.redfish_sim.timepoint();
+
+        let mut gate = if dpf_first {
+            let mut gate = env.db_txn().await;
+            db::machine::lock_by_id_for_update(gate.as_mut(), &machine_ids[0])
+                .await
+                .unwrap();
+            gate
+        } else {
+            gate_controller_machine_write(&env.pool, machine_ids[1])
+                .await
+                .expect("fixture should gate its admitted heartbeat report")
+        };
+        let gate_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(gate.as_mut())
+            .await
+            .unwrap();
+        let iteration = maybe_done(env.run_machine_state_controller_iteration_no_requeue());
+        let update = maybe_done(env.api.modify_dpf_state(Request::new(
+            rpc::forge::ModifyDpfStateRequest {
+                machine_id: Some(mh.id.into()),
+                dpf_enabled: true,
+            },
+        )));
+        tokio::pin!(iteration, update);
+
+        // The health UPDATE follows admission. An outcome UPDATE behind the
+        // public writer instead records the deliberately deferred heartbeat.
+        let mut heartbeat_pid = None;
+        let mut update_pid = None;
+        let readiness = timeout(TimeoutDuration::from_secs(25), async {
+            if dpf_first {
+                update_pid = Some(tokio::select! {
+                    () = &mut update => return Err("public DPF passed H gate".to_string()),
+                    pid = wait_for_blocked_query(&env.pool, gate_pid, "SELECT id FROM machines WHERE id = $1 FOR UPDATE") => pid,
+                });
+                heartbeat_pid = Some(tokio::select! {
+                    () = &mut update => return Err("public DPF passed H gate".to_string()),
+                    () = &mut iteration => return Err("controller did not persist its deferred heartbeat".to_string()),
+                    pid = wait_for_blocked_query(&env.pool, update_pid.unwrap(),
+                        "UPDATE machines SET controller_state_outcome") => pid,
+                });
+            } else {
+                heartbeat_pid = Some(tokio::select! {
+                    () = &mut iteration => return Err("heartbeat did not reach its admitted health write".to_string()),
+                    pid = wait_for_blocked_query(&env.pool, gate_pid,
+                        "UPDATE machines SET health_reports = jsonb_set(") => pid,
+                });
+                update_pid = Some(tokio::select! {
+                    () = &mut iteration => return Err("heartbeat passed its health gate".to_string()),
+                    () = &mut update => return Err("public DPF passed the admitted heartbeat".to_string()),
+                    pid = wait_for_blocked_query(&env.pool, heartbeat_pid.unwrap(),
+                        "SELECT id FROM machines WHERE id = $1 FOR UPDATE") => pid,
+                });
+            }
+            Ok::<(), String>(())
+        }).await.unwrap_or_else(|error| Err(format!("heartbeat readiness timed out: {error}")));
+        tracing::info!(
+            case,
+            ?gate_pid,
+            ?heartbeat_pid,
+            ?update_pid,
+            "Observed heartbeat and public DPF ownership"
+        );
+        let mut txn = env.db_txn().await;
+        let waiting = mh.snapshot(&mut txn).await;
+        let waiting_history =
+            find_by_object_ids(txn.as_mut(), StateHistoryTableId::Machine, &machine_ids).await;
+        let waiting_reader_end = txn.commit().await;
+        let release = gate.commit().await;
+        let timed_out =
+            queued_reprovision_completion::join_writers(&env, [heartbeat_pid, update_pid], async {
+                tokio::join!(&mut iteration, &mut update);
+            })
+            .await;
+        let trigger_cleanup = if dpf_first {
+            Ok(())
+        } else {
+            remove_controller_machine_write_gate(&env.pool).await
+        };
+        let update_result = update.as_mut().take_output().unwrap();
+        assert!(
+            !timed_out,
+            "{case}: {readiness:?}; public DPF: {update_result:?}"
+        );
+        release.unwrap();
+        readiness.unwrap_or_else(|error| panic!("{case}: {error}; public DPF: {update_result:?}"));
+        waiting_reader_end.unwrap();
+        trigger_cleanup.unwrap();
+        update_result.unwrap_or_else(|error| panic!("{case}: DPF update failed: {error}"));
+        assert!(
+            waiting.host_snapshot.controller_state_outcome.is_none(),
+            "{case}"
+        );
+        assert_eq!(
+            waiting.dpu_snapshots[0].health_reports, dpu_before.health_reports,
+            "{case}"
+        );
+        assert_eq!(
+            waiting.dpu_snapshots[0].network_status_observation,
+            Some(observation.clone()),
+            "{case}"
+        );
+        assert_eq!(
+            waiting.host_snapshot.config.dpf, host_before.config.dpf,
+            "{case}"
+        );
+        assert_eq!(
+            waiting.dpu_snapshots[0].config.dpf, dpu_before.config.dpf,
+            "{case}"
+        );
+        for (previous, paused) in [
+            (&host_before.state, &waiting.host_snapshot.state),
+            (&dpu_before.state, &waiting.dpu_snapshots[0].state),
+        ] {
+            assert_eq!(paused.value, previous.value, "{case}");
+            assert_eq!(paused.version, previous.version, "{case}");
+        }
+        assert_eq!(
+            serde_json::to_value(waiting_history.unwrap()).unwrap(),
+            serde_json::to_value(&history_before).unwrap(),
+            "{case}"
+        );
+
+        let mut txn = env.db_txn().await;
+        let host = mh.host().db_machine(&mut txn).await;
+        let dpu = mh.dpu().db_machine(&mut txn).await;
+        assert_eq!(host.state.value, host_before.state.value, "{case}");
+        assert_eq!(host.state.version, host_before.state.version, "{case}");
+        assert_eq!(dpu.state.value, dpu_before.state.value, "{case}");
+        assert_eq!(dpu.state.version, dpu_before.state.version, "{case}");
+        assert_eq!(
+            host.config.dpf,
+            model::machine::Dpf {
+                enabled: true,
+                ..host_before.config.dpf.clone()
+            },
+            "{case}"
+        );
+        assert_eq!(
+            dpu.config.dpf,
+            model::machine::Dpf {
+                enabled: true,
+                ..dpu_before.config.dpf.clone()
+            },
+            "{case}"
+        );
+        assert_eq!(dpu.network_status_observation, Some(observation), "{case}");
+        let report = dpu
+            .dpu_agent_health_report()
+            .expect("DPU health report should survive contention");
+        if dpf_first {
+            assert!(report.alerts.is_empty(), "{case}");
+            assert!(
+                matches!(&host.controller_state_outcome,
+                Some(PersistentStateHandlerOutcome::Wait { reason, .. })
+                if reason == "DPU heartbeat check deferred because a Machine row is busy or missing"),
+                "{case}: {:?}",
+                host.controller_state_outcome
+            );
+        } else {
+            assert_eq!(report.alerts.len(), 1, "{case}: {report:?}");
+            assert_eq!(
+                report.alerts[0].id,
+                HealthProbeId::heartbeat_timeout(),
+                "{case}"
+            );
+            assert_eq!(
+                report.alerts[0].target.as_deref(),
+                Some(HealthReport::DPU_AGENT_SOURCE),
+                "{case}"
+            );
+            assert!(
+                matches!(
+                    &host.controller_state_outcome,
+                    Some(PersistentStateHandlerOutcome::DoNothing { .. })
+                ),
+                "{case}: admitted heartbeat must commit in this invocation: {:?}",
+                host.controller_state_outcome
+            );
+        }
+        txn.commit().await.unwrap();
+
+        // Only the public-first row defers. Its next explicit invocation must
+        // record the timeout after the actual H owner has committed.
+        if dpf_first {
+            let timed_out =
+                queued_reprovision_completion::join_writers(&env, [None, None], async {
+                    env.run_machine_state_controller_iteration_no_requeue()
+                        .await;
+                })
+                .await;
+            assert!(
+                !timed_out,
+                "{case}: deferred heartbeat retry exceeded its completion bound"
+            );
+        }
+        let mut txn = env.db_txn().await;
+        let host = mh.host().db_machine(&mut txn).await;
+        let dpu = mh.dpu().db_machine(&mut txn).await;
+        let report = dpu
+            .dpu_agent_health_report()
+            .expect("heartbeat should persist a DPU health report");
+        assert_eq!(report.alerts.len(), 1, "{case}: {report:?}");
+        assert_eq!(
+            report.alerts[0].id,
+            HealthProbeId::heartbeat_timeout(),
+            "{case}"
+        );
+        assert_eq!(
+            report.alerts[0].target.as_deref(),
+            Some(HealthReport::DPU_AGENT_SOURCE),
+            "{case}"
+        );
+        assert_eq!(host.state.value, host_before.state.value, "{case}");
+        assert_eq!(host.state.version, host_before.state.version, "{case}");
+        assert!(
+            matches!(
+                host.controller_state_outcome,
+                Some(PersistentStateHandlerOutcome::DoNothing { .. })
+            ),
+            "{case}: timeout health and host outcome must commit together: {:?}",
+            host.controller_state_outcome
+        );
+        let history_after =
+            find_by_object_ids(txn.as_mut(), StateHistoryTableId::Machine, &machine_ids)
+                .await
+                .unwrap();
+        assert_eq!(
+            serde_json::to_value(&history_after).unwrap(),
+            serde_json::to_value(&history_before).unwrap(),
+            "{case}"
+        );
+        assert!(
+            env.redfish_sim
+                .actions_since(&redfish_timepoint)
+                .all_hosts()
+                .is_empty(),
+            "{case}"
+        );
+        txn.commit().await.unwrap();
+    }
+}
+
+#[crate::sqlx_test]
+async fn dpu_heartbeat_contention_defers_host_and_allows_other_hosts(pool: sqlx::PgPool) {
+    use futures_util::future::maybe_done;
+    use tokio::time::{Duration as TimeoutDuration, timeout};
+
+    let env = create_test_env(pool).await;
+    let hosts = [
+        create_managed_host(&env).await,
+        create_managed_host(&env).await,
+    ];
+    let mut snapshots = Vec::new();
+    for (index, mh) in hosts.iter().enumerate() {
+        mh.network_configured(&env).await;
+        let mut txn = env.db_txn().await;
+        if index == 1 {
+            // The compatible host proves heartbeat handling precedes a non-Ready branch.
+            let host_id: HostMachineId = mh.id.into();
+            db::machine::update_state(&mut txn, &host_id, &ManagedHostState::ForceDeletion)
+                .await
+                .unwrap();
+        }
+        let dpu = mh.dpu().db_machine(&mut txn).await;
+        assert!(dpu.dpu_agent_health_report().unwrap().alerts.is_empty());
+        let mut observation = dpu.network_status_observation.unwrap();
+        observation.observed_at = Utc::now() - Duration::hours(1);
+        sqlx::query("UPDATE machines SET network_status_observation = $1 WHERE id = $2")
+            .bind(sqlx::types::Json(&observation))
+            .bind(mh.dpu_ids[0])
+            .execute(txn.as_mut())
+            .await
+            .unwrap();
+        sqlx::query("UPDATE machines SET controller_state_outcome = NULL WHERE id = $1")
+            .bind(mh.id)
+            .execute(txn.as_mut())
+            .await
+            .unwrap();
+        snapshots.push(mh.snapshot(&mut txn).await);
+        txn.commit().await.unwrap();
+    }
+
+    assert_eq!(snapshots[1].managed_state, ManagedHostState::ForceDeletion);
+
+    let gated = &hosts[0];
+    let mut gate = env.db_txn().await;
+    db::machine::lock_by_id_for_update(gate.as_mut(), &gated.dpu_ids[0].into())
+        .await
+        .unwrap();
+    let compatible = &hosts[1];
+    let mut key_share_gate = env.db_txn().await;
+    // Keep referenced rows under `KEY SHARE` until their health and outcome
+    // are observed. These readers permit both non-key heartbeat updates.
+    for id in [compatible.id.to_machine_id(), compatible.dpu_ids[0].into()] {
+        sqlx::query_scalar::<_, MachineId>("SELECT id FROM machines WHERE id = $1 FOR KEY SHARE")
+            .bind(id)
+            .fetch_one(key_share_gate.as_mut())
+            .await
+            .expect("the compatible reader locks its existing host and DPU");
+    }
+    let iteration = maybe_done(env.run_machine_state_controller_iteration_no_requeue());
+    tokio::pin!(iteration);
+    let completed_while_gated = timeout(TimeoutDuration::from_secs(30), &mut iteration)
+        .await
+        .is_ok();
+
+    let mut txn = env.db_txn().await;
+    let mut observed = Vec::new();
+    for mh in &hosts {
+        observed.push((
+            mh.host().db_machine(&mut txn).await,
+            mh.dpu().db_machine(&mut txn).await,
+        ));
+    }
+    let observation_release = txn.commit().await;
+    let key_share_release = key_share_gate.rollback().await;
+    let gate_release = gate.commit().await;
+    timeout(TimeoutDuration::from_secs(30), &mut iteration)
+        .await
+        .expect("released heartbeat iteration must join before assertions");
+    observation_release.expect("finish the persisted heartbeat observations");
+    key_share_release.expect("release the compatible host and DPU readers");
+    gate_release.expect("release the incompatible DPU gate");
+    assert!(
+        completed_while_gated,
+        "a busy DPU must defer its host while compatible readers allow the other host to finish"
+    );
+    for (index, ((host, dpu), snapshot)) in observed.into_iter().zip(&snapshots).enumerate() {
+        assert_eq!(host.state.value, snapshot.host_snapshot.state.value);
+        assert_eq!(host.state.version, snapshot.host_snapshot.state.version);
+        assert_eq!(dpu.state.value, snapshot.dpu_snapshots[0].state.value);
+        assert_eq!(dpu.state.version, snapshot.dpu_snapshots[0].state.version);
+        assert_eq!(
+            dpu.network_status_observation,
+            snapshot.dpu_snapshots[0].network_status_observation
+        );
+        if index == 0 {
+            assert!(matches!(
+                host.controller_state_outcome,
+                Some(PersistentStateHandlerOutcome::Wait { ref reason, .. })
+                    if reason == "DPU heartbeat check deferred because a Machine row is busy or missing"
+            ));
+            assert_eq!(
+                dpu.dpu_agent_health_report(),
+                snapshot.dpu_snapshots[0].dpu_agent_health_report()
+            );
+        } else {
+            let report = dpu.dpu_agent_health_report().unwrap();
+            assert_eq!(report.source, HealthReport::DPU_AGENT_SOURCE);
+            assert_eq!(report.alerts.len(), 1);
+            assert_eq!(report.alerts[0].id, HealthProbeId::heartbeat_timeout());
+            assert_eq!(
+                report.alerts[0].target.as_deref(),
+                Some(HealthReport::DPU_AGENT_SOURCE)
+            );
+            assert!(matches!(
+                host.controller_state_outcome,
+                Some(PersistentStateHandlerOutcome::DoNothing { .. })
+            ));
+        }
+    }
+
+    let retry = maybe_done(env.run_machine_state_controller_iteration_no_requeue());
+    tokio::pin!(retry);
+    let retried = timeout(TimeoutDuration::from_secs(30), &mut retry)
+        .await
+        .is_ok();
+    timeout(TimeoutDuration::from_secs(180), &mut retry)
+        .await
+        .expect("the heartbeat retry must join its controller tasks before assertions");
+    assert!(
+        retried,
+        "the deferred heartbeat must retry after its DPU becomes available"
+    );
+    let mut txn = env.db_txn().await;
+    let host = gated.host().db_machine(&mut txn).await;
+    let dpu = gated.dpu().db_machine(&mut txn).await;
+    let report = dpu.dpu_agent_health_report().unwrap();
+    assert_eq!(report.source, HealthReport::DPU_AGENT_SOURCE);
+    assert_eq!(report.alerts.len(), 1);
+    assert_eq!(report.alerts[0].id, HealthProbeId::heartbeat_timeout());
+    assert_eq!(
+        report.alerts[0].target.as_deref(),
+        Some(HealthReport::DPU_AGENT_SOURCE)
+    );
+    assert_eq!(host.state.value, snapshots[0].host_snapshot.state.value);
+    assert_eq!(host.state.version, snapshots[0].host_snapshot.state.version);
+    assert_eq!(
+        dpu.network_status_observation,
+        snapshots[0].dpu_snapshots[0].network_status_observation
+    );
+    assert!(matches!(
+        host.controller_state_outcome,
+        Some(PersistentStateHandlerOutcome::DoNothing { .. })
+    ));
+    txn.commit().await.unwrap();
+}
+
+#[crate::sqlx_test]
 async fn test_failed_state_host_discovery_recovery(pool: sqlx::PgPool) {
     let env = create_test_env(pool).await;
     let mh = common::api_fixtures::create_managed_host(&env).await;
@@ -8006,9 +8689,61 @@ async fn test_host_level_dpu_reprovision_errors_for_zero_dpu(
     // The guard returns an error, which the state controller surfaces as
     // a handler failure rather than silently advancing. The host stays in
     // DPUReprovision.
+    let host = load_test_host(&env, &mh).await;
     assert!(matches!(
-        load_host_state(&env, &mh.id).await,
+        host.state.value,
         ManagedHostState::DPUReprovision { .. }
     ));
+    let diagnostic = format!(
+        "DPUReprovision state entered on zero-DPU host {}; reprovision requires DPUs",
+        mh.id,
+    );
+    assert!(
+        matches!(host.controller_state_outcome.as_ref(),
+            Some(PersistentStateHandlerOutcome::Error { err, .. }) if err.contains(&diagnostic)
+        ),
+        "expected the persisted zero-DPU invariant error, got: {:?}",
+        host.controller_state_outcome
+    );
     Ok(())
+}
+
+mod queued_reprovision_completion {
+    use std::future::Future;
+
+    use tokio::time::{Duration as TimeoutDuration, timeout};
+
+    use super::TestEnv;
+
+    pub(super) async fn join_writers(
+        env: &TestEnv,
+        pids: [Option<i32>; 2],
+        joined: impl Future<Output = ()>,
+    ) -> bool {
+        tokio::pin!(joined);
+        if timeout(TimeoutDuration::from_secs(30), &mut joined)
+            .await
+            .is_ok()
+        {
+            return false;
+        }
+        // Failure cleanup is limited to the exact fixture writer PIDs already
+        // observed. Keep the real controller alive so it joins its children.
+        let mut cancellations = Vec::new();
+        for pid in pids.into_iter().flatten() {
+            cancellations.push((
+                pid,
+                sqlx::query_scalar::<_, bool>("SELECT pg_cancel_backend($1)")
+                    .bind(pid)
+                    .fetch_one(&env.pool)
+                    .await,
+            ));
+        }
+        timeout(TimeoutDuration::from_secs(30), &mut joined)
+            .await
+            .unwrap_or_else(|error| {
+                panic!("writer cleanup did not settle: {error}; {cancellations:?}")
+            });
+        true
+    }
 }
