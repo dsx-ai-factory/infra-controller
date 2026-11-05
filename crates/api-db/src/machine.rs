@@ -796,6 +796,32 @@ pub async fn find_by_mac_address(
     Ok(machine)
 }
 
+/// Returns the machine IDs owning the requested non-BMC interface MACs.
+///
+/// Unowned interfaces and missing MACs are omitted. Predictions are not consulted.
+/// As with [`find_by_mac_address`], the owner chosen for a MAC associated with
+/// multiple machines is unspecified.
+pub async fn find_machine_ids_by_mac_addresses(
+    db: impl DbReader<'_>,
+    mac_addresses: &[MacAddress],
+) -> DatabaseResult<HashMap<MacAddress, MachineId>> {
+    if mac_addresses.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let query = r#"
+        SELECT mi.mac_address, m.id
+        FROM machine_interfaces mi
+        JOIN machines m ON m.id = mi.machine_id
+        WHERE mi.mac_address = ANY($1) AND mi.interface_type != 'Bmc'
+    "#;
+    let rows: Vec<(MacAddress, MachineId)> = sqlx::query_as(query)
+        .bind(mac_addresses)
+        .fetch_all(db)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))?;
+    Ok(rows.into_iter().collect())
+}
+
 /// Finds the machine with this address in either loopback field.
 /// Both fields are serialized from typed IP addresses, so their stored text
 /// matches `IpAddr::to_string()`.
@@ -1132,28 +1158,95 @@ pub async fn lookup_host_state_by_dpu_machine_id(
     Ok(host.map(|(_, state)| state.0))
 }
 
-pub async fn lookup_host_machine_ids_by_dpu_ids(
-    conn: impl DbReader<'_>,
-    dpu_machine_ids: &[DpuMachineId],
-) -> Result<HashMap<DpuMachineId, HostMachineId>, DatabaseError> {
-    let query = r#"SELECT mi.attached_dpu_machine_id, mi.machine_id
-        FROM machine_interfaces mi
-        WHERE mi.attached_dpu_machine_id != mi.machine_id
-        AND mi.interface_type != 'Bmc'
-        AND mi.attached_dpu_machine_id = ANY($1)"#;
+/// DPU-to-host attachments found for one requested set of DPUs.
+///
+/// Loading permits partial results and DPUs from different hosts. Call
+/// [`Self::common_host_machine_id`] to require one host for the complete set.
+#[derive(Debug)]
+pub struct DpuHostAssociations {
+    host_ids_by_dpu_id: HashMap<DpuMachineId, HostMachineId>,
+    missing_dpu_machine_id: Option<DpuMachineId>,
+}
 
-    let dpu_id_host_id_pairs: Vec<(DpuMachineId, HostMachineId)> = sqlx::query_as(query)
-        .bind(
-            dpu_machine_ids
-                .iter()
-                .map(|i| i.to_string())
-                .collect::<Vec<_>>(),
-        )
-        .fetch_all(conn)
-        .await
-        .map_err(|e| DatabaseError::query(query, e))?;
+/// A requested DPU set cannot be interpreted as one existing managed host.
+#[derive(Debug, PartialEq, Eq, thiserror::Error)]
+pub enum DpuHostAssociationError {
+    /// Some requested DPUs have host attachments, but this one does not.
+    #[error("DPU {dpu_machine_id} is not attached to a host while other requested DPUs are")]
+    Incomplete {
+        /// First requested DPU without a host attachment.
+        dpu_machine_id: DpuMachineId,
+    },
+    /// All requested DPUs have attachments, but to more than one host.
+    #[error("requested DPUs are attached to different hosts")]
+    MultipleHosts,
+}
 
-    Ok(dpu_id_host_id_pairs.into_iter().collect())
+impl DpuHostAssociations {
+    /// Loads non-BMC host attachments for the requested DPUs.
+    ///
+    /// A DPU's own interfaces are excluded. Missing DPUs are allowed, and
+    /// duplicate requested IDs do not change the result.
+    pub async fn load(
+        conn: impl DbReader<'_>,
+        dpu_machine_ids: &[DpuMachineId],
+    ) -> DatabaseResult<Self> {
+        let query = r#"SELECT mi.attached_dpu_machine_id, mi.machine_id
+            FROM machine_interfaces mi
+            WHERE mi.attached_dpu_machine_id != mi.machine_id
+            AND mi.interface_type != 'Bmc'
+            AND mi.attached_dpu_machine_id = ANY($1)"#;
+
+        let pairs: Vec<(DpuMachineId, HostMachineId)> = sqlx::query_as(query)
+            .bind(
+                dpu_machine_ids
+                    .iter()
+                    .map(|id| id.to_string())
+                    .collect::<Vec<_>>(),
+            )
+            .fetch_all(conn)
+            .await
+            .map_err(|error| DatabaseError::query(query, error))?;
+        let host_ids_by_dpu_id: HashMap<_, _> = pairs.into_iter().collect();
+        let missing_dpu_machine_id = dpu_machine_ids
+            .iter()
+            .find(|id| !host_ids_by_dpu_id.contains_key(id))
+            .copied();
+        Ok(Self {
+            host_ids_by_dpu_id,
+            missing_dpu_machine_id,
+        })
+    }
+
+    /// Returns the host attached to a requested DPU, if one was found.
+    pub fn host_machine_id(&self, dpu_machine_id: &DpuMachineId) -> Option<HostMachineId> {
+        self.host_ids_by_dpu_id.get(dpu_machine_id).copied()
+    }
+
+    /// Returns one host ID per attached DPU; IDs may repeat and have no defined order.
+    pub fn host_machine_ids(&self) -> impl Iterator<Item = HostMachineId> + '_ {
+        self.host_ids_by_dpu_id.values().copied()
+    }
+
+    /// Returns `None` when no requested DPU has a host attachment, including an empty request.
+    /// Returns a host only when every requested DPU is attached to that same host.
+    ///
+    /// Partial attachment takes precedence over conflicting hosts when both occur.
+    pub fn common_host_machine_id(&self) -> Result<Option<HostMachineId>, DpuHostAssociationError> {
+        match self.missing_dpu_machine_id {
+            Some(dpu_machine_id) if !self.host_ids_by_dpu_id.is_empty() => {
+                Err(DpuHostAssociationError::Incomplete { dpu_machine_id })
+            }
+            _ => self
+                .host_machine_ids()
+                .try_fold(None, |common_host_id, host_id| match common_host_id {
+                    Some(common_host_id) if common_host_id != host_id => {
+                        Err(DpuHostAssociationError::MultipleHosts)
+                    }
+                    _ => Ok(Some(host_id)),
+                }),
+        }
+    }
 }
 
 /// Return the [`ManagedHostState`] for a machine given its id without returning the whole snapshot.
@@ -2740,9 +2833,8 @@ where
     for<'db> &'db mut DB: DbReader<'db>,
 {
     let host_ids =
-        lookup_host_machine_ids_by_dpu_ids(&mut *conn, std::slice::from_ref(dpu_machine_id))
-            .await?;
-    let Some(host_machine_id) = host_ids.get(dpu_machine_id) else {
+        DpuHostAssociations::load(&mut *conn, std::slice::from_ref(dpu_machine_id)).await?;
+    let Some(host_machine_id) = host_ids.host_machine_id(dpu_machine_id) else {
         return Ok(None);
     };
 
@@ -4579,6 +4671,262 @@ mod test {
 
     fn machine_id(seed: u8, ty: MachineType) -> MachineId {
         MachineId::new(MachineIdSource::ProductBoardChassisSerial, [seed; 32], ty)
+    }
+
+    #[crate::sqlx_test]
+    async fn find_machine_ids_by_mac_addresses_preserves_sources(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use mac_address::MacAddress;
+        use model::network_segment::NetworkSegmentType;
+        use model::predicted_machine_interface::NewPredictedMachineInterface;
+
+        let first_host = machine_id(40, MachineType::Host);
+        let second_host = machine_id(41, MachineType::Host);
+        let dpu = machine_id(42, MachineType::Dpu);
+        let [
+            live,
+            ambiguous,
+            bmc,
+            unowned,
+            dpu_mac,
+            predicted,
+            unrequested,
+            unknown,
+        ] = [1, 2, 3, 4, 5, 6, 7, 8].map(|suffix| MacAddress::new([0x02, 0, 0, 0, 0x32, suffix]));
+        let mut txn = pool.begin().await?;
+        for id in [first_host, second_host, dpu] {
+            super::create(
+                txn.as_mut(),
+                None,
+                &id,
+                ManagedHostState::Ready,
+                None,
+                model::machine::CURRENT_STATE_MODEL_VERSION,
+            )
+            .await?;
+        }
+        let segments: Vec<NetworkSegmentId> = sqlx::query_scalar(
+            "INSERT INTO network_segments (name, version) \
+             VALUES ('mac-owners-a', 'V1-T0'), ('mac-owners-b', 'V1-T0') RETURNING id",
+        )
+        .fetch_all(txn.as_mut())
+        .await?;
+        for (owner, segment, mac, interface_type) in [
+            (Some(first_host), segments[0], live, InterfaceType::Data),
+            (Some(first_host), segments[1], live, InterfaceType::Data),
+            (
+                Some(first_host),
+                segments[0],
+                ambiguous,
+                InterfaceType::Data,
+            ),
+            (
+                Some(second_host),
+                segments[1],
+                ambiguous,
+                InterfaceType::Data,
+            ),
+            (Some(second_host), segments[0], bmc, InterfaceType::Bmc),
+            (None, segments[0], unowned, InterfaceType::Data),
+            (Some(dpu), segments[0], dpu_mac, InterfaceType::Data),
+            (
+                Some(first_host),
+                segments[0],
+                unrequested,
+                InterfaceType::Data,
+            ),
+        ] {
+            sqlx::query(
+                "INSERT INTO machine_interfaces \
+                    (machine_id, association_type, segment_id, mac_address, \
+                     primary_interface, hostname, interface_type) \
+                 VALUES ($1, $2::association_type, $3, $4, false, 'mac-owners', $5)",
+            )
+            .bind(owner)
+            .bind(if owner.is_some() { "Machine" } else { "None" })
+            .bind(segment)
+            .bind(mac)
+            .bind(interface_type)
+            .execute(txn.as_mut())
+            .await?;
+        }
+        for (mac_address, owner) in [
+            (live, second_host),
+            (bmc, first_host),
+            (unowned, second_host),
+            (predicted, first_host),
+            (unrequested, second_host),
+        ] {
+            crate::predicted_machine_interface::create(
+                NewPredictedMachineInterface {
+                    machine_id: &owner,
+                    mac_address,
+                    expected_network_segment_type: NetworkSegmentType::HostInband,
+                    boot_interface_id: None,
+                    primary_interface: false,
+                },
+                txn.as_mut(),
+            )
+            .await?;
+        }
+
+        for (scenario, requested, expected_live, expected_predicted) in [
+            ("empty request", vec![], vec![], vec![]),
+            ("missing MAC", vec![unknown], vec![], vec![]),
+            (
+                "duplicate requested MAC with independent owners",
+                vec![live, live],
+                vec![(live, first_host)],
+                vec![(live, second_host)],
+            ),
+            (
+                "mixed sources exclude BMC and unowned real interfaces",
+                vec![live, bmc, unowned, dpu_mac, predicted, unknown],
+                vec![(live, first_host), (dpu_mac, dpu)],
+                vec![
+                    (live, second_host),
+                    (bmc, first_host),
+                    (unowned, second_host),
+                    (predicted, first_host),
+                ],
+            ),
+        ] {
+            assert_eq!(
+                super::find_machine_ids_by_mac_addresses(txn.as_mut(), &requested).await?,
+                expected_live.into_iter().collect(),
+                "{scenario}: real interfaces"
+            );
+            assert_eq!(
+                crate::predicted_machine_interface::find_machine_ids_by_mac_addresses(
+                    txn.as_mut(),
+                    &requested,
+                )
+                .await?,
+                expected_predicted.into_iter().collect(),
+                "{scenario}: predictions"
+            );
+        }
+        let owners = super::find_machine_ids_by_mac_addresses(txn.as_mut(), &[ambiguous]).await?;
+        assert_eq!(owners.len(), 1);
+        assert!([first_host, second_host].contains(&owners[&ambiguous]));
+        txn.rollback().await?;
+        Ok(())
+    }
+
+    #[crate::sqlx_test]
+    async fn dpu_host_associations_load_and_validate(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use super::{DpuHostAssociationError, DpuHostAssociations};
+
+        let [first_host, second_host] = [1, 2]
+            .map(|seed| HostMachineId::try_from(machine_id(seed, MachineType::Host)).unwrap());
+        let [first_dpu, second_dpu, third_dpu, unattached_dpu] = [3, 4, 5, 6]
+            .map(|seed| DpuMachineId::try_from(machine_id(seed, MachineType::Dpu)).unwrap());
+        let mut txn = pool.begin().await?;
+        for id in [
+            first_host.into(),
+            second_host.into(),
+            first_dpu.into(),
+            second_dpu.into(),
+            third_dpu.into(),
+            unattached_dpu.into(),
+        ] {
+            super::create(
+                txn.as_mut(),
+                None,
+                &id,
+                ManagedHostState::Ready,
+                None,
+                model::machine::CURRENT_STATE_MODEL_VERSION,
+            )
+            .await?;
+        }
+        let segment_id: NetworkSegmentId = sqlx::query_scalar(
+            "INSERT INTO network_segments (name, version)
+             VALUES ('dpu-host-associations', 'V1-T0') RETURNING id",
+        )
+        .fetch_one(txn.as_mut())
+        .await?;
+        for (index, (dpu_id, owner_id, interface_type)) in [
+            (first_dpu, MachineId::from(first_host), InterfaceType::Data),
+            (second_dpu, first_host.into(), InterfaceType::Data),
+            (third_dpu, second_host.into(), InterfaceType::Data),
+            // Multiple interface rows still represent one attachment for this DPU.
+            (first_dpu, first_host.into(), InterfaceType::Data),
+            // Neither a DPU's own OOB row nor a BMC row is a host attachment.
+            (unattached_dpu, unattached_dpu.into(), InterfaceType::Data),
+            (unattached_dpu, second_host.into(), InterfaceType::Bmc),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            sqlx::query(
+                "INSERT INTO machine_interfaces
+                    (machine_id, attached_dpu_machine_id, association_type, segment_id,
+                     mac_address, primary_interface, hostname, interface_type)
+                 VALUES ($1, $2, 'Machine', $3, $4::macaddr, false, 'dpu-host-associations', $5)",
+            )
+            .bind(owner_id)
+            .bind(dpu_id)
+            .bind(segment_id)
+            .bind(format!("02:00:00:00:31:{index:02x}"))
+            .bind(interface_type)
+            .execute(txn.as_mut())
+            .await?;
+        }
+
+        for (scenario, requested, expected) in [
+            ("empty request", vec![], Ok(None)),
+            ("no host attachments", vec![unattached_dpu], Ok(None)),
+            ("one DPU", vec![first_dpu], Ok(Some(first_host))),
+            (
+                "complete shared host with duplicate requested IDs",
+                vec![second_dpu, first_dpu, first_dpu],
+                Ok(Some(first_host)),
+            ),
+            (
+                "partial attachment",
+                vec![first_dpu, unattached_dpu],
+                Err(DpuHostAssociationError::Incomplete {
+                    dpu_machine_id: unattached_dpu,
+                }),
+            ),
+            (
+                "different hosts",
+                vec![first_dpu, third_dpu],
+                Err(DpuHostAssociationError::MultipleHosts),
+            ),
+            (
+                "partial attachment takes precedence over different hosts",
+                vec![first_dpu, third_dpu, unattached_dpu],
+                Err(DpuHostAssociationError::Incomplete {
+                    dpu_machine_id: unattached_dpu,
+                }),
+            ),
+        ] {
+            let associations = DpuHostAssociations::load(txn.as_mut(), &requested).await?;
+            assert_eq!(
+                associations.common_host_machine_id(),
+                expected,
+                "{scenario}"
+            );
+        }
+
+        let associations =
+            DpuHostAssociations::load(txn.as_mut(), &[first_dpu, second_dpu, third_dpu]).await?;
+        assert_eq!(associations.host_machine_id(&first_dpu), Some(first_host));
+        assert_eq!(associations.host_machine_id(&third_dpu), Some(second_host));
+        assert_eq!(associations.host_machine_id(&unattached_dpu), None);
+        let mut host_ids = associations.host_machine_ids().collect::<Vec<_>>();
+        host_ids.sort_unstable();
+        let mut expected_host_ids = vec![first_host, first_host, second_host];
+        expected_host_ids.sort_unstable();
+        assert_eq!(host_ids, expected_host_ids);
+
+        txn.rollback().await?;
+        Ok(())
     }
 
     // Raw stored JSON and independent expectations verify which health report is

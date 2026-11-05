@@ -1613,13 +1613,12 @@ async fn wakeup_host_state_handler_by_dpu_id(
     dpu_machine_id: &DpuMachineId,
 ) -> Result<(), DatabaseError> {
     let host_machines_by_dpu_ids =
-        db::machine::lookup_host_machine_ids_by_dpu_ids(&mut api.db_reader(), &[*dpu_machine_id])
-            .await?;
+        db::machine::DpuHostAssociations::load(&mut api.db_reader(), &[*dpu_machine_id]).await?;
 
-    if let Some(host_machine_id) = host_machines_by_dpu_ids.get(dpu_machine_id)
+    if let Some(host_machine_id) = host_machines_by_dpu_ids.host_machine_id(dpu_machine_id)
         && let Err(err) = api
             .machine_state_handler_enqueuer
-            .enqueue_object(host_machine_id)
+            .enqueue_object(&host_machine_id)
             .await
     {
         carbide_instrument::emit(StateHandlerWakeupFailed {

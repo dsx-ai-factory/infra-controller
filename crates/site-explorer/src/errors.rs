@@ -60,6 +60,12 @@ pub enum SiteExplorerError {
     },
 }
 
+impl From<db::machine::DpuHostAssociationError> for SiteExplorerError {
+    fn from(error: db::machine::DpuHostAssociationError) -> Self {
+        Self::internal(error.to_string())
+    }
+}
+
 impl From<InvalidMachineType> for SiteExplorerError {
     #[track_caller]
     fn from(err: InvalidMachineType) -> Self {
