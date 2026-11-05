@@ -204,11 +204,21 @@ arrived host stays pending until it is `Ready` and has no reprovision or machine
 maintenance request. NICo then submits the rack profile's configured firmware
 object for that host and appends its child job handle to the persisted rack job.
 Existing devices are not resubmitted, and a controller restart resumes polling
-all persisted handles. A late host with desired power `Off` blocks submission
-with a retryable handler error; its desired power is not changed.
+all persisted handles. A host that has not joined this job stays pending even
+if its machine state is `Failed`; that unrelated failure does not fail the
+rack firmware job. An unsubmitted host already in `Assigned` is excluded from
+supplemental firmware and does not block ingestion. Its firmware requires a
+separate maintenance operation when the host is eligible.
+
+A late host with desired power `Off` blocks submission with a retryable handler
+error; its desired power is not changed. Results polled for existing devices
+are committed before supplemental admission. Inventory, credential, or dispatch
+errors for a late host therefore do not prevent existing devices from observing
+their completed firmware results. Other unsubmitted hosts remain pending until
+ready and free of conflicting requests; this waiting has no overall deadline.
 
 `Completed` repeats this membership check before clearing `ingestion_in_progress`
-and validation labels. Unsubmitted hosts or a pending firmware job return the
+and validation labels. Unsubmitted hosts outside `Assigned`, or a pending firmware job, return the
 rack to `FirmwareUpgrade(WaitForComplete)`, including after a restart between
 persisting a new batch and transitioning the rack. The firmware job persists
 `return_to_completed = true` with the supplemental batch, or with the transition

@@ -3637,7 +3637,7 @@ async fn test_ingestion_reconciles_late_compute_firmware_body(
         .set_firmware_job_status(rms::GetFirmwareJobStatusResponse {
             status: rms::ReturnCode::Success as i32,
             job_id: "original-child".to_string(),
-            job_state: rms::FirmwareJobState::Completed as i32,
+            job_state: rms::FirmwareJobState::Running as i32,
             ..Default::default()
         })
         .await;
@@ -3677,6 +3677,33 @@ async fn test_ingestion_reconciles_late_compute_firmware_body(
         1
     );
 
+    // An unrelated failure before admission must remain retryable rather than
+    // being attributed to the rack firmware job.
+    db::machine::update_state(
+        pool.acquire().await?.as_mut(),
+        &late.host_snapshot.id,
+        &model::machine::ManagedHostState::Failed {
+            details: model::machine::FailureDetails {
+                cause: model::machine::FailureCause::UnhandledState {
+                    err: "late host discovery failure".into(),
+                },
+                failed_at: chrono::Utc::now(),
+                source: model::machine::FailureSource::StateMachine,
+            },
+            machine_id: late.host_snapshot.id.into(),
+            retry_count: 0,
+        },
+    )
+    .await?;
+    env.run_rack_controller_iteration().await;
+    let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    assert_eq!(rack.controller_state.value, waiting);
+    assert!(matches!(rack.controller_state_outcome,
+        Some(model::controller_outcome::PersistentStateHandlerOutcome::Wait { ref reason, .. })
+        if reason.contains("failed=0") && reason.contains(&late.host_snapshot.id.to_string())
+    ));
+    assert_eq!(rack.firmware_upgrade_job.unwrap().machines.len(), 1);
+
     let mut conn = pool.acquire().await?;
     let machine = db::machine::find_one(
         conn.as_mut(),
@@ -3700,6 +3727,22 @@ async fn test_ingestion_reconciles_late_compute_firmware_body(
         model::power_manager::PowerState::On,
     )
     .await?;
+    let original_before =
+        db::machine::find_one(&pool, &original.host_snapshot.id, Default::default())
+            .await?
+            .unwrap();
+    assert_eq!(
+        original_before.rack_fw_details.unwrap().status,
+        RackFirmwareUpgradeState::InProgress
+    );
+    env.rms_sim
+        .set_firmware_job_status(rms::GetFirmwareJobStatusResponse {
+            status: rms::ReturnCode::Success as i32,
+            job_id: "original-child".to_string(),
+            job_state: rms::FirmwareJobState::Completed as i32,
+            ..Default::default()
+        })
+        .await;
     env.run_rack_controller_iteration().await;
     let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
     assert!(matches!(rack.controller_state_outcome,
@@ -3712,6 +3755,25 @@ async fn test_ingestion_reconciles_late_compute_firmware_body(
             .await
             .len(),
         1
+    );
+    // The rejected late admission must not discard newly polled completion.
+    let original_after =
+        db::machine::find_one(&pool, &original.host_snapshot.id, Default::default())
+            .await?
+            .unwrap();
+    let original_status = original_after.rack_fw_details.unwrap();
+    assert_eq!(original_status.status, RackFirmwareUpgradeState::Completed);
+    assert!(
+        original_status.is_current_for(
+            original_after
+                .host_reprovision_requested
+                .unwrap()
+                .requested_at
+        )
+    );
+    assert_eq!(
+        rack.firmware_upgrade_job.unwrap().machines[0].status,
+        FirmwareProgressState::Completed
     );
     set_machine_power_states(
         &pool,
@@ -3959,6 +4021,25 @@ async fn test_ingestion_reopens_firmware_for_compute_arriving_during_later_maint
         })
         .await;
 
+    // A host already serving a tenant never joins the supplemental job and
+    // must not hold either firmware completion or final admission open.
+    let assigned = Box::pin(new_host(
+        &env,
+        ManagedHostConfig::default().with_expected_machine_data(ExpectedMachineData {
+            rack_id: Some(rack_id.clone()),
+            ..Default::default()
+        }),
+    ))
+    .await?;
+    db::machine::update_state(
+        pool.acquire().await?.as_mut(),
+        &assigned.host_snapshot.id,
+        &model::machine::ManagedHostState::Assigned {
+            instance_state: model::machine::InstanceState::Ready,
+        },
+    )
+    .await?;
+
     // Another arrival during supplemental firmware joins the same continuation.
     let later = Box::pin(new_host(
         &env,
@@ -4027,6 +4108,15 @@ async fn test_ingestion_reopens_firmware_for_compute_arriving_during_later_maint
     );
     assert!(!rack.config.ingestion_in_progress);
     assert!(rack.nvos_update_job.is_none());
+    let assigned = db::machine::find_one(&pool, &assigned.host_snapshot.id, Default::default())
+        .await?
+        .unwrap();
+    assert!(matches!(
+        assigned.state.value,
+        model::machine::ManagedHostState::Assigned { .. }
+    ));
+    assert!(assigned.host_reprovision_requested.is_none());
+    assert!(assigned.rack_fw_details.is_none());
     for host_id in [late.host_snapshot.id, later.host_snapshot.id] {
         let machine = db::machine::find_one(&pool, &host_id, Default::default())
             .await?

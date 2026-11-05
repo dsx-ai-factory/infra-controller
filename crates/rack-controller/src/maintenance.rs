@@ -735,7 +735,11 @@ async fn reconcile_ingestion_firmware_machines(
     let missing = load_scoped_machines(conn.as_mut(), &state.id, &MaintenanceScope::default())
         .await?
         .into_iter()
-        .filter(|machine| !submitted.contains(&machine.id))
+        // Tenant-owned hosts are outside automatic supplemental maintenance.
+        .filter(|machine| {
+            !submitted.contains(&machine.id)
+                && !matches!(machine.state.value, ManagedHostState::Assigned { .. })
+        })
         .collect::<Vec<_>>();
     let ready_ids = missing
         .iter()
@@ -976,7 +980,10 @@ async fn scoped_switch_waiting_for_nvos(
 
 /// Reads device controller states for devices in `rack_id`,
 /// filtered by `scope`, and decides whether firmware WaitForComplete can
-/// advance. Device membership comes from the DB + scope, not the firmware job.
+/// advance. Membership comes from the DB + scope; during automatic ingestion,
+/// job handles distinguish submitted hosts from those awaiting admission.
+/// Unsubmitted assigned hosts are outside supplemental maintenance; other
+/// unsubmitted hosts wait for eligibility, including recovery from host failure.
 async fn evaluate_firmware_progress_from_devices(
     txn: &mut sqlx::PgConnection,
     rack_id: &RackId,
@@ -1015,11 +1022,14 @@ async fn evaluate_firmware_progress_from_devices(
     let mut pending_device_ids = Vec::new();
     for machine in &machines {
         let mut outcome = machine_firmware_outcome(machine);
-        if outcome != DeviceFirmwareOutcome::Failed
-            && submitted
-                .as_ref()
-                .is_some_and(|ids| !ids.contains(&machine.id))
+        if submitted
+            .as_ref()
+            .is_some_and(|ids| !ids.contains(&machine.id))
         {
+            if matches!(machine.state.value, ManagedHostState::Assigned { .. }) {
+                continue;
+            }
+            // A host that has not joined this job cannot fail its firmware work.
             outcome = DeviceFirmwareOutcome::Waiting;
         }
         if outcome == DeviceFirmwareOutcome::Waiting {
@@ -2744,9 +2754,6 @@ pub async fn handle_maintenance(
                     .await
                     .map_err(|error| StateHandlerError::GenericError(eyre::eyre!(error)))?;
 
-                reconcile_ingestion_firmware_machines(state, rack_profile_id, &mut job, ctx)
-                    .await?;
-
                 let mut txn = ctx.services.db_pool.begin().await?;
 
                 for device in job.machines.iter() {
@@ -2832,6 +2839,20 @@ pub async fn handle_maintenance(
                             .await?;
                         }
                     }
+                }
+
+                if state.config.ingestion_in_progress
+                    && state.config.maintenance_requested.is_none()
+                {
+                    // Existing device controllers consume these results independently
+                    // of supplemental admission. Commit before any fallible dispatch
+                    // so a late host cannot roll back their firmware completion.
+                    db_rack::update_firmware_upgrade_job(txn.as_mut(), id, Some(&job)).await?;
+                    txn.commit().await?;
+                    state.firmware_upgrade_job = Some(job.clone());
+                    reconcile_ingestion_firmware_machines(state, rack_profile_id, &mut job, ctx)
+                        .await?;
+                    txn = ctx.services.db_pool.begin().await?;
                 }
 
                 // Advancement is driven by machine/switch/power-shelf controller

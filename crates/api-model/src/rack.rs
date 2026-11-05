@@ -459,6 +459,9 @@ pub enum RackErrorRecoveryPolicy {
 /// FirmwareUpgrade -> NVOSUpdate -> [PowerSequence(PowerReset)]
 ///   -> ConfigureNmxCluster -> Completed -> Validating(Pending)
 /// ```
+///
+/// During automatic ingestion, Completed may re-enter FirmwareUpgrade for
+/// late compute hosts; supplemental completion returns directly to Completed.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum RackState {
@@ -468,8 +471,8 @@ pub enum RackState {
     #[serde(alias = "expected", alias = "unknown")]
     Created,
 
-    /// Discovery in progress - waiting for all expected devices to appear
-    /// and reach ManagedHostState::Ready.
+    /// Discovery waits for the rack profile's minimum number of ready switches.
+    /// Compute tray and power shelf counts and readiness do not gate this state.
     Discovering,
 
     /// Rack is in the validation phase. The sub-state tracks progress from
