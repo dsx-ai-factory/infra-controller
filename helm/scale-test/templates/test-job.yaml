@@ -4,18 +4,30 @@
 {{- $known := dict
     "cluster" (dict "binary" "/tests/cluster.test" "run" "^TestAgainstARealCluster$")
     "probe" (dict "binary" "/tests/probe.test" "run" "^TestAgainstARealProbe$")
-    "inventory" (dict "binary" "/tests/inventory.test" "run" "^TestAcceptance$") -}}
+    "inventory" (dict "binary" "/tests/inventory.test" "run" "^TestAcceptance$")
+    "history" (dict "binary" "/tests/history.test" "run" "^TestAcceptanceReplaysARealProbeCapture$") -}}
 {{- $enabled := list -}}
 {{- range $name, $suite := .Values.suites -}}
 {{- if $suite.enabled -}}
 {{- if not (hasKey $known $name) -}}
-{{- fail (printf "unknown suite %q; the known suites are cluster, probe and inventory" $name) -}}
+{{- fail (printf "unknown suite %q; the known suites are cluster, probe, inventory and history" $name) -}}
 {{- end -}}
 {{- $enabled = append $enabled $name -}}
 {{- end -}}
 {{- end -}}
 {{- if not $enabled -}}
 {{- fail "at least one suite must be enabled under suites.<name>.enabled" -}}
+{{- end -}}
+{{/* The history suite replays a real probe capture mounted into the pod; its
+     source is required and must be exactly one of a ConfigMap or a claim. */}}
+{{- if has "history" $enabled -}}
+{{- $cap := $root.Values.historyCapture -}}
+{{- if and (not $cap.configMap) (not $cap.existingClaim) -}}
+{{- fail "the history suite needs historyCapture.configMap or historyCapture.existingClaim" -}}
+{{- end -}}
+{{- if and $cap.configMap $cap.existingClaim -}}
+{{- fail "set only one of historyCapture.configMap or historyCapture.existingClaim" -}}
+{{- end -}}
 {{- end -}}
 {{- $image := include "scale-test.image" $root -}}
 {{- $deadline := include "scale-test.jobDeadline" $root -}}
@@ -116,6 +128,21 @@ spec:
             - name: SCALE_TEST_PROBE_URL
               value: {{ $root.Values.probeUrl | quote }}
             {{- end }}
+            {{- if eq $name "history" }}
+            {{- $cap := $root.Values.historyCapture }}
+            {{- $file := ternary (printf "/capture/%s" (default "capture.json" $cap.subPath)) (printf "/capture/%s" (default "capture.json" $cap.key)) (empty $cap.configMap) }}
+            # The capture and the capture-producer provenance the test logs.
+            - name: SCALE_TEST_HISTORY_CAPTURE
+              value: {{ $file | quote }}
+            {{- if $cap.producerImage }}
+            - name: SCALE_TEST_CAPTURE_PROBE_IMAGE
+              value: {{ $cap.producerImage | quote }}
+            {{- end }}
+            {{- if $cap.producerRevision }}
+            - name: SCALE_TEST_CAPTURE_PROBE_REVISION
+              value: {{ $cap.producerRevision | quote }}
+            {{- end }}
+            {{- end }}
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
@@ -130,6 +157,11 @@ spec:
               mountPath: /var/run/secrets/spiffe.io
               readOnly: true
             {{- end }}
+            {{- if eq $name "history" }}
+            - name: capture
+              mountPath: /capture
+              readOnly: true
+            {{- end }}
       volumes:
         - name: tmp
           emptyDir: {}
@@ -137,5 +169,17 @@ spec:
         - name: nico-client-cert
           secret:
             secretName: {{ required "inventory.clientSecret is required when the inventory suite is enabled" $root.Values.inventory.clientSecret | quote }}
+        {{- end }}
+        {{- if eq $name "history" }}
+        {{- $cap := $root.Values.historyCapture }}
+        - name: capture
+          {{- if $cap.configMap }}
+          configMap:
+            name: {{ $cap.configMap | quote }}
+          {{- else }}
+          persistentVolumeClaim:
+            claimName: {{ $cap.existingClaim | quote }}
+            readOnly: true
+          {{- end }}
         {{- end }}
 {{- end }}

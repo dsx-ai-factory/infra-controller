@@ -21,6 +21,7 @@ var acceptanceFixtures = []string{
 	"../probe/devsite_test.go",
 	"../cluster/devcluster_test.go",
 	"../../harness/acceptance_test.go",
+	"../history/acceptance_test.go",
 }
 
 // TestAcceptanceFixturesNeverSkip enforces the chart's promise that a required
