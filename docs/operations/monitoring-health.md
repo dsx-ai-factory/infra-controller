@@ -434,6 +434,8 @@ The log body provides a compact human-readable summary, for example `firmware CP
 
 The OTLP severity is `ERROR` when health, health rollup, or a condition is `Critical`; `WARN` when at least one is `Warning`; and `INFO` otherwise. Missing status remains missing rather than being reported as healthy. At most 64 conditions are included in one record.
 
+When `[sinks.tracing]` is enabled, each record is also logged as "Redfish resource status event" with `resource_type`, `resource_id`, `resource_name`, and `status` fields.
+
 ## DPU Health Checks
 
 `dpu-agent` runs on managed DPUs and reports DPU health to NICo. The BlueField
