@@ -194,6 +194,47 @@ receivers:
               replacement: '$$1'
               action: replace
 
+  prometheus/ovnkube-node-dpu:
+    config:
+      scrape_configs:
+        - job_name: 'ovnkube-node-dpu-metrics'
+          authorization:
+            type: Bearer
+            credentials_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+          scrape_interval: 1m
+          metric_relabel_configs:
+            - action: drop
+              regex: '(go|process)_.*'
+              source_labels:
+              - __name__
+            - action: drop
+              regex: 'ovs_vswitchd_interface(_ingress_policing.+|_ingress_policy.+|_mtu|_duplex|_ifindex|_link_speed|_driver_name|_multicast_total)'
+              source_labels:
+              - __name__
+            - action: drop
+              regex: 'ovs_vswitchd_interface_.*;ovn-.*'
+              source_labels:
+              - __name__
+              - name
+            - action: labeldrop
+              regex: 'endpoint|service'
+            - action: replace
+              regex: '(ovs_vswitchd_interface_.*);(.+)'
+              replacement: '$$2'
+              source_labels:
+              - __name__
+              - name
+              target_label: interface
+          metrics_path: /metrics
+          static_configs:
+            - targets: ['127.0.0.1:9410']
+          relabel_configs:
+            - action: replace
+              replacement: '${env:NODE_NAME}'
+              target_label: instance
+          scheme: https
+          tls_config:
+            insecure_skip_verify: true
   prometheus/log-stats:
     config:
       scrape_configs:
@@ -337,6 +378,11 @@ processors:
     attributes:
       - key: component
         value: node-exporter
+        action: upsert
+  resource/metrics-ovnkube-node-dpu:
+    attributes:
+      - key: component
+        value: ovnkube
         action: upsert
   resource/metrics-transceiver:
     attributes:
@@ -504,6 +550,15 @@ service:
         - resourcedetection
         - resource/metrics-dts
         - transform/metrics-dts
+        - telemetry_stats
+        - batch/metrics
+      exporters: [otlp/site, prometheus]
+    metrics/ovnkube-node-dpu:
+      receivers: [prometheus/ovnkube-node-dpu]
+      processors:
+        - memory_limiter
+        - resourcedetection
+        - resource/metrics-ovnkube-node-dpu
         - telemetry_stats
         - batch/metrics
       exporters: [otlp/site, prometheus]
