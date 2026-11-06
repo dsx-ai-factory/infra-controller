@@ -1,0 +1,49 @@
+{{- if and .Values.certManager.siteIssuer.create (or (not .Values.vault.enabled) .Values.vault.tls.create) }}
+## =============================================================================
+## site-issuer — ClusterIssuer backed by the self-signed site-root CA
+##
+## Signs with the site-root Secret in certManagerNamespace, so it needs neither
+## Vault nor the vault-pki-config Job. Two consumers:
+##   - the Vault TLS bootstrap Certificates in vault-tls-certs.yaml
+##     (nicoca-vault-client, vault-raft-tls), which must exist before Vault starts
+##   - every NICo certificate on a site installed with `setup.sh --skip-vault`,
+##     where setup.sh points the Core, RMS, Flow, and site-agent releases at
+##     site-issuer (ClusterIssuer, cert-manager.io) instead of vault-nico-issuer.
+##     Vault sites keep
+##     vault-nico-issuer, whose PKI mount imports the same site-root CA, so both
+##     issuers chain to one root and a site can move between them without
+##     re-trusting anything.
+##
+## Hook weights (pre-install,pre-upgrade):
+##   -10  selfsigned-bootstrap ClusterIssuer (site-root-certificate.yaml)
+##    -9  site-root Certificate              (site-root-certificate.yaml)
+##    -5  site-issuer ClusterIssuer          (this file)
+##    -4  nicoca-vault-client Certificate   (vault-tls-certs.yaml, vault.enabled only)
+##    -4  vault-raft-tls Certificate         (vault-tls-certs.yaml, vault.enabled only)
+##
+## Rendered while certManager.siteIssuer.create is true and, on a Vault site
+## (vault.enabled), only while vault.tls.create is also true. That was the
+## condition when this document lived in vault-tls-certs.yaml, so a Vault site
+## that disables the TLS bootstrap and manages its own site-issuer keeps it. A
+## Vault-free site renders it whatever vault.tls.create says.
+##
+## This document moved here from vault-tls-certs.yaml unchanged. Helm tracks a
+## hook by kind and name, and before-hook-creation deletes and recreates it on
+## every install and upgrade, so the move causes no churn on existing releases.
+## =============================================================================
+
+---
+## site-issuer — ClusterIssuer backed by the self-signed site-root CA.
+## Issues Vault TLS certs without depending on Vault being up.
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: site-issuer
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-5"
+    helm.sh/hook-delete-policy: before-hook-creation
+spec:
+  ca:
+    secretName: site-root
+{{- end }}

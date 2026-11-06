@@ -1,0 +1,98 @@
+suite: Vault runtime configuration toggle
+templates:
+  - deployment.yaml
+  - configmap.yaml
+release:
+  namespace: nico-system
+set:
+  global.image.repository: registry.example.com/nvmetal-carbide
+  global.image.tag: test
+tests:
+  - it: injects the Vault environment from the nico-prereqs ConfigMap and Secrets by default
+    template: deployment.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].env[0].name
+          value: VAULT_ROLE_ID
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: VAULT_ADDR
+            valueFrom:
+              configMapKeyRef:
+                name: vault-cluster-info
+                key: VAULT_SERVICE
+
+  - it: injects no Vault environment when vault.enabled is false
+    template: deployment.yaml
+    set:
+      vault.enabled: false
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: VAULT_ROLE_ID
+          any: true
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: VAULT_SECRET_ID
+          any: true
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: VAULT_TOKEN
+          any: true
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: VAULT_ADDR
+          any: true
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: VAULT_NAMESPACE
+          any: true
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: VAULT_KV_MOUNT_LOCATION
+          any: true
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: VAULT_PKI_MOUNT_LOCATION
+          any: true
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: VAULT_PKI_ROLE_NAME
+          any: true
+      - equal:
+          path: spec.template.spec.containers[0].env[0].name
+          value: DATASTORE_USER
+
+  - it: renders vaultClusterInfo as the Vault ConfigMap while Vault is enabled
+    template: configmap.yaml
+    set:
+      vaultClusterInfo:
+        VAULT_SERVICE: https://vault.example.com
+        NICO_VAULT_MOUNT: secrets
+        NICO_VAULT_PKI_MOUNT: nicoca
+    asserts:
+      - containsDocument:
+          apiVersion: v1
+          kind: ConfigMap
+          name: vault-cluster-info
+          namespace: nico-system
+          any: true
+
+  - it: rejects vaultClusterInfo when vault.enabled is false
+    template: configmap.yaml
+    set:
+      vault.enabled: false
+      vaultClusterInfo:
+        VAULT_SERVICE: https://vault.example.com
+    asserts:
+      - failedTemplate:
+          errorPattern: nico-api.vaultClusterInfo is set but nico-api.vault.enabled is false

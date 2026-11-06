@@ -1,12 +1,23 @@
 # =============================================================================
 # Dynamic values for nico-prereqs — rendered at sync time by helmfile.
-# Runs after vault is deployed and unsealed.
+# Runs after vault is deployed and unsealed, or without Vault when setup.sh
+# exports INSTALL_VAULT=false (--skip-vault).
 #
-# Uses exec to query live cluster state (root token only).
+# vault.enabled follows NICO_PREREQS_VAULT_ENABLED, falling back to INSTALL_VAULT
+# and then to true when both are unset, so direct helmfile use keeps installing
+# Vault. setup.sh exports INSTALL_VAULT for the whole run and sets
+# NICO_PREREQS_VAULT_ENABLED=true with INSTALL_VAULT=false while the running
+# Core still mounts the Vault ConfigMap and token Secrets, and false once the
+# replacement Core is applied. The root token is read live from the cluster
+# (exec) only while the Vault resources render: the Secret may not exist otherwise.
 # DNS is working on this cluster — vault addressed by DNS name.
 # =============================================================================
+{{- $vaultEnabled := ne (env "NICO_PREREQS_VAULT_ENABLED" | default (env "INSTALL_VAULT" | default "true")) "false" }}
 vault:
+  enabled: {{ $vaultEnabled }}
   address: "https://vault.vault.svc.cluster.local:8200"
+{{- if $vaultEnabled }}
   token: "{{ exec "sh" (list "-c" "kubectl get secret vaultroottoken -n vault -o jsonpath={.data.token} | base64 -d") }}"
+{{- end }}
 imagePullSecrets:
   ngcNicoPull: "{{ env "REGISTRY_PULL_SECRET" }}"

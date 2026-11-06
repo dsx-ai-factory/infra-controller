@@ -49,7 +49,7 @@ ESO syncs secrets from Vault into Kubernetes Secret objects.
 
 <Note>The cert-manager component issues and rotates the TLS certificates that NICo services use for mTLS/gRPC communication.</Note>
 
-**ClusterIssuers required**: `self-issuer`, `site-issuer`, `vault-issuer`, `vault-nico-issuer`
+**ClusterIssuers required**: `site-issuer`, a CA issuer backed by the `site-root` Secret, and `vault-nico-issuer`, backed by Vault PKI. The reference installation creates both, plus the `selfsigned-bootstrap` issuer that signs `site-root`; a site installed with `--skip-vault` creates no `vault-nico-issuer` and uses `site-issuer` for every service certificate.
 
 **If you already have cert-manager:**
 
@@ -110,7 +110,7 @@ psql "postgres://<POSTGRES_USER>:<POSTGRES_PASSWORD>@<POSTGRES_HOST>:<POSTGRES_P
 | Vault server | v1.14.0 (HA Raft) |
 | Vault injector (vault-k8s) | v1.2.1 |
 
-Vault provides a PKI engine for certificate issuance and a KV secrets engine for credential storage. NICo can keep the credentials it manages in Postgres instead; refer to [Day 0 Credential Store](../installation-options/day0-credential-store.md). Certificate issuance stays in Vault.
+Vault provides a PKI engine for certificate issuance and a KV secrets engine for credential storage. It installs by default and stays a supported option. NICo can keep the credentials it manages in Postgres instead; refer to [Day 0 Credential Store](../installation-options/day0-credential-store.md). A site can also be installed without Vault: `setup.sh --skip-vault` keeps credentials in Postgres, issues service certificates from the cert-manager `site-issuer` CA ClusterIssuer, and has `nico-api` request machine and UFM certificates through cert-manager. Refer to [Installing without Vault](https://github.com/dsx-ai-factory/infra-controller/blob/main/helm-prereqs/README.md#installing-without-vault). The rest of this section applies to sites that install Vault.
 
 **Configuration required:**
 
@@ -129,7 +129,7 @@ Vault provides a PKI engine for certificate issuance and a KV secrets engine for
   - `VAULT_PKI_ROLE_NAME=nico-cluster`
 - Injector (optional) may be enabled for sidecar-based secret injection.
 
-Vault is consumed by nico-api for PKI and secrets (env `VAULT_*`) and by credsmgr (cloud-cert-manager) for CA material exposed to the site bootstrap flow.
+When installed, Vault is consumed by nico-api for PKI and secrets (env `VAULT_*`) and by credsmgr (cloud-cert-manager) for CA material exposed to the site bootstrap flow.
 
 ## Workflow Orchestration
 
@@ -187,7 +187,7 @@ All logs are collected and shipped using `otel-collector-contrib` (both site con
 These prerequisites should be installed in the following order:
 
 1. **Cluster and networking**: Kubernetes, containerd, Calico (or conformant CNI), ingress controller (Contour/Envoy), load balancer (MetalLB or cloud LB), DNS recursive resolvers, NTP
-2. **Foundation services** (in order): ESO (optional) → cert-manager → PostgreSQL → Vault → Temporal
+2. **Foundation services** (in order): ESO (optional) → cert-manager → PostgreSQL → Vault (unless the site runs without it) → Temporal
 3. **NICo Core** (nico-system): nico-api and supporting services (DHCP/PXE/DNS as required)
 4. **NICo REST components**: Deploy cloud-api, cloud-workflow (cloud-worker & site-worker), and cloud-cert-manager (credsmgr). Seed DB and register Temporal namespaces (`cloud`, `site`, then site UUID). Create OTP and bootstrap secrets for elektra-site-agent; roll restart it.
 5. **Monitoring** (optional): Prometheus operator, Grafana, Loki, OTel, node exporter

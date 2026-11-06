@@ -132,6 +132,33 @@ fi
 assert_not_logged "get secret vaultroottoken"
 assert_not_logged "delete job flow-vault-tokens"
 
+# A --skip-vault run (setup.sh exports INSTALL_VAULT=false) cannot revoke the
+# Vault tokens: with markers present it must stop before any deletion or Vault
+# access and name the markers; without markers it stays a no-op.
+: > "${TEST_LOG}"
+if skip_vault_output="$(INSTALL_VAULT=false PATH="${TEST_TMP_DIR}/bin:${PATH}" \
+    "${SCRIPT_DIR}/../cleanup-legacy-flow-managers.sh" 2>&1)"; then
+    echo "cleanup ran its Vault token revocation on a --skip-vault run" >&2
+    exit 1
+fi
+if ! grep -Fq 'installs without Vault (--skip-vault)' <<< "${skip_vault_output}" || \
+   ! grep -Fxq '  job.batch/flow-vault-tokens' <<< "${skip_vault_output}" || \
+   ! grep -Fq 'Installing without Vault' <<< "${skip_vault_output}"; then
+    echo "a --skip-vault run did not name the legacy markers and the Vault requirement" >&2
+    printf '%s\n' "${skip_vault_output}" >&2
+    exit 1
+fi
+assert_logged "get job/flow-vault-tokens serviceaccount/flow-vault-tokens-sa"
+assert_not_logged "get secret vaultroottoken"
+assert_not_logged "exec -i vault-0"
+assert_not_logged "delete job flow-vault-tokens"
+assert_not_logged "delete clusterrolebinding flow-vault-tokens-writer"
+: > "${TEST_LOG}"
+TEST_MARKERS=absent INSTALL_VAULT=false PATH="${TEST_TMP_DIR}/bin:${PATH}" \
+    "${SCRIPT_DIR}/../cleanup-legacy-flow-managers.sh"
+assert_not_logged "get secret vaultroottoken"
+assert_not_logged "delete job flow-vault-tokens"
+
 # A missing root token must stop after authorization removal and before deleting
 # the workload token Secrets, preserving evidence and allowing cleanup to retry.
 cat > "${TEST_TMP_DIR}/bin/kubectl" <<'FAKE_EMPTY_ROOT_KUBECTL'

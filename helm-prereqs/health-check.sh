@@ -11,6 +11,15 @@
 # All namespaces are auto-detected from cluster resources. Override via env:
 #   NICO_NS, VAULT_NS, POSTGRES_NS, CERT_MANAGER_NS, ESO_NS, METALLB_NS,
 #   CONTOUR_NS
+# Vault checks are skipped when no vault StatefulSet exists (an install made
+# with setup.sh --skip-vault); a Vault namespace without one fails as partial,
+# and so does a missing Vault that NICo is still configured to use.
+# The Vault integration checks (PKI Job, ClusterIssuer, token Secrets, the
+# vault-cluster-info keys) run only while NICo is integrated with Vault: a
+# Deployment in the NICo namespace references VAULT_ADDR, a cert-manager
+# Certificate in any namespace is issued by vault-nico-issuer, or, before Core
+# is installed, nico-prereqs renders vault-cluster-info. setup.sh --skip-vault
+# turns them off once nothing references Vault.
 # =============================================================================
 set -uo pipefail
 
@@ -75,11 +84,18 @@ _service_namespace() {
   fi
 }
 
-# NICo namespace: find the namespace containing vault-cluster-info
+# NICo namespace: the namespace holding the database ConfigMap that
+# nico-prereqs always renders, then the Vault ConfigMap (absent on an install
+# made with --skip-vault), then the default.
 if [[ -z "${NICO_NS:-}" ]]; then
   NICO_NS=$(kubectl get configmap -A \
-    --field-selector metadata.name=vault-cluster-info \
+    --field-selector metadata.name=nico-system-nico-database-config \
     -o jsonpath='{.items[0].metadata.namespace}' 2>/dev/null || true)
+  if [[ -z "${NICO_NS}" ]]; then
+    NICO_NS=$(kubectl get configmap -A \
+      --field-selector metadata.name=vault-cluster-info \
+      -o jsonpath='{.items[0].metadata.namespace}' 2>/dev/null || true)
+  fi
   NICO_NS="${NICO_NS:-nico-system}"
 fi
 
@@ -94,6 +110,71 @@ fi
 VAULT_ADDR=$(kc get configmap -n "${NICO_NS}" vault-cluster-info \
   -o jsonpath='{.data.VAULT_SERVICE}' 2>/dev/null || \
   printf 'https://vault.%s.svc.cluster.local:8200' "${VAULT_NS}")
+
+# Vault installs by default; setup.sh --skip-vault leaves no StatefulSet
+# behind. The Vault section below runs when it is present, fails when NICo is
+# still configured for a Vault that is gone or when only the Vault namespace
+# exists (partial install), and is skipped otherwise.
+_VAULT_INSTALLED=false
+if [[ -n "$(kc get statefulset -n "${VAULT_NS}" vault -o name)" ]]; then
+  _VAULT_INSTALLED=true
+fi
+# NICo is integrated with Vault while anything still consumes it, the rule of
+# _vault_consumers in preflight.sh (same probes): a Deployment in its
+# namespace with a container env entry named VAULT_ADDR, which the nico-api
+# chart renders only while nico-api.vault.enabled (no Deployment name is
+# assumed, so a renamed Core counts), or a cert-manager Certificate in any
+# namespace issued by vault-nico-issuer, which renews through the Vault
+# resources (Flow and the site-agent after --skip-vault --skip-rest, for
+# example). Before Core is installed there is no Deployment, so the
+# vault-cluster-info ConfigMap that nico-prereqs renders while vault.enabled
+# decides instead. Deciding from the consumers keeps a Vault site whose
+# ConfigMap was deleted integrated, so the ConfigMap checks below fail and
+# name it instead of mistaking the site for a --skip-vault opt-out. The Vault
+# PKI Job, ClusterIssuer, token Secrets, and ConfigMap keys are checked only
+# when integrated; a Vault that runs without being used is reported in the
+# Vault section.
+# _VAULT_INTEGRATED_BY records the first evidence for the failure message below.
+_VAULT_INTEGRATED=false
+_VAULT_INTEGRATED_BY=""
+_NICO_DEPLOYMENTS_KNOWN=true
+if _NICO_DEPLOYMENTS=$(kc get deployments -n "${NICO_NS}" \
+     -o jsonpath='{range .items[*]}{.metadata.name}{" "}{range .spec.template.spec.containers[*].env[*]}{.name}{","}{end}{"\n"}{end}'); then
+  while read -r _DEP _ENVS; do
+    if [[ -n "${_DEP}" && ",${_ENVS}" == *,VAULT_ADDR,* ]]; then
+      _VAULT_INTEGRATED=true
+      _VAULT_INTEGRATED_BY="deployment/${_DEP} references VAULT_ADDR"
+      break
+    fi
+  done <<< "${_NICO_DEPLOYMENTS}"
+else
+  _NICO_DEPLOYMENTS=""
+  _NICO_DEPLOYMENTS_KNOWN=false
+  warn "could not list the Deployments in ${NICO_NS}; Vault integration is decided from Certificates and vault-cluster-info alone"
+fi
+# A missing Certificate CRD (cert-manager not installed) means no Certificates;
+# any other failure is reported and never read as none.
+if [[ "${_VAULT_INTEGRATED}" != "true" ]]; then
+  _CERT_ERR="$(mktemp)"
+  if _VAULT_CERTIFICATES=$(kubectl get certificates.cert-manager.io -A \
+       -o jsonpath='{range .items[*]}{.metadata.namespace}{"/"}{.metadata.name}{" "}{.spec.issuerRef.name}{"\n"}{end}' 2>"${_CERT_ERR}"); then
+    while read -r _CERT_REF _CERT_ISSUER; do
+      if [[ -n "${_CERT_REF}" && "${_CERT_ISSUER}" == "vault-nico-issuer" ]]; then
+        _VAULT_INTEGRATED=true
+        _VAULT_INTEGRATED_BY="certificate/${_CERT_REF} is issued by vault-nico-issuer"
+        break
+      fi
+    done <<< "${_VAULT_CERTIFICATES}"
+  elif ! grep -qE "doesn't have a resource type|no matches for kind|could not find the requested resource" "${_CERT_ERR}"; then
+    warn "could not list cert-manager Certificates; Vault integration is decided without them"
+  fi
+  rm -f "${_CERT_ERR}"
+fi
+if [[ "${_VAULT_INTEGRATED}" != "true" && ( -z "${_NICO_DEPLOYMENTS}" || "${_NICO_DEPLOYMENTS_KNOWN}" != "true" ) ]] \
+   && kc get configmap -n "${NICO_NS}" vault-cluster-info -o name >/dev/null; then
+  _VAULT_INTEGRATED=true
+  _VAULT_INTEGRATED_BY="vault-cluster-info exists in ${NICO_NS}"
+fi
 
 # postgres namespace: parse from DB_HOST in database configmap
 # e.g. nico-pg-cluster.postgres.svc.cluster.local → postgres
@@ -128,7 +209,11 @@ fi
 
 printf "  %-26s %s\n" "NICo namespace:"     "${NICO_NS}"
 printf "  %-26s %s\n" "vault namespace:"       "${VAULT_NS}"
-printf "  %-26s %s\n" "vault address:"         "${VAULT_ADDR}"
+if [[ "${_VAULT_INSTALLED}" == "true" ]]; then
+  printf "  %-26s %s\n" "vault address:"         "${VAULT_ADDR}"
+else
+  printf "  %-26s %s\n" "vault address:"         "not installed (no statefulset/vault in ${VAULT_NS})"
+fi
 printf "  %-26s %s\n" "postgres namespace:"    "${POSTGRES_NS}"
 printf "  %-26s %s\n" "cert-manager ns:"       "${CERT_MANAGER_NS}"
 printf "  %-26s %s\n" "external-secrets ns:"   "${ESO_NS}"
@@ -351,48 +436,63 @@ fi
 # 2. Vault
 # --------------------------------------------------------------------------
 section "Vault"
-_check_statefulset "${VAULT_NS}" vault
+if [[ "${_VAULT_INSTALLED}" == "true" ]]; then
+  _check_statefulset "${VAULT_NS}" vault
 
-_vault_json_field() {
-  printf '%s' "$1" | grep -o "\"$2\":[^,}]*" | cut -d: -f2 | tr -d ' "'
-}
+  _vault_json_field() {
+    printf '%s' "$1" | grep -o "\"$2\":[^,}]*" | cut -d: -f2 | tr -d ' "'
+  }
 
-_VAULT_REPLICAS=$(kc get statefulset -n "${VAULT_NS}" vault \
-  -o jsonpath='{.spec.replicas}' || printf '0')
-_VAULT_REPLICAS="${_VAULT_REPLICAS:-0}"
-[[ "${_VAULT_REPLICAS}" =~ ^[0-9]+$ ]] || _VAULT_REPLICAS=0
-_VAULT_HA=false
+  _VAULT_REPLICAS=$(kc get statefulset -n "${VAULT_NS}" vault \
+    -o jsonpath='{.spec.replicas}' || printf '0')
+  _VAULT_REPLICAS="${_VAULT_REPLICAS:-0}"
+  [[ "${_VAULT_REPLICAS}" =~ ^[0-9]+$ ]] || _VAULT_REPLICAS=0
+  _VAULT_HA=false
 
-if [[ "${_VAULT_REPLICAS}" -le 0 ]]; then
-  fail "vault: no replicas found"
+  if [[ "${_VAULT_REPLICAS}" -le 0 ]]; then
+    fail "vault: no replicas found"
+  else
+    for _IDX in $(seq 0 $(( _VAULT_REPLICAS - 1 ))); do
+      _VAULT_POD="vault-${_IDX}"
+      _VAULT_JSON=$(kubectl exec -n "${VAULT_NS}" "${_VAULT_POD}" -c vault -- \
+        vault status -address="${VAULT_ADDR}" -tls-skip-verify -format=json 2>/dev/null || printf '{}')
+
+      _VAULT_INIT=$(_vault_json_field "${_VAULT_JSON}" initialized)
+      _VAULT_SEALED=$(_vault_json_field "${_VAULT_JSON}" sealed)
+      _VAULT_POD_HA=$(_vault_json_field "${_VAULT_JSON}" ha_enabled)
+
+      if [[ "${_VAULT_INIT}" == "true" ]]; then
+        pass "${_VAULT_POD}: initialized"
+      else
+        fail "${_VAULT_POD}: not initialized"
+      fi
+      if [[ "${_VAULT_SEALED}" == "false" ]]; then
+        pass "${_VAULT_POD}: unsealed"
+      else
+        fail "${_VAULT_POD}: sealed — cluster cannot operate"
+      fi
+      [[ "${_VAULT_POD_HA}" == "true" ]] && _VAULT_HA=true
+    done
+  fi
+
+  if [[ "${_VAULT_HA}" == "true" ]]; then
+    pass "vault: HA enabled"
+  else
+    warn "vault: HA not enabled"
+  fi
+  if [[ "${_VAULT_INTEGRATED}" != "true" ]]; then
+    warn "vault: running, but NICo is not configured to use it (--skip-vault); uninstall the vault release and delete the namespace when the rollback window closes"
+  fi
+elif [[ "${_VAULT_INTEGRATED}" == "true" ]]; then
+  # nico-prereqs still renders the Vault resources, so NICo expects a Vault
+  # that is gone: a broken site, not an opt-out.
+  fail "statefulset/vault: not found, but NICo is configured to use Vault (${_VAULT_INTEGRATED_BY})"
+elif kc get namespace "${VAULT_NS}" &>/dev/null; then
+  # The StatefulSet is absent but its namespace lingers — a partial or
+  # failed Vault install, not a clean opt-out. Fail rather than silently skip.
+  fail "statefulset/vault: not found, but namespace ${VAULT_NS} exists (partial/failed Vault install)"
 else
-  for _IDX in $(seq 0 $(( _VAULT_REPLICAS - 1 ))); do
-    _VAULT_POD="vault-${_IDX}"
-    _VAULT_JSON=$(kubectl exec -n "${VAULT_NS}" "${_VAULT_POD}" -c vault -- \
-      vault status -address="${VAULT_ADDR}" -tls-skip-verify -format=json 2>/dev/null || printf '{}')
-
-    _VAULT_INIT=$(_vault_json_field "${_VAULT_JSON}" initialized)
-    _VAULT_SEALED=$(_vault_json_field "${_VAULT_JSON}" sealed)
-    _VAULT_POD_HA=$(_vault_json_field "${_VAULT_JSON}" ha_enabled)
-
-    if [[ "${_VAULT_INIT}" == "true" ]]; then
-      pass "${_VAULT_POD}: initialized"
-    else
-      fail "${_VAULT_POD}: not initialized"
-    fi
-    if [[ "${_VAULT_SEALED}" == "false" ]]; then
-      pass "${_VAULT_POD}: unsealed"
-    else
-      fail "${_VAULT_POD}: sealed — cluster cannot operate"
-    fi
-    [[ "${_VAULT_POD_HA}" == "true" ]] && _VAULT_HA=true
-  done
-fi
-
-if [[ "${_VAULT_HA}" == "true" ]]; then
-  pass "vault: HA enabled"
-else
-  warn "vault: HA not enabled"
+  skip "not installed (--skip-vault was used)"
 fi
 
 # vault-pki-config job completion implies PKI+auth are configured correctly
@@ -471,7 +571,11 @@ else
 fi
 
 section "NICo Jobs"
-_check_job_complete "${NICO_NS}" vault-pki-config
+if [[ "${_VAULT_INTEGRATED}" == "true" ]]; then
+  _check_job_complete "${NICO_NS}" vault-pki-config
+else
+  skip "job/vault-pki-config: not configured (--skip-vault was used)"
+fi
 # Migration job: find by label (name includes a random suffix)
 _MIG_JOB=$(kc get jobs -n "${NICO_NS}" -l 'app.kubernetes.io/name=nico-api-migrate' \
   --sort-by=.metadata.creationTimestamp \
@@ -491,7 +595,15 @@ fi
 # 5. PKI — ClusterIssuers + Certificates
 # --------------------------------------------------------------------------
 section "ClusterIssuers"
-for _ISSUER in selfsigned-bootstrap site-issuer vault-nico-issuer; do
+# vault-nico-issuer (Vault PKI) exists only while NICo is integrated with
+# Vault; with --skip-vault, site-issuer signs the service certificates instead.
+_ISSUERS=(selfsigned-bootstrap site-issuer)
+if [[ "${_VAULT_INTEGRATED}" == "true" ]]; then
+  _ISSUERS+=(vault-nico-issuer)
+else
+  skip "clusterissuer/vault-nico-issuer: not configured (--skip-vault was used)"
+fi
+for _ISSUER in "${_ISSUERS[@]}"; do
   _READY=$(kc get clusterissuer "${_ISSUER}" \
     -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}')
   if [[ "${_READY}" == "True" ]]; then
@@ -532,10 +644,14 @@ done < <(kc get certificates -n "${NICO_NS}" \
 # 6. Required secrets & ConfigMaps
 # --------------------------------------------------------------------------
 section "Secrets"
-_check_secret_exists "${NICO_NS}" nico-vault-token
-_check_secret_exists "${NICO_NS}" nico-vault-approle-tokens
-_check_secret_key    "${NICO_NS}" nico-vault-approle-tokens VAULT_ROLE_ID
-_check_secret_key    "${NICO_NS}" nico-vault-approle-tokens VAULT_SECRET_ID
+if [[ "${_VAULT_INTEGRATED}" == "true" ]]; then
+  _check_secret_exists "${NICO_NS}" nico-vault-token
+  _check_secret_exists "${NICO_NS}" nico-vault-approle-tokens
+  _check_secret_key    "${NICO_NS}" nico-vault-approle-tokens VAULT_ROLE_ID
+  _check_secret_key    "${NICO_NS}" nico-vault-approle-tokens VAULT_SECRET_ID
+else
+  skip "secret/nico-vault-token, secret/nico-vault-approle-tokens: not configured (--skip-vault was used)"
+fi
 _check_secret_exists "${NICO_NS}" nico-roots
 _check_secret_exists "${NICO_NS}" ssh-host-key
 _check_secret_exists "${NICO_NS}" "nico-system.nico.nico-pg-cluster.credentials"
@@ -545,8 +661,12 @@ for _CERT_S in nico-api-certificate nico-pxe-certificate \
 done
 
 section "ConfigMaps"
-_check_configmap_key "${NICO_NS}" vault-cluster-info                   VAULT_SERVICE
-_check_configmap_key "${NICO_NS}" vault-cluster-info                   NICO_VAULT_PKI_MOUNT
+if [[ "${_VAULT_INTEGRATED}" == "true" ]]; then
+  _check_configmap_key "${NICO_NS}" vault-cluster-info                   VAULT_SERVICE
+  _check_configmap_key "${NICO_NS}" vault-cluster-info                   NICO_VAULT_PKI_MOUNT
+else
+  skip "configmap/vault-cluster-info: not configured (--skip-vault was used)"
+fi
 _check_configmap_key "${NICO_NS}" nico-system-nico-database-config DB_HOST
 _check_configmap_key "${NICO_NS}" nico-system-nico-database-config DB_NAME
 _check_configmap_key "${NICO_NS}" nico-system-nico-database-config DB_PORT
