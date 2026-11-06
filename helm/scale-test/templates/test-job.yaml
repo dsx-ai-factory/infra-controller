@@ -8,7 +8,8 @@
     "history" (dict "binary" "/tests/history.test" "run" "^TestAcceptanceReplaysARealProbeCapture$")
     "lock" (dict "binary" "/tests/lock.test" "run" "^(TestEnvLock|TestEnvCleanupIsBounded)$")
     "store" (dict "binary" "/tests/store.test" "run" "^TestAgainstARealStore$")
-    "store-transition" (dict "binary" "/tests/store.test" "run" "^TestControlledTransition$") -}}
+    "store-transition" (dict "binary" "/tests/store.test" "run" "^TestControlledTransition$")
+    "result" (dict "binary" "/tests/result.test" "run" "^TestEnvResult$") -}}
 {{- $enabled := list -}}
 {{- range $name, $suite := .Values.suites -}}
 {{- if $suite.enabled -}}
@@ -18,7 +19,7 @@
 {{- fail "enable the journal proof with journal.enabled=true, not suites.journal.enabled" -}}
 {{- end -}}
 {{- if not (hasKey $known $name) -}}
-{{- fail (printf "unknown suite %q; the known suites are cluster, probe, inventory, history, lock, store and store-transition" $name) -}}
+{{- fail (printf "unknown suite %q; the known suites are cluster, probe, inventory, history, lock, store, store-transition and result" $name) -}}
 {{- end -}}
 {{- $enabled = append $enabled $name -}}
 {{- end -}}
@@ -220,6 +221,11 @@ spec:
             - name: SCALE_TEST_CAPTURE_MIN_TIMING_ERROR
               value: {{ $t.minTimingErrorSeconds | quote }}
             {{- end }}
+            {{- if eq $item.name "result" }}
+            # The mounted directory the authoritative result.json is written to.
+            - name: SCALE_TEST_RESULT_DIR
+              value: /results
+            {{- end }}
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
@@ -256,6 +262,10 @@ spec:
             - name: run-data
               mountPath: {{ $journalDir | quote }}
               readOnly: {{ $item.readOnly }}
+            {{- end }}
+            {{- if eq $item.name "result" }}
+            - name: results
+              mountPath: /results
             {{- end }}
       volumes:
         - name: tmp
@@ -295,5 +305,9 @@ spec:
           persistentVolumeClaim:
             claimName: {{ $claim | quote }}
             readOnly: {{ $item.readOnly }}
+        {{- end }}
+        {{- if eq $item.name "result" }}
+        - name: results
+          emptyDir: {}
         {{- end }}
 {{- end }}
