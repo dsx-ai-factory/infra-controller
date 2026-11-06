@@ -261,6 +261,11 @@ pub enum SessionBootOrder {
     /// Leave the domain's boot configuration as the session prepared it. The
     /// resulting boot does not use the BMC's boot configuration, so it leaves a
     /// pending one-time boot override for the next boot that applies it.
+    ///
+    /// Use it only when the session itself prepared the boot configuration. The
+    /// backend cannot tell whether the session changed the saved definition, so a
+    /// session that has not changed it should use [`SessionBootOrder::Apply`]: the
+    /// boot then uses the effective boot order and consumes a one-time override.
     Keep,
 }
 
