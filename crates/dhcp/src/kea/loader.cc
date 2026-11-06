@@ -33,8 +33,8 @@ isc::log::Logger loader_logger("kea-shim-loader");
 using namespace isc::hooks;
 using namespace isc::data;
 
-static_assert(KEA_HOOKS_VERSION >= 20200,
-              "carbide-dhcp requires Kea 2.2 or newer");
+static_assert(KEA_HOOKS_VERSION >= 30000,
+              "nico-dhcp requires Kea 3.0 or newer");
 
 using StringSetter = void (*)(const char *);
 using ValidatedStringSetter = bool (*)(const char *);
