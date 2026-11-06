@@ -7773,9 +7773,19 @@ func (x *SpdmMachineAttestationTriggerRequest) GetRedfishTimeoutSecs() uint32 {
 	return 0
 }
 
+// Lists retained jobs by aggregate status, ordered by ascending job UUID.
+// Pages are separate reads; concurrent status changes and retention can affect membership.
 type SpdmListAttestationRequest struct {
-	state         protoimpl.MessageState             `protogen:"open.v1"`
-	Selector      SpdmListAttestationRequestSelector `protobuf:"varint,2,opt,name=selector,proto3,enum=forge.SpdmListAttestationRequestSelector" json:"selector,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Omission selects in-progress jobs. Unknown enum values return INVALID_ARGUMENT.
+	Selector SpdmListAttestationRequestSelector `protobuf:"varint,2,opt,name=selector,proto3,enum=forge.SpdmListAttestationRequestSelector" json:"selector,omitempty"`
+	// Maximum matching jobs to return. Zero uses RuntimeConfig.max_find_by_ids;
+	// larger values are capped at that setting, which defaults to 100.
+	PageSize uint32 `protobuf:"varint,4,opt,name=page_size,json=pageSize,proto3" json:"page_size,omitempty"`
+	// Empty for the first page; otherwise copy the preceding response's next_page_token.
+	// Tokens are opaque and bound to selector; keep it unchanged. Page size may change.
+	// Malformed tokens or a changed selector return INVALID_ARGUMENT.
+	PageToken     string `protobuf:"bytes,5,opt,name=page_token,json=pageToken,proto3" json:"page_token,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -7817,9 +7827,26 @@ func (x *SpdmListAttestationRequest) GetSelector() SpdmListAttestationRequestSel
 	return SpdmListAttestationRequestSelector_SPDM_LIST_IN_PROGRESS
 }
 
+func (x *SpdmListAttestationRequest) GetPageSize() uint32 {
+	if x != nil {
+		return x.PageSize
+	}
+	return 0
+}
+
+func (x *SpdmListAttestationRequest) GetPageToken() string {
+	if x != nil {
+		return x.PageToken
+	}
+	return ""
+}
+
 type SpdmListAttestationResponse struct {
-	state         protoimpl.MessageState      `protogen:"open.v1"`
-	Statuses      []*SpdmAttestationJobStatus `protobuf:"bytes,1,rep,name=statuses,proto3" json:"statuses,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Matching jobs in ascending UUID order; empty when no jobs match.
+	Statuses []*SpdmAttestationJobStatus `protobuf:"bytes,1,rep,name=statuses,proto3" json:"statuses,omitempty"`
+	// Empty when no further matching jobs exist; otherwise pass it as page_token.
+	NextPageToken string `protobuf:"bytes,2,opt,name=next_page_token,json=nextPageToken,proto3" json:"next_page_token,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -7859,6 +7886,13 @@ func (x *SpdmListAttestationResponse) GetStatuses() []*SpdmAttestationJobStatus 
 		return x.Statuses
 	}
 	return nil
+}
+
+func (x *SpdmListAttestationResponse) GetNextPageToken() string {
+	if x != nil {
+		return x.NextPageToken
+	}
+	return ""
 }
 
 // One matcher against a ComponentIntegrity Id. Matching is case-sensitive,
@@ -77217,12 +77251,16 @@ const file_nico_nico_proto_rawDesc = "" +
 	"$SpdmMachineAttestationTriggerRequest\x120\n" +
 	"\n" +
 	"machine_id\x18\x01 \x01(\v2\x11.common.MachineIdR\tmachineId\x120\n" +
-	"\x14redfish_timeout_secs\x18\x02 \x01(\rR\x12redfishTimeoutSecs\"\x83\x01\n" +
+	"\x14redfish_timeout_secs\x18\x02 \x01(\rR\x12redfishTimeoutSecs\"\xb1\x01\n" +
 	"\x1aSpdmListAttestationRequest\x12E\n" +
-	"\bselector\x18\x02 \x01(\x0e2).forge.SpdmListAttestationRequestSelectorR\bselectorJ\x04\b\x01\x10\x02J\x04\b\x03\x10\x04R\n" +
-	"machine_idR\x06job_id\"Z\n" +
+	"\bselector\x18\x02 \x01(\x0e2).forge.SpdmListAttestationRequestSelectorR\bselector\x12\x1b\n" +
+	"\tpage_size\x18\x04 \x01(\rR\bpageSize\x12\x1d\n" +
+	"\n" +
+	"page_token\x18\x05 \x01(\tR\tpageTokenJ\x04\b\x01\x10\x02R\n" +
+	"machine_id\"\x82\x01\n" +
 	"\x1bSpdmListAttestationResponse\x12;\n" +
-	"\bstatuses\x18\x01 \x03(\v2\x1f.forge.SpdmAttestationJobStatusR\bstatuses\"O\n" +
+	"\bstatuses\x18\x01 \x03(\v2\x1f.forge.SpdmAttestationJobStatusR\bstatuses\x12&\n" +
+	"\x0fnext_page_token\x18\x02 \x01(\tR\rnextPageToken\"O\n" +
 	"\x10ComponentIdMatch\x12\x16\n" +
 	"\x05exact\x18\x01 \x01(\tH\x00R\x05exact\x12\x18\n" +
 	"\x06prefix\x18\x02 \x01(\tH\x00R\x06prefixB\t\n" +

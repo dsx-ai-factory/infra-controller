@@ -202,17 +202,24 @@ pub(crate) async fn fail_attestation(
     Ok(Response::new(()))
 }
 
+// Bind the cursor to the status search, matching machine-status pagination below.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AttestationJobPageToken {
+    version: u8,
+    after_job_id: Uuid,
+    selector: i32,
+}
+
 pub(crate) async fn list_attestation(
     api: &Api,
     request: tonic::Request<rpc::SpdmListAttestationRequest>,
 ) -> Result<Response<rpc::SpdmListAttestationResponse>, Status> {
     log_request_data(&request);
 
-    let mut txn = api.txn_begin().await?;
-
-    let request_selector =
-        rpc::SpdmListAttestationRequestSelector::try_from(request.get_ref().selector)
-            .map_err(|_| Status::invalid_argument("invalid attestation selector"))?;
+    let request = request.into_inner();
+    let request_selector = rpc::SpdmListAttestationRequestSelector::try_from(request.selector)
+        .map_err(|_| CarbideError::InvalidArgument("invalid attestation selector".into()))?;
 
     let list_selector = match request_selector {
         rpc::SpdmListAttestationRequestSelector::SpdmListInProgress => {
@@ -229,28 +236,79 @@ pub(crate) async fn list_attestation(
         }
     };
 
-    let response = db::attestation::spdm::list_all_attestation_statuses(&mut txn, list_selector)
-        .await
-        .map(|statuses| {
-            Response::new(rpc::SpdmListAttestationResponse {
-                statuses: statuses
-                    .into_iter()
-                    .map(
-                        |(job_id, status, machine_ids)| rpc::SpdmAttestationJobStatus {
-                            job_id: Some(::rpc::common::Uuid {
-                                value: job_id.to_string(),
-                            }),
-                            attestation_status: rpc::SpdmAttestationStatus::from(status).into(),
-                            machine_ids,
-                        },
-                    )
-                    .collect(),
-            })
+    let cap = api.runtime_config.max_find_by_ids;
+    if cap == 0 {
+        return Err(CarbideError::Internal {
+            message: "attestation job page limit must be positive".into(),
+        }
+        .into());
+    }
+    let page_size = if request.page_size == 0 {
+        cap
+    } else {
+        request.page_size.min(cap)
+    };
+    // Validate continuations before opening a transaction. Page size is not part
+    // of the cursor, so callers can change it without skipping matching jobs.
+    let after_job_id = if request.page_token.is_empty() {
+        None
+    } else {
+        let bytes = URL_SAFE_NO_PAD.decode(&request.page_token).map_err(|_| {
+            CarbideError::InvalidArgument("invalid attestation job page token".into())
         })?;
+        let token: AttestationJobPageToken = serde_json::from_slice(&bytes).map_err(|_| {
+            CarbideError::InvalidArgument("invalid attestation job page token".into())
+        })?;
+        if token.version != 1 || token.selector != request.selector {
+            return Err(CarbideError::InvalidArgument(
+                "attestation job page token is incompatible with this search".into(),
+            )
+            .into());
+        }
+        Some(token.after_job_id)
+    };
 
+    // Read one extra matching job in the same query to determine continuation.
+    let mut txn = api.txn_begin().await?;
+    let mut statuses = db::attestation::spdm::list_all_attestation_statuses(
+        &mut txn,
+        list_selector,
+        after_job_id,
+        page_size,
+    )
+    .await?;
     txn.commit().await?;
 
-    Ok(response)
+    let has_more = statuses.len() > page_size as usize;
+    statuses.truncate(page_size as usize);
+    let next_page_token = if let Some(last) = statuses.last().filter(|_| has_more) {
+        let token = AttestationJobPageToken {
+            version: 1,
+            after_job_id: last.0,
+            selector: request.selector,
+        };
+        let bytes = serde_json::to_vec(&token).map_err(|error| CarbideError::Internal {
+            message: format!("failed to encode attestation job page token: {error}"),
+        })?;
+        URL_SAFE_NO_PAD.encode(bytes)
+    } else {
+        String::new()
+    };
+    Ok(Response::new(rpc::SpdmListAttestationResponse {
+        statuses: statuses
+            .into_iter()
+            .map(
+                |(job_id, status, machine_ids)| rpc::SpdmAttestationJobStatus {
+                    job_id: Some(::rpc::common::Uuid {
+                        value: job_id.to_string(),
+                    }),
+                    attestation_status: rpc::SpdmAttestationStatus::from(status).into(),
+                    machine_ids,
+                },
+            )
+            .collect(),
+        next_page_token,
+    }))
 }
 
 // The token carries only the cursor and filters, so page sizes can change without

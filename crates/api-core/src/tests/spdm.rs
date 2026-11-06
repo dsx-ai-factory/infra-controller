@@ -1850,6 +1850,166 @@ pub(in crate::tests) mod tests {
     }
 
     #[crate::sqlx_test]
+    async fn attestation_jobs_rpc_paginates_and_validates(pool: sqlx::PgPool) -> eyre::Result<()> {
+        use base64::Engine;
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        use carbide_test_support::Outcome::FailsWith;
+        use carbide_test_support::{Case, check_cases_async};
+        use carbide_uuid::machine::{MachineIdSource, MachineType};
+
+        let mut config = get_config();
+        config.max_find_by_ids = 2;
+        let env = create_test_env_with_overrides(
+            pool,
+            TestEnvOverrides {
+                config: Some(config),
+                ..TestEnvOverrides::no_network_segments()
+            },
+        )
+        .await;
+        let mut machines = [0x81, 0x82].map(|seed| {
+            MachineId::new(
+                MachineIdSource::ProductBoardChassisSerial,
+                [seed; 32],
+                MachineType::Host,
+            )
+        });
+        machines.sort();
+        for machine_id in machines {
+            sqlx::query("INSERT INTO machines (id, dpf) VALUES ($1, '{}'::jsonb)")
+                .bind(machine_id)
+                .execute(&env.pool)
+                .await?;
+        }
+        let jobs = [10, 20, 30, 40, 50].map(uuid::Uuid::from_u128);
+        // Insert out of order and interleave other statuses. Each matching job has
+        // two machines, so pagination must follow complete job aggregation.
+        for id in [50, 45, 40, 30, 25, 20, 10, 5] {
+            for (index, machine_id) in machines.iter().enumerate() {
+                let state = if index == 1 {
+                    SpdmAttestationState::Passed
+                } else if id % 10 == 0 {
+                    SpdmAttestationState::FetchMetadata
+                } else {
+                    SpdmAttestationState::Failed("verification failed".into())
+                };
+                sqlx::query(
+                    "INSERT INTO spdm_machine_devices_attestation
+                     (machine_id, device_id, nonce, state, job_id, started_at)
+                     VALUES ($1, 'GPU_0', gen_random_uuid(), $2, $3, now())",
+                )
+                .bind(machine_id)
+                .bind(sqlx::types::Json(state))
+                .bind(uuid::Uuid::from_u128(id))
+                .execute(&env.pool)
+                .await?;
+            }
+        }
+
+        let mut listed_jobs = Vec::new();
+        let mut page_token = String::new();
+        let mut first_token = String::new();
+        // Zero defaults to the cap, oversized requests are capped, and the final
+        // continuation changes page size. The last full page needs no token.
+        for (page_size, expected_len) in [(0, 2), (u32::MAX, 2), (1, 1)] {
+            let response = env
+                .api
+                .list_attestation(Request::new(SpdmListAttestationRequest {
+                    page_size,
+                    page_token,
+                    ..Default::default()
+                }))
+                .await?
+                .into_inner();
+            assert_eq!(response.statuses.len(), expected_len);
+            if first_token.is_empty() {
+                first_token.clone_from(&response.next_page_token);
+            }
+            for status in response.statuses {
+                listed_jobs.push(uuid::Uuid::try_from(status.job_id.unwrap())?);
+                assert_eq!(status.machine_ids, machines);
+                assert_eq!(
+                    status.attestation_status,
+                    i32::from(SpdmAttestationStatus::SpdmAttInProgress)
+                );
+            }
+            page_token = response.next_page_token;
+            assert_eq!(page_token.is_empty(), listed_jobs.len() == jobs.len());
+        }
+        assert_eq!(listed_jobs, jobs);
+
+        let empty = env
+            .api
+            .list_attestation(Request::new(SpdmListAttestationRequest {
+                selector: SpdmListAttestationRequestSelector::SpdmListWaived.into(),
+                ..Default::default()
+            }))
+            .await?
+            .into_inner();
+        assert!(empty.statuses.is_empty());
+        assert!(empty.next_page_token.is_empty());
+
+        let invalid_requests = [
+            (
+                "unknown selector",
+                SpdmListAttestationRequest {
+                    selector: -1,
+                    ..Default::default()
+                },
+            ),
+            (
+                "malformed base64",
+                SpdmListAttestationRequest {
+                    page_token: "!".into(),
+                    ..Default::default()
+                },
+            ),
+            (
+                "invalid token schema",
+                SpdmListAttestationRequest {
+                    page_token: URL_SAFE_NO_PAD.encode(b"{}"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "unsupported token version",
+                SpdmListAttestationRequest {
+                    page_token: URL_SAFE_NO_PAD.encode(serde_json::to_vec(&serde_json::json!({
+                        "version": 2, "after_job_id": jobs[0], "selector": 0,
+                    }))?),
+                    ..Default::default()
+                },
+            ),
+            (
+                "changed selector",
+                SpdmListAttestationRequest {
+                    selector: SpdmListAttestationRequestSelector::SpdmListPassed.into(),
+                    page_token: first_token,
+                    ..Default::default()
+                },
+            ),
+        ];
+        check_cases_async(
+            invalid_requests.map(|(scenario, input)| Case {
+                scenario,
+                input,
+                expect: FailsWith(tonic::Code::InvalidArgument),
+            }),
+            |request| {
+                let api = &env.api;
+                async move {
+                    api.list_attestation(Request::new(request))
+                        .await
+                        .map(|_| ())
+                        .map_err(|error| error.code())
+                }
+            },
+        )
+        .await;
+        Ok(())
+    }
+
+    #[crate::sqlx_test]
     async fn predicted_machine_attestation_rpc_paginates_and_validates(
         pool: sqlx::PgPool,
     ) -> eyre::Result<()> {
@@ -2350,6 +2510,7 @@ pub(in crate::tests) mod tests {
         env.api
             .list_attestation(Request::new(SpdmListAttestationRequest {
                 selector: SpdmListAttestationRequestSelector::SpdmListInProgress.into(),
+                ..Default::default()
             }))
             .await
             .map(|response| response.into_inner().statuses)

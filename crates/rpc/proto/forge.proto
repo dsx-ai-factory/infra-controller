@@ -1443,15 +1443,28 @@ enum SpdmListAttestationRequestSelector {
   SPDM_LIST_PASSED = 4;
 }
 
+// Lists retained jobs by aggregate status, ordered by ascending job UUID.
+// Pages are separate reads; concurrent status changes and retention can affect membership.
 message SpdmListAttestationRequest {
-  reserved 1, 3;
-  reserved "machine_id", "job_id";
+  reserved 1;
+  reserved "machine_id";
+  // Omission selects in-progress jobs. Unknown enum values return INVALID_ARGUMENT.
   SpdmListAttestationRequestSelector selector = 2;
+  // Maximum matching jobs to return. Zero uses RuntimeConfig.max_find_by_ids;
+  // larger values are capped at that setting, which defaults to 100.
+  uint32 page_size = 4;
+  // Empty for the first page; otherwise copy the preceding response's next_page_token.
+  // Tokens are opaque and bound to selector; keep it unchanged. Page size may change.
+  // Malformed tokens or a changed selector return INVALID_ARGUMENT.
+  string page_token = 5;
 }
 
 message SpdmListAttestationResponse {
   option (carbide.codegen.v1.message_derive) = "serde::Serialize";
+  // Matching jobs in ascending UUID order; empty when no jobs match.
   repeated SpdmAttestationJobStatus statuses = 1;
+  // Empty when no further matching jobs exist; otherwise pass it as page_token.
+  string next_page_token = 2;
 }
 
 // Attestation profiles: one policy per hardware class, naming which attesters

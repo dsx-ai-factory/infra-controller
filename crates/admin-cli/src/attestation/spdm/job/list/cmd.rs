@@ -19,6 +19,7 @@ use ::rpc::forge::{
     SpdmAttestationStatus, SpdmListAttestationRequest, SpdmListAttestationRequestSelector,
 };
 use carbide_uuid::machine::MachineId;
+use eyre::Context;
 use uuid::Uuid;
 
 use crate::attestation::spdm::job::list::args::{Args, Selector};
@@ -33,14 +34,28 @@ pub(super) async fn list(args: Args, api_client: &ApiClient) -> CarbideCliResult
         Selector::Passed => SpdmListAttestationRequestSelector::SpdmListPassed,
     };
 
+    // Follow every continuation so the CLI still prints the complete retained list.
+    let mut statuses = Vec::new();
+    let mut page_token = String::new();
+    loop {
+        let response = api_client
+            .0
+            .list_attestation(SpdmListAttestationRequest {
+                selector: selector.into(),
+                page_token,
+                ..Default::default()
+            })
+            .await
+            .context("list SPDM attestation jobs")?;
+        statuses.extend(response.statuses);
+        page_token = response.next_page_token;
+        if page_token.is_empty() {
+            break;
+        }
+    }
+
     // Keep the job ID and status positions stable, appending the job's machine membership.
-    let attestations: Vec<(Uuid, String, Vec<MachineId>)> = api_client
-        .0
-        .list_attestation(SpdmListAttestationRequest {
-            selector: selector.into(),
-        })
-        .await?
-        .statuses
+    let attestations: Vec<(Uuid, String, Vec<MachineId>)> = statuses
         .into_iter()
         .map(|elem| {
             let job_id = elem.job_id.ok_or_else(|| {

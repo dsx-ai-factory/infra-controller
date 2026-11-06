@@ -197,6 +197,7 @@ async fn list_machines_under_attestation(
     env.api
         .list_attestation(Request::new(SpdmListAttestationRequest {
             selector: SpdmListAttestationRequestSelector::SpdmListInProgress.into(),
+            ..Default::default()
         }))
         .await
         .map(|response| response.into_inner().statuses)

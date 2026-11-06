@@ -360,10 +360,14 @@ pub async fn find_machine_ids_for_attestation(
 /// Lists jobs matching the aggregate device status selected by `selector`.
 /// Unfinished devices take precedence, followed by failure, waiver, and all-passed.
 /// Each summary includes distinct machine IDs from retained device attestations, sorted by ID.
+/// Returns up to `page_size + 1` matches in ascending job UUID order, strictly after
+/// `after_job_id` when supplied. The extra match lets the caller detect another page.
 // Waived retains the legacy "Cancelled" JSON encoding for existing API readers.
 pub async fn list_all_attestation_statuses(
     txn: &mut PgConnection,
     selector: SpdmAttestationStatus,
+    after_job_id: Option<uuid::Uuid>,
+    page_size: u32,
 ) -> Result<Vec<(uuid::Uuid, SpdmAttestationStatus, Vec<MachineId>)>, DatabaseError> {
     // Aggregate membership over the same complete job as its status, before filtering jobs.
     let status = match selector {
@@ -377,6 +381,7 @@ pub async fn list_all_attestation_statuses(
         WITH device_statuses AS (
             SELECT a.job_id, a.machine_id, {0} AS device_status
             FROM spdm_machine_devices_attestation a
+            WHERE ($2::uuid IS NULL OR a.job_id > $2)
         ), machine_attestation_statuses AS (
             SELECT
                 job_id,
@@ -397,12 +402,16 @@ pub async fn list_all_attestation_statuses(
         SELECT job_id, attestation_status, machine_ids
         FROM machine_attestation_statuses
         WHERE attestation_status = $1
+        ORDER BY job_id
+        LIMIT $3
     "#,
         DEVICE_STATUS_SQL
     );
 
     let attestation_status_rows = sqlx::query(query)
         .bind(status)
+        .bind(after_job_id)
+        .bind(i64::from(page_size) + 1)
         .fetch_all(txn)
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
@@ -1358,7 +1367,7 @@ mod tests {
                 .into_iter()
                 .enumerate()
                 {
-                    let statuses = list_all_attestation_statuses(&mut txn, selector)
+                    let statuses = list_all_attestation_statuses(&mut txn, selector, None, 100)
                         .await
                         .map_err(|e| e.to_string())?;
                     let expected = if selector == input.expected_status {
