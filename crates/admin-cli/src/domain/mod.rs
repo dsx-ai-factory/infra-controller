@@ -30,7 +30,11 @@ use crate::cfg::dispatch::Dispatch;
 pub(crate) enum Cmd {
     #[clap(about = "Display Domain information")]
     Show(show::Args),
-    #[clap(about = "Create a Domain, optionally owned by a VPC")]
+    #[clap(
+        about = "Create a Domain, optionally owned by a VPC",
+        long_about = "Create a Domain, optionally owned by a VPC.\n\n\
+            The inherited --extended and --sort-by options have no effect on this command."
+    )]
     Create(create::Args),
     #[clap(about = "Update domain default TTL")]
     Update(update::Args),

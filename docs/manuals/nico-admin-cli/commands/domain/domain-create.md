@@ -16,7 +16,10 @@ nico-admin-cli domain create [--vpc-id] [--default-ttl]
 
 ## DESCRIPTION
 
-Create a Domain, optionally owned by a VPC
+Create a Domain, optionally owned by a VPC.
+
+The inherited --extended and --sort-by options have no effect on this
+command.
 
 ## OPTIONS
 
