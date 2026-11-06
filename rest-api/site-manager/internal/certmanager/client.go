@@ -13,9 +13,11 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"time"
 
+	commontls "github.com/NVIDIA/infra-controller/rest-api/common/pkg/tls"
 	"github.com/pkg/errors"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 )
@@ -50,38 +52,55 @@ type Client struct {
 	httpClient *http.Client
 }
 
-// NewClient returns a client for Cert Manager at url. The CA bundle at caPath
-// is the only trust anchor. So an unreadable or empty bundle fails here
-// instead of falling back to an unverified connection.
-func NewClient(url, caPath string) (*Client, error) {
-	if caPath == "" {
+// Options configures the verified endpoint and optional client identity.
+type Options struct {
+	URL            string
+	CAPath         string
+	ClientCertPath string
+	ClientKeyPath  string
+}
+
+// NewClient returns a verified Cert Manager client. A configured identity uses
+// the shared renewable TLS configuration; cancellation releases its resources.
+func NewClient(ctx context.Context, o Options) (*Client, error) {
+	endpoint, err := url.Parse(o.URL)
+	if err != nil {
+		return nil, errors.Wrap(err, "parse certificate manager URL")
+	}
+	if endpoint.Scheme != "https" || endpoint.Host == "" || endpoint.User != nil {
+		return nil, fmt.Errorf("certificate manager URL must use HTTPS without user information")
+	}
+	if o.CAPath == "" {
 		return nil, fmt.Errorf("a CA bundle path is required to verify the Cert Manager endpoint")
 	}
-
-	caPEM, err := os.ReadFile(caPath)
+	caPEM, err := os.ReadFile(o.CAPath)
 	if err != nil {
-		return nil, errors.Wrapf(err, "read Cert Manager CA bundle %q", caPath)
+		return nil, errors.Wrapf(err, "read Cert Manager CA bundle %q", o.CAPath)
 	}
-
 	pool := x509.NewCertPool()
 	if !pool.AppendCertsFromPEM(caPEM) {
-		return nil, fmt.Errorf("the Cert Manager CA bundle %q contains no certificates", caPath)
+		return nil, fmt.Errorf("the Cert Manager CA bundle %q contains no certificates", o.CAPath)
 	}
-
-	return &Client{
-		url: url,
-		httpClient: &http.Client{
-			Timeout: requestTimeout,
-			Transport: otelhttp.NewTransport(&http.Transport{
-				TLSClientConfig: &tls.Config{
-					RootCAs:    pool,
-					MinVersion: tls.VersionTLS12,
-				},
-			}, otelhttp.WithSpanNameFormatter(func(_ string, _ *http.Request) string {
-				return spanName
-			})),
-		},
-	}, nil
+	tlsConfig := &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}
+	if o.ClientCertPath != "" || o.ClientKeyPath != "" {
+		if o.ClientCertPath == "" || o.ClientKeyPath == "" {
+			return nil, fmt.Errorf("both client certificate and key paths are required")
+		}
+		dynamic, err := commontls.NewDynTLSCfg(o.ClientKeyPath, o.ClientCertPath, o.CAPath)
+		if err != nil {
+			return nil, errors.Wrap(err, "configure certificate manager client identity")
+		}
+		context.AfterFunc(ctx, dynamic.Close)
+		tlsConfig = dynamic.ClientCfg()
+	}
+	client := &http.Client{
+		Timeout: requestTimeout,
+		Transport: otelhttp.NewTransport(&http.Transport{TLSClientConfig: tlsConfig},
+			otelhttp.WithSpanNameFormatter(func(_ string, _ *http.Request) string { return spanName })),
+		CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse },
+	}
+	context.AfterFunc(ctx, client.CloseIdleConnections)
+	return &Client{url: o.URL, httpClient: client}, nil
 }
 
 // IssueCertificate asks Cert Manager to issue a certificate for name and app,
