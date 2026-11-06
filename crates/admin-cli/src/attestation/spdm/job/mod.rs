@@ -15,15 +15,23 @@
  * limitations under the License.
  */
 
-use crate::attestation::spdm::cancel::Args;
-use crate::errors::CarbideCliResult;
-use crate::rpc::ApiClient;
+mod fail;
+mod get;
+mod list;
+mod waive;
 
-pub(super) async fn cancel(args: Args, api_client: &ApiClient) -> CarbideCliResult<()> {
-    api_client
-        .0
-        .cancel_machine_attestation(args.machine_id)
-        .await?;
-    println!("Successfully submitted the command");
-    Ok(())
+use clap::Parser;
+
+use crate::cfg::dispatch::Dispatch;
+
+#[derive(Dispatch, Parser, Debug)]
+pub(crate) enum Cmd {
+    #[clap(about = "Request a waiver for an attestation job")]
+    Waive(waive::args::Args),
+    #[clap(about = "Request failure for an attestation job")]
+    Fail(fail::Args),
+    #[clap(about = "Get SPDM attestation details for a given job id")]
+    Get(get::args::Args),
+    #[clap(about = "List SPDM attestation jobs by status")]
+    List(list::args::Args),
 }

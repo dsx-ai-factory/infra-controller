@@ -5,6 +5,7 @@ package run
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -90,6 +91,7 @@ type execution struct {
 	runDone chan struct{} // closed when the Test.Run callback returns
 
 	reasons      []string
+	detail       json.RawMessage // the test's findings, kept for result.json
 	knownFailure string
 	timedOut     bool
 	abandoned    bool // the Run callback did not stop within the drain
@@ -243,7 +245,10 @@ func (e *execution) runTest(ctx RunCtx) (result.Outcome, error) {
 }
 
 // verdictOf is the run-level verdict: a lost lock or a hard cancel outranks the outcome; a soft stop is soft stopped.
+// The test's reasons and findings are kept whatever the verdict.
 func (e *execution) verdictOf(outcome result.Outcome, runErr error) result.Verdict {
+	e.reasons = append(e.reasons, outcome.Reasons...)
+	e.detail = outcome.Detail
 	hard := e.timedOut || e.outside.Err() != nil || e.control.Cancelled()
 	if runErr != nil {
 		e.reason(runErr.Error())
@@ -474,7 +479,7 @@ func (e *execution) result(verdict result.Verdict) result.RunResult {
 		Clock: result.RunClock{StartedAt: jsonx.Time{Time: e.bounds.Started}, Deadline: jsonxTime(e.bounds.Deadline),
 			EndedAt: jsonx.Time{Time: e.clock.Now()}, ClockSyncAssumption: result.ClockSyncAssumption},
 		Lock: e.lock, Stages: []result.StageResult{}, Invariants: []result.InvariantResult{},
-		Journal: e.journalCounts(), Result: e.resultRef(),
+		Journal: e.journalCounts(), Result: e.resultRef(), Detail: e.detail,
 	}
 }
 

@@ -210,7 +210,7 @@ func TestGate(t *testing.T) {
 			var mu sync.Mutex
 			var starts []time.Time
 			inFlight := 0
-			f := func(ctx context.Context) error {
+			f := func(ctx context.Context) (time.Time, error) {
 				mu.Lock()
 				starts, inFlight = append(starts, time.Now()), inFlight+1
 				most = max(most, inFlight)
@@ -223,7 +223,7 @@ func TestGate(t *testing.T) {
 				mu.Lock()
 				inFlight--
 				mu.Unlock()
-				return a.reply
+				return time.Now(), a.reply
 			}
 			var wg sync.WaitGroup
 			errs = make([]error, n)
@@ -273,10 +273,19 @@ func TestGate(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		g := newGate()
 		started := time.Now()
-		err := g.do(t.Context(), func(ctx context.Context) error { <-ctx.Done(); return ctx.Err() })
+		err := g.do(t.Context(), func(ctx context.Context) (time.Time, error) { <-ctx.Done(); return time.Now(), ctx.Err() })
 		eq(t, []any{err, time.Since(started)}, []any{error(callError{kind: timedOut}), 3 * callTimeout}, "slow calls")
-		err = g.call(t.Context(), func(context.Context) error { time.Sleep(callTimeout); return nil })
+		err = g.call(t.Context(), func(context.Context) (time.Time, error) { time.Sleep(callTimeout); return time.Now(), nil })
 		eq(t, err, error(callError{kind: timedOut}), "a reply at the timeout")
+		// A reply read in time whose parse runs past the timeout is not a
+		// timeout: the call timeout bounds the request and body read, not the
+		// parse after them.
+		err = g.call(t.Context(), func(context.Context) (time.Time, error) {
+			read := time.Now()
+			time.Sleep(2 * callTimeout)
+			return read, nil
+		})
+		eq(t, err, nil, "a slow parse after an in-time read is not a timeout")
 	})
 }
 
@@ -618,8 +627,9 @@ func TestConfigRefusesWhatItCannotSend(t *testing.T) {
 		{Config{Headers: map[string]string{"Authorization": "Bearer " + sentinel}}, "Authorization header comes from bearerTokenFile"},
 		{Config{Headers: map[string]string{"bad name": "x"}}, "header name is not valid"},
 		{Config{Headers: map[string]string{"X-Scope-OrgID": sentinel + "\nInjected: yes"}}, "header x-scope-orgid is not valid"},
+		{Config{Headers: map[string]string{"x-scope-orgid": "a", "X-Scope-OrgID": "b"}}, "header x-scope-orgid is given twice"},
 		{Config{Headers: many}, "takes at most 16 headers"},
-		{Config{IngestionDelaySeconds: 61}, "ingestion delay is over 60s"},
+		{Config{IngestionDelaySeconds: 45}, "ingestion delay is over 44s"},
 		{Config{CAFile: &missing}, "CA file cannot be read"},
 		{Config{CAFile: &notPEM}, "CA file holds no PEM certificate"},
 		{Config{URL: "ftp://store"}, "URL is not an http(s) URL"},
@@ -638,6 +648,15 @@ func TestConfigRefusesWhatItCannotSend(t *testing.T) {
 		_, err := New(c.cfg, metadata(t), DefaultOptions)
 		eq(t, err, unsupported(c.want), c.want)
 	}
+}
+
+// The largest delay the chart permits passes New with DefaultOptions: the
+// chart ceiling and New's SummaryTimeout/2 bound agree, so a rendered value
+// never fails the suite at startup.
+func TestMaxIngestionDelayPassesNew(t *testing.T) {
+	cfg := Config{URL: "https://prometheus:9090", IngestionDelaySeconds: uint64(MaxIngestionDelay / time.Second)}
+	_, err := New(cfg, metadata(t), DefaultOptions)
+	eq(t, err, nil, "the longest accepted delay")
 }
 
 // The CA file is the only trust: the system roots and another CA do not

@@ -15,17 +15,18 @@
  * limitations under the License.
  */
 
-pub(super) mod args;
-mod cmd;
+use clap::Parser;
+use uuid::Uuid;
 
-use args::Args;
+#[derive(Parser, Debug)]
+#[command(after_long_help = "\
+EXAMPLES:
 
-use crate::cfg::run::Run;
-use crate::cfg::runtime::RuntimeContext;
-use crate::errors::CarbideCliResult;
+Get the SPDM attestation details for a job:
+    $ nico-admin-cli attestation spdm job get 12345678-1234-5678-90ab-cdef01234567
 
-impl Run for args::Args {
-    async fn run(self, ctx: &mut RuntimeContext) -> CarbideCliResult<()> {
-        cmd::get(self, &ctx.api_client).await
-    }
+")]
+pub(crate) struct Args {
+    #[clap(help = "Attestation job ID")]
+    pub(super) job_id: Uuid,
 }

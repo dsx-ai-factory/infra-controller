@@ -16,6 +16,8 @@ import (
 
 	"github.com/NVIDIA/infra-controller/dev/k8s/scale-test/internal/cluster"
 	"github.com/NVIDIA/infra-controller/dev/k8s/scale-test/internal/journal"
+	"github.com/NVIDIA/infra-controller/dev/k8s/scale-test/internal/jsonx"
+	"github.com/NVIDIA/infra-controller/dev/k8s/scale-test/internal/readiness"
 	"github.com/NVIDIA/infra-controller/dev/k8s/scale-test/internal/result"
 	"github.com/NVIDIA/infra-controller/dev/k8s/scale-test/internal/writer"
 )
@@ -118,5 +120,34 @@ func TestRefusedClaimDoesNotOverwrite(t *testing.T) {
 	}
 	if !slices.ContainsFunc(res.Reasons, func(r string) bool { return strings.Contains(r, "owned by another attempt") }) {
 		t.Errorf("a reason must explain the refused claim: %v", res.Reasons)
+	}
+}
+
+// TestFoundReasonsAndDetailReachTheResult proves a test's reasons and findings land in the RunResult and its
+// result.json, while the ConfigMap status keeps only the verdict and reasons.
+func TestFoundReasonsAndDetailReachTheResult(t *testing.T) {
+	d := deps(t, nil, held(nil))
+	detail := readiness.Report{Checks: []readiness.Check{{Name: "probe", Detail: "probe: down"}, {Name: "controlPlanePods", OK: true}},
+		Restarts: map[string]uint32{"nico/api-0": 3, "nico/api-1": 0}}.Detail()
+	res := Execute(d, fakeTest{run: func(RunCtx, *writer.Writer) (result.Outcome, error) {
+		return result.Found(result.NotReady, []string{"probe: down"}, detail), nil
+	}})
+	if res.Verdict != result.NotReady || res.ExitCode != result.ExitNotRun || !slices.Contains(res.Reasons, "probe: down") {
+		t.Errorf("result = %q/%d %v, want notReady/2 with the test's reason", res.Verdict, res.ExitCode, res.Reasons)
+	}
+	if string(res.Detail) != string(detail) {
+		t.Errorf("detail = %s, want %s", res.Detail, detail)
+	}
+	file, err := os.ReadFile(res.Result.Path)
+	var got result.RunResult
+	if err == nil {
+		err = jsonx.Decode(file, &got)
+	}
+	if err != nil || got.Verdict != result.NotReady || string(got.Detail) != string(detail) {
+		t.Errorf("result.json did not round-trip the detail: %v %s", err, got.Detail)
+	}
+	status := d.CM.(*cmFake).written("r1-result")
+	if _, has := status["detail"]; has || !strings.Contains(string(status["reasons"]), "probe: down") {
+		t.Errorf("status = %v, want the reasons and no detail", status)
 	}
 }

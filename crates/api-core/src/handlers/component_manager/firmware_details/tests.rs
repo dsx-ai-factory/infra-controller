@@ -798,6 +798,13 @@ fn switch_requests_survive_unknown_rack_without_borrowing_metadata() {
         started_at: Some(accepted_at()),
         ended_at: None,
     });
+    // The child and scope both select this switch. Only the rack's own ID makes
+    // this supplied snapshot unrelated, so dropping the entrypoint filter leaks work.
+    let unrelated_rack = Rack {
+        id: RackId::new("unrelated-rack"),
+        firmware_upgrade_job: Some(switch_firmware_job(&switch)),
+        ..rack_fixture()
+    };
     let expected = |current| StoredFirmwareActions {
         current: vec![current],
         outstanding_requests: vec![
@@ -825,7 +832,7 @@ fn switch_requests_survive_unknown_rack_without_borrowing_metadata() {
         [
             Check {
                 scenario: "positive saved switch entrypoint",
-                input: switch.clone(),
+                input: (switch.clone(), None),
                 expect: expected(CurrentFirmwareWork {
                     job_id: Some("device-job".into()),
                     started_at: Some(accepted_at()),
@@ -837,7 +844,7 @@ fn switch_requests_survive_unknown_rack_without_borrowing_metadata() {
                 input: {
                     let mut s = switch.clone();
                     s.rack_id = None;
-                    s
+                    (s, None)
                 },
                 expect: expected(firmware_wait()),
             },
@@ -853,7 +860,7 @@ fn switch_requests_survive_unknown_rack_without_borrowing_metadata() {
                         started_at: None,
                         ended_at: Some(accepted_at()),
                     });
-                    s
+                    (s, None)
                 },
                 expect: StoredFirmwareActions {
                     current: vec![],
@@ -869,17 +876,26 @@ fn switch_requests_survive_unknown_rack_without_borrowing_metadata() {
                 },
             },
             Check {
+                scenario: "unrelated supplied rack cannot replace device evidence",
+                input: (switch.clone(), Some(&unrelated_rack)),
+                expect: expected(CurrentFirmwareWork {
+                    job_id: Some("device-job".into()),
+                    started_at: Some(accepted_at()),
+                    ..firmware_wait()
+                }),
+            },
+            Check {
                 scenario: "rack association differs from saved actor",
                 input: {
                     let mut s = switch;
                     s.rack_id = Some(RackId::new("other-rack"));
-                    s
+                    (s, None)
                 },
                 expect: expected(firmware_wait()),
             },
         ],
-        |switch| {
-            let actions = super::switch(&switch, None);
+        |(switch, rack)| {
+            let actions = super::switch(&switch, rack);
 
             assert!(!format!("{actions:?}").contains("secret"));
             actions

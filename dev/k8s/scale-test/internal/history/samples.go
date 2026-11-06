@@ -177,6 +177,20 @@ func join(counts []RawSeries, countDims []string, times []RawSeries, caps []capS
 	return points, nil
 }
 
+// LatestSweep is the newest scrape in times, joined on (source, timestamp) as
+// a summary joins them, that shows a sweep of the probe process started at
+// process, by exact bits: its time and the sweep's end. ok is false when no
+// scrape shows one, so an earlier process's sweep is never its evidence.
+func LatestSweep(times []RawSeries, process float64) (atMs int64, end float64, ok bool, err error) {
+	points, err := join(nil, nil, times, nil)
+	for _, p := range slices.Backward(points) {
+		if math.Float64bits(p.process) == math.Float64bits(process) {
+			return p.at, p.end, true, err
+		}
+	}
+	return 0, 0, false, err
+}
+
 // sweep is one sweep, as its first scrape saw it. process is the probe
 // process that produced it; the summary binds the window to one process and
 // rejects a foreign one.
