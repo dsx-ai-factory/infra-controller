@@ -51,6 +51,8 @@ pub mod extension_service;
 pub mod hardware_class_attesters;
 pub mod health_history;
 pub mod health_report;
+/// Reconciles registered BF4 host links and checks their persisted boot readiness.
+pub mod host_boot_interface;
 pub mod host_firmware_config;
 pub mod host_machine_update;
 pub mod host_naming;
@@ -447,6 +449,15 @@ pub enum DatabaseError {
     TenantError(#[from] TenantError),
     #[error("hardware info error: {0}")]
     HardwareInfoError(#[from] HardwareInfoError),
+    /// Invalid or changed DPU-agent inventory preserves the registered controller/PF mapping.
+    #[error("DPU {dpu_machine_id} host-PF inventory: {source}")]
+    DpuHostPf {
+        /// DPU whose registration failed validation.
+        dpu_machine_id: carbide_uuid::machine::DpuMachineId,
+        /// Typed inventory failure, including identity and boot-MAC drift.
+        #[source]
+        source: model::hardware_info::DpuHostPfError,
+    },
     #[error("the function is not implemented")]
     NotImplemented,
     #[error("error in DHCP allocation/handling: {0}")]
@@ -694,7 +705,7 @@ impl From<DatabaseError> for tonic::Status {
             error @ DatabaseError::ExpectedSwitchDuplicateNvosMacAddress(_) => {
                 Status::failed_precondition(error.to_string())
             }
-            error @ DatabaseError::FailedPrecondition(_) => {
+            error @ (DatabaseError::FailedPrecondition(_) | DatabaseError::DpuHostPf { .. }) => {
                 Status::failed_precondition(error.to_string())
             }
             DatabaseError::ResourcePoolError(

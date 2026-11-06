@@ -187,6 +187,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .field_attribute("SkuComponentStorage.min_size_mb", "#[serde(default)]")
         .field_attribute("SkuComponentStorage.max_size_mb", "#[serde(default)]")
         .field_attribute("SkuComponentStorage.pci_patterns", "#[serde(default)]")
+        .field_attribute("machine_discovery.DpuData.host_pfs", "#[serde(default, skip_serializing_if = \"Vec::is_empty\")]")
         .field_attribute("machine_discovery.BlockDevice.device_type", "#[serde(default)]")
         .field_attribute("machine_discovery.NvmeDevice.serial", "#[serde(default)]")
         .field_attribute(

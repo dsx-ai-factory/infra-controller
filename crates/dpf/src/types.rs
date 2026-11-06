@@ -164,6 +164,8 @@ pub struct InitDpfResourcesConfig {
     /// API-core rejects a disabled value during DPF initialization while scoped
     /// ServiceInterfaces exist.
     pub(crate) deployment_scoped_service_interfaces: bool,
+    /// Resolved API controller selection for BF4 PF/VF interfaces; BF3 always uses controller 1.
+    pub(crate) dpu_host_pf_pci_controller_id: u8,
     /// Optional intercept-bridging topology for BF3 and both BF4 profiles. `Some` replaces the
     /// ordinary static PF/VF inventory and contains exactly one configured PF.
     #[builder(setter(strip_option))]
@@ -205,6 +207,16 @@ pub struct BlueFieldSoftwareParams {
 }
 
 impl InitDpfResourcesConfig {
+    /// Selects BF4's resolved controller while keeping BF3 resources on controller 1 at mixed-platform sites.
+    pub(crate) fn host_pf_pci_controller_id(&self) -> u8 {
+        match self.deployment_type {
+            DpuDeploymentType::Bf4Generic | DpuDeploymentType::Bf4Astra => {
+                self.dpu_host_pf_pci_controller_id
+            }
+            DpuDeploymentType::Bf3 | DpuDeploymentType::Bf3Gb200 => 1,
+        }
+    }
+
     /// Returns the platform profile selected for this initialization configuration.
     pub fn deployment_type(&self) -> DpuDeploymentType {
         self.deployment_type
@@ -226,6 +238,7 @@ impl Default for InitDpfResourcesConfig {
             max_active_service_vpc_interfaces_per_dpu: 0,
             max_sf_per_pf: DEFAULT_MAX_SF_PER_PF,
             deployment_scoped_service_interfaces: false,
+            dpu_host_pf_pci_controller_id: 1,
             intercept_bridging: None,
             interfaces: Vec::new(),
             proxy: None,

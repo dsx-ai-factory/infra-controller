@@ -85,6 +85,26 @@ tests:
               path: /custom/cert/dir
               type: DirectoryOrCreate
 
+  # Regenerate old BF4 cache inventory before registration without privileged device access.
+  - it: should expose host PF sysfs and a writable hardware cache to the main agent
+    set:
+      image:
+        repository: test
+        tag: test
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content:
+            name: sys
+            mountPath: /host-sys
+            readOnly: true
+      - contains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content:
+            name: hw-cache
+            mountPath: /data
+            readOnly: false
+
   - it: should run the LLDP snapshot sidecar with read-only host runtime access
     set:
       image:
@@ -167,11 +187,6 @@ tests:
           path: spec.template.spec.initContainers[0].volumeMounts
           content:
             name: host-lib
-          any: true
-      - notContains:
-          path: spec.template.spec.containers[0].volumeMounts
-          content:
-            name: sys
           any: true
       - contains:
           path: spec.template.spec.containers[0].env

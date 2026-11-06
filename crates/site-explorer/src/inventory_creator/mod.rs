@@ -37,8 +37,10 @@ mod machine_creator;
 mod power_shelf_creator;
 mod switch_creator;
 
-pub(super) use machine_creator::ConfiguredIngestionCandidate;
 pub use machine_creator::MachineCreator;
+pub(super) use machine_creator::{
+    ConfiguredIngestionCandidate, SiteExplorerHostAdminAddressReconcileFailed,
+};
 pub use power_shelf_creator::PowerShelfCreator;
 pub use switch_creator::SwitchCreator;
 
@@ -67,6 +69,8 @@ pub struct Config {
     pub admin_fnn_enabled: bool,
     /// How long retained boot interfaces remain applicable; `None` means forever.
     pub retained_boot_interface_window: Option<chrono::Duration>,
+    /// Resolved controller selection for BF4 host PF 0.
+    pub dpu_host_pf_pci_controller_id: u8,
 }
 
 /// Creates inventory from identified hosts and explored endpoints.

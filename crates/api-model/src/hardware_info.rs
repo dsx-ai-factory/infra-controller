@@ -16,6 +16,7 @@
  */
 
 //! Describes hardware that is discovered by Forge
+use std::collections::BTreeMap;
 use std::fmt;
 use std::fmt::{Display, Formatter};
 use std::net::IpAddr;
@@ -137,6 +138,80 @@ pub struct DmiData {
     pub sys_vendor: String,
 }
 
+/// Records a host physical function so boot selection can use DPU-agent inventory.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DpuHostPf {
+    /// PCI controller parsed from the Linux physical-port name.
+    pub pci_controller_id: u32,
+    /// Physical function parsed from the Linux physical-port name.
+    pub pf_id: u32,
+    /// Host-visible MAC read from this netdev's sysfs address.
+    pub mac_address: MacAddress,
+    /// Complete Linux physical-port name in c<decimal>pf<decimal> format.
+    pub physical_port_name: String,
+    /// Linux interface name, when available, for diagnostics.
+    pub netdev_name: Option<String>,
+    /// PCI BDF, when available, for diagnostics.
+    pub pci_address: Option<String>,
+}
+
+/// Describes invalid or changed host-PF inventory so registration cannot silently change boot identity.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum DpuHostPfError {
+    /// BF4 registration supplied no host-PF inventory.
+    #[error("BF4 host-PF inventory is missing")]
+    MissingInventory,
+    /// The physical-port name does not identify the reported controller and PF.
+    #[error("physical-port name {0} does not match its controller/PF identity")]
+    InvalidPhysicalPortName(String),
+    /// Two netdevs reported the same controller and PF.
+    #[error("duplicate host PF on controller {controller}, PF {pf}")]
+    DuplicateIdentity {
+        /// Duplicated controller ID.
+        controller: u32,
+        /// Duplicated PF ID.
+        pf: u32,
+    },
+    /// A host-PF MAC is zero or multicast and cannot identify a boot interface.
+    #[error("invalid host-PF MAC {0}")]
+    InvalidMacAddress(MacAddress),
+    /// The registered inventory lacks the configured boot target.
+    #[error("registered inventory lacks controller {controller}, PF {pf}")]
+    MissingTarget {
+        /// Required controller ID.
+        controller: u32,
+        /// Required PF ID.
+        pf: u32,
+    },
+    /// A later report changed the registered controller/PF key set.
+    #[error("registered host-PF controller/PF identities changed")]
+    IdentityDrift,
+    /// A later report changed a registered host-visible MAC.
+    #[error("registered boot MAC changed on controller {controller}, PF {pf}")]
+    BootMacDrift {
+        /// Controller whose MAC changed.
+        controller: u32,
+        /// PF whose MAC changed.
+        pf: u32,
+    },
+}
+
+impl DpuHostPf {
+    /// Parses a complete physical-port name so netdev names cannot determine controller/PF identity.
+    pub fn parse_physical_port_name(name: &str) -> Option<(u32, u32)> {
+        let (controller, pf) = name.strip_prefix('c')?.split_once("pf")?;
+        // Reject signed, empty, and partial numbers before checked integer conversion.
+        if controller.is_empty()
+            || pf.is_empty()
+            || !controller.bytes().all(|byte| byte.is_ascii_digit())
+            || !pf.bytes().all(|byte| byte.is_ascii_digit())
+        {
+            return None;
+        }
+        Some((controller.parse().ok()?, pf.parse().ok()?))
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DpuData {
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -153,6 +228,91 @@ pub struct DpuData {
     pub firmware_date: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub switches: Vec<LldpSwitchData>,
+    /// DPU-agent host-PF inventory; old topology rows have no registered mapping.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub host_pfs: Vec<DpuHostPf>,
+}
+
+impl DpuData {
+    /// Requires the configured controller's PF 0 for BF4 while preserving BF2/BF3 selection.
+    pub fn required_host_pf(&self, controller: u8) -> Option<(u32, u32)> {
+        crate::site_explorer::is_bf4_dpu_part_number(self.part_number.trim())
+            .then_some((u32::from(controller), 0))
+    }
+
+    /// Validates host-PF identities and boot MACs so incomplete BF4 discovery cannot register.
+    pub fn validate_host_pfs(&self) -> Result<(), DpuHostPfError> {
+        if self.required_host_pf(1).is_some() && self.host_pfs.is_empty() {
+            return Err(DpuHostPfError::MissingInventory);
+        }
+
+        // Validate every observed controller independently of the site's selection policy.
+        let mut identities = BTreeMap::new();
+        for host_pf in &self.host_pfs {
+            let identity = (host_pf.pci_controller_id, host_pf.pf_id);
+            if DpuHostPf::parse_physical_port_name(&host_pf.physical_port_name) != Some(identity) {
+                return Err(DpuHostPfError::InvalidPhysicalPortName(
+                    host_pf.physical_port_name.clone(),
+                ));
+            }
+            if host_pf.mac_address.bytes() == [0; 6] || host_pf.mac_address.bytes()[0] & 1 != 0 {
+                return Err(DpuHostPfError::InvalidMacAddress(host_pf.mac_address));
+            }
+            if identities.insert(identity, host_pf.mac_address).is_some() {
+                return Err(DpuHostPfError::DuplicateIdentity {
+                    controller: identity.0,
+                    pf: identity.1,
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// Resolves BF4's exact target without substituting the factory MAC or another controller.
+    pub fn selected_host_pf(&self, controller: u8) -> Result<Option<&DpuHostPf>, DpuHostPfError> {
+        let Some((controller, pf)) = self.required_host_pf(controller) else {
+            return Ok(None);
+        };
+        self.validate_host_pfs()?;
+        self.host_pfs
+            .iter()
+            .find(|entry| entry.pci_controller_id == controller && entry.pf_id == pf)
+            .map(Some)
+            .ok_or(DpuHostPfError::MissingTarget { controller, pf })
+    }
+
+    /// Rejects controller/PF and MAC changes while allowing diagnostic metadata to differ.
+    pub fn check_host_pf_identity(&self, incoming: &Self) -> Result<(), DpuHostPfError> {
+        incoming.validate_host_pfs()?;
+        // Redfish may have classified BF4 before phone-home, so an omitted part number cannot waive its inventory.
+        if self.required_host_pf(1).is_some() && incoming.host_pfs.is_empty() {
+            return Err(DpuHostPfError::MissingInventory);
+        }
+        // An empty stored vector represents inventory not yet initialized by the agent.
+        if self.host_pfs.is_empty() {
+            return Ok(());
+        }
+        self.validate_host_pfs()?;
+        let registered = self
+            .host_pfs
+            .iter()
+            .map(|entry| ((entry.pci_controller_id, entry.pf_id), entry.mac_address))
+            .collect::<BTreeMap<_, _>>();
+        let reported = incoming
+            .host_pfs
+            .iter()
+            .map(|entry| ((entry.pci_controller_id, entry.pf_id), entry.mac_address))
+            .collect::<BTreeMap<_, _>>();
+        if !registered.keys().eq(reported.keys()) {
+            return Err(DpuHostPfError::IdentityDrift);
+        }
+        for ((controller, pf), mac_address) in registered {
+            if reported.get(&(controller, pf)) != Some(&mac_address) {
+                return Err(DpuHostPfError::BootMacDrift { controller, pf });
+            }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -577,7 +737,7 @@ impl From<libnmxm::nmxm_model::Gpu> for NvLinkGpu {
 mod tests {
 
     use carbide_test_support::Outcome::*;
-    use carbide_test_support::{scenarios, value_scenarios};
+    use carbide_test_support::{Case, check_cases, scenarios, value_scenarios};
 
     use super::*;
 
@@ -1577,6 +1737,160 @@ mod tests {
                     above_half_max = MAX_MEMORY_DEVICE_COUNT / 2 + 1
                 ) => Fails,
             }
+        );
+    }
+    /// Accepts only complete numeric controller/PF names so unrelated netdevs cannot become boot candidates.
+    #[test]
+    fn dpu_host_pf_physical_port_names() {
+        // Exercise grammar and integer limits without depending on a netdev name.
+        value_scenarios!(
+            run = DpuHostPf::parse_physical_port_name;
+            "host physical functions" {
+                // The default controller remains ordinary factual inventory.
+                "c1pf0" => Some((1, 0)),
+                // Another controller is collected without selecting it.
+                "c2pf0" => Some((2, 0)),
+                // Neither identifier is limited to a single decimal digit.
+                "c12pf34" => Some((12, 34)),
+                // Controller zero is a valid explicit policy.
+                "c0pf0" => Some((0, 0)),
+            }
+            "unrelated or malformed names" {
+                // Uplink names do not identify a host PF.
+                "p0" => None,
+                // Partial matches must not admit VF representors.
+                "c1pf0vf1" => None,
+                // A missing controller cannot default to zero.
+                "cpf0" => None,
+                // A missing PF cannot default to zero.
+                "c1pf" => None,
+                // Signed values are outside the kernel grammar.
+                "c-1pf0" => None,
+                // Explicit plus signs are also outside the grammar.
+                "c1pf+0" => None,
+                // Controller overflow must not wrap into another identity.
+                "c4294967296pf0" => None,
+                // PF conversion has its own overflow boundary.
+                "c1pf4294967296" => None,
+            }
+        );
+    }
+
+    /// Rejects missing or malformed inventory and changed controller/PF keys and boot MACs while allowing diagnostic-only registration changes.
+    #[test]
+    fn dpu_host_pf_registration_identity() {
+        // A registered BF4 host PF establishes the immutable key and boot MAC.
+        let registered = DpuData {
+            part_number: "900-9D4B4-CWAA-TSA".to_string(),
+            host_pfs: vec![DpuHostPf {
+                pci_controller_id: 1, // The registered controller must remain present.
+                pf_id: 0,
+                mac_address: "96:ab:d0:3e:5f:a6".parse().expect("valid host-PF MAC"),
+                physical_port_name: "c1pf0".to_string(),
+                netdev_name: Some("before-udev-rename".to_string()),
+                pci_address: None,
+            }],
+            ..Default::default()
+        };
+        // Diagnostic values may change without changing controller/PF identity.
+        let mut renamed = registered.clone();
+        renamed.host_pfs[0].netdev_name = Some("after-udev-rename".to_string());
+        renamed.host_pfs[0].pci_address = Some("0000:03:00.0".to_string());
+        // Change both controller representations to isolate identity drift from malformed data.
+        let mut changed_controller = registered.clone();
+        changed_controller.host_pfs[0].pci_controller_id = 2;
+        changed_controller.host_pfs[0].physical_port_name = "c2pf0".to_string();
+        // A valid replacement MAC still changes the registered boot identity.
+        let mut changed_mac = registered.clone();
+        changed_mac.host_pfs[0].mac_address =
+            "96:ab:d0:3e:5f:a8".parse().expect("valid replacement MAC");
+        // Duplicate observations must remain ambiguous even if their MACs agree.
+        let mut duplicate = registered.clone();
+        duplicate.host_pfs.push(duplicate.host_pfs[0].clone());
+        // An old or incomplete report cannot clear registered inventory.
+        let mut missing = registered.clone();
+        missing.host_pfs.clear();
+        // Omit the incoming classification while retaining the predecessor's BF4 inventory requirement.
+        let mut unclassified_missing = missing.clone();
+        unclassified_missing.part_number.clear();
+        // Leave the physical name unchanged to isolate disagreement with the numeric controller.
+        let mut mismatched_name = registered.clone();
+        mismatched_name.host_pfs[0].pci_controller_id = 2;
+        // A syntactically valid multicast MAC remains unusable as a host boot identity.
+        let mut multicast = registered.clone();
+        multicast.host_pfs[0].mac_address = "97:ab:d0:3e:5f:a6"
+            .parse()
+            .expect("multicast MAC representation");
+
+        // Compare the report against persisted identity, retaining distinct failure reasons.
+        check_cases(
+            [
+                // A repeated phone-home is idempotent.
+                Case {
+                    scenario: "unchanged registration",
+                    input: registered.clone(),
+                    expect: Yields(()),
+                },
+                // Udev and PCI diagnostics do not control boot identity.
+                Case {
+                    scenario: "diagnostic metadata changes",
+                    input: renamed,
+                    expect: Yields(()),
+                },
+                // Controller changes violate the supplied hardware invariant.
+                Case {
+                    scenario: "controller drift",
+                    input: changed_controller,
+                    expect: FailsWith(DpuHostPfError::IdentityDrift),
+                },
+                // Boot-MAC changes fail closed independently of key stability.
+                Case {
+                    scenario: "boot MAC drift",
+                    input: changed_mac,
+                    expect: FailsWith(DpuHostPfError::BootMacDrift {
+                        controller: 1,
+                        pf: 0,
+                    }),
+                },
+                // No enumeration order can resolve a duplicated semantic identity.
+                Case {
+                    scenario: "duplicate identity",
+                    input: duplicate,
+                    expect: FailsWith(DpuHostPfError::DuplicateIdentity {
+                        controller: 1,
+                        pf: 0,
+                    }),
+                },
+                // Missing inventory cannot be treated as an idempotent empty update.
+                Case {
+                    scenario: "missing inventory",
+                    input: missing,
+                    expect: FailsWith(DpuHostPfError::MissingInventory),
+                },
+                // An omitted part number cannot waive the persisted BF4 inventory requirement.
+                Case {
+                    scenario: "unclassified report without inventory",
+                    input: unclassified_missing,
+                    expect: FailsWith(DpuHostPfError::MissingInventory),
+                },
+                // Valid grammar alone cannot validate a contradictory numeric identity.
+                Case {
+                    scenario: "physical name disagrees with numeric controller",
+                    input: mismatched_name,
+                    expect: FailsWith(DpuHostPfError::InvalidPhysicalPortName("c1pf0".to_string())),
+                },
+                // Multicast is a distinct invalid-MAC boundary from the zero address.
+                Case {
+                    scenario: "multicast boot MAC",
+                    input: multicast,
+                    expect: FailsWith(DpuHostPfError::InvalidMacAddress(
+                        "97:ab:d0:3e:5f:a6"
+                            .parse()
+                            .expect("multicast MAC representation"),
+                    )),
+                },
+            ],
+            |incoming| registered.check_host_pf_identity(&incoming),
         );
     }
 }

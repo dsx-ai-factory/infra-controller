@@ -504,6 +504,11 @@ pub struct CarbideConfig {
     )]
     pub retained_boot_interface_window: Option<chrono::Duration>,
 
+    /// Selects PCI controller 0 through 255, PF 0 for BF4 host boot and applicable DPF resources.
+    /// Defaults to 1; changes require an API restart. BF2/BF3 retain their existing selection.
+    #[serde(default = "default_dpu_host_pf_pci_controller_id")]
+    pub dpu_host_pf_pci_controller_id: u8,
+
     /// SiteExplorer related configuration
     #[serde(default)]
     pub site_explorer: SiteExplorerConfig,
@@ -1418,6 +1423,11 @@ impl Default for TracingConfig {
     }
 }
 
+/// Defaults BF4 host-PF policy to controller 1 to preserve the existing DPF controller selection.
+fn default_dpu_host_pf_pci_controller_id() -> u8 {
+    1
+}
+
 impl CarbideConfig {
     /// Returns the configured FNN site-fabric null routes, including the legacy fallback.
     pub fn effective_site_fabric_null_routes(&self) -> &[IpNetwork] {
@@ -1488,6 +1498,7 @@ impl CarbideConfig {
             ewethers_enabled: self.is_ewethers_enabled(),
             astra_enabled: self.is_astra_enabled(),
             dpf_enabled: self.dpf.enabled,
+            dpu_host_pf_pci_controller_id: self.dpu_host_pf_pci_controller_id,
             dpu_service_sync_enabled: self.dpf.dpu_service_sync_enabled,
             spdm_enabled: self.spdm.enabled,
             bmc_rotation_enabled: self.bmc_rotation_enabled,
@@ -9859,5 +9870,39 @@ helm_repo_url = "oci://registry.example.test/doca"
             bf4_astra: None,
         };
         assert!(many.validate_provisioning_sources().is_ok());
+    }
+
+    /// Defaults BF4 controller selection to 1 and rejects out-of-range values before startup consumers receive it.
+    #[test]
+    fn dpu_host_pf_controller_configuration_bounds() {
+        use carbide_test_support::Outcome::{Fails, Yields};
+        // Exercise omission separately from explicit controller values using the full configuration schema.
+        carbide_test_support::scenarios!(
+            run = |controller: Option<i64>| {
+                let mut config = serde_json::to_value(crate::test_support::default_config::get()).expect("serialize config");
+                let fields = config.as_object_mut().expect("config object");
+                fields.remove("dpu_host_pf_pci_controller_id");
+                if let Some(controller) = controller {
+                    fields.insert("dpu_host_pf_pci_controller_id".to_string(), controller.into());
+                }
+                serde_json::from_value::<CarbideConfig>(config).map(|config| config.dpu_host_pf_pci_controller_id).map_err(drop)
+            };
+            "valid site controller policy" {
+                // Old configurations retain controller 1.
+                None => Yields(1),
+                // An explicit zero is a real controller, not omission.
+                Some(0) => Yields(0),
+                // Controller 2 is an override example rather than a universal requirement.
+                Some(2) => Yields(2),
+                // DPF's u8 identity includes the upper endpoint.
+                Some(255) => Yields(255),
+            }
+            "invalid controller bounds" {
+                // Negative values cannot identify a PCI controller.
+                Some(-1) => Fails,
+                // Values outside DPF's controller identity must not truncate.
+                Some(256) => Fails,
+            }
+        );
     }
 }

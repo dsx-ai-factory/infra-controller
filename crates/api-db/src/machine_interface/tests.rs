@@ -22,6 +22,7 @@ use model::allocation_type::AllocationType;
 use model::expected_machine::{
     ExpectedInterface, ExpectedInterfaceIpAllocation, ExpectedInterfaceRole,
 };
+use model::hardware_info::HardwareInfo;
 use model::machine_interface::InterfaceType;
 use model::network_prefix::NewNetworkPrefix;
 use model::network_segment::{
@@ -281,8 +282,9 @@ async fn proactive_admin_discovery_preserves_existing_mac_ownership(
     .await?;
     let discovered = create_host_machine_dpu_interface_proactively(
         &mut txn,
-        Some(&hardware_info),
+        hardware_info.factory_mac_address()?,
         &dpu_id,
+        DpuHostInterfaceOwnership::Legacy,
         true,
         None,
     )
@@ -312,8 +314,9 @@ async fn proactive_admin_discovery_preserves_existing_mac_ownership(
     .await?;
     let error = create_host_machine_dpu_interface_proactively(
         &mut txn,
-        Some(&hardware_info),
+        hardware_info.factory_mac_address()?,
         &other_dpu_id,
+        DpuHostInterfaceOwnership::Legacy,
         true,
         None,
     )
@@ -399,8 +402,9 @@ async fn proactive_admin_discovery_rejects_foreign_managed_ownership(
     let mut txn = pool.begin().await?;
     let error = create_host_machine_dpu_interface_proactively(
         &mut txn,
-        Some(&hardware_info),
+        hardware_info.factory_mac_address()?,
         &requesting_dpu_id,
+        DpuHostInterfaceOwnership::Legacy,
         true,
         None,
     )
@@ -523,8 +527,9 @@ async fn proactive_admin_discovery_selects_eligible_segment(
         let (dpu_id, hardware_info) = create_proactive_discovery_dpu(&mut txn, mac).await?;
         let discovered = create_host_machine_dpu_interface_proactively(
             &mut txn,
-            Some(&hardware_info),
+            hardware_info.factory_mac_address()?,
             &dpu_id,
+            DpuHostInterfaceOwnership::Legacy,
             case.admin_fnn_enabled,
             None,
         )
@@ -573,8 +578,9 @@ async fn proactive_admin_discovery_requires_gateway_for_ipv4_prefix(
     let (dpu_id, hardware_info) = create_proactive_discovery_dpu(&mut txn, mac).await?;
     let error = create_host_machine_dpu_interface_proactively(
         &mut txn,
-        Some(&hardware_info),
+        hardware_info.factory_mac_address()?,
         &dpu_id,
+        DpuHostInterfaceOwnership::Legacy,
         true,
         None,
     )
@@ -622,8 +628,9 @@ async fn proactive_admin_discovery_rejects_unreserved_mac(
         let (dpu_id, hardware_info) = create_proactive_discovery_dpu(&mut txn, mac).await?;
         let error = create_host_machine_dpu_interface_proactively(
             &mut txn,
-            Some(&hardware_info),
+            hardware_info.factory_mac_address()?,
             &dpu_id,
+            DpuHostInterfaceOwnership::Legacy,
             true,
             None,
         )
@@ -642,6 +649,231 @@ async fn proactive_admin_discovery_rejects_unreserved_mac(
         );
         txn.rollback().await?;
     }
+    Ok(())
+}
+
+/// Rejects static ownership published after paired host-PF prevalidation so a later target lookup cannot attach another host's NIC.
+/// Blocking a second anonymous target's address row keeps the real repair between its first empty lookup and its final selection.
+#[crate::sqlx_test]
+async fn registered_host_pf_repair_rechecks_static_rows_after_prevalidation(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // Provide two paired DPU links and an anonymous second target so only the late first target changes ownership.
+    create_static_assignments_segment(&pool).await?;
+    let mut definition = managed_segment(
+        "paired-static-race",
+        "192.0.2.0/24",
+        NetworkSegmentType::Admin,
+        AllocationStrategy::Dynamic,
+    );
+    definition.prefixes[0].gateway = Some("192.0.2.1".parse()?); // Keep the candidate eligible for proactive host-PF repair.
+    let host_id = MachineId::new(
+        MachineIdSource::ProductBoardChassisSerial,
+        [0x81; 32],
+        MachineType::Host,
+    );
+    let other_host_id = MachineId::new(
+        MachineIdSource::ProductBoardChassisSerial,
+        [0x82; 32],
+        MachineType::Host,
+    );
+    let first_dpu_id = MachineId::new(
+        MachineIdSource::ProductBoardChassisSerial,
+        [0x83; 32],
+        MachineType::Dpu,
+    );
+    let second_dpu_id = MachineId::new(
+        MachineIdSource::ProductBoardChassisSerial,
+        [0x84; 32],
+        MachineType::Dpu,
+    );
+    let first_target: MacAddress = "02:00:00:00:56:04".parse()?;
+    let second_target: MacAddress = "02:00:00:00:56:03".parse()?;
+    let mut setup = pool.begin().await?;
+    let state = model::machine::ManagedHostState::DPUInit {
+        dpu_states: model::machine::DpuInitStates {
+            states: std::collections::HashMap::from([
+                (first_dpu_id.try_into()?, model::machine::DpuInitState::Init),
+                (
+                    second_dpu_id.try_into()?,
+                    model::machine::DpuInitState::Init,
+                ),
+            ]),
+        },
+    };
+    for machine_id in [host_id, other_host_id, first_dpu_id, second_dpu_id] {
+        db::machine::create(
+            &mut setup,
+            None,
+            &machine_id,
+            state.clone(),
+            None,
+            model::machine::CURRENT_STATE_MODEL_VERSION,
+        )
+        .await?;
+    }
+    let segment =
+        db::network_segment::persist(definition, &mut setup, NetworkSegmentControllerState::Ready)
+            .await?;
+    // Materialize the current host links and anonymous target before installing the address gate.
+    let mut retained_interfaces = Vec::new();
+    for (mac, address, paired_dpu, primary) in [
+        // Keep the current primary attached to the first DPU while its requested replacement remains absent.
+        ("02:00:00:00:56:01", "192.0.2.2", Some(first_dpu_id), true),
+        // Retain the second DPU's existing link so repair has a real stale association for each target.
+        ("02:00:00:00:56:02", "192.0.2.3", Some(second_dpu_id), false),
+        // Leave the second target anonymous so caller-owned interface locks do not reach the address gate early.
+        ("02:00:00:00:56:03", "192.0.2.4", None, false),
+    ] {
+        let mac = mac.parse()?;
+        let interface = create(
+            &mut setup,
+            std::slice::from_ref(&segment),
+            &mac,
+            primary,
+            AddressSelectionStrategy::StaticAddress(address.parse()?),
+            None,
+        )
+        .await?;
+        if let Some(dpu_id) = paired_dpu {
+            associate_interface_with_machine(
+                &interface.id,
+                MachineInterfaceAssociation::Machine(host_id),
+                &mut setup,
+            )
+            .await?;
+            associate_interface_with_dpu_machine(&interface.id, &dpu_id, &mut setup).await?;
+        }
+        set_boot_interface_id(mac, "NIC.Existing.1", &mut setup).await?;
+        retained_interfaces.push(interface.id);
+    }
+    setup.commit().await?;
+
+    // Reload associations and boot IDs after setup commits so preservation compares persisted inventory.
+    let mut original_interfaces = Vec::new();
+    for interface_id in &retained_interfaces {
+        original_interfaces.push(find_one(&pool, *interface_id).await?);
+    }
+
+    // Lock only the anonymous target's address so repair can validate the first absent target before waiting.
+    let mut gate = pool.begin().await?;
+    let gate_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *gate)
+        .await?;
+    sqlx::query("SELECT id FROM machine_interface_addresses WHERE interface_id = $1 FOR UPDATE")
+        .bind(retained_interfaces[2])
+        .fetch_one(&mut *gate)
+        .await?;
+    let host_machine_id = host_id.try_into()?;
+    let mut repair = pool.begin().await?;
+    lock_all_admin_segments(&mut repair).await?;
+    lock_host_boot_interface_rows(&mut repair, &host_machine_id).await?;
+    sqlx::query("SELECT id FROM machines WHERE id = ANY($1) ORDER BY id FOR UPDATE NOWAIT")
+        .bind(vec![
+            host_id.to_string(),
+            first_dpu_id.to_string(),
+            second_dpu_id.to_string(),
+        ])
+        .fetch_all(&mut *repair)
+        .await?;
+    // Confirm the first target is absent before repair's prevalidation reaches the second target's address gate.
+    assert!(
+        find_by_mac_address(repair.as_mut(), first_target)
+            .await?
+            .is_empty()
+    );
+    let targets = [
+        (first_dpu_id.try_into()?, first_target),
+        (second_dpu_id.try_into()?, second_target),
+    ];
+    let selected = model::machine_boot_interface::MachineBootInterface {
+        mac_address: second_target, // Select the uncontested target so final primary validation cannot conceal a missing first-target check.
+        interface_id: "NIC.Selected.1".to_string(),
+    };
+    let (late_interface, original_versions) = {
+        let attempt = reconcile_registered_host_interfaces(
+            &mut repair,
+            &host_machine_id,
+            &targets,
+            &selected,
+            model::machine_boot_interface::BootInterfaceSelectionSource::RedfishUefiPci,
+            false,
+            None,
+        );
+        tokio::pin!(attempt);
+        tokio::select! {
+            result = &mut attempt => panic!("repair bypassed its second target's address gate: {result:?}"),
+            _ = wait_for_blocked_query(&pool, gate_pid, "ORDER BY interface_id, address") => {},
+        }
+
+        // Publish a real external static reservation and host association while repair still holds every Admin lock.
+        let late_interface = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let mut worker = db::Transaction::begin(&pool).await?;
+            preallocate_machine_interface(
+                &mut worker,
+                first_target,
+                "203.0.113.87".parse().expect("static address"),
+                None,
+            )
+            .await?;
+            let interface = find_by_mac_address(&mut worker, first_target)
+                .await?
+                .remove(0);
+            associate_interface_with_machine(
+                &interface.id,
+                MachineInterfaceAssociation::Machine(other_host_id),
+                &mut worker,
+            )
+            .await?;
+            set_boot_interface_id(first_target, "NIC.OtherHost.1", &mut worker).await?;
+            worker.commit().await?;
+            find_one(&pool, interface.id).await
+        })
+        .await??;
+        // Confirm host ownership committed while repair remained blocked on the second target.
+        assert_eq!(late_interface.machine_id, Some(other_host_id));
+        assert!(late_interface.attached_dpu_machine_id.is_none());
+
+        // Record versions after the writer commits so preservation excludes its intentional association.
+        let original_versions: Vec<(MachineId, String)> =
+            sqlx::query_as("SELECT id, network_config_version::text FROM machines ORDER BY id")
+                .fetch_all(&pool)
+                .await?;
+
+        // Resume the later lookup and require its ownership rejection before any DPU attachment or primary change.
+        gate.rollback().await?;
+        let error = tokio::time::timeout(std::time::Duration::from_secs(30), &mut attempt)
+            .await?
+            .expect_err("the later paired lookup must reject the newly owned static row");
+        assert!(matches!(error, DatabaseError::FailedPrecondition(message)
+        if message.contains("conflicting ownership")));
+        (late_interface, original_versions)
+    };
+    repair.rollback().await?;
+
+    // Reload both writers' inventory and machine versions to prove rejected repair preserves their committed state.
+    for original in original_interfaces
+        .iter()
+        .chain(std::iter::once(&late_interface))
+    {
+        let persisted = find_one(&pool, original.id).await?;
+        assert_eq!(
+            serde_json::to_value(persisted)?,
+            serde_json::to_value(original)?
+        );
+    }
+    let persisted_versions: Vec<(MachineId, String)> =
+        sqlx::query_as("SELECT id, network_config_version::text FROM machines ORDER BY id")
+            .fetch_all(&pool)
+            .await?;
+    assert_eq!(persisted_versions, original_versions);
+    let mut txn = pool.begin().await?;
+    let addresses =
+        db::machine_interface_address::find_for_interface(&mut txn, late_interface.id).await?;
+    assert_eq!(addresses.len(), 1);
+    assert_eq!(addresses[0].address, "203.0.113.87".parse::<IpAddr>()?);
+    assert_eq!(addresses[0].allocation_type, AllocationType::Static);
+    txn.rollback().await?;
     Ok(())
 }
 

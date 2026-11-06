@@ -1866,6 +1866,8 @@ async fn create_test_env_with_overrides_inner(
         SiteExplorerConfig {
             enabled: Arc::new(true.into()),
             retained_boot_interface_window: None,
+            // Keep manual exploration on the API's configured host-PF controller.
+            dpu_host_pf_pci_controller_id: api.runtime_config.dpu_host_pf_pci_controller_id,
             admin_fnn_enabled: api
                 .runtime_config
                 .fnn

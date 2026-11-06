@@ -18,7 +18,8 @@ use std::collections::HashMap;
 use std::fmt::Write;
 use std::fs;
 use std::fs::File;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Write as _};
+use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::Command;
 use std::str::Utf8Error;
@@ -37,6 +38,7 @@ use uname::uname;
 
 pub mod dpu;
 mod gpu;
+mod host_pfs;
 mod tpm;
 
 /// Path where the init container writes the hardware snapshot, and the containerized agent reads it from.
@@ -58,6 +60,21 @@ const NVIDIA_VENDOR_DRIVER: &str = "nvidia";
 pub enum HardwareEnumerationError {
     #[error("hardware enumeration error: {0}")]
     GenericError(String),
+    /// Invalid host-PF inventory prevents ambiguous boot identity from registering.
+    #[error(transparent)]
+    DpuHostPf(#[from] model::hardware_info::DpuHostPfError),
+    /// Host-PF collection failed while reading the named sysfs path.
+    #[error("failed to read host-PF sysfs path {path}: {source}")]
+    HostPfSysfs {
+        /// Sysfs path that could not be read.
+        path: std::path::PathBuf,
+        /// Underlying filesystem failure.
+        #[source]
+        source: std::io::Error,
+    },
+    /// Invalid wire inventory cannot be accepted from the hardware cache.
+    #[error(transparent)]
+    HostPfConversion(#[from] rpc::errors::RpcDataConversionError),
     #[error("udev failed with error: {0}")]
     UdevError(#[from] libudev::Error),
     #[error("udev string {0} is not a valid MAC address")]
@@ -805,7 +822,17 @@ fn enumerate_hardware_inner(
 
     let dpu_vpd = match dmi.sys_vendor.as_str() {
         "https://www.mellanox.com" | "Nvidia" => match dpu::get_dpu_info() {
-            Ok(dpu_data) => Some(dpu_data),
+            Ok(mut dpu_data) => {
+                // BF2/BF3 retain factory-MAC selection and do not require host-PF sysfs access.
+                if model::site_explorer::is_bf4_dpu_part_number(dpu_data.part_number.trim()) {
+                    // Collect every observable host PF before saving immutable BF4 inventory.
+                    dpu_data.host_pfs = host_pfs::collect(Path::new("/sys/class/net"))?
+                        .into_iter()
+                        .map(Into::into)
+                        .collect();
+                }
+                Some(dpu_data)
+            }
             Err(e) => {
                 tracing::error!(error = ?e, "Could not get DPU data");
                 None
@@ -956,16 +983,17 @@ const INIT_MEM_INFO_PATH: &str = "/host-mem-info";
 /// enough for downstream use. Returns `Err` describing the missing piece so
 /// the caller can retry the probe.
 ///
-/// Today the only required field is `dpu_info` — DPU VPD probing can race
-/// with device init and produce a `None` if read too early.
-fn validate_enumerated(
+/// DPU VPD probing can race with device initialization. BF4 also requires valid,
+/// nonempty host-PF inventory before the result is complete enough to register.
+pub fn validate_enumerated(
     info: &rpc_discovery::DiscoveryInfo,
 ) -> Result<(), HardwareEnumerationError> {
-    if info.dpu_info.is_none() {
-        return Err(HardwareEnumerationError::GenericError(
+    let dpu_info = info.dpu_info.as_ref().ok_or_else(|| {
+        HardwareEnumerationError::GenericError(
             "Hardware enumeration is missing dpu_info".to_string(),
-        ));
-    }
+        )
+    })?;
+    model::hardware_info::DpuData::try_from(dpu_info.clone())?.validate_host_pfs()?;
     Ok(())
 }
 
@@ -1023,23 +1051,83 @@ pub async fn enumerate_and_save_hardware()
 
 /// Load the hardware snapshot from [`HW_CACHE_PATH`] written by the init container.
 ///
-/// Used by the containerized agent instead of direct hardware probing.
+/// Used by the containerized agent instead of direct hardware probing. Old BF4 caches
+/// with no host-PF inventory are regenerated from the read-only host sysfs mount and
+/// saved before use. Invalid or still-incomplete inventory returns an error.
 pub fn load_hardware_from_cache() -> Result<rpc_discovery::DiscoveryInfo, HardwareEnumerationError>
 {
-    load_hardware_from(HW_CACHE_PATH)
+    load_validated_hardware_from(HW_CACHE_PATH, Path::new("/host-sys/class/net"))
 }
 
+/// Rebuilds missing BF4 host-PF inventory from host sysfs so old caches cannot register incomplete data.
+fn load_validated_hardware_from(
+    cache_path: &str,
+    sysfs_net: &Path,
+) -> Result<rpc_discovery::DiscoveryInfo, HardwareEnumerationError> {
+    let mut info = load_hardware_from(cache_path)?;
+    let mut regenerated = false;
+    if let Some(dpu_info) = info.dpu_info.as_mut() {
+        let inventory = model::hardware_info::DpuData::try_from(dpu_info.clone())?;
+        // The agent lacks the init container's device access; probe only the missing sysfs facts.
+        if inventory.required_host_pf(1).is_some() && dpu_info.host_pfs.is_empty() {
+            dpu_info.host_pfs = host_pfs::collect(sysfs_net)?
+                .into_iter()
+                .map(Into::into)
+                .collect();
+            regenerated = true;
+        }
+    }
+    validate_enumerated(&info)?;
+    if regenerated {
+        save_hardware_to(&info, cache_path)?;
+    }
+    Ok(info)
+}
+
+/// Keeps the previous hardware cache intact until atomic replacement so interrupted writes cannot expose incomplete JSON.
 fn save_hardware_to(
     info: &rpc_discovery::DiscoveryInfo,
     path: &str,
 ) -> Result<(), HardwareEnumerationError> {
     let json = serde_json::to_string_pretty(info)
         .map_err(|e| HardwareEnumerationError::GenericError(e.to_string()))?;
-    fs::write(path, json).map_err(|e| {
+    let write_error = |error| {
         HardwareEnumerationError::GenericError(format!(
-            "Failed to write hardware cache to {path}: {e}"
+            "Failed to write hardware cache to {path}: {error}"
         ))
-    })
+    };
+    let directory = Path::new(path)
+        .parent()
+        .filter(|directory| !directory.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+
+    let permissions = match fs::metadata(path) {
+        Ok(metadata) => Some(metadata.permissions()),
+        // First publication uses the same creation permissions and process umask as fs::write.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(write_error(error)),
+    };
+
+    // Stage beside the cache so writing cannot truncate the file used by registration.
+    let mut temporary = tempfile::Builder::new()
+        .permissions(fs::Permissions::from_mode(0o666))
+        .tempfile_in(directory)
+        .map_err(write_error)?;
+    temporary.write_all(json.as_bytes()).map_err(write_error)?;
+    // Retain access granted by the existing cache before publishing the replacement.
+    if let Some(permissions) = permissions {
+        temporary
+            .as_file()
+            .set_permissions(permissions)
+            .map_err(write_error)?;
+    }
+    temporary.as_file().sync_all().map_err(write_error)?;
+
+    // Publish only complete JSON through a same-directory rename.
+    temporary
+        .persist(path)
+        .map_err(|error| write_error(error.error))?;
+    Ok(())
 }
 
 fn load_hardware_from(
@@ -1197,6 +1285,51 @@ mod tests {
             let err = load_hardware_from(path).unwrap_err();
             Ok::<_, ()>(err.to_string().contains("Failed to parse hardware cache"))
         });
+    }
+
+    /// Keeps the previous cache file intact and preserves its permissions when publishing JSON so readers
+    /// cannot see truncation or lose access to the shared cache.
+    #[test]
+    fn save_hardware_preserves_previous_cache_file() {
+        // Retain a second name for the original file to observe writes to its existing contents.
+        let directory = tempfile::tempdir().expect("temporary hardware cache directory");
+        let cache_path = directory.path().join("hardware.json");
+        let cache_path = cache_path.to_str().expect("UTF-8 temporary cache path");
+        let previous_path = directory.path().join("previous.json");
+        let previous_path = previous_path.to_str().expect("UTF-8 previous cache path");
+        let previous = minimal_discovery_info();
+        save_hardware_to(&previous, cache_path).expect("save original cache");
+
+        // Set permissions distinct from tempfile's default to detect changes during replacement.
+        fs::set_permissions(cache_path, fs::Permissions::from_mode(0o640))
+            .expect("set original cache permissions");
+        fs::hard_link(cache_path, previous_path).expect("retain original cache file");
+
+        // Publish different JSON at the cache pathname while the original file remains readable.
+        let replacement = rpc_discovery::DiscoveryInfo {
+            machine_type: "x86_64".to_string(), // Distinguish the replacement from the original cache.
+            ..Default::default()
+        };
+        save_hardware_to(&replacement, cache_path).expect("replace hardware cache");
+
+        // New opens see the replacement, and existing references retain the complete original JSON.
+        assert_eq!(
+            load_hardware_from(cache_path).expect("load replacement cache"),
+            replacement
+        );
+        assert_eq!(
+            load_hardware_from(previous_path).expect("load original cache file"),
+            previous
+        );
+        // Preserve the original access permissions on the newly published cache file.
+        assert_eq!(
+            fs::metadata(cache_path)
+                .expect("replacement cache metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o640
+        );
     }
 
     // Init-container bind-mount paths and the cache path are part of the
@@ -1517,8 +1650,8 @@ mod tests {
         );
     }
 
-    // validate_enumerated: the sole required field today is dpu_info. None ->
-    // Err, Some -> Ok(()). Error is not PartialEq so use Fails + Yields(()).
+    // DPU VPD remains required for every generation; older DPUs need no host-PF mapping.
+    // Error is not PartialEq so use Fails + Yields(()).
     #[test]
     fn validate_enumerated_cases() {
         scenarios!(
@@ -1583,6 +1716,106 @@ mod tests {
                     .map(|_| MemoryDevice { size_mb: Some(16384), mem_type: Some("DDR5".into()) })
                     .collect::<Vec<_>>() => Fails,
             }
+        );
+    }
+    /// Regenerates an old BF4 cache from host sysfs before use without requiring the API's selected controller.
+    ///
+    /// An empty reconstruction must leave the cache intact so a later read can recover when host sysfs appears.
+    /// Populated inventory survives changed or absent sysfs, while invalid cached identities fail without
+    /// replacement so registration cannot silently change a boot MAC.
+    #[test]
+    fn old_bf4_cache_regenerates_host_pfs() {
+        // The old cache has valid DPU VPD but predates host-PF collection.
+        let cache = NamedTempFile::new().expect("temporary hardware cache");
+        let cache_path = cache.path().to_str().expect("UTF-8 temporary path");
+        let legacy = rpc_discovery::DiscoveryInfo {
+            dpu_info: Some(rpc_discovery::DpuData {
+                part_number: "900-9D4B4-CWAA-TSA".to_string(), // BF4 requires registered host-PF facts.
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        save_hardware_to(&legacy, cache_path).expect("save legacy cache");
+        let sysfs = tempfile::tempdir().expect("temporary host sysfs");
+
+        // Reject missing BF4 facts without replacing the old cache, so a later read can recover.
+        let incomplete = load_validated_hardware_from(cache_path, sysfs.path());
+        assert!(matches!(
+            incomplete,
+            Err(HardwareEnumerationError::DpuHostPf(
+                model::hardware_info::DpuHostPfError::MissingInventory
+            ))
+        ));
+        assert_eq!(
+            load_hardware_from(cache_path).expect("reload unchanged cache"),
+            legacy
+        );
+
+        // Only controller 2 becomes observable; collection must not impose controller 1.
+        let netdev = sysfs.path().join("renamed-by-udev");
+        fs::create_dir(&netdev).expect("create host PF");
+        fs::write(netdev.join("phys_port_name"), "c2pf0\n").expect("write host PF identity");
+        fs::write(netdev.join("address"), "96:ab:d0:3e:5f:a6\n").expect("write host PF MAC");
+
+        // Consume the old cache through the registration validation path.
+        let rebuilt = load_validated_hardware_from(cache_path, sysfs.path())
+            .expect("regenerate BF4 inventory");
+
+        // Both the returned inventory and the saved cache must contain the sysfs facts.
+        assert_eq!(
+            rebuilt.dpu_info.as_ref().expect("DPU data").host_pfs.len(),
+            1
+        );
+        assert_eq!(
+            load_hardware_from(cache_path).expect("reload persisted cache"),
+            rebuilt
+        );
+        assert_eq!(
+            rebuilt.dpu_info.as_ref().expect("DPU data").host_pfs[0].pci_controller_id,
+            2
+        );
+
+        // Expose a different valid sysfs MAC after the populated inventory has been saved.
+        fs::write(netdev.join("address"), "96:ab:d0:3e:5f:a8\n").expect("change host PF MAC");
+        let absent_sysfs = sysfs.path().join("not-mounted");
+        for (scenario, sysfs_net) in [
+            // A changed live MAC must not replace the inventory from a populated cache.
+            ("changed host sysfs", sysfs.path()),
+            // An absent mount must not prevent registration using the populated cache.
+            ("absent host sysfs", absent_sysfs.as_path()),
+        ] {
+            // Confirm the registration loader returns exactly the populated cache for either sysfs state.
+            assert_eq!(
+                load_validated_hardware_from(cache_path, sysfs_net)
+                    .expect("reuse populated cache without probing sysfs"),
+                rebuilt,
+                "{scenario}"
+            );
+        }
+
+        // Keep a populated cache but make its physical-port name disagree with controller 2.
+        let mut invalid_inventory = rebuilt;
+        invalid_inventory
+            .dpu_info
+            .as_mut()
+            .expect("DPU data")
+            .host_pfs[0]
+            .physical_port_name = "c1pf0".to_string();
+        save_hardware_to(&invalid_inventory, cache_path).expect("save invalid cached inventory");
+        let invalid_cache = fs::read(cache_path).expect("read invalid cached inventory");
+
+        // Reject invalid cached identity even though sysfs still offers a valid replacement.
+        let invalid = load_validated_hardware_from(cache_path, sysfs.path());
+        assert!(matches!(
+            invalid,
+            Err(HardwareEnumerationError::DpuHostPf(
+                model::hardware_info::DpuHostPfError::InvalidPhysicalPortName(name)
+            )) if name == "c1pf0"
+        ));
+        // Keep the invalid cache bytes unchanged so a later retry cannot see substituted inventory.
+        assert_eq!(
+            fs::read(cache_path).expect("reload unchanged invalid cache"),
+            invalid_cache
         );
     }
 }

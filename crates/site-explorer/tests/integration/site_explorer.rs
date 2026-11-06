@@ -29,14 +29,16 @@ use carbide_test_harness::prelude::*;
 use carbide_test_harness::test_support::fixture_config::{
     DpuConfigExt as _, FixtureDefault as _, ManagedHostConfigExt as _,
 };
-use carbide_uuid::machine::{MachineId, MachineType};
+use carbide_uuid::machine::{DpuMachineId, HostMachineId, MachineId, MachineType};
 use db::explored_endpoints::EndpointReportNotCurrent;
 use db::sku::CURRENT_SKU_VERSION;
 use db::{ConditionalWrite, ObjectFilter};
 use itertools::Itertools;
 use mac_address::MacAddress;
 use model::bmc_suppression::{BmcSuppressionSource, BmcSuppressionSubsystem, NewBmcSuppression};
-use model::expected_machine::{ExpectedMachine, ExpectedMachineData};
+use model::expected_machine::{
+    ExpectedInterface, ExpectedInterfaceRole, ExpectedMachine, ExpectedMachineData,
+};
 use model::hardware_info::{DmiData, HardwareInfo};
 use model::machine::machine_id::from_hardware_info_with_type;
 use model::machine::machine_search_config::MachineSearchConfig;
@@ -3269,6 +3271,7 @@ async fn test_site_explorer_audit_exploration_results(
     let explorer_config = SiteExplorerConfig {
         enabled: Arc::new(true.into()),
         retained_boot_interface_window: None,
+        dpu_host_pf_pci_controller_id: 1,
         admin_fnn_enabled: false,
         explorations_per_run: 7,
         exploration_timeouts_before_prevent_allocations: 1,
@@ -5602,19 +5605,55 @@ async fn test_site_explorer_deduplicates_inventory_serials_and_repairs_persisted
     Ok(())
 }
 
+/// Reads persisted desired selection through the public API so the BF4 lifecycle assertions verify committed state.
+async fn bf4_boot_reconciliation(
+    env: &Env,
+    host_id: HostMachineId,
+) -> Result<
+    rpc::forge::get_machine_boot_interfaces_response::Reconciliation,
+    Box<dyn std::error::Error>,
+> {
+    let view = env
+        .api()
+        .get_machine_boot_interfaces(Request::new(rpc::forge::GetMachineBootInterfacesRequest {
+            machine_id: Some(host_id.into()),
+        }))
+        .await?
+        .into_inner();
+    Ok(view
+        .reconciliation
+        .expect("initialized desired boot interface"))
+}
+
 /// Vera Rubin host BMCs report the attached BF4 as its own `BlueField_0`
 /// chassis, with the usable pairing serial on that chassis object and no DPU
 /// under `Systems[].PCIeDevices`. This is the shape from the real VR Redfish
 /// dump, and it must pair without falling through to the zero-DPU gate.
+/// Late agent registration must preserve Ready and allocated hosts, then replace the provisional link before HostInit.
+/// Scout and unspecified reports cannot initialize inventory; rejected drift preserves generic discovery and an accepted report clears only drift health.
+/// Link replacement advances managed_host_config_version, while repeated reconciliation preserves it.
 #[sqlx_test]
 async fn test_site_explorer_pairs_vr_bf4_from_bluefield_chassis(
     pool: PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    use carbide_test_support::Outcome::Yields;
+    use carbide_test_support::{Case, check_cases_async};
+
     // This iteration records a failed creation; see the mutex's comment.
     let _failed_creation_guard = super::machine_creator::FAILED_CREATION_METRIC_TEST_SERIAL
         .lock()
         .await;
     let env = Env::new(pool).await;
+    // Provide an admin DHCP allocation so repair must transfer its ownership rather than consume another address.
+    // Use a separate Admin domain because Env already created its underlay domain.
+    let admin_domain = env
+        .test_harness
+        .create_test_domain("bf4-admin.example.com")
+        .await;
+    env.test_harness
+        .network_controller()
+        .create_admin_segment(&admin_domain)
+        .await;
 
     let reports = generate_managed_host_reports(HardwareType::NvidiaDgxVr).await?;
     let dpu = reports
@@ -5673,9 +5712,16 @@ async fn test_site_explorer_pairs_vr_bf4_from_bluefield_chassis(
         ..Default::default()
     };
     let explorer = env.test_site_explorer(explorer_config);
+    // Omit the registered target initially so the test controls when host Redfish evidence becomes complete.
+    let mut initial_host_report = reports.host.report.clone();
+    initial_host_report.systems[0]
+        .ethernet_interfaces
+        .retain(|interface| {
+            interface.mac_address.map(|mac| mac.to_string()).as_deref() != Some("96:ab:d0:3e:5f:a6")
+        });
     explorer.insert_endpoint_results(vec![
         (dpu_bmc_ip, Ok(dpu.report.clone())),
-        (host_bmc_ip, Ok(reports.host.report.clone())),
+        (host_bmc_ip, Ok(initial_host_report.clone())),
     ]);
 
     explorer.run_single_iteration().await.unwrap();
@@ -5698,7 +5744,7 @@ async fn test_site_explorer_pairs_vr_bf4_from_bluefield_chassis(
     assert_eq!(
         managed_host.dpus[0].host_pf_mac_address,
         Some(host_pf_mac),
-        "BF4 host-PF MAC should come from the DPU report base_mac"
+        "BF4 pairing retains the provisional DPU base MAC"
     );
     if let Some(blocker_metric) = env
         .test_harness
@@ -5711,6 +5757,648 @@ async fn test_site_explorer_pairs_vr_bf4_from_bluefield_chassis(
         );
     }
 
+    // Model an upgraded host with a completed provisional target and keep its public networking for comparison.
+    let mut txn = env.pool.begin().await?;
+    let host_id =
+        db::machine_topology::find_machine_id_by_bmc_mac::<HostMachineId>(&mut txn, host_bmc_mac)
+            .await?
+            .expect("ingested host");
+    let dpu_id =
+        db::machine_topology::find_machine_id_by_bmc_mac::<DpuMachineId>(&mut txn, dpu_bmc_mac)
+            .await?
+            .expect("ingested DPU");
+    // Disable ordinary refresh explicitly so first host-PF registration must bypass topology throttling.
+    db::machine_topology::set_topology_update_needed(&mut txn, &dpu_id.into(), false).await?;
+    assert!(
+        !db::machine_topology::find_latest_by_machine_ids(&mut txn, &[dpu_id]).await?[&dpu_id]
+            .topology_update_needed,
+        "first phone-home must bypass generic topology throttling"
+    );
+    db::machine_desired_boot_interface::set(
+        &mut txn,
+        &host_id,
+        &model::machine_boot_interface::MachineBootInterfaceTarget::Pair(
+            model::machine_boot_interface::MachineBootInterface {
+                mac_address: host_pf_mac,
+                interface_id: "Provisional.BaseMac".to_string(),
+            },
+        ),
+        BootInterfaceSelectionSource::RedfishChassisId,
+    )
+    .await?;
+    db::machine::update_state(&mut txn, &host_id, &ManagedHostState::Ready).await?;
+    txn.commit().await?;
+    let before = env
+        .test_harness
+        .find_machine(host_id.into())
+        .await
+        .remove(0)
+        .status
+        .expect("host status");
+    let original_primary = before
+        .interfaces
+        .iter()
+        .find(|interface| interface.primary_interface)
+        .expect("provisional primary");
+    assert!(
+        !original_primary.address.is_empty(),
+        "fixture must own an admin DHCP address"
+    );
+    let original_target = bf4_boot_reconciliation(&env, host_id).await?;
+
+    // Register through DiscoverMachine while generic topology refresh is disabled.
+    let registered_dpu = env.test_harness.find_machine(dpu_id.into()).await.remove(0);
+    let caller = registered_dpu
+        .bmc
+        .as_ref()
+        .and_then(|bmc| bmc.machine_interface_id)
+        .expect("owned DPU BMC interface");
+    let registered_mac: MacAddress = "96:ab:d0:3e:5f:a6".parse()?;
+    assert_ne!(
+        registered_mac, host_pf_mac,
+        "factory identity must be a decoy in this fixture"
+    );
+    let mut discovery = registered_dpu
+        .status
+        .expect("DPU status")
+        .discovery_info
+        .expect("Redfish-derived hardware");
+    discovery.dpu_info.as_mut().expect("BF4 DpuData").host_pfs =
+        vec![rpc::machine_discovery::DpuHostPf {
+            pci_controller_id: 1, // Omitted API configuration selects controller 1.
+            pf_id: 0,
+            mac_address: registered_mac.to_string(),
+            physical_port_name: "c1pf0".to_string(),
+            netdev_name: Some("renamed-host-pf".to_string()),
+            pci_address: None,
+        }];
+    let registered_firmware = discovery
+        .dpu_info
+        .as_ref()
+        .expect("BF4 DpuData")
+        .firmware_version
+        .clone();
+    let request = rpc::forge::MachineDiscoveryInfo {
+        machine_interface_id: Some(caller),
+        discovery_data: Some(rpc::DiscoveryData::Info(discovery)),
+        discovery_reporter: rpc::forge::MachineDiscoveryReporter::DpuAgent as i32,
+        ..Default::default()
+    };
+
+    // Submit the same factual inventory through public reporters that cannot initialize agent-owned fields.
+    check_cases_async(
+        [
+            // Older callers omit the reporter and must not acquire DPU-agent authority.
+            Case {
+                scenario: "unspecified discovery cannot register host PFs",
+                input: rpc::forge::MachineDiscoveryReporter::Unspecified,
+                expect: Yields(Vec::new()),
+            },
+            // Scout's generic discovery path must preserve the same registration boundary.
+            Case {
+                scenario: "Scout discovery cannot register host PFs",
+                input: rpc::forge::MachineDiscoveryReporter::Scout,
+                expect: Yields(Vec::new()),
+            },
+        ],
+        |reporter| {
+            let mut report = request.clone();
+            report.discovery_reporter = reporter as i32;
+            let env = &env;
+            async move {
+                env.api()
+                    .discover_machine(Request::new(report))
+                    .await
+                    .map_err(|error| error.to_string())?;
+                // Reload the public machine view to distinguish persisted inventory from request data.
+                Ok::<_, String>(
+                    env.test_harness
+                        .find_machine(dpu_id.into())
+                        .await
+                        .remove(0)
+                        .status
+                        .expect("DPU after generic discovery")
+                        .discovery_info
+                        .expect("discovery")
+                        .dpu_info
+                        .expect("DPU inventory")
+                        .host_pfs,
+                )
+            }
+        },
+    )
+    .await;
+
+    // Publish the trusted registration only after generic reporters have left inventory uninitialized.
+    env.api()
+        .discover_machine(Request::new(request.clone()))
+        .await?;
+    let persisted_dpu = env
+        .test_harness
+        .find_machine(dpu_id.into())
+        .await
+        .remove(0)
+        .status
+        .expect("registered DPU");
+    assert_eq!(
+        persisted_dpu
+            .discovery_info
+            .expect("discovery")
+            .dpu_info
+            .expect("DPU inventory")
+            .host_pfs[0]
+            .mac_address,
+        registered_mac.to_string()
+    );
+    assert!(
+        matches!(db::host_boot_interface::not_ready_reason(&env.pool, &host_id, 1).await?,
+        Some(db::host_boot_interface::HostBootInterfaceNotReady::Selection(
+            model::site_explorer::HostPrimaryInterfaceError::MissingHostInterface(mac))) if mac == registered_mac)
+    );
+
+    // Publish the current host EthernetInterface so selection is resolvable while Ready protection remains active.
+    let mut host_report = initial_host_report;
+    host_report.systems[0]
+        .ethernet_interfaces
+        .push(model::site_explorer::EthernetInterface {
+            id: Some("BF4.HostPF0".to_string()),
+            mac_address: Some(registered_mac),
+            uefi_device_path: Some("PciRoot(0x0)/Pci(0x2,0x0)".parse()?),
+            ..Default::default()
+        });
+    explorer.insert_endpoint_results(vec![(host_bmc_ip, Ok(host_report))]);
+    explorer.run_single_iteration().await?;
+    let still_ready = env
+        .test_harness
+        .find_machine(host_id.into())
+        .await
+        .remove(0)
+        .status
+        .expect("Ready host");
+    assert_eq!(still_ready.interfaces, before.interfaces);
+    assert_eq!(
+        bf4_boot_reconciliation(&env, host_id).await?,
+        original_target
+    );
+    assert!(
+        matches!(db::host_boot_interface::not_ready_reason(&env.pool, &host_id, 1).await?,
+        Some(db::host_boot_interface::HostBootInterfaceNotReady::Primary(mac)) if mac == registered_mac)
+    );
+
+    // Start allocation with the same machine-row lock used by instance creation while the host is initializing.
+    let mut txn = env.pool.begin().await?;
+    db::machine::update_state(
+        &mut txn,
+        &host_id,
+        &ManagedHostState::DPUInit {
+            dpu_states: model::machine::DpuInitStates {
+                states: HashMap::from([(
+                    dpu_id,
+                    model::machine::DpuInitState::WaitingForNetworkConfig,
+                )]),
+            },
+        },
+    )
+    .await?;
+    txn.commit().await?;
+    // Capture the initializing lifecycle too because the public reconciliation response includes machine_state.
+    let initializing_target = bf4_boot_reconciliation(&env, host_id).await?;
+    let mut allocation = env.pool.begin().await?;
+    sqlx::query("SELECT id FROM machines WHERE id = $1 FOR UPDATE")
+        .bind(host_id)
+        .execute(allocation.as_mut())
+        .await?;
+    let instance_id: carbide_uuid::instance::InstanceId = sqlx::query_scalar(
+        r#"INSERT INTO instances (machine_id, operating_system_id, os_ipxe_script, network_config, nvlink_config)
+           VALUES ($1, NULL, '#!ipxe', '{"interfaces": [], "auto_config": null}'::jsonb, '{"gpu_configs": []}'::jsonb)
+           RETURNING id"#)
+        .bind(host_id).fetch_one(allocation.as_mut()).await?;
+
+    // Repair must yield to the in-flight allocator before it can publish any networking changes.
+    let mut repair = env.pool.begin().await?;
+    let blocked =
+        db::host_boot_interface::reconcile_pre_host_init(&mut repair, &host_id, 1, false, None)
+            .await
+            .expect_err("allocation machine lock must prevent repair");
+    assert!(matches!(&blocked, db::DatabaseError::Sqlx(error)
+        if error.source.as_database_error().and_then(|error| error.code()).as_deref() == Some("55P03")));
+    repair.rollback().await?;
+    allocation.commit().await?;
+
+    // Disable exploration and creation to prove the independent repair pass still observes persisted allocations.
+    let idle_explorer = env.test_site_explorer(SiteExplorerConfig {
+        enabled: Arc::new(true.into()),
+        create_machines: Arc::new(false.into()),
+        explorations_per_run: 0,
+        retained_boot_interface_window: None,
+        ..Default::default()
+    });
+    idle_explorer.run_single_iteration().await?;
+    let allocated = env
+        .test_harness
+        .find_machine(host_id.into())
+        .await
+        .remove(0)
+        .status
+        .expect("allocated host");
+    assert_eq!(allocated.interfaces, before.interfaces);
+    assert_eq!(
+        bf4_boot_reconciliation(&env, host_id).await?,
+        initializing_target
+    );
+
+    // Remove only the synthetic allocation (no tenant resources were created) to permit pre-HostInit repair.
+    sqlx::query("DELETE FROM instances WHERE id = $1")
+        .bind(instance_id)
+        .execute(&env.pool)
+        .await?;
+    let before_repair_version = env
+        .api()
+        .get_managed_host_network_config(Request::new(
+            rpc::forge::ManagedHostNetworkConfigRequest {
+                dpu_machine_id: Some(dpu_id),
+            },
+        ))
+        .await?
+        .into_inner()
+        .managed_host_config_version;
+    idle_explorer.run_single_iteration().await?;
+
+    // Reload public APIs to prove the exact link, sole primary, DHCP ownership, target and decision metadata committed.
+    let repaired = env
+        .test_harness
+        .find_machine(host_id.into())
+        .await
+        .remove(0)
+        .status
+        .expect("repaired host");
+    let primary = repaired
+        .interfaces
+        .iter()
+        .filter(|interface| interface.primary_interface)
+        .collect::<Vec<_>>();
+    assert_eq!(primary.len(), 1);
+    assert_eq!(primary[0].mac_address, registered_mac.to_string());
+    assert_eq!(primary[0].attached_dpu_machine_id, Some(dpu_id));
+    assert_eq!(primary[0].address, original_primary.address);
+    let repaired_network_version = env
+        .api()
+        .get_managed_host_network_config(Request::new(
+            rpc::forge::ManagedHostNetworkConfigRequest {
+                dpu_machine_id: Some(dpu_id),
+            },
+        ))
+        .await?
+        .into_inner()
+        .managed_host_config_version;
+    assert_ne!(repaired_network_version, before_repair_version);
+    let provisional = repaired
+        .interfaces
+        .iter()
+        .find(|interface| interface.id == original_primary.id)
+        .expect("provisional row is retained");
+    assert!(!provisional.primary_interface);
+    assert_eq!(provisional.attached_dpu_machine_id, None);
+    assert!(provisional.address.is_empty());
+    let selected = bf4_boot_reconciliation(&env, host_id).await?;
+    let target = selected
+        .desired_boot_interface
+        .as_ref()
+        .expect("completed desired target");
+    assert_eq!(target.mac_address, registered_mac.to_string());
+    assert_eq!(target.interface_id.as_deref(), Some("BF4.HostPF0"));
+    assert_eq!(
+        selected.selection_source,
+        rpc::forge::BootInterfaceSelectionSource::RedfishUefiPci as i32
+    );
+    assert!(selected.selection_updated_at.is_some());
+    assert!(
+        db::host_boot_interface::not_ready_reason(&env.pool, &host_id, 1)
+            .await?
+            .is_none()
+    );
+
+    // Repeated registration and reconciliation must retain the decision time and desired generation.
+    env.api()
+        .discover_machine(Request::new(request.clone()))
+        .await?;
+    idle_explorer.run_single_iteration().await?;
+    let repeated = bf4_boot_reconciliation(&env, host_id).await?;
+    assert_eq!(repeated.desired_version, selected.desired_version);
+    assert_eq!(repeated.selection_updated_at, selected.selection_updated_at);
+    assert_eq!(
+        env.api()
+            .get_managed_host_network_config(Request::new(
+                rpc::forge::ManagedHostNetworkConfigRequest {
+                    dpu_machine_id: Some(dpu_id),
+                }
+            ))
+            .await?
+            .into_inner()
+            .managed_host_config_version,
+        repaired_network_version
+    );
+
+    // Enable a generic refresh and preserve another health source before submitting rejected discovery.
+    let mut txn = env.pool.begin().await?;
+    db::machine_topology::set_topology_update_needed(&mut txn, &dpu_id.into(), true).await?;
+    let mut unrelated_health =
+        health_report::HealthReport::empty("unrelated-inventory".to_string());
+    unrelated_health
+        .alerts
+        .push(health_report::HealthProbeAlert {
+            id: "UnrelatedInventoryProbe".parse()?,
+            target: Some("unchanged-component".to_string()),
+            in_alert_since: None,
+            message: "unrelated health must survive registration".to_string(),
+            tenant_message: None,
+            classifications: Vec::new(),
+        });
+    db::health_report::insert_health_report(
+        &mut txn,
+        "machines",
+        &dpu_id,
+        health_report::HealthReportApplyMode::Merge,
+        &unrelated_health,
+    )
+    .await?;
+    txn.commit().await?;
+
+    // A later MAC change is rejected and reports hardware drift without replacing the registered identity.
+    let mut drifted = request.clone();
+    let Some(rpc::DiscoveryData::Info(discovery)) = drifted.discovery_data.as_mut() else {
+        panic!("fixture must contain discovery information");
+    };
+    discovery.dpu_info.as_mut().expect("DpuData").host_pfs[0].mac_address =
+        "96:ab:d0:3e:5f:a8".to_string();
+    // This generic field would change before validation if discovery committed the rejected transaction.
+    discovery
+        .dpu_info
+        .as_mut()
+        .expect("DpuData")
+        .firmware_version = "rejected-discovery".to_string();
+    assert_eq!(
+        env.api()
+            .discover_machine(Request::new(drifted))
+            .await
+            .expect_err("MAC drift is rejected")
+            .code(),
+        tonic::Code::FailedPrecondition
+    );
+    let rejected = env
+        .test_harness
+        .find_machine(dpu_id.into())
+        .await
+        .remove(0)
+        .status
+        .expect("DPU after rejection");
+    // The generic firmware value and immutable mapping must remain unchanged after rejection.
+    let preserved_inventory = rejected
+        .discovery_info
+        .expect("discovery")
+        .dpu_info
+        .expect("inventory");
+    assert_eq!(
+        preserved_inventory.host_pfs[0].mac_address,
+        registered_mac.to_string()
+    );
+    assert_eq!(preserved_inventory.firmware_version, registered_firmware);
+    let drift_health = rejected.health.expect("drift health report");
+    let drift_alert = drift_health
+        .alerts
+        .iter()
+        .find(|alert| alert.id == "DpuHostPfIdentityDrift")
+        .expect("host-PF identity drift alert");
+    assert_eq!(drift_alert.target, Some(dpu_id.to_string()));
+    assert_eq!(
+        drift_alert
+            .classifications
+            .iter()
+            .map(String::as_str)
+            .collect::<std::collections::BTreeSet<_>>(),
+        std::collections::BTreeSet::from(["PreventAllocations", "PreventHostStateChanges"])
+    );
+    let preserved = bf4_boot_reconciliation(&env, host_id).await?;
+    assert_eq!(preserved.desired_version, selected.desired_version);
+    assert_eq!(
+        preserved.selection_updated_at,
+        selected.selection_updated_at
+    );
+
+    // An accepted report clears only drift health, leaving the independently reported component alert visible.
+    env.api()
+        .discover_machine(Request::new(request.clone()))
+        .await?;
+    let recovered_health = env
+        .test_harness
+        .find_machine(dpu_id.into())
+        .await
+        .remove(0)
+        .status
+        .expect("DPU after accepted registration")
+        .health
+        .expect("remaining health report");
+    assert!(
+        !recovered_health
+            .alerts
+            .iter()
+            .any(|alert| alert.id == "DpuHostPfIdentityDrift")
+    );
+    let retained_alert = recovered_health
+        .alerts
+        .iter()
+        .find(|alert| alert.id == "UnrelatedInventoryProbe")
+        .expect("unrelated health alert survives registration");
+    assert_eq!(
+        retained_alert.target.as_deref(),
+        Some("unchanged-component")
+    );
+    assert_eq!(
+        retained_alert.message,
+        "unrelated health must survive registration"
+    );
+
+    // Record operator authority for the same physical NIC; background BF4 repair must not replace that decision's source or time.
+    let mut txn = env.pool.begin().await?;
+    db::machine_desired_boot_interface::set(
+        &mut txn,
+        &host_id,
+        &model::machine_boot_interface::MachineBootInterfaceTarget::Pair(
+            model::machine_boot_interface::MachineBootInterface {
+                mac_address: registered_mac,
+                interface_id: "BF4.HostPF0".to_string(),
+            },
+        ),
+        BootInterfaceSelectionSource::Operator,
+    )
+    .await?;
+    txn.commit().await?;
+    let operator_selection = bf4_boot_reconciliation(&env, host_id).await?;
+    idle_explorer.run_single_iteration().await?;
+    let retained_operator = bf4_boot_reconciliation(&env, host_id).await?;
+    assert_eq!(
+        retained_operator.selection_source,
+        rpc::forge::BootInterfaceSelectionSource::Operator as i32
+    );
+    assert_eq!(
+        retained_operator.desired_boot_interface,
+        operator_selection.desired_boot_interface
+    );
+    assert_eq!(
+        retained_operator.selection_updated_at,
+        operator_selection.selection_updated_at
+    );
+
+    Ok(())
+}
+
+/// Preserves a resolved integrated primary through BF4 identification and persistence even before agent inventory arrives.
+#[sqlx_test]
+async fn test_bf4_declared_integrated_primary_survives_ingestion(
+    pool: PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // Prepare BF4 Redfish reports and the admin and HostInband segments needed for DHCP and
+    // ingestion; all three fixture segments need a VLAN and VNI from the configured pools.
+    let test_harness = TestHarness::builder(pool.clone())
+        .with_resource_pools(
+            ResourcePoolBuilder::default()
+                .with_vlan_ids(1, 3)
+                .with_vnis(10001, 10003)
+                .build(),
+        )
+        .build()
+        .await;
+    let domain = test_harness.test_domain().await;
+    let underlay_segment = test_harness
+        .network_controller()
+        .create_underlay_segment(&domain)
+        .await;
+    let env = Env {
+        pool,
+        underlay_segment,
+        test_harness,
+    };
+    env.test_harness
+        .network_controller()
+        .create_admin_segment(&domain)
+        .await;
+    let inband_segment = env
+        .test_harness
+        .network_controller()
+        .create_host_inband_segment(&domain)
+        .await;
+    let mut reports = generate_managed_host_reports(HardwareType::NvidiaDgxVr).await?;
+    let dpu = &reports.dpus[0];
+    let host_bmc_mac = reports.host.machine_info.bmc_mac_address;
+    let dpu_bmc_mac = dpu.machine_info.bmc_mac_address;
+    let declared_mac: MacAddress = "02:00:00:00:aa:06".parse()?;
+
+    // Add a non-DPU NIC without a PCI path; explicit primary selection depends only on its MAC and Redfish ID.
+    reports.host.report.systems[0].ethernet_interfaces.push(
+        model::site_explorer::EthernetInterface {
+            id: Some("Integrated.Primary".to_string()),
+            mac_address: Some(declared_mac),
+            uefi_device_path: None,
+            ..Default::default()
+        },
+    );
+    assert_ne!(
+        Some(declared_mac),
+        dpu.report.systems[0].base_mac.map(|mac| mac.to_mac())
+    );
+    let mut host_bmc = env.new_machine(&host_bmc_mac.to_string(), "NVIDIA");
+    let mut dpu_bmc = env.new_machine(&dpu_bmc_mac.to_string(), "NVIDIA/BF/BMC");
+    host_bmc.discover_dhcp(env.api()).await?;
+    dpu_bmc.discover_dhcp(env.api()).await?;
+    // Lease the declared NIC before ingestion to exercise adoption of an existing anonymous
+    // HostInband interface.
+    let mut integrated = FakeMachine::new(inband_segment, &declared_mac.to_string(), "PXEClient");
+    integrated.discover_dhcp(env.api()).await?;
+
+    // Declare the integrated NIC before ingestion so identification and interface adoption see the same authority.
+    let mut txn = env.pool.begin().await?;
+    db::expected_machine::create(
+        &mut txn,
+        ExpectedMachine {
+            id: None,
+            bmc_mac_address: host_bmc_mac,
+            data: ExpectedMachineData {
+                serial_number: reports.host.report.systems[0]
+                    .serial_number
+                    .clone()
+                    .expect("host serial"),
+                bmc_username: "ADMIN".to_string(),
+                bmc_password: "PASS".to_string(),
+                metadata: Metadata::new_with_default_name(),
+                interfaces: vec![ExpectedInterface {
+                    mac_address: Some(declared_mac),
+                    role: ExpectedInterfaceRole::Host,
+                    primary: Some(true),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+        },
+    )
+    .await?;
+    txn.commit().await?;
+    let explorer = env.test_site_explorer(SiteExplorerConfig {
+        enabled: Arc::new(true.into()),
+        create_machines: Arc::new(true.into()),
+        explorations_per_run: 10,
+        retained_boot_interface_window: None,
+        ..Default::default()
+    });
+    let host_ip = host_bmc.ip.parse()?;
+    let dpu_ip = dpu_bmc.ip.parse()?;
+    explorer.insert_endpoint_results(vec![
+        (host_ip, Ok(reports.host.report.clone())),
+        (dpu_ip, Ok(dpu.report.clone())),
+    ]);
+    explorer.run_single_iteration().await?;
+    // Complete preingestion after exploration so the next iteration can ingest both endpoints.
+    let mut txn = env.pool.begin().await?;
+    for ip in [host_ip, dpu_ip] {
+        db::explored_endpoints::set_preingestion_complete(ip, &mut txn).await?;
+    }
+    txn.commit().await?;
+    explorer.run_single_iteration().await?;
+
+    // Reload through public APIs to prove the declared NIC survived both identification and durable target selection.
+    let mut txn = env.pool.begin().await?;
+    let host_id =
+        db::machine_topology::find_machine_id_by_bmc_mac::<HostMachineId>(&mut txn, host_bmc_mac)
+            .await?
+            .expect("host must be ingested despite non-DPU primary");
+    txn.commit().await?;
+    let host = env
+        .test_harness
+        .find_machine(host_id.into())
+        .await
+        .remove(0)
+        .status
+        .expect("host status");
+    assert_eq!(host.associated_dpu_machine_ids.len(), 1);
+    let primaries = host
+        .interfaces
+        .iter()
+        .filter(|interface| interface.primary_interface)
+        .collect::<Vec<_>>();
+    assert_eq!(primaries.len(), 1);
+    assert_eq!(primaries[0].mac_address, declared_mac.to_string());
+    let selection = bf4_boot_reconciliation(&env, host_id).await?;
+    let target = selection.desired_boot_interface.expect("declared target");
+    assert_eq!(target.mac_address, declared_mac.to_string());
+    assert_eq!(target.interface_id.as_deref(), Some("Integrated.Primary"));
+    assert_eq!(
+        selection.selection_source,
+        rpc::forge::BootInterfaceSelectionSource::ExpectedMachine as i32
+    );
+    assert!(
+        db::host_boot_interface::not_ready_reason(&env.pool, &host_id, 1)
+            .await?
+            .is_none()
+    );
     Ok(())
 }
 
