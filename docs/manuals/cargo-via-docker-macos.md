@@ -27,12 +27,14 @@ All commands below are run from the **repository root** unless noted.
 
 2. **cargo-make**  
    Used to run the Makefile tasks. Install if needed:
+
    ```bash
    cargo install cargo-make
    ```
 
 3. **CARGO_HOME (optional but recommended)**  
    So the container can reuse your Cargo cache:
+
    ```bash
    export CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}"
    ```
@@ -291,7 +293,7 @@ Or manually:
 KEA_VERSION=$(cat dev/docker/kea.version)
 docker build --build-arg KEA_VERSION="${KEA_VERSION}" \
   -f dev/docker/Dockerfile.build-container-x86_64 \
-  -t nico-build-x86_64 dev/docker
+  -t nico-build-x86_64 .
 ```
 
 On Apple Silicon this runs under emulation and can take a long time; step 7 (installing cargo tools) alone often takes 45+ minutes.
@@ -348,16 +350,20 @@ For tests that need Postgres, start it first (e.g. `docker compose up -d postgre
 3. **File ownership**  
    **`cargo-docker-minimal`** runs the container as root and runs `chown -R` on `/code` after each run, so `target/` is left owned by your user and "Permission denied" when writing to `target/` should not recur.  
    If you still see "Permission denied" (e.g. after using another Docker task that writes to the repo as root), from the repo root run:
+
    ```bash
    cargo make fix-target-permissions
    ```
+
    or manually: `sudo chown -R $(id -u):$(id -g) target` (or `.` for the whole repo).
 
 4. **Postgres for API tests**  
    Start Postgres (e.g. `docker-compose up -d postgresql`; if the Loki plugin is missing, use `-f docker-compose.no-loki.yml` as well), then set:
+
    ```bash
    export DATABASE_URL="postgres://nico_development:notforprod@host.docker.internal:5432/nico_development"
    ```
+
    Use **`host.docker.internal`** (not `localhost`) so the container can reach Postgres on the host. `cargo-docker-minimal` passes `DATABASE_URL` into the container when set.
 
 5. **Docker or tests hang**  
@@ -366,11 +372,13 @@ For tests that need Postgres, start it first (e.g. `docker compose up -d postgre
    - **Timeout:** Run tests with a time limit so they don’t hang indefinitely:
      - **Linux:** `timeout 300 cargo make cargo-docker-minimal -- test ...`
      - **macOS:** Install GNU coreutils then use `gtimeout`, or run without timeout and set `DATABASE_URL` so DB tests don’t hang:
+
        ```bash
        brew install coreutils   # one-time; provides gtimeout
        export DATABASE_URL="postgres://nico_development:notforprod@host.docker.internal:5432/nico_development"
        gtimeout 300 cargo make cargo-docker-minimal -- test -p nico-api ib_partition --no-default-features --no-fail-fast
        ```
+
      (300 seconds = 5 minutes; adjust as needed.)
 
 6. **Apple Silicon (M1/M2/M3) and Colima**  
@@ -382,6 +390,7 @@ For tests that need Postgres, start it first (e.g. `docker compose up -d postgre
 
 8. **Running without cargo-make**  
    You can run the same `docker run` locally. The minimal variant (after building `nico-build-minimal` once); add `-e DATABASE_URL="$DATABASE_URL"` when running tests that need the DB:
+
    ```bash
    docker run --rm \
      -v "$(pwd)":/code \
