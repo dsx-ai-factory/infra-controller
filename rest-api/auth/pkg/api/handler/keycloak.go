@@ -70,12 +70,6 @@ func (lh LoginHandler) Handle(c echo.Context) error {
 	if req.IsClientCredentials() {
 		logger.Info().Str("client_id", *req.ClientID).Msg("Processing client credentials authentication")
 
-		// Check if service accounts are enabled
-		if !lh.keycloakAuth.IsServiceAccountEnabled() {
-			logger.Error().Str("client_id", *req.ClientID).Msg("Client credentials requested but service accounts are not enabled")
-			return ccu.NewAPIErrorResponse(c, http.StatusUnauthorized, "Service accounts are not enabled", nil)
-		}
-
 		tokens, err := lh.keycloakAuth.ClientCredentialsAuth(ctx, *req.ClientID, *req.ClientSecret)
 		if err != nil {
 			logger.Error().Err(err).Msg("failed client credentials authentication")

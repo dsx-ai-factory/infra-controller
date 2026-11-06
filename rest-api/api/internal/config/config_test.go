@@ -270,12 +270,39 @@ func TestConfig_ValidateIssuersConfig(t *testing.T) {
 		}
 	}
 	kasIssuer := IssuerConfig{Name: "kas-api-key", Origin: cauth.TokenOriginKas, Issuer: "https://ngc-api.example.com"}
+	serviceAccountIssuer := func(name, org string) IssuerConfig {
+		issuer := jwtIssuer(name, cauth.TokenOriginCustom)
+		issuer.ClaimMappings = []cauth.ClaimMapping{{OrgName: org, OrgDisplayName: org, IsServiceAccount: true}}
+		return issuer
+	}
 
 	tests := []struct {
-		name    string
-		issuers []IssuerConfig
-		wantErr string
+		name         string
+		issuers      []IssuerConfig
+		disconnected bool
+		wantErr      string
 	}{
+		{
+			name:         "one service account mapping in disconnected mode",
+			issuers:      []IssuerConfig{serviceAccountIssuer("custom-one", "automation")},
+			disconnected: true,
+		},
+		{
+			name: "service account mappings in two issuers",
+			issuers: []IssuerConfig{
+				serviceAccountIssuer("custom-one", "automation"),
+				serviceAccountIssuer("custom-two", "automation-two"),
+			},
+			disconnected: true,
+			wantErr:      "only one claimMapping with isServiceAccount is allowed across all issuers",
+		},
+		{
+			name: "service account mappings in two issuers in connected mode",
+			issuers: []IssuerConfig{
+				serviceAccountIssuer("custom-one", "automation"),
+				serviceAccountIssuer("custom-two", "automation-two"),
+			},
+		},
 		{
 			name: "direct and legacy KAS",
 			issuers: []IssuerConfig{
@@ -372,6 +399,7 @@ func TestConfig_ValidateIssuersConfig(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			v := viper.New()
+			v.Set(ConfigEnvDisconnected, tt.disconnected)
 			cfg := &Config{v: v}
 
 			err := cfg.ValidateIssuersConfig(tt.issuers)
@@ -399,6 +427,8 @@ func TestGetOrInitTokenOriginConfig(t *testing.T) {
 		v.Set(ConfigKeycloakRealm, "test-realm")
 		v.Set(ConfigKeycloakClientID, "test-client")
 		v.Set(ConfigKeycloakClientSecret, "test-secret")
+		v.Set(ConfigKeycloakServiceAccountEnabled, true)
+		v.Set(ConfigKeycloakServiceAccountOrgs, []string{" NCX ", "acme", "ncx", ""})
 
 		c := &Config{v: v}
 		tokenOriginConfig := c.GetOrInitTokenOriginConfig()
@@ -407,7 +437,64 @@ func TestGetOrInitTokenOriginConfig(t *testing.T) {
 		jwksConfig := tokenOriginConfig.GetConfig("https://keycloak.example.com/realms/test-realm")
 		require.NotNil(t, jwksConfig)
 		assert.Nil(t, jwksConfig.GetJWKS())
+		assert.True(t, jwksConfig.ServiceAccount)
+		assert.Equal(t, []string{"ncx", "acme"}, jwksConfig.ServiceAccountOrgs)
 	})
+}
+
+func TestConfig_ValidateKeycloakConfig(t *testing.T) {
+	tests := []struct {
+		name               string
+		disconnected       bool
+		serviceAccount     bool
+		serviceAccountOrgs []string
+		wantErr            string
+	}{
+		{
+			name:               "service account in disconnected mode with one org",
+			disconnected:       true,
+			serviceAccount:     true,
+			serviceAccountOrgs: []string{"ncx"},
+		},
+		{
+			name:               "service account in disconnected mode with two orgs",
+			disconnected:       true,
+			serviceAccount:     true,
+			serviceAccountOrgs: []string{"ncx", "acme"},
+			wantErr:            "keycloak service account orgs must list exactly one org in disconnected mode",
+		},
+		{
+			name:               "service account in connected mode with two orgs",
+			serviceAccount:     true,
+			serviceAccountOrgs: []string{"ncx", "acme"},
+		},
+		{
+			name:           "service account without orgs",
+			serviceAccount: true,
+			wantErr:        "keycloak service account orgs must be specified",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			v := viper.New()
+			v.Set(ConfigKeycloakEnabled, true)
+			v.Set(ConfigKeycloakBaseURL, "http://keycloak:8082")
+			v.Set(ConfigKeycloakRealm, "nico")
+			v.Set(ConfigKeycloakClientID, "nico-rest")
+			v.Set(ConfigKeycloakClientSecret, "test-secret")
+			v.Set(ConfigEnvDisconnected, tt.disconnected)
+			v.Set(ConfigKeycloakServiceAccountEnabled, tt.serviceAccount)
+			v.Set(ConfigKeycloakServiceAccountOrgs, tt.serviceAccountOrgs)
+
+			err := (&Config{v: v}).ValidateKeycloakConfig()
+
+			if tt.wantErr == "" {
+				require.NoError(t, err)
+			} else {
+				require.ErrorContains(t, err, tt.wantErr)
+			}
+		})
+	}
 }
 
 func TestConfig_WatchConfigFile(t *testing.T) {
