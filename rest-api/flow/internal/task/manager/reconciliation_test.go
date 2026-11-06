@@ -121,7 +121,7 @@ func TestManagerImpl_ReconcileExecutions(t *testing.T) {
 		// Temporal after startup. No in-memory ownership from that process remains.
 		running := &taskdef.Task{ID: uuid.New(), RackID: rackID, Operation: testPowerControlOperation(t), Status: taskcommon.TaskStatusRunning, ExecutorType: taskcommon.ExecutorTypeTemporal, ExecutionID: "original-run"}
 		expires := time.Now().Add(time.Hour)
-		waiting := &taskdef.Task{ID: uuid.New(), RackID: rackID, Operation: testPowerControlOperation(t), Status: taskcommon.TaskStatusWaiting, QueueExpiresAt: &expires}
+		waiting := &taskdef.Task{ID: uuid.New(), RackID: rackID, Operation: testPowerControlOperation(t), Status: taskcommon.TaskStatusWaiting, ExecutorType: taskcommon.ExecutorTypeUnknown, QueueExpiresAt: &expires}
 		require.NoError(t, store.CreateTask(t.Context(), running))
 		require.NoError(t, store.CreateTask(t.Context(), waiting))
 		closed := time.Now().Add(-time.Hour).UTC().Truncate(time.Microsecond)

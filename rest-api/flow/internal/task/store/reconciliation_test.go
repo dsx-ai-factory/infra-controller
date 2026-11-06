@@ -89,7 +89,8 @@ func TestPostgresStore_ListTasksForReconciliation(t *testing.T) {
 	require.Len(t, first, 1)
 	require.Equal(t, ids[0], first[0].ID)
 	// Removing the first page must not shift the cursor past a surviving row.
-	_, err = store.FinishTaskExecution(t.Context(), first[0], &taskdef.ExecutionStatus{Status: taskcommon.TaskStatusTerminated, FinishedAt: func() *time.Time { v := time.Now(); return &v }()})
+	closed := time.Now()
+	_, err = store.FinishTaskExecution(t.Context(), first[0], &taskdef.ExecutionStatus{Status: taskcommon.TaskStatusTerminated, FinishedAt: &closed})
 	require.NoError(t, err)
 	next, err := store.ListTasksForReconciliation(t.Context(), taskcommon.ExecutorTypeTemporal, first[0].ID, 1)
 	require.NoError(t, err)
