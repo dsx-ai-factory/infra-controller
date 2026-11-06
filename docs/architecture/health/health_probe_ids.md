@@ -76,6 +76,39 @@ Example:
 power_supply 'PSU0_OutputPower': Critical - reading 1320.00W (power), valid range: 0.0 to 1500.0, caution: 1200.0 to 1300.0, critical: 0.0 to 1310.0
 ```
 
+## NVLink isolation health probe identifiers
+
+A host whose aggregate health carries the `IsolateFromNvLinkPartitions`
+classification, for example from the admin CLI `compute-tray-due-for-swap`
+template, is marked for NVLink isolation. On each NVLink partition monitor pass
+(`nvlink_config.monitor_run_interval`), the monitor removes the host's GPUs from
+every NVLink partition and records the progress as a `Merge` report under the
+source `nvlink-isolation`. The report states the membership NMX-C listed when the
+pass started, so a host reads as isolated on the pass after its removals
+complete.
+
+The monitor rewrites the report only when the status changes. A failed write
+leaves the stored report unchanged, is logged with the machine ID, and is
+retried on the next pass. When the host is no longer marked, the monitor removes
+the report.
+
+See [Moving or Replacing a Compute Tray](../../manuals/nvlink_partitioning.md#moving-or-replacing-a-compute-tray)
+for the operator steps.
+
+### `NvlinkIsolationPending`
+
+An alert that names the GPUs NMX-C still lists in a partition, or states that
+isolation cannot be confirmed because the host's NVLink GPU inventory is empty
+or contains a GPU whose stored UID is `0`. The alert carries
+[`PreventAllocations`](health_alert_classifications.md#preventallocations) and
+[`SuppressExternalAlerting`](health_alert_classifications.md#suppressexternalalerting).
+
+### `NvlinkIsolated`
+
+A success that the monitor reports once the host's NVLink GPU inventory is
+known and NMX-C lists none of those GPUs in any partition. The report then has
+no alerts.
+
 ## DPU related health probe identifiers
 
 ### `BgpPeeringTor`

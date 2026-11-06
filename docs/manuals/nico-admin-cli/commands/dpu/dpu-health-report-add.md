@@ -35,6 +35,8 @@ Predefined Template name\
 
 - out-for-repair
 
+- compute-tray-due-for-swap
+
 - degraded
 
 - validation

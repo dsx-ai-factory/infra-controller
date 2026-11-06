@@ -2017,6 +2017,149 @@ async fn test_subset_nvl_config_preserves_unconfigured_gpus_in_tray_partition(po
     assert_eq!(actual_tray_uids, expected_tray_uids);
 }
 
+/// A host marked for NVLink isolation leaves its tray default partition and is not placed back
+/// in one. The monitor reports progress under the `nvlink-isolation` source: pending while the
+/// GPUs are partitioned, isolated on the pass after the removals complete, and cleared once the
+/// mark is removed, which also returns the GPUs to their tray default partition.
+#[crate::sqlx_test]
+async fn test_nvlink_isolation_removes_tray_gpus_and_reports_progress(pool: sqlx::PgPool) {
+    const MARK_SOURCE: &str = "compute-tray-due-for-swap";
+
+    let mut config = common::api_fixtures::get_config();
+    if let Some(nvlink_config) = config.nvlink_config.as_mut() {
+        nvlink_config.enabled = true;
+    }
+    let env = common::api_fixtures::create_test_env_with_overrides(
+        pool.clone(),
+        TestEnvOverrides::with_config(config),
+    )
+    .await;
+    let mh = create_managed_host_with_hardware_info_template(
+        &env,
+        HardwareInfoTemplate::Custom(
+            crate::tests::common::api_fixtures::host::GB200_COMPUTE_TRAY_1_INFO_JSON,
+        ),
+    )
+    .await;
+
+    // Partition names and member counts as NMX-C reports them.
+    let partitions = async || {
+        let mut nmxc_client = env
+            .nmxc_sim
+            .create_client(libnmxc::Endpoint::new("http://localhost:4010").unwrap())
+            .await
+            .unwrap();
+        nmxc_client
+            .get_partition_info_list(GetPartitionInfoListRequest {
+                context: None,
+                partition_id_list: vec![],
+                partition_name_list: vec![],
+                gateway_id: libnmxc::NMX_C_GATEWAY_ID.into(),
+            })
+            .await
+            .unwrap()
+            .partition_info_list
+            .into_iter()
+            .map(|partition| (partition.name, partition.gpu_uid_list.len()))
+            .collect::<Vec<_>>()
+    };
+    // The stored isolation status: success IDs and "<alert id>: <message>" lines.
+    let isolation_status = async || {
+        let mut txn = env.db_txn().await;
+        let machine = mh.host().db_machine(&mut txn).await;
+        machine
+            .health_reports
+            .merges
+            .get("nvlink-isolation")
+            .map(|report| {
+                (
+                    report
+                        .successes
+                        .iter()
+                        .map(|success| success.id.to_string())
+                        .collect::<Vec<_>>(),
+                    report
+                        .alerts
+                        .iter()
+                        .map(|alert| format!("{}: {}", alert.id, alert.message))
+                        .collect::<Vec<_>>(),
+                )
+            })
+    };
+
+    env.run_nvl_partition_monitor_iteration().await;
+    assert_eq!(
+        partitions().await,
+        vec![("tray_partition_0".to_string(), 4)]
+    );
+    assert_eq!(
+        isolation_status().await,
+        None,
+        "unmarked hosts carry no status"
+    );
+
+    let mut mark = health_report::HealthReport::empty(MARK_SOURCE.to_string());
+    mark.alerts.push(health_report::HealthProbeAlert {
+        id: "Maintenance".parse().unwrap(),
+        target: Some("ComputeTrayDueForSwap".to_string()),
+        in_alert_since: None,
+        message: String::new(),
+        tenant_message: None,
+        classifications: vec![
+            health_report::HealthAlertClassification::isolate_from_nvlink_partitions(),
+        ],
+    });
+    let mut txn = env.pool.begin().await.unwrap();
+    db::machine::insert_health_report(
+        &mut txn,
+        &mh.id,
+        health_report::HealthReportApplyMode::Merge,
+        &mark,
+        false,
+    )
+    .await
+    .unwrap();
+    txn.commit().await.unwrap();
+
+    // Pass 1: the GPUs are still partitioned when the pass starts; it removes them.
+    env.run_nvl_partition_monitor_iteration().await;
+    assert_eq!(partitions().await, vec![], "the tray partition was deleted");
+    let (successes, alerts) = isolation_status().await.expect("status recorded");
+    assert_eq!(successes, Vec::<String>::new());
+    assert_eq!(alerts.len(), 1);
+    assert!(
+        alerts[0]
+            .starts_with("NvlinkIsolationPending: 4 of 4 NVLink GPUs are still in a partition"),
+        "{alerts:?}"
+    );
+
+    // Pass 2: NMX-C lists none of the GPUs, and they are not placed back in a partition.
+    env.run_nvl_partition_monitor_iteration().await;
+    assert_eq!(
+        isolation_status().await,
+        Some((vec!["NvlinkIsolated".to_string()], vec![]))
+    );
+    assert_eq!(partitions().await, vec![]);
+
+    // Pass 3: once the mark is removed, the status is cleared and the GPUs return.
+    let mut txn = env.pool.begin().await.unwrap();
+    db::machine::remove_health_report(
+        &mut txn,
+        &mh.id,
+        health_report::HealthReportApplyMode::Merge,
+        MARK_SOURCE,
+    )
+    .await
+    .unwrap();
+    txn.commit().await.unwrap();
+    env.run_nvl_partition_monitor_iteration().await;
+    assert_eq!(isolation_status().await, None);
+    assert_eq!(
+        partitions().await,
+        vec![("tray_partition_0".to_string(), 4)]
+    );
+}
+
 #[crate::sqlx_test]
 async fn test_create_instance_gpu_in_unknown_partition(pool: sqlx::PgPool) {
     let mut config = common::api_fixtures::get_config();

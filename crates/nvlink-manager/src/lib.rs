@@ -243,9 +243,22 @@ struct NmxcPartitionOperation {
 #[derive(Debug, Clone)]
 pub enum NmxcPartitionOperationType {
     Create,
-    Remove(u32),                 // NMX-C partition ID
+    Remove(u32), // NMX-C partition ID
+    /// Removal of the NMX-C default partition. Its failure aborts the monitor pass.
+    RemoveDefaultPartition(u32), // NMX-C partition ID
+    /// Removal of an emptied unknown or tray default partition. Its failure is retried next
+    /// pass like any other operation.
     RemoveUnknownPartition(u32), // NMX-C partition ID
-    Update(u32),                 // NMX-C partition ID
+    Update(u32), // NMX-C partition ID
+}
+
+impl NmxcPartitionOperationType {
+    /// Whether NMX-C refusing this delete of an untracked partition aborts the monitor pass.
+    /// Only the NMX-C default partition's delete does; an emptied unknown or tray default
+    /// partition that NMX-C refuses to delete is retried next pass like any other operation.
+    fn failed_delete_aborts_pass(&self) -> bool {
+        matches!(self, Self::RemoveDefaultPartition(_))
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -316,6 +329,29 @@ fn is_gpu_in_tray_default_partition(partition: &PartitionInfo, slot_id: i32) -> 
     partition.name == tray_default_partition_name(slot_id)
 }
 
+/// Whether an operator marked the host for NVLink isolation with the
+/// `IsolateFromNvLinkPartitions` health classification (for example through the
+/// admin-cli `compute-tray-due-for-swap` template) before moving or replacing its tray.
+fn is_marked_for_nvlink_isolation(snapshot: &ManagedHostStateSnapshot) -> bool {
+    snapshot
+        .aggregate_health
+        .find_alert_by_classification(
+            &health_report::HealthAlertClassification::isolate_from_nvlink_partitions(),
+        )
+        .is_some()
+}
+
+/// How [`NvlPartitionMonitor::check_machine_and_handle_gpu_removals`] treats a host's GPUs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GpuRemovalMode {
+    /// Host without an instance in admin network mode: remove GPUs from tenant and unknown
+    /// partitions and keep them in the tray default partition.
+    Idle,
+    /// Host marked for NVLink isolation: remove GPUs from every partition, including the tray
+    /// default partition, and leave them out.
+    Isolate,
+}
+
 impl PartitionProcessingContext {
     fn new(
         nmx_c_partitions: Vec<PartitionInfo>,
@@ -364,7 +400,7 @@ impl PartitionProcessingContext {
             .or_default()
             .push(NmxcPartitionOperation {
                 domain_uuid: None,
-                operation_type: NmxcPartitionOperationType::RemoveUnknownPartition(
+                operation_type: NmxcPartitionOperationType::RemoveDefaultPartition(
                     default_nmx_c_id,
                 ),
                 gpu_uids: vec![],
@@ -504,6 +540,44 @@ impl PartitionProcessingContext {
                 },
             )
         })
+    }
+
+    // Observation for a host marked for NVLink isolation. Each GPU reports the tenant partition
+    // NMX-C currently has it in, which is none once the isolation removals complete.
+    fn isolated_host_observation(
+        &self,
+        mh: &ManagedHostStateSnapshot,
+    ) -> MachineNvLinkStatusObservation {
+        let nvlink_gpus = mh
+            .host_snapshot
+            .nvlink_info
+            .iter()
+            .flat_map(|info| {
+                info.gpus.iter().map(move |gpu| {
+                    let mut observation = MachineNvLinkGpuStatusObservation {
+                        device_instance: gpu.device_id as u32 - 1,
+                        domain_id: info.domain_uuid,
+                        gpu_id: gpu.guid.to_string(),
+                        guid: gpu.guid,
+                        ..Default::default()
+                    };
+                    if let Some((partition_id, logical_partition_id, _, _)) = self
+                        .gpu_to_partition_map
+                        .get(&gpu.guid)
+                        .and_then(|partition| partition.partition_id)
+                        .and_then(|id| self.get_db_partition_info(id.partition_id))
+                    {
+                        observation.partition_id = partition_id;
+                        observation.logical_partition_id = logical_partition_id;
+                    }
+                    observation
+                })
+            })
+            .collect();
+        MachineNvLinkStatusObservation {
+            observed_at: Utc::now(),
+            nvlink_gpus,
+        }
     }
 
     // Get the list of GPUs that should remain in a partition after removing a specific GPU from a logical partition.
@@ -1457,6 +1531,11 @@ impl NvlPartitionMonitor {
             machine_nvlink_info,
         );
 
+        // Report isolation progress for marked hosts from this pass's partition membership. A
+        // failed write never blocks reconciliation.
+        self.record_nvlink_isolation_status(&partition_processing_context, &managed_host_snapshots)
+            .await;
+
         // Check if any partitions need to be created, updated, or deleted.
         let observations = self.check_nv_link_partitions(
             &mut partition_processing_context,
@@ -1548,9 +1627,36 @@ impl NvlPartitionMonitor {
 
         for mh in mh_snapshots.values() {
             metrics.num_machines_scanned += 1;
+            if is_marked_for_nvlink_isolation(mh) {
+                // The host is about to have its tray moved or replaced. Remove its GPUs from every
+                // partition while NMX-C still recognizes them, and skip instance reconciliation,
+                // which would add them back to the tenant's partition.
+                if let Err(e) = self.check_machine_and_handle_gpu_removals(
+                    mh,
+                    partition_ctx,
+                    GpuRemovalMode::Isolate,
+                ) {
+                    tracing::warn!(
+                        machine_id = %mh.host_snapshot.id,
+                        error = %e,
+                        "Failed to enqueue NVLink isolation removals",
+                    );
+                }
+                if let Some(instance) = &mh.instance {
+                    machine_gpu_statuses.insert(
+                        instance.machine_id,
+                        partition_ctx.isolated_host_observation(mh),
+                    );
+                }
+                continue;
+            }
             let Some(instance) = &mh.instance else {
                 // For machines with no instance, check if machine is in admin network and any cleanup is required
-                let _ = self.check_machine_and_handle_gpu_removals(mh, partition_ctx);
+                let _ = self.check_machine_and_handle_gpu_removals(
+                    mh,
+                    partition_ctx,
+                    GpuRemovalMode::Idle,
+                );
                 continue;
             };
             metrics.num_instances_scanned += 1;
@@ -1901,17 +2007,23 @@ impl NvlPartitionMonitor {
 
     // Managed hosts that are no longer an instance should not have GPUs in tenant or NMX-C default
     // partitions: move every GPU into its tray default partition (`tray_partition_{slot_id}`).
+    //
+    // With `GpuRemovalMode::Isolate`, the host is marked for NVLink isolation: every GPU leaves
+    // every partition, including the tray default partition, and is not placed anywhere.
     pub fn check_machine_and_handle_gpu_removals(
         &self,
         mh: &ManagedHostStateSnapshot,
         partition_ctx: &mut PartitionProcessingContext,
+        mode: GpuRemovalMode,
     ) -> NvLinkManagerResult<()> {
         // If not in admin-network mode, skip processing. GPUs should stay
         // attached to tenant partitions, but zero-DPU hosts are always
         // considered admin network (since they don't have a DPU to put them
         // in an overlay network). In other words, zero-DPU hosts get GPU
         // removals, but hosts with DPUs in tenant networks don't.
-        if !mh.use_admin_network() {
+        // Isolation applies regardless: the tray may be failed with its
+        // instance still assigned.
+        if mode == GpuRemovalMode::Idle && !mh.use_admin_network() {
             return Ok(());
         }
 
@@ -1920,6 +2032,7 @@ impl NvlPartitionMonitor {
                 let nmxc_partition = match partition_ctx.gpu_to_partition_map.get(&gpu.guid) {
                     // GPU is in a partition, so we need to remove it from the partition.
                     Some(p) => p,
+                    None if mode == GpuRemovalMode::Isolate => continue,
                     None => {
                         // GPU is not in any NMX-C partition; place it in the tray default partition
                         // (named from this GPU's slot id), creating that partition if needed.
@@ -1932,7 +2045,9 @@ impl NvlPartitionMonitor {
                     }
                 };
 
-                if is_gpu_in_tray_default_partition(nmxc_partition, gpu.slot_id) {
+                if mode == GpuRemovalMode::Idle
+                    && is_gpu_in_tray_default_partition(nmxc_partition, gpu.slot_id)
+                {
                     continue;
                 }
 
@@ -1973,6 +2088,7 @@ impl NvlPartitionMonitor {
                         gpu_guid = %gpu.guid,
                         logical_partition_id = %logical_id,
                         gpus_to_keep = ?gpus_to_keep,
+                        removal_mode = ?mode,
                         "Handling GPU removal from partition for machine in admin network"
                     );
                     partition_ctx.handle_gpu_removal(&gpu_ctx, gpus_to_keep)?;
@@ -2001,6 +2117,7 @@ impl NvlPartitionMonitor {
                         gpu_guid = %gpu.guid,
                         nmx_c_partition_id = pid_struct.partition_id,
                         gpus_to_keep = ?gpus_to_keep,
+                        removal_mode = ?mode,
                         "Handling GPU removal from NMX-C partition without DB row (admin network)"
                     );
                     partition_ctx.handle_gpu_removal_from_unknown_partition(
@@ -2106,6 +2223,63 @@ impl NvlPartitionMonitor {
         Ok(())
     }
 
+    /// Keeps the isolation status report on each host in the group current: hosts marked for
+    /// NVLink isolation get the status from this pass's NMX-C partition membership (see
+    /// [`nvlink_isolation_status_report`]), and the report is removed from hosts that are no
+    /// longer marked. The status reflects membership before this pass's removals, so a host
+    /// reads as isolated on the pass after its removals complete. A failed write is logged and
+    /// retried on the next pass, which checks every group again.
+    async fn record_nvlink_isolation_status(
+        &self,
+        partition_ctx: &PartitionProcessingContext,
+        mh_snapshots: &HashMap<MachineId, ManagedHostStateSnapshot>,
+    ) {
+        for (machine_id, mh) in mh_snapshots {
+            let existing = mh
+                .host_snapshot
+                .health_reports
+                .merges
+                .get(NVLINK_ISOLATION_REPORT_SOURCE);
+
+            let result = if is_marked_for_nvlink_isolation(mh) {
+                let gpus = mh
+                    .host_snapshot
+                    .nvlink_info
+                    .as_ref()
+                    .map_or(&[][..], |info| info.gpus.as_slice());
+                let mut report =
+                    nvlink_isolation_status_report(gpus, &partition_ctx.gpu_to_partition_map);
+                if existing.is_some_and(|previous| same_nvlink_isolation_status(previous, &report))
+                {
+                    continue;
+                }
+                report.update_in_alert_since(existing);
+                tracing::info!(
+                    %machine_id,
+                    isolated = report.alerts.is_empty(),
+                    "Recording NVLink isolation status"
+                );
+                set_nvlink_isolation_status(&self.db_pool, machine_id, &report).await
+            } else if existing.is_some() {
+                tracing::info!(
+                    %machine_id,
+                    "Host is no longer marked for NVLink isolation - clearing isolation status"
+                );
+                clear_nvlink_isolation_status(&self.db_pool, machine_id).await
+            } else {
+                continue;
+            };
+
+            if let Err(error) = result {
+                tracing::warn!(
+                    %machine_id,
+                    %error,
+                    "Failed to record NVLink isolation status; retrying next pass"
+                );
+            }
+        }
+    }
+
     async fn execute_nmx_c_operations(
         &self,
         nmxc_client: &mut dyn Nmxc,
@@ -2195,7 +2369,8 @@ impl NvlPartitionMonitor {
                             }
                         }
                     }
-                    NmxcPartitionOperationType::RemoveUnknownPartition(nmx_c_partition_id) => {
+                    NmxcPartitionOperationType::RemoveDefaultPartition(nmx_c_partition_id)
+                    | NmxcPartitionOperationType::RemoveUnknownPartition(nmx_c_partition_id) => {
                         let request = libnmxc::nmxc_model::DeletePartitionRequest {
                             context: None,
                             partition_id: Some(libnmxc::nmxc_model::PartitionId {
@@ -2206,10 +2381,18 @@ impl NvlPartitionMonitor {
                         };
                         match nmxc_client.delete_partition(request).await {
                             Ok(_) => true,
-                            Err(e) => {
+                            Err(e) if operation.operation_type.failed_delete_aborts_pass() => {
                                 return Err(NvLinkManagerError::internal(format!(
                                     "Failed to delete default partition: {e}"
                                 )));
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    %logical_partition_id,
+                                    %nmx_c_partition_id,
+                                    "Failed to delete emptied partition on NMX-C, continuing with other operations: {e}"
+                                );
+                                false
                             }
                         }
                     }
@@ -2405,7 +2588,8 @@ impl NvlPartitionMonitor {
                         // Partition membership is not tracked in the partitions table. The status observation of the
                         // added/removed GPUs will be updated.
                     }
-                    NmxcPartitionOperationType::RemoveUnknownPartition(_) => {
+                    NmxcPartitionOperationType::RemoveDefaultPartition(_)
+                    | NmxcPartitionOperationType::RemoveUnknownPartition(_) => {
                         // No-op, since default partition membership is not tracked in the partitions table. The status observation of the
                         // added/removed GPUs will be updated.
                     }
@@ -2582,6 +2766,155 @@ fn record_domain_health(
     }
 }
 
+/// Source of the isolation status report this monitor keeps on hosts marked for NVLink
+/// isolation.
+const NVLINK_ISOLATION_REPORT_SOURCE: &str = "nvlink-isolation";
+
+/// Builds the isolation status report for a host marked for NVLink isolation, from the NMX-C
+/// partition membership seen this pass. It reports `NvlinkIsolated` as a success only when the
+/// host's GPU inventory is known and NMX-C lists none of those GPUs in a partition. Otherwise
+/// it carries an `NvlinkIsolationPending` alert naming the GPUs still partitioned, so an
+/// operator never has to read the absence of an alert as confirmation.
+fn nvlink_isolation_status_report(
+    gpus: &[NvLinkGpu],
+    gpu_to_partition_map: &HashMap<u64, PartitionInfo>,
+) -> health_report::HealthReport {
+    // A GUID of 0 is the parse-failure placeholder from `parse_nvlink_gpu_fabric_guid`, so
+    // a GPU carrying it cannot be checked against NMX-C.
+    let pending_message = if gpus.is_empty() || gpus.iter().any(|gpu| gpu.guid == 0) {
+        Some(
+            "Cannot confirm NVLink isolation: the host's NVLink GPU inventory is incomplete"
+                .to_string(),
+        )
+    } else {
+        let partitioned: Vec<String> = gpus
+            .iter()
+            .filter(|gpu| gpu_to_partition_map.contains_key(&gpu.guid))
+            .map(|gpu| gpu.guid.to_string())
+            .collect();
+        (!partitioned.is_empty()).then(|| {
+            format!(
+                "{} of {} NVLink GPUs are still in a partition: {}",
+                partitioned.len(),
+                gpus.len(),
+                partitioned.join(", ")
+            )
+        })
+    };
+
+    let (successes, alerts) = match pending_message {
+        Some(message) => (
+            vec![],
+            vec![health_report::HealthProbeAlert {
+                id: health_report::HealthProbeId::nvlink_isolation_pending(),
+                target: None,
+                in_alert_since: Some(Utc::now()),
+                message,
+                tenant_message: None,
+                classifications: vec![
+                    health_report::HealthAlertClassification::prevent_allocations(),
+                    health_report::HealthAlertClassification::suppress_external_alerting(),
+                ],
+            }],
+        ),
+        None => (
+            vec![health_report::HealthProbeSuccess {
+                id: health_report::HealthProbeId::nvlink_isolated(),
+                target: None,
+            }],
+            vec![],
+        ),
+    };
+
+    health_report::HealthReport {
+        source: NVLINK_ISOLATION_REPORT_SOURCE.to_string(),
+        triggered_by: None,
+        observed_at: Some(Utc::now()),
+        successes,
+        alerts,
+    }
+}
+
+/// Whether two isolation status reports state the same status, ignoring timestamps, so an
+/// unchanged status is not rewritten every pass.
+fn same_nvlink_isolation_status(
+    a: &health_report::HealthReport,
+    b: &health_report::HealthReport,
+) -> bool {
+    let status = |report: &health_report::HealthReport| {
+        (
+            report
+                .successes
+                .iter()
+                .map(|success| success.id.clone())
+                .collect::<Vec<_>>(),
+            report
+                .alerts
+                .iter()
+                .map(|alert| {
+                    (
+                        alert.id.clone(),
+                        alert.message.clone(),
+                        alert.classifications.clone(),
+                    )
+                })
+                .collect::<Vec<_>>(),
+        )
+    };
+    status(a) == status(b)
+}
+
+/// Writes the isolation status report for the machine as a merge report, replacing the
+/// previous entry under its source and leaving reports from other sources untouched.
+async fn set_nvlink_isolation_status(
+    db_pool: &PgPool,
+    machine_id: &MachineId,
+    report: &health_report::HealthReport,
+) -> NvLinkManagerResult<()> {
+    let mut conn = db_pool
+        .acquire()
+        .await
+        .map_err(|e| NvLinkManagerError::internal(format!("Failed to acquire connection: {e}")))?;
+
+    db::machine::insert_health_report(
+        &mut conn,
+        machine_id,
+        health_report::HealthReportApplyMode::Merge,
+        report,
+        false, // overwrite existing
+    )
+    .await
+    .map_err(|e| {
+        NvLinkManagerError::internal(format!("Failed to set NVLink isolation status: {e}"))
+    })?;
+
+    Ok(())
+}
+
+/// Removes the isolation status report from the machine.
+async fn clear_nvlink_isolation_status(
+    db_pool: &PgPool,
+    machine_id: &MachineId,
+) -> NvLinkManagerResult<()> {
+    let mut conn = db_pool
+        .acquire()
+        .await
+        .map_err(|e| NvLinkManagerError::internal(format!("Failed to acquire connection: {e}")))?;
+
+    db::machine::remove_health_report(
+        &mut conn,
+        machine_id,
+        health_report::HealthReportApplyMode::Merge,
+        NVLINK_ISOLATION_REPORT_SOURCE,
+    )
+    .await
+    .map_err(|e| {
+        NvLinkManagerError::internal(format!("Failed to clear NVLink isolation status: {e}"))
+    })?;
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod domain_uuid_observation_tests {
     use carbide_uuid::machine::{MachineIdSource, MachineType};
@@ -2701,6 +3034,72 @@ mod partition_classification_tests {
                 is_gpu_in_tray_default_partition(&partition, slot_id),
                 expected,
                 "partition name {name:?}, slot {slot_id}",
+            );
+        }
+    }
+
+    /// The isolation status is pending, never isolated, whenever the host's GPUs cannot all be
+    /// checked, and it names only the GPUs NMX-C still lists in a partition.
+    #[test]
+    fn isolation_status_is_pending_until_every_known_gpu_is_unpartitioned() {
+        use std::collections::HashMap;
+
+        use model::hardware_info::NvLinkGpu;
+
+        use super::nvlink_isolation_status_report;
+
+        let gpu = |guid: u64| NvLinkGpu {
+            tray_index: 1,
+            slot_id: 1,
+            device_id: 1,
+            guid,
+        };
+        let partitioned = HashMap::from([(0x10, PartitionInfo::default())]);
+        let incomplete =
+            "Cannot confirm NVLink isolation: the host's NVLink GPU inventory is incomplete";
+        let cases = [
+            ("no GPU inventory", vec![], incomplete),
+            ("placeholder GUID", vec![gpu(0x11), gpu(0)], incomplete),
+            (
+                "one of two GPUs partitioned",
+                vec![gpu(0x10), gpu(0x11)],
+                "1 of 2 NVLink GPUs are still in a partition: 16",
+            ),
+        ];
+
+        for (scenario, gpus, expected_message) in cases {
+            let report = nvlink_isolation_status_report(&gpus, &partitioned);
+            assert!(report.successes.is_empty(), "{scenario}: never isolated");
+            assert_eq!(report.alerts.len(), 1, "{scenario}");
+            assert_eq!(report.alerts[0].message, expected_message, "{scenario}");
+            assert!(
+                report.alerts[0]
+                    .classifications
+                    .contains(&health_report::HealthAlertClassification::prevent_allocations()),
+                "{scenario}"
+            );
+        }
+    }
+
+    /// Only a refused delete of the NMX-C default partition aborts the monitor pass. An emptied
+    /// unknown or tray default partition, such as one left behind by NVLink isolation, is retried
+    /// next pass instead.
+    #[test]
+    fn only_a_failed_default_partition_delete_aborts_the_pass() {
+        use super::NmxcPartitionOperationType;
+
+        let cases = [
+            (
+                NmxcPartitionOperationType::RemoveDefaultPartition(32766),
+                true,
+            ),
+            (NmxcPartitionOperationType::RemoveUnknownPartition(9), false),
+        ];
+        for (operation_type, expected) in cases {
+            assert_eq!(
+                operation_type.failed_delete_aborts_pass(),
+                expected,
+                "{operation_type:?}"
             );
         }
     }

@@ -291,6 +291,7 @@ fn health_override_templates_value_enum() {
             T::HostUpdate => "host-update",
             T::InternalMaintenance => "internal-maintenance",
             T::OutForRepair => "out-for-repair",
+            T::ComputeTrayDueForSwap => "compute-tray-due-for-swap",
             T::Degraded => "degraded",
             T::Validation => "validation",
             T::SuppressExternalAlerting => "suppress-external-alerting",
@@ -320,6 +321,10 @@ fn health_override_templates_value_enum() {
 
         "out-for-repair" {
             "out-for-repair" => Yields(template_name(&T::OutForRepair)),
+        }
+
+        "compute-tray-due-for-swap" {
+            "compute-tray-due-for-swap" => Yields(template_name(&T::ComputeTrayDueForSwap)),
         }
 
         "degraded" {

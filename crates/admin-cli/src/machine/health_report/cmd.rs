@@ -97,6 +97,19 @@ pub fn get_health_report(template: HealthReportTemplates, message: Option<String
                 .classifications
                 .push(HealthAlertClassification::exclude_from_state_machine_sla());
         }
+        // Template applied before a compute tray is physically moved or replaced. Besides
+        // holding the host out of allocation like `OutForRepair`, it tells the NVLink
+        // partition monitor to remove the host's GPUs from every NVLink partition. It uses
+        // its own source so that adding it does not replace an existing `manual-maintenance`
+        // hold, such as `OutForRepair` or a stop-reboot guard.
+        HealthReportTemplates::ComputeTrayDueForSwap => {
+            report.source = "compute-tray-due-for-swap".to_string();
+            report.alerts[0].target = Some("ComputeTrayDueForSwap".to_string());
+            report.alerts[0].classifications.extend([
+                HealthAlertClassification::exclude_from_state_machine_sla(),
+                HealthAlertClassification::isolate_from_nvlink_partitions(),
+            ]);
+        }
         HealthReportTemplates::Degraded => {
             report.source = "manual-maintenance".to_string();
             report.alerts[0].target = Some("Degraded".to_string());
@@ -447,6 +460,25 @@ mod tests {
             alert
                 .classifications
                 .contains(&HealthAlertClassification::suppress_external_alerting())
+        );
+    }
+
+    #[test]
+    fn test_compute_tray_due_for_swap_template_isolates_from_nvlink_partitions() {
+        let report = get_health_report(HealthReportTemplates::ComputeTrayDueForSwap, None);
+
+        // A source of its own, so adding it never replaces a `manual-maintenance` hold.
+        assert_eq!(report.source, "compute-tray-due-for-swap");
+        let alert = &report.alerts[0];
+        assert_eq!(alert.target, Some("ComputeTrayDueForSwap".to_string()));
+        assert_eq!(
+            alert.classifications,
+            vec![
+                HealthAlertClassification::prevent_allocations(),
+                HealthAlertClassification::suppress_external_alerting(),
+                HealthAlertClassification::exclude_from_state_machine_sla(),
+                HealthAlertClassification::isolate_from_nvlink_partitions(),
+            ]
         );
     }
 }
