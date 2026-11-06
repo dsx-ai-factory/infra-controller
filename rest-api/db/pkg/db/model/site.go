@@ -229,6 +229,11 @@ func (s *Site) BeforeCreateTable(ctx context.Context, query *bun.CreateTableQuer
 type SiteDAO interface {
 	//
 	GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, includeRelations []string, includeDeleted bool, forUpdate bool) (*Site, error)
+	// GetForShare requires a transaction and returns a nondeleted Site without
+	// relations. Shared readers coexist while status/config changes and deletion
+	// wait until the transaction completes. Missing or soft-deleted Sites return
+	// db.ErrDoesNotExist; a nil transaction returns db.ErrInvalidValue.
+	GetForShare(ctx context.Context, tx *db.Tx, id uuid.UUID) (*Site, error)
 	//
 	GetAll(ctx context.Context, tx *db.Tx, filter SiteFilterInput, page paginator.PageInput, includeRelations []string) (sites []Site, total int, err error)
 	// GetCount returns total count of rows for specified filter
@@ -249,29 +254,47 @@ type SiteSQLDAO struct {
 
 // GetByID returns a Site by its ID
 func (ssd SiteSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, includeRelations []string, includeDeleted bool, forUpdate bool) (_ *Site, retErr error) {
-	if forUpdate && tx == nil {
-		return nil, fmt.Errorf("%w: locking a Site requires a transaction", db.ErrInvalidValue)
-	}
 	// Create a child span and set the attributes for current request
 	ctx, stDAOSpan := cotel.StartSpan(ctx, "SiteDAO.GetByID")
 	defer func() { cotel.EndSpan(stDAOSpan, retErr) }()
 	cotel.SetAttribute(stDAOSpan, attribute.String("id", id.String()))
 
-	st := &Site{}
-
-	query := db.GetIDB(tx, ssd.dbSession).NewSelect().Model(st).Where("st.id = ?", id)
+	lockClause := ""
 	if forUpdate {
 		// Exclude Site deletion while allowing child inserts to check their Site foreign key.
-		query = query.For("NO KEY UPDATE OF st")
+		lockClause = "NO KEY UPDATE OF st"
+	}
+	return ssd.getByID(ctx, tx, id, includeRelations, includeDeleted, lockClause)
+}
+
+// GetForShare reads a nondeleted Site without relations in a required
+// transaction. Other shared readers can proceed, while Site status/config
+// changes and deletion wait until the transaction completes. Missing or
+// soft-deleted Sites return db.ErrDoesNotExist; nil tx returns db.ErrInvalidValue.
+func (ssd SiteSQLDAO) GetForShare(ctx context.Context, tx *db.Tx, id uuid.UUID) (_ *Site, retErr error) {
+	ctx, stDAOSpan := cotel.StartSpan(ctx, "SiteDAO.GetForShare")
+	defer func() { cotel.EndSpan(stDAOSpan, retErr) }()
+	cotel.SetAttribute(stDAOSpan, attribute.String("id", id.String()))
+
+	return ssd.getByID(ctx, tx, id, nil, false, "SHARE OF st")
+}
+
+// Keep lock clauses local to the named accessors above.
+func (ssd SiteSQLDAO) getByID(ctx context.Context, tx *db.Tx, id uuid.UUID, includeRelations []string, includeDeleted bool, lockClause string) (*Site, error) {
+	if lockClause != "" && tx == nil {
+		return nil, fmt.Errorf("%w: locking a Site requires a transaction", db.ErrInvalidValue)
+	}
+	st := &Site{}
+	query := db.GetIDB(tx, ssd.dbSession).NewSelect().Model(st).Where("st.id = ?", id)
+	if lockClause != "" {
+		query = query.For(lockClause)
 	}
 	for _, relation := range includeRelations {
 		query = query.Relation(relation)
 	}
-
 	if includeDeleted {
 		query = query.WhereDeleted()
 	}
-
 	err := query.Scan(ctx)
 	if err != nil {
 		if err == sql.ErrNoRows {
@@ -279,7 +302,6 @@ func (ssd SiteSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, incl
 		}
 		return nil, err
 	}
-
 	return st, nil
 }
 

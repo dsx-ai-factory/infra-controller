@@ -56,6 +56,10 @@ const (
 	// ConfigExpectedMachineBatchRecoveryEnabled enables durable reservations
 	// for new Expected Machine create batches.
 	ConfigExpectedMachineBatchRecoveryEnabled = "api.expectedMachineBatchRecovery.enabled"
+	// ConfigSkuDeletionRecoveryEnabled gates new durable SKU deletion attempts.
+	// Activation requires upgraded writers, quiesced SKU mutations, resolved legacy
+	// results, and enabling all API writers before mutations resume.
+	ConfigSkuDeletionRecoveryEnabled = "api.skuDeletionRecovery.enabled"
 
 	// ConfigLogLevel specifies the log level
 	ConfigLogLevel = "log.level"
@@ -867,6 +871,12 @@ func (c *Config) GetExpectedMachineBatchRecoveryEnabled() bool {
 	return c.v.GetBool(ConfigExpectedMachineBatchRecoveryEnabled)
 }
 
+// GetSkuDeletionRecoveryEnabled gates new deletion intents and defaults to false.
+// Existing intents remain fenced and recover regardless of this setting.
+func (c *Config) GetSkuDeletionRecoveryEnabled() bool {
+	return c.v.GetBool(ConfigSkuDeletionRecoveryEnabled)
+}
+
 // GetLogLevel returns the log level
 func (c *Config) GetLogLevel() string {
 	return c.v.GetString(ConfigLogLevel)
@@ -1417,6 +1427,7 @@ func newAPIConfigViper() *viper.Viper {
 	v.SetDefault(ConfigAPIPort, 8388)
 	v.SetDefault(ConfigAPIRouteVersion, "v1")
 	v.SetDefault(ConfigExpectedMachineBatchRecoveryEnabled, false)
+	v.SetDefault(ConfigSkuDeletionRecoveryEnabled, false)
 	v.AutomaticEnv()
 	return v
 }

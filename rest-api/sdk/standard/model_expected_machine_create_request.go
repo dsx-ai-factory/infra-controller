@@ -38,7 +38,7 @@ type ExpectedMachineCreateRequest struct {
 	FallbackDPUSerialNumbers []string `json:"fallbackDPUSerialNumbers,omitempty"`
 	// Optional expected host NIC declarations. Omission or null creates an empty list.
 	Interfaces []ExpectedMachineInterface `json:"interfaces,omitempty"`
-	// Optional ID of an existing SKU at this Expected Machine's Site. Omission or null leaves the SKU association unset. REST rejects an empty string with HTTP 400.
+	// Optional ID of an existing SKU at this Expected Machine's Site. Omission or null leaves the SKU association unset. REST rejects an empty string with HTTP 400. A SKU with a pending deletion is rejected with HTTP 422 for single requests and HTTP 400 for batch requests.
 	SkuId NullableString `json:"skuId,omitempty"`
 	// Optional rack identifier for this component
 	RackId NullableString `json:"rackId,omitempty"`

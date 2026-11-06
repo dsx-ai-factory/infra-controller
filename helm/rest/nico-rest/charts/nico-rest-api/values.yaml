@@ -111,6 +111,17 @@ config:
     name: nico
     route:
       version: v2
+    skuDeletionRecovery:
+      # -- Persist new SKU deletion attempts. Chart default false. Upgrade all
+      # cooperating REST API and inventory writers first. Quiesce SKU mutations
+      # and resolve every legacy mutation result, then enable across all API
+      # writers before resuming mutations. Mixed legacy and durable dispatch is
+      # not supported. Disabling preserves existing fences and recovery.
+      # Resolve every sku.deletion before rollback to unaware binaries; never
+      # clear unknown attempts. Check: SELECT count(*) FROM sku WHERE deletion IS NOT NULL;
+      # Rendered into config.yaml; API.SKUDELETIONRECOVERY.ENABLED overrides it.
+      # Changes require restarting the REST API pods.
+      enabled: false
     expectedMachineBatchRecovery:
       # -- Create durable reservations for new Expected Machine batches. Chart
       # default false. Upgrade every REST API and inventory worker with this off

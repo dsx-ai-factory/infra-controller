@@ -1122,27 +1122,28 @@ func testDeleteSiteComponentsFromDBDeletedSiteResources(t *testing.T) {
 
 	// siteResources keeps the records and IDs checked after cleanup.
 	type siteResources struct {
-		site               *cdbm.Site
-		instance           *cdbm.Instance
-		vpc                *cdbm.Vpc
-		ipBlock            *cdbm.IPBlock
-		vpcPrefixID        uuid.UUID
-		vpcPeeringID       uuid.UUID
-		nvllpID            uuid.UUID
-		nsgID              string
-		skuID              string
-		dpuDeploymentID    uuid.UUID
-		interfaceIDs       []uuid.UUID
-		ibInterfaceIDs     []uuid.UUID
-		nvlinkInterfaceIDs []uuid.UUID
-		sshKeyGroupSiteID  uuid.UUID
-		sshKeyGroupInstID  uuid.UUID
-		sshKeyAssocID      uuid.UUID
-		expectedMachineID  uuid.UUID
-		expectedSwitchID   uuid.UUID
-		expectedShelfID    uuid.UUID
-		imageOSSAID        uuid.UUID
-		tenantSiteID       uuid.UUID
+		site                 *cdbm.Site
+		instance             *cdbm.Instance
+		vpc                  *cdbm.Vpc
+		ipBlock              *cdbm.IPBlock
+		vpcPrefixID          uuid.UUID
+		vpcPeeringID         uuid.UUID
+		nvllpID              uuid.UUID
+		nsgID                string
+		skuID                string
+		pendingDeletionSkuID string
+		dpuDeploymentID      uuid.UUID
+		interfaceIDs         []uuid.UUID
+		ibInterfaceIDs       []uuid.UUID
+		nvlinkInterfaceIDs   []uuid.UUID
+		sshKeyGroupSiteID    uuid.UUID
+		sshKeyGroupInstID    uuid.UUID
+		sshKeyAssocID        uuid.UUID
+		expectedMachineID    uuid.UUID
+		expectedSwitchID     uuid.UUID
+		expectedShelfID      uuid.UUID
+		imageOSSAID          uuid.UUID
+		tenantSiteID         uuid.UUID
 	}
 
 	buildSiteResources := func(tag string) *siteResources {
@@ -1205,6 +1206,18 @@ func testDeleteSiteComponentsFromDBDeletedSiteResources(t *testing.T) {
 
 		// SKU (hard delete)
 		sku := util.TestBuildSku(t, dbSession, "sku-"+tag, site)
+		pendingSku := util.TestBuildSku(t, dbSession, "pending-deletion-sku-"+tag, site)
+		err = cdb.WithTx(ctx, dbSession, func(tx *cdb.Tx) error {
+			dao := cdbm.NewSkuDAO(dbSession)
+			_, err := dao.GetForUpdate(ctx, tx, pendingSku.ID)
+			if err != nil {
+				return err
+			}
+			applied, err := dao.SetDeletion(ctx, tx, pendingSku.ID, site.ID, nil, &cdbm.SkuDeletion{WorkflowID: "site-cleanup-delete-" + tag})
+			require.True(t, applied)
+			return err
+		})
+		require.NoError(t, err)
 
 		// SSH key group + site/instance associations + key + key association.
 		// Site cleanup retains SSH key-to-group associations.
@@ -1238,27 +1251,28 @@ func testDeleteSiteComponentsFromDBDeletedSiteResources(t *testing.T) {
 		tenantSite := cdbm.TestBuildTenantSite(t, dbSession, tenant, site, &cdbm.TenantSiteConfig{TargetedInstanceCreation: cutil.GetPtr(false)}, ipu)
 
 		return &siteResources{
-			site:               site,
-			instance:           instance,
-			vpc:                vpc,
-			ipBlock:            ipBlock,
-			vpcPrefixID:        vpcPrefix.ID,
-			vpcPeeringID:       vpcPeering.ID,
-			nvllpID:            nvllp.ID,
-			nsgID:              nsg.ID,
-			skuID:              sku.ID,
-			dpuDeploymentID:    desd.ID,
-			interfaceIDs:       []uuid.UUID{iface1.ID, iface2.ID},
-			ibInterfaceIDs:     []uuid.UUID{ibi.ID},
-			nvlinkInterfaceIDs: []uuid.UUID{nvli.ID},
-			sshKeyGroupSiteID:  skgsa.ID,
-			sshKeyGroupInstID:  skgia.ID,
-			sshKeyAssocID:      ska.ID,
-			expectedMachineID:  em.ID,
-			expectedSwitchID:   es.ID,
-			expectedShelfID:    eps.ID,
-			imageOSSAID:        imageOSSA.ID,
-			tenantSiteID:       tenantSite.ID,
+			site:                 site,
+			instance:             instance,
+			vpc:                  vpc,
+			ipBlock:              ipBlock,
+			vpcPrefixID:          vpcPrefix.ID,
+			vpcPeeringID:         vpcPeering.ID,
+			nvllpID:              nvllp.ID,
+			nsgID:                nsg.ID,
+			skuID:                sku.ID,
+			pendingDeletionSkuID: pendingSku.ID,
+			dpuDeploymentID:      desd.ID,
+			interfaceIDs:         []uuid.UUID{iface1.ID, iface2.ID},
+			ibInterfaceIDs:       []uuid.UUID{ibi.ID},
+			nvlinkInterfaceIDs:   []uuid.UUID{nvli.ID},
+			sshKeyGroupSiteID:    skgsa.ID,
+			sshKeyGroupInstID:    skgia.ID,
+			sshKeyAssocID:        ska.ID,
+			expectedMachineID:    em.ID,
+			expectedSwitchID:     es.ID,
+			expectedShelfID:      eps.ID,
+			imageOSSAID:          imageOSSA.ID,
+			tenantSiteID:         tenantSite.ID,
 		}
 	}
 
@@ -1345,6 +1359,7 @@ func testDeleteSiteComponentsFromDBDeletedSiteResources(t *testing.T) {
 	assertGone("network_security_group", &cdbm.NetworkSecurityGroup{}, "nsg.id", site1Resources.nsgID)
 	assertGone("dpu_extension_service_deployment", &cdbm.DpuExtensionServiceDeployment{}, "desd.id", site1Resources.dpuDeploymentID)
 	assertGone("sku", &cdbm.SKU{}, "sk.id", site1Resources.skuID)
+	assertGone("pending-deletion SKU", &cdbm.SKU{}, "sk.id", site1Resources.pendingDeletionSkuID)
 	assertGone("expected_machine", &cdbm.ExpectedMachine{}, "em.id", site1Resources.expectedMachineID)
 	assertGone("pending_expected_machine", &cdbm.PendingExpectedMachine{}, "pem.workflow_id", "pending-site-a")
 	assertGone("expected_machine inserted during cleanup", &cdbm.ExpectedMachine{}, "em.id", lateExpectedMachineID)
@@ -1372,6 +1387,7 @@ func testDeleteSiteComponentsFromDBDeletedSiteResources(t *testing.T) {
 	assertPresent("network_security_group", &cdbm.NetworkSecurityGroup{}, "nsg.id", site2Resources.nsgID)
 	assertPresent("dpu_extension_service_deployment", &cdbm.DpuExtensionServiceDeployment{}, "desd.id", site2Resources.dpuDeploymentID)
 	assertPresent("sku", &cdbm.SKU{}, "sk.id", site2Resources.skuID)
+	assertPresent("pending-deletion SKU", &cdbm.SKU{}, "sk.id", site2Resources.pendingDeletionSkuID)
 	assertPresent("expected_machine", &cdbm.ExpectedMachine{}, "em.id", site2Resources.expectedMachineID)
 	assertPresent("pending_expected_machine", &cdbm.PendingExpectedMachine{}, "pem.workflow_id", "pending-site-b")
 	assertPresent("expected_switch", &cdbm.ExpectedSwitch{}, "es.id", site2Resources.expectedSwitchID)
@@ -1386,8 +1402,10 @@ func testDeleteSiteComponentsFromDBDeletedSiteResources(t *testing.T) {
 	err = mv.DeleteSiteComponentsFromDB(ctx, site1Resources.site.ID, ip.ID, false)
 	require.NoError(t, err, "completed Site cleanup must be idempotent")
 	assertGone("sku", &cdbm.SKU{}, "sk.id", site1Resources.skuID)
+	assertGone("pending-deletion SKU", &cdbm.SKU{}, "sk.id", site1Resources.pendingDeletionSkuID)
 	assertGone("expected_machine", &cdbm.ExpectedMachine{}, "em.id", site1Resources.expectedMachineID)
 	assertPresent("sku", &cdbm.SKU{}, "sk.id", site2Resources.skuID)
+	assertPresent("pending-deletion SKU", &cdbm.SKU{}, "sk.id", site2Resources.pendingDeletionSkuID)
 	assertPresent("expected_machine", &cdbm.ExpectedMachine{}, "em.id", site2Resources.expectedMachineID)
 }
 

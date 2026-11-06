@@ -22,6 +22,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/grpcproxy"
+	proxyrecovery "github.com/NVIDIA/infra-controller/rest-api/common/pkg/grpcproxy/recovery"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	swe "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/error"
 	"github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/queue"
@@ -87,7 +88,29 @@ func ExecuteCoreGRPCWithWorkflowID(
 		mode = proxyStartAttempt
 	}
 	return runGRPCProxy(ctx, stc, grpcproxy.Core, fullMethod, req, resp, workflowID,
-		temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_FAIL, mode, secretKey, secretFields...)
+		temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_FAIL, mode, nil, secretKey, secretFields...)
+}
+
+// ExecuteCoreGRPCWithRunID binds an acknowledged original run before awaiting
+// its result. Only the intent creator may start. Recovery verifies and binds
+// an unbound original through bindRun without starting a workflow. Missing proof
+// retains the fence. resp must be nonnil and typed (&emptypb.Empty{} for an empty
+// reply). The boolean means a verified reply was observed, including a rejection;
+// it does not mean success. Callers must inspect both return values.
+func ExecuteCoreGRPCWithRunID(ctx context.Context, stc tclient.Client, fullMethod string, req, resp proto.Message, workflowID, runID string, startNewAttempt bool, bindRun func(string) error) (*cutil.APIError, bool) {
+	if strings.TrimSpace(workflowID) == "" || (startNewAttempt && bindRun == nil) {
+		return cutil.NewAPIError(http.StatusInternalServerError, "Core attempt requires a workflow ID and durable run binding", nil), false
+	}
+	mode := proxyResumeAttempt
+	if startNewAttempt {
+		mode = proxyStartAttempt
+	}
+	return runGRPCProxy(ctx, stc, grpcproxy.Core, fullMethod, req, resp, workflowID, temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_FAIL, mode, &boundCoreAttempt{runID: runID, bind: bindRun}, "")
+}
+
+type boundCoreAttempt struct {
+	runID string
+	bind  func(string) error
 }
 
 // ExecuteFlowGRPC proxies one already-validated Flow (v1.Flow) gRPC request via
@@ -225,7 +248,7 @@ func executeGRPCProxy(
 	secretFields ...string,
 ) *cutil.APIError {
 	apiErr, _ := runGRPCProxy(ctx, stc, backend, fullMethod, req, resp, workflowID,
-		conflictPolicy, proxyDefaultWorkflow, secretKey, secretFields...)
+		conflictPolicy, proxyDefaultWorkflow, nil, secretKey, secretFields...)
 	return apiErr
 }
 
@@ -247,6 +270,7 @@ func runGRPCProxy(
 	workflowID string,
 	conflictPolicy temporalEnums.WorkflowIdConflictPolicy,
 	mode proxyWorkflowMode,
+	bound *boundCoreAttempt,
 	secretKey string,
 	secretFields ...string,
 ) (*cutil.APIError, bool) {
@@ -295,7 +319,15 @@ func runGRPCProxy(
 
 	var we tclient.WorkflowRun
 	if mode == proxyResumeAttempt {
-		we = stc.GetWorkflow(wfCtx, workflowID, "")
+		runID := ""
+		if bound != nil {
+			runID, err = proxyrecovery.ResolveCoreAttemptRunID(wfCtx, stc, workflowID, bound.runID, bound.bind)
+			if err != nil {
+				return cutil.NewAPIError(http.StatusServiceUnavailable, "Core operation is pending; its result is not yet available", nil).WithCause(err), false
+			}
+			bound.runID = runID
+		}
+		we = stc.GetWorkflow(wfCtx, workflowID, runID)
 	} else {
 		we, err = stc.ExecuteWorkflow(wfCtx, workflowOptions, backend.WorkflowName, grpcproxy.Request{
 			FullMethod:       fullMethod,
@@ -304,7 +336,15 @@ func runGRPCProxy(
 		})
 		var alreadyStarted *serviceerror.WorkflowExecutionAlreadyStarted
 		if mode == proxyStartAttempt && errors.As(err, &alreadyStarted) {
-			we = stc.GetWorkflow(wfCtx, workflowID, alreadyStarted.RunId)
+			runID := alreadyStarted.RunId
+			if bound != nil {
+				runID, err = proxyrecovery.ResolveCoreAttemptRunID(wfCtx, stc, workflowID, "", bound.bind)
+				if err != nil {
+					return cutil.NewAPIError(http.StatusServiceUnavailable, "Core operation is pending; its result is not yet available", nil).WithCause(err), false
+				}
+				bound.runID = runID
+			}
+			we = stc.GetWorkflow(wfCtx, workflowID, runID)
 			err = nil
 		}
 	}
@@ -325,8 +365,35 @@ func runGRPCProxy(
 		return cutil.NewAPIError(http.StatusInternalServerError, fmt.Sprintf("Failed to execute %s proxy workflow", backend.Label), fmt.Errorf("execute %s workflow: %w", backend.WorkflowName, err)), false
 	}
 
+	if bound != nil && mode == proxyStartAttempt && bound.runID == "" {
+		runID := we.GetRunID()
+		if runID == "" {
+			return cutil.NewAPIError(http.StatusServiceUnavailable, "Core operation is pending; its result is not yet available", nil), false
+		}
+		bindErr := bound.bind(runID)
+		if bindErr != nil {
+			return cutil.NewAPIError(http.StatusInternalServerError, "Failed to bind original Core attempt", nil).WithCause(bindErr), false
+		}
+		bound.runID = runID
+	}
 	var out grpcproxy.Response
-	resultErr := we.Get(wfCtx, &out)
+	var resultErr error
+	if bound != nil {
+		resultErr = we.GetWithOptions(wfCtx, &out, tclient.WorkflowRunGetOptions{DisableFollowingRuns: true})
+		result, checkedErr := proxyrecovery.CheckCoreAttemptResult(wfCtx, stc, workflowID, bound.runID, out, resp, resultErr)
+		if result == proxyrecovery.CoreAttemptSucceeded {
+			return nil, true
+		}
+		if result == proxyrecovery.CoreAttemptNotFound || result == proxyrecovery.CoreAttemptRejected {
+			code, err := UnwrapWorkflowError(resultErr)
+			return cutil.NewAPIError(code, err.Error(), nil).WithCause(resultErr), true
+		}
+		if checkedErr != nil {
+			resultErr = checkedErr
+		}
+	} else {
+		resultErr = we.Get(wfCtx, &out)
+	}
 	if resultErr != nil {
 		// A Temporal timeout is positive evidence that the execution closed, so
 		// it is checked first: when the caller also went away, having closed is
@@ -347,7 +414,7 @@ func runGRPCProxy(
 
 		code, werr := UnwrapWorkflowError(resultErr)
 		coreResultObserved := false
-		if mode != proxyDefaultWorkflow {
+		if mode != proxyDefaultWorkflow && bound == nil {
 			var activityErr *tp.ActivityError
 			var applicationErr *tp.ApplicationError
 			if errors.As(resultErr, &activityErr) && activityErr.ActivityType().GetName() == "InvokeCoreGRPCOnSite" && errors.As(resultErr, &applicationErr) {
@@ -365,6 +432,13 @@ func runGRPCProxy(
 			var missingNamespace *serviceerror.NamespaceNotFound
 			if !coreResultObserved && (code == http.StatusNotFound || errors.As(resultErr, &missingWorkflow) || errors.As(resultErr, &missingNamespace)) {
 				// A missing workflow or namespace is not a missing Core resource.
+				code = http.StatusServiceUnavailable
+			}
+		}
+		if bound != nil {
+			var missingWorkflow *serviceerror.NotFound
+			var missingNamespace *serviceerror.NamespaceNotFound
+			if code == http.StatusNotFound || errors.As(resultErr, &missingWorkflow) || errors.As(resultErr, &missingNamespace) {
 				code = http.StatusServiceUnavailable
 			}
 		}

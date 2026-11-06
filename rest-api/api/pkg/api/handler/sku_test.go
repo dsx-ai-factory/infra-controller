@@ -20,6 +20,7 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/pagination"
 	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
 	authz "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
+	cconfig "github.com/NVIDIA/infra-controller/rest-api/common/pkg/config"
 	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/grpcproxy"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
@@ -35,6 +36,8 @@ import (
 	"github.com/uptrace/bun"
 	"github.com/uptrace/bun/extra/bundebug"
 	temporalEnums "go.temporal.io/api/enums/v1"
+	"go.temporal.io/api/serviceerror"
+	tclient "go.temporal.io/sdk/client"
 	tmocks "go.temporal.io/sdk/mocks"
 	tp "go.temporal.io/sdk/temporal"
 	"google.golang.org/grpc/codes"
@@ -740,6 +743,13 @@ func TestGetSkuHandler_Handle(t *testing.T) {
 }
 
 func TestCreateSkuHandler(t *testing.T) {
+	t.Run("pending deletion blocks Core create with new admission disabled", func(t *testing.T) {
+		f := newSkuManagementFixture(t, []string{authz.ProviderAdminRole})
+		setSkuDeletion(t, f.deleteHandler.dbSession, "sku-1", &cdbm.SkuDeletion{WorkflowID: "pending-delete"})
+		rec := f.request(t, http.MethodPost, "", validSkuCreateRequest(f.siteID), f.createHandler.Handle)
+		require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+		assert.Empty(t, f.requests)
+	})
 	t.Run("proxies create and returns created SKU", func(t *testing.T) {
 		fixture := newSkuManagementFixtureWithOptions(t, []string{authz.ProviderAdminRole}, skuManagementFixtureOptions{
 			skipPersistedSKU: true,
@@ -949,6 +959,14 @@ func TestUpdateSkuHandler_Handle(t *testing.T) {
 		name string
 		run  func(*testing.T)
 	}{
+		{name: "pending deletion blocks Core update with new admission disabled", run: func(t *testing.T) {
+			f := newSkuManagementFixture(t, []string{authz.ProviderAdminRole})
+			setSkuDeletion(t, f.deleteHandler.dbSession, "sku-1", &cdbm.SkuDeletion{WorkflowID: "pending-delete"})
+			rec := f.request(t, http.MethodPatch, "sku-1", model.APISkuUpdateRequest{Description: cutil.GetPtr("blocked")}, f.updateHandler.Handle)
+			require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+			assert.Empty(t, f.requests)
+		}},
+		{name: "deletion admitted during Core call preserves intent and returns conflict", run: testSkuUpdatePendingAfterCore},
 		{
 			name: "uses metadata RPC for metadata patch",
 			run: func(t *testing.T) {
@@ -1967,6 +1985,15 @@ func TestDeleteSkuHandler_Handle(t *testing.T) {
 		name string
 		run  func(*testing.T)
 	}{
+		{name: "lost acknowledgement recovers and binds the original without redispatch", run: testSkuDeletionLostAck},
+		{name: "durable success not found and rejection retain their contracts", run: testSkuDeletionCoreResults},
+		{name: "earlier admitted reference commits before deletion validation", run: testSkuDeletionWaitsForAttachment},
+		{name: "preparation preserves missing and captured attempt policies", run: testSkuDeletionPreparationRaces},
+		{name: "late completion preserves an actual replacement", run: testSkuDeletionLateCompletionPreservesReplacement},
+		{name: "rejects public and pending references before dispatch", run: testSkuDeleteReferences},
+		{name: "known preparation failures do not leave deletion intents", run: testSkuDeletionBeforeDispatch},
+		{name: "acknowledged run survives caller cancellation", run: testSkuDeletionCanceledAfterAck},
+		{name: "unknown attempt resumes once and confirmed cleanup survives restart", run: testSkuDeletionRecovery},
 		{
 			name: "proxies delete",
 			run: func(t *testing.T) {
@@ -2201,6 +2228,8 @@ func newSkuManagementFixtureWithOptions(t *testing.T, roles []string, options sk
 	t.Cleanup(dbSession.Close)
 	common.TestSetupSchema(t, dbSession)
 	require.NoError(t, dbSession.DB.ResetModel(context.Background(), (*cdbm.SKU)(nil)))
+	require.NoError(t, dbSession.DB.ResetModel(context.Background(), (*cdbm.ExpectedMachine)(nil)))
+	require.NoError(t, dbSession.DB.ResetModel(context.Background(), (*cdbm.PendingExpectedMachine)(nil)))
 
 	org := "test-org"
 	user := common.TestBuildUser(t, dbSession, uuid.NewString(), org, roles)
@@ -2283,7 +2312,7 @@ func newSkuManagementFixtureWithOptions(t *testing.T, roles []string, options sk
 	scp.IDClientMap[site.ID.String()] = client
 	fixture.createHandler = NewCreateSkuHandler(dbSession, scp)
 	fixture.updateHandler = NewUpdateSkuHandler(dbSession, scp)
-	fixture.deleteHandler = NewDeleteSkuHandler(dbSession, scp)
+	fixture.deleteHandler = NewDeleteSkuHandler(dbSession, scp, nil)
 	return fixture
 }
 
@@ -2400,4 +2429,233 @@ func existingSkuProto() *corev1.Sku {
 
 func existingSkuCreatedTime() time.Time {
 	return time.Date(2025, time.January, 2, 3, 4, 5, 678_901_234, time.UTC)
+}
+
+func testSkuDeleteReferences(t *testing.T) {
+	cases := []struct {
+		name    string
+		pending bool
+	}{
+		{name: "public Expected Machine"},
+		{name: "pending Expected Machine batch", pending: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newSkuManagementFixture(t, []string{authz.ProviderAdminRole})
+			ctx := context.Background()
+			session := f.deleteHandler.dbSession
+			siteID := uuid.MustParse(f.siteID)
+			input := cdbm.ExpectedMachineCreateInput{ExpectedMachineID: uuid.New(), SiteID: siteID, SkuID: cutil.GetPtr("sku-1"), BmcMacAddress: "00:11:22:33:44:55", ChassisSerialNumber: "delete-reference", CreatedBy: f.user.ID}
+			err := cdb.WithTx(ctx, session, func(tx *cdb.Tx) error {
+				if tc.pending {
+					return cdbm.NewPendingExpectedMachineBatchDAO(session).Create(ctx, tx, cdbm.PendingExpectedMachineBatch{WorkflowID: "pending-create", SiteID: siteID, Inputs: []cdbm.ExpectedMachineCreateInput{input}})
+				}
+				_, err := cdbm.NewExpectedMachineDAO(session).Create(ctx, tx, input)
+				return err
+			})
+			require.NoError(t, err)
+			rec := f.request(t, http.MethodDelete, "sku-1", nil, f.deleteHandler.Handle)
+			require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+			assert.Contains(t, rec.Body.String(), "referenced by Expected Machines")
+			assert.Empty(t, f.requests)
+			stored, err := cdbm.NewSkuDAO(session).Get(ctx, nil, "sku-1")
+			require.NoError(t, err)
+			assert.Nil(t, stored.Deletion)
+		})
+	}
+}
+
+func testSkuDeletionRecovery(t *testing.T) {
+	f := newSkuManagementFixture(t, []string{authz.ProviderAdminRole})
+	ctx := context.Background()
+	session := f.deleteHandler.dbSession
+	siteID := uuid.MustParse(f.siteID)
+	dao := cdbm.NewSkuDAO(session)
+	t.Setenv(strings.ToUpper(config.ConfigSkuDeletionRecoveryEnabled), "true")
+	f.deleteHandler.cfg = common.GetTestConfig()
+	require.True(t, f.deleteHandler.cfg.GetSkuDeletionRecoveryEnabled())
+	stc := &tmocks.Client{}
+	started, resumed := &tmocks.WorkflowRun{}, &tmocks.WorkflowRun{}
+	workflowID := ""
+	stc.On("ExecuteWorkflow", mock.Anything, mock.MatchedBy(func(options tclient.StartWorkflowOptions) bool {
+		workflowID = options.ID
+		assert.Equal(t, temporalEnums.WORKFLOW_ID_REUSE_POLICY_REJECT_DUPLICATE, options.WorkflowIDReusePolicy)
+		return strings.HasPrefix(workflowID, "core-grpc-DeleteSku-")
+	}), grpcproxy.Core.WorkflowName, mock.MatchedBy(func(req grpcproxy.Request) bool { return req.FullMethod == corev1.Forge_DeleteSku_FullMethodName })).Run(func(mock.Arguments) {
+		stored, err := dao.Get(ctx, nil, "sku-1")
+		require.NoError(t, err)
+		require.NotNil(t, stored.Deletion)
+		assert.Equal(t, workflowID, stored.Deletion.WorkflowID)
+		assert.Nil(t, stored.Deletion.RunID)
+	}).Return(started, nil).Once()
+	started.On("GetRunID").Return("original-run").Once()
+	started.On("GetWithOptions", mock.Anything, mock.Anything, tclient.WorkflowRunGetOptions{DisableFollowingRuns: true}).Run(func(mock.Arguments) {
+		stored, err := dao.Get(ctx, nil, "sku-1")
+		require.NoError(t, err)
+		assert.Equal(t, cutil.GetPtr("original-run"), stored.Deletion.RunID)
+	}).Return(serviceerror.NewNotFound("result unavailable")).Once()
+	f.deleteHandler.scp.IDClientMap[f.siteID] = stc
+	rec := f.request(t, http.MethodDelete, "sku-1", nil, f.deleteHandler.Handle)
+	require.Equal(t, http.StatusServiceUnavailable, rec.Code, rec.Body.String())
+	stored, err := dao.Get(ctx, nil, "sku-1")
+	require.NoError(t, err)
+	require.NotNil(t, stored.Deletion)
+	assert.False(t, stored.Deletion.Confirmed)
+
+	// Turning new admission off does not release or redispatch this attempt.
+	t.Setenv(strings.ToUpper(config.ConfigSkuDeletionRecoveryEnabled), "false")
+	stc.AssertNumberOfCalls(t, "ExecuteWorkflow", 1)
+
+	_, err = session.DB.ExecContext(ctx, `CREATE OR REPLACE FUNCTION fail_sku_recovery_cleanup() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected SKU cleanup failure'; END $$`)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_, cleanupErr := session.DB.ExecContext(ctx, "DROP FUNCTION fail_sku_recovery_cleanup() CASCADE")
+		require.NoError(t, cleanupErr)
+	})
+	_, err = session.DB.ExecContext(ctx, "CREATE TRIGGER fail_sku_recovery_cleanup BEFORE DELETE ON sku FOR EACH ROW EXECUTE FUNCTION fail_sku_recovery_cleanup()")
+	require.NoError(t, err)
+	stc.On("GetWorkflow", mock.Anything, workflowID, "original-run").Return(resumed).Once()
+	resumed.On("GetWithOptions", mock.Anything, mock.Anything, tclient.WorkflowRunGetOptions{DisableFollowingRuns: true}).Run(func(args mock.Arguments) {
+		args.Get(1).(*grpcproxy.Response).ResponseJSON = []byte(`{}`)
+	}).Return(nil).Once()
+	restarted := NewDeleteSkuHandler(session, f.deleteHandler.scp, f.deleteHandler.cfg)
+	rec = f.request(t, http.MethodDelete, "sku-1", nil, restarted.Handle)
+	require.Equal(t, http.StatusInternalServerError, rec.Code, rec.Body.String())
+	stored, err = dao.Get(ctx, nil, "sku-1")
+	require.NoError(t, err)
+	require.NotNil(t, stored.Deletion)
+	assert.True(t, stored.Deletion.Confirmed)
+	assert.Equal(t, workflowID, stored.Deletion.WorkflowID)
+	_, err = session.DB.ExecContext(ctx, "DROP TRIGGER fail_sku_recovery_cleanup ON sku")
+	require.NoError(t, err)
+	// A process with no Temporal client can finish the persisted local cleanup.
+	restarted = NewDeleteSkuHandler(session, nil, f.deleteHandler.cfg)
+	_, err = cdbm.NewSiteDAO(session).Update(ctx, nil, cdbm.SiteUpdateInput{SiteID: siteID, Status: cutil.GetPtr(cdbm.SiteStatusPending)})
+	require.NoError(t, err)
+	rec = f.request(t, http.MethodDelete, "sku-1", nil, restarted.Handle)
+	require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
+	_, err = dao.Get(ctx, nil, "sku-1")
+	require.ErrorIs(t, err, cdb.ErrDoesNotExist)
+	stc.AssertExpectations(t)
+	started.AssertExpectations(t)
+	resumed.AssertExpectations(t)
+}
+
+type skuCommitHook struct {
+	afterCommit func()
+	fired       bool
+}
+
+func (h *skuCommitHook) BeforeQuery(ctx context.Context, _ *bun.QueryEvent) context.Context {
+	return ctx
+}
+func (h *skuCommitHook) AfterQuery(_ context.Context, event *bun.QueryEvent) {
+	if !h.fired && strings.HasPrefix(event.Query, "COMMIT") && event.Err == nil {
+		h.fired = true
+		h.afterCommit()
+	}
+}
+
+func testSkuDeletionBeforeDispatch(t *testing.T) {
+	cases := []struct {
+		name              string
+		cancelAfterCommit bool
+		wantCode          int
+	}{
+		{name: "client prerequisite fails before admission", wantCode: http.StatusInternalServerError},
+		{name: "cancellation after committed admission releases undispatched attempt", cancelAfterCommit: true, wantCode: http.StatusGatewayTimeout},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newSkuManagementFixture(t, []string{authz.ProviderAdminRole})
+			t.Setenv(strings.ToUpper(config.ConfigSkuDeletionRecoveryEnabled), "true")
+			f.deleteHandler.cfg = common.GetTestConfig()
+			dao := cdbm.NewSkuDAO(f.deleteHandler.dbSession)
+			var handle func(echo.Context) error
+			if !tc.cancelAfterCommit {
+				f.deleteHandler.scp = sc.NewClientPool(&cconfig.TemporalConfig{Host: "%", Port: 7233})
+				handle = f.deleteHandler.Handle
+			} else {
+				var cancelRequest context.CancelFunc
+				hook := &skuCommitHook{afterCommit: func() {
+					stored, err := dao.Get(context.Background(), nil, "sku-1")
+					require.NoError(t, err)
+					require.NotNil(t, stored.Deletion, "intent must commit before cancellation")
+					cancelRequest()
+				}}
+				f.deleteHandler.dbSession.DB.AddQueryHook(hook)
+				handle = func(c echo.Context) error {
+					ctx, cancel := context.WithCancel(c.Request().Context())
+					defer cancel()
+					cancelRequest = cancel
+					c.SetRequest(c.Request().WithContext(ctx))
+					return f.deleteHandler.Handle(c)
+				}
+				t.Cleanup(func() { assert.True(t, hook.fired) })
+			}
+			rec := f.request(t, http.MethodDelete, "sku-1", nil, handle)
+			require.Equal(t, tc.wantCode, rec.Code, rec.Body.String())
+			stored, err := dao.Get(context.Background(), nil, "sku-1")
+			require.NoError(t, err)
+			assert.Nil(t, stored.Deletion)
+			assert.Empty(t, f.requests)
+		})
+	}
+}
+
+func testSkuDeletionCanceledAfterAck(t *testing.T) {
+	f := newSkuManagementFixture(t, []string{authz.ProviderAdminRole})
+	t.Setenv(strings.ToUpper(config.ConfigSkuDeletionRecoveryEnabled), "true")
+	f.deleteHandler.cfg = common.GetTestConfig()
+	stc, run := &tmocks.Client{}, &tmocks.WorkflowRun{}
+	var cancelRequest context.CancelFunc
+	workflowID := ""
+	stc.On("ExecuteWorkflow", mock.Anything, mock.Anything, grpcproxy.Core.WorkflowName, mock.Anything).Run(func(args mock.Arguments) {
+		workflowID = args.Get(1).(tclient.StartWorkflowOptions).ID
+		cancelRequest()
+	}).Return(run, nil).Once()
+	run.On("GetRunID").Return("acknowledged-run").Once()
+	run.On("GetWithOptions", mock.Anything, mock.Anything, tclient.WorkflowRunGetOptions{DisableFollowingRuns: true}).Return(context.Canceled).Once()
+	f.deleteHandler.scp.IDClientMap[f.siteID] = stc
+	rec := f.request(t, http.MethodDelete, "sku-1", nil, func(c echo.Context) error {
+		ctx, cancel := context.WithCancel(c.Request().Context())
+		defer cancel()
+		cancelRequest = cancel
+		c.SetRequest(c.Request().WithContext(ctx))
+		return f.deleteHandler.Handle(c)
+	})
+	require.Equal(t, http.StatusGatewayTimeout, rec.Code, rec.Body.String())
+	dao := cdbm.NewSkuDAO(f.deleteHandler.dbSession)
+	stored, err := dao.Get(context.Background(), nil, "sku-1")
+	require.NoError(t, err)
+	require.NotNil(t, stored.Deletion)
+	assert.Equal(t, cutil.GetPtr("acknowledged-run"), stored.Deletion.RunID)
+	assert.False(t, stored.Deletion.Confirmed)
+	resumed := &tmocks.WorkflowRun{}
+	stc.On("GetWorkflow", mock.Anything, workflowID, "acknowledged-run").Return(resumed).Once()
+	resumed.On("GetWithOptions", mock.Anything, mock.Anything, tclient.WorkflowRunGetOptions{DisableFollowingRuns: true}).Return(serviceerror.NewNotFound("history unavailable")).Once()
+	rec = f.request(t, http.MethodDelete, "sku-1", nil, f.deleteHandler.Handle)
+	require.Equal(t, http.StatusServiceUnavailable, rec.Code, rec.Body.String())
+	stored, err = dao.Get(context.Background(), nil, "sku-1")
+	require.NoError(t, err)
+	require.NotNil(t, stored.Deletion)
+	assert.Equal(t, cutil.GetPtr("acknowledged-run"), stored.Deletion.RunID)
+	assert.False(t, stored.Deletion.Confirmed)
+	stc.AssertNumberOfCalls(t, "ExecuteWorkflow", 1)
+	stc.AssertExpectations(t)
+	run.AssertExpectations(t)
+	resumed.AssertExpectations(t)
+}
+
+func testSkuUpdatePendingAfterCore(t *testing.T) {
+	f := newSkuManagementFixtureWithOptions(t, []string{authz.ProviderAdminRole}, skuManagementFixtureOptions{afterUpdateMetadata: func(session *cdb.Session) {
+		setSkuDeletion(t, session, "sku-1", &cdbm.SkuDeletion{WorkflowID: "concurrent-delete"})
+	}})
+	rec := f.request(t, http.MethodPatch, "sku-1", model.APISkuUpdateRequest{Description: cutil.GetPtr("updated in Core")}, f.updateHandler.Handle)
+	require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+	stored, err := cdbm.NewSkuDAO(f.updateHandler.dbSession).Get(context.Background(), nil, "sku-1")
+	require.NoError(t, err)
+	require.NotNil(t, stored.Deletion)
+	assert.Equal(t, "concurrent-delete", stored.Deletion.WorkflowID)
+	assert.NotEqual(t, "updated in Core", stored.Description)
 }
