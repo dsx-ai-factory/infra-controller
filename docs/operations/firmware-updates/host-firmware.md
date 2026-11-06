@@ -57,9 +57,9 @@ configured default. `preingest_upgrade_when_below` is not used after ingestion.
 
 The catalog can change through the
 [Host Firmware Config API](api:PUT/v2/org/{org}/nico/firmware-config/host)
-or legacy/static configuration. Machine Update Manager refreshes its
-desired-version snapshot when the runtime configuration changes or the legacy
-firmware directory is modified.
+or legacy/static configuration. When shared capacity allows the scheduler to
+reach host selection, Machine Update Manager refreshes its desired-version
+snapshot if the runtime configuration or legacy firmware directory changed.
 
 ### Scheduling gates
 
@@ -69,24 +69,14 @@ A drifted host becomes eligible only after the relevant gates pass:
 |---|---|
 | Automatic update policy | `firmware_global.autoupdate` supplies the site default. A per-machine override can enable or disable one host independently. |
 | Host state | With `firmware_global.instance_updates_manual_tagging = true`, automatic selection is limited to unassigned hosts in `Ready`. When false, assigned hosts can also be selected. Unassigned hosts are considered first. |
-| Existing work | A host with an existing reprovisioning request is not selected again. Machines already in maintenance or another update workflow count against the shared budget. |
+| Existing work | A host with an existing reprovisioning request is not selected again. Module-reported hosts consume shared capacity. |
 | Explicit start | When the model has `explicit_start_needed = true`, the current time must be inside that machine's firmware update window. |
-| Site capacity | `machine_updater.max_concurrent_machine_updates_absolute` and `machine_updater.max_concurrent_machine_updates_percent` determine the site-wide update ceiling as described below. Machines already in maintenance consume this budget. |
+| Site capacity | The configured shared ceiling must have room for another host. Refer to the capacity policy below. |
 
-Automatic machine updates do not start when both concurrency limits are
-unset, because the resulting update ceiling is zero. Machine Update Manager
-runs every `machine_update_run_interval` seconds; the default is 300 seconds.
-
-`machine_updater.max_concurrent_machine_updates_percent` sets a ceiling based on
-the total number of managed hosts. NICo rounds the percentage of that count up
-to a whole host, then subtracts unhealthy hosts without going below zero. If
-`machine_updater.max_concurrent_machine_updates_absolute` is also set, it caps
-this remaining ceiling. Hosts already in update workflows consume slots from
-the resulting ceiling before NICo starts more updates.
-
-When the percentage is unset, NICo uses the absolute limit directly. A zero or
-negative percentage disables automatic machine updates even if the absolute
-limit is positive.
+Refer to [Shared Host Capacity](../firmware-updates.md#shared-host-capacity)
+for counted hosts, the ceiling calculation, and build requirements for NIC
+accounting and transaction protections. Machine Update Manager runs every
+`machine_update_run_interval` seconds; the default is 300 seconds.
 
 When a host is selected, NICo creates a host reprovisioning request. The
 managed-host state machine then adds the `host-fw-update` health report. This
@@ -113,9 +103,9 @@ nico-admin-cli -a <core-api-url> machine auto-update \
 The static `firmware_global.host_enable_autoupdate` and
 `firmware_global.host_disable_autoupdate` fields are legacy controls. The
 current scheduler does not read `host_enable_autoupdate`, and it compares
-`host_disable_autoupdate` entries only with machine IDs. A matching disabled
-entry also ends host selection for that scheduler pass. Use the per-machine
-command for new operational workflows.
+`host_disable_autoupdate` entries only with machine IDs. Listed hosts are not
+eligible for automatic selection. Use the per-machine command for new
+operational workflows.
 
 ### Open an explicit-start window
 
@@ -345,7 +335,7 @@ Useful metrics are:
 | `carbide_exhausted_reprovision_retry_count` | Unassigned hosts whose top-level firmware retry budget is exhausted. Assigned-host update substates are not included. |
 | `carbide_firmware_updates_total{target="host"}` | Host updates started and completed, separated by the `phase` label. |
 | `carbide_host_reprovision_retries_total` | Automatic retries of failed host firmware reprovisioning. |
-| `carbide_machines_in_maintenance_count` | Machines consuming the shared maintenance budget. |
+| `carbide_machines_in_maintenance_count` | Distinct hosts reported by the shared capacity accounting. |
 | `carbide_concurrent_machine_updates_available` | The calculated site-wide concurrency ceiling for machine updates. |
 
 Refer to [Core Metrics](../../observability/core_metrics.md) for the common metric

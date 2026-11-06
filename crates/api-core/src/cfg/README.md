@@ -843,8 +843,8 @@ TOML section: `[extension_service_state_controller]`.
 | Field | Type | Default | Description |
 | ------- | ------ | --------- | ------------- |
 | `autoupdate` | `bool` | `false` | Enable automatic host firmware updates. |
-| `host_enable_autoupdate` | `Vec<String>` | `[]` | Host models to force-enable autoupdate. |
-| `host_disable_autoupdate` | `Vec<String>` | `[]` | Host models to force-disable autoupdate. |
+| `host_enable_autoupdate` | `Vec<String>` | `[]` | Legacy field; automatic host selection does not read it. |
+| `host_disable_autoupdate` | `Vec<String>` | `[]` | Host machine IDs excluded from automatic host selection. |
 | `run_interval` | `Duration` | `30s` | Firmware manager polling interval. |
 | `max_uploads` | `usize` | `4` | Max concurrent firmware uploads. |
 | `concurrency_limit` | `usize` | `16` | Max concurrent firmware flashing operations. |
@@ -908,8 +908,8 @@ concurrency have separate owners and limits.
 | Field | Type | Default | Description |
 | ------- | ------ | --------- | ------------- |
 | `instance_autoreboot_period` | `Option<TimePeriod>` | — | UTC time window for automatic machine reboots. |
-| `max_concurrent_machine_updates_absolute` | `Option<i32>` | — | Hard cap on concurrent machine updates. |
-| `max_concurrent_machine_updates_percent` | `Option<i32>` | — | Percentage cap on concurrent updates (lesser of absolute/percent is used). |
+| `max_concurrent_machine_updates_absolute` | `Option<i32>` | — | Absolute input to the [shared ceiling for new automatic requests](../../../../docs/operations/firmware-updates.md#shared-host-capacity), including legacy configuration precedence. |
+| `max_concurrent_machine_updates_percent` | `Option<i32>` | — | Percentage input to the [shared ceiling for new automatic requests](../../../../docs/operations/firmware-updates.md#shared-host-capacity); refer to that policy for health subtraction and precedence. |
 
 ### `PowerManagerOptions`
 
