@@ -1139,6 +1139,7 @@ NvLink partitioning via NMX-C is gated on `[nvlink_config]`:
 [nvlink_config]
 enabled = true
 monitor_run_interval = "60s"
+partition_monitor_unreachable_alert_after = 3 # consecutive passes a rack's NMX-C must be unusable before its NmxcUnreachable rack alert is raised; cleared by the first reachable pass
 nmxc_endpoint = "https://nmxc.example.com"
 # Plus auth + retry settings — see the canonical reference.
 ```

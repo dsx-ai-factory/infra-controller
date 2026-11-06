@@ -408,6 +408,23 @@ pub async fn remove_health_report(
     crate::health_report::remove_health_report(txn, "racks", rack_id, mode, source).await
 }
 
+/// Live racks that carry a merge-mode health report from `source`.
+pub async fn find_ids_with_health_report_merge_source(
+    db: impl DbReader<'_>,
+    source: &str,
+) -> Result<Vec<RackId>, DatabaseError> {
+    let query = r#"
+        SELECT id FROM racks
+        WHERE deleted IS NULL
+          AND coalesce(health_reports, '{"merges": {}}'::jsonb)->'merges' ? $1
+    "#;
+    sqlx::query_scalar(query)
+        .bind(source)
+        .fetch_all(db)
+        .await
+        .map_err(|e| DatabaseError::query(query, e))
+}
+
 pub async fn update_metadata(
     txn: &mut PgConnection,
     rack_id: &RackId,
