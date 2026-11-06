@@ -24,11 +24,9 @@ pub fn built_in_rules() -> Rules {
     Rules::new(built_ins()).expect("compiled rules must be valid")
 }
 
-/// The compiled rules plus deployment overrides written as TOML `[[rules]]`.
-///
-/// Parsed rules rank as deployment overrides, so they outrank every
+/// The compiled rules plus deployment overrides, which outrank every
 /// built-in rule and can never be shadowed by one.
-pub fn rules_with_overrides(overrides: &str) -> Result<Rules, RuleError> {
+pub fn rules_with_overrides(overrides: impl IntoIterator<Item = Rule>) -> Result<Rules, RuleError> {
     Rules::with_overrides(built_ins(), overrides)
 }
 

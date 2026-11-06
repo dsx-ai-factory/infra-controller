@@ -79,6 +79,7 @@ compatibility parsing does not restore their former behavior.
 | `machine_update_run_interval` | `Option<u64>` | — | `machines` | Interval (seconds) at which the machine update manager checks for updates. |
 | `retained_boot_interface_window` | `Option<Duration>` | — | `machines` | How long a retained boot interface pair (`retained_boot_interfaces` table) stays applicable after its `machine_interfaces` row was deleted. Unset retains forever; set a window (e.g. `30d`) so a MAC reappearing on different hardware doesn't inherit an obsolete Redfish interface id. |
 | `site_explorer` | `SiteExplorerConfig` | *(see below)* | `hardware` | SiteExplorer hardware discovery settings (see [SiteExplorerConfig](#siteexplorerconfig)). |
+| `bmc_driver_rules` | `Vec<BmcDriverRule>` | `[]` | `hardware` | Site rules that pick BMC drivers for hardware the compiled rules get wrong. Each rule has an `id`, `matchers` on the BMC's identity (all must match, none matches every BMC), and `selections` mapping capabilities such as `power` or `boot_order` to `unsupported`, `standard`, or a compiled driver id. A configured rule outranks every compiled rule for the capabilities it sets, and capabilities it leaves out keep their compiled choice. `nico-admin-cli site-explorer drivers <BMC_IP>` shows the identity to match on and which rule chose each driver. Startup fails on an invalid rule, such as an unknown driver id. Read at startup. A change needs a restart. Full format in [BmcDriverRule](https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/api-core/src/cfg/README.md#bmcdriverrule--bmc_driver_rules). |
 | `vpc_peering_policy` | `Option<VpcPeeringPolicy>` | — | `networking` | VPC peering creation policy. `exclusive` admits capability-compatible pairs, while `none` or omission disables creation. The deprecated `mixed` value logs a startup warning and behaves as `exclusive`. ETV/FNN requests always return `InvalidArgument`. |
 | `vpc_peering_policy_on_existing` | `Option<VpcPeeringPolicy>` | — | `networking` | Activation policy for stored VPC peerings. Omission falls back to `vpc_peering_policy`. `exclusive` enables the virtualization-specific mechanism only for compatible pairs: ETV emits peer-prefix ACL permits, while FNN imports peer-VNI route targets. `none` disables both mechanisms. The deprecated `mixed` value logs a startup warning and behaves as `exclusive`. |
 | `attestation_enabled` | `bool` | `false` | `security` | Enables TPM-based machine attestation (adds `Measuring` state before `Ready`). |
@@ -711,6 +712,71 @@ to keep the previous behavior.
 | `switches_created_per_run` | `u64` | `9` | Max switches created per run. `0` creates none. |
 | `explore_drive_firmware` | `bool` | `false` | Reads drive firmware versions from each host's Redfish Storage subsystems and reports each enabled drive with a usable model and version as a `Drive_<Model>_<DriveId>` firmware inventory entry. Adds one request per Storage subsystem and per drive to every exploration. |
 | `dpu_policy` | `Option<HostDpuPolicy>` | — (effective: `manage`) | Site-wide policy for DPU hardware: `manage`, `nic`, or `ignore`. Per-host `nic` and `ignore` override it; per-host `manage` inherits it for backward compatibility. When omitted, the site default is `manage`. The previous `use_as_nic` value and the legacy `dpu_mode` field with `dpu_mode` / `nic_mode` / `no_dpu` values remain accepted during deserialization. |
+
+### `BmcDriverRule` — `bmc_driver_rules`
+
+Each `[[bmc_driver_rules]]` entry picks drivers for the BMCs whose identity
+matches it, so a site can work around hardware that misbehaves before a
+release adds a compiled rule. `nico-admin-cli site-explorer drivers <BMC_IP>`
+shows the identity a BMC's latest exploration report gives, the driver each
+capability uses, and the rule that chose it.
+
+| Field | Type | Default | Description |
+| ------- | ------ | --------- | ------------- |
+| `id` | `String` | **required** | Identifies the rule in selections and errors. Must not be empty or match any other rule, compiled ones included. |
+| `matchers` | `Vec<IdentityMatcher>` | `[]` | Conditions that must all hold. A rule without matchers applies to every BMC. |
+| `selections` | `Map<Capability, String>` | `{}` | The driver for each capability the rule decides: `unsupported`, `standard`, or the id of a compiled driver for that capability from [`crates/bmc-drivers/src/drivers.rs`](https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/bmc-drivers/src/drivers.rs). Capabilities are `power`, `bmc_control`, `bios`, `boot_order`, `secure_boot`, `lockdown`, `accounts`, `firmware`, `storage`, `dpu`, `attestation`, `console`, and `super_nic`. `lockdown`, `storage`, `dpu`, `console`, and `super_nic` have no standard driver, so they take `unsupported` or a driver id. |
+| `quirks` | `Vec<Quirk>` | `[]` | Firmware quirks from [`crates/bmc-platform/src/quirk.rs`](https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/bmc-platform/src/quirk.rs), in `snake_case`, added to those of every other matching rule. |
+
+An `IdentityMatcher` is `{ field = ..., pattern = { kind = ..., value = ... } }`.
+`field` is one of `service_root_vendor`, `service_root_product`,
+`service_root_oem_key`, `manager_id`, `manager_model`, `manager_firmware`,
+`system_id`, `system_manufacturer`, `system_model`, `system_sku`,
+`system_part_number`, `system_bios_version`, `chassis_id`,
+`chassis_manufacturer`, `chassis_model`, `chassis_part_number`, or
+`manager_mac_address`, or `{ firmware_inventory = "<entry id>" }` for the
+version of one firmware inventory entry. A chassis field matches when any
+chassis has a matching value, and `manager_mac_address` matches when any of the
+manager's network interfaces has the MAC address. `kind` is one of:
+
+- `exact`, `exact_ascii_case_insensitive`, `prefix`, `contains`, or
+  `contains_ascii_case_insensitive`, with a string value.
+- `one_of`, with a list of exact values.
+- `version_equal`, `version_at_least`, or `version_below`, with a version, or
+  `firmware_version_range`, with `{ minimum = ..., maximum = ... }` bounds
+  that both count. These apply only to `manager_firmware`,
+  `system_bios_version`, and firmware inventory entries.
+- `mac_address`, with a MAC address in any case and with `:` or `-`
+  separators. It applies only to `manager_mac_address`, which takes no other
+  kind.
+
+Capabilities a rule leaves out keep what the compiled rules choose. A rule that
+matches `manager_mac_address` names one BMC, so it outranks every other
+configured rule. Otherwise, when several configured rules match a BMC and set
+the same capability, the one with the most matchers wins. If they tie,
+selection fails for that BMC and names the tied rules.
+
+```toml
+[[bmc_driver_rules]]
+id = "site-gb300-no-power"
+matchers = [{ field = "system_model", pattern = { kind = "contains", value = "GB300" } }]
+selections = { power = "unsupported" }
+
+# One host whose BMC misbehaves keeps the standard power driver.
+[[bmc_driver_rules]]
+id = "rack12-node3-standard-power"
+matchers = [{ field = "manager_mac_address", pattern = { kind = "mac_address", value = "C4:5A:B1:C8:38:0D" } }]
+selections = { power = "standard" }
+```
+
+Startup fails on a rule with an empty or repeated `id`, one that selects no
+capability and adds no quirk, a driver id this binary does not compile, a
+driver for another capability, `standard` for a capability without a standard
+driver, an empty or repeated matcher, a version pattern on a field that is not
+a version, a `mac_address` pattern on another field or another pattern on
+`manager_mac_address`, or a value that is not a MAC address. An unknown key
+inside a rule follows the
+[unknown-field policy](#nico-api-configuration-reference) like any other key.
 
 ### `StateControllerConfig`
 

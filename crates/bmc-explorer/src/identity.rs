@@ -38,6 +38,11 @@ pub fn platform_identity(report: &EndpointExplorationReport) -> PlatformIdentity
             id: manager.id.clone(),
             model: manager.model.clone(),
             firmware: manager.firmware_version.clone(),
+            mac_addresses: manager
+                .ethernet_interfaces
+                .iter()
+                .filter_map(|interface| interface.mac_address)
+                .collect(),
         }),
         system: report.systems.first().map(|system| SystemIdentity {
             id: system.id.clone(),
@@ -74,7 +79,7 @@ pub fn platform_identity(report: &EndpointExplorationReport) -> PlatformIdentity
 #[cfg(test)]
 mod tests {
     use model::site_explorer::{
-        Chassis, ComputerSystem, DriveIdentity, Inventory, Manager, Service,
+        Chassis, ComputerSystem, DriveIdentity, EthernetInterface, Inventory, Manager, Service,
         ServiceRoot as ModelServiceRoot,
     };
     use serde_json::json;
@@ -99,6 +104,13 @@ mod tests {
                 id: "iDRAC.Embedded.1".to_string(),
                 model: Some("16G Monolithic".to_string()),
                 firmware_version: Some("7.10.30.00".to_string()),
+                ethernet_interfaces: vec![
+                    EthernetInterface {
+                        mac_address: Some("C4:5A:B1:C8:38:0D".parse().unwrap()),
+                        ..Default::default()
+                    },
+                    EthernetInterface::default(),
+                ],
                 ..Default::default()
             }],
             systems: vec![
@@ -146,7 +158,12 @@ mod tests {
                 "product": "Integrated Dell Remote Access Controller",
                 "oem_keys": ["Dell"]
             },
-            "manager": { "id": "iDRAC.Embedded.1", "model": "16G Monolithic", "firmware": "7.10.30.00" },
+            "manager": {
+                "id": "iDRAC.Embedded.1",
+                "model": "16G Monolithic",
+                "firmware": "7.10.30.00",
+                "mac_addresses": ["C4:5A:B1:C8:38:0D"]
+            },
             "system": {
                 "id": "System.Embedded.1",
                 "manufacturer": "Dell Inc.",

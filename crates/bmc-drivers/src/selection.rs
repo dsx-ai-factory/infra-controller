@@ -168,6 +168,7 @@ impl<'de> Deserialize<'de> for DriverMap {
 /// broad rule can never outrank a narrower one. Rules parsed as
 /// deployment overrides rank above every built-in rule.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Rule {
     /// Stable non-empty identifier used in decisions and ambiguity errors.
     pub id: String,
@@ -235,10 +236,18 @@ impl Rule {
 
     /// The rank this rule competes at.
     pub fn precedence(&self) -> Precedence {
-        if self.deployment_override {
-            return Precedence::DeploymentOverride;
+        if !self.deployment_override {
+            return derived_precedence(&self.matchers);
         }
-        derived_precedence(&self.matchers)
+        if self
+            .matchers
+            .iter()
+            .any(|matcher| matcher.field.is_mac_address())
+        {
+            Precedence::DeploymentBmcOverride
+        } else {
+            Precedence::DeploymentOverride
+        }
     }
 
     fn select(&mut self, capability: Capability, selection: CapabilitySelection) {
@@ -337,6 +346,17 @@ impl Rules {
                         field: matcher.field.clone(),
                     });
                 }
+                if matcher.pattern.is_mac_address_pattern() != matcher.field.is_mac_address() {
+                    return Err(RuleError::MacAddressPatternMismatch {
+                        id: rule.id.clone(),
+                        field: matcher.field.clone(),
+                    });
+                }
+                if matcher.field.is_mac_address() && !rule.deployment_override {
+                    return Err(RuleError::MacAddressInCompiledRule {
+                        id: rule.id.clone(),
+                    });
+                }
                 if !matcher.pattern.has_parseable_bound() {
                     return Err(RuleError::InvalidVersion {
                         id: rule.id.clone(),
@@ -352,26 +372,22 @@ impl Rules {
             }
         }
         rules.sort_by(|left, right| left.id.cmp(&right.id));
-        if has_duplicates(rules.iter().map(|rule| &rule.id)) {
-            return Err(RuleError::DuplicateId);
+        if let Some(pair) = rules.windows(2).find(|pair| pair[0].id == pair[1].id) {
+            return Err(RuleError::DuplicateId {
+                id: pair[0].id.clone(),
+            });
         }
         let hash = hash_rules(&rules);
         Ok(Self { rules, hash })
     }
 
-    /// Layers deployment overrides parsed from TOML over compiled-in rules.
-    ///
-    /// The document holds `[[rules]]` tables in the [`Rule`] wire format.
-    /// Every parsed rule ranks as a deployment override.
-    pub fn with_overrides(mut built_in: Vec<Rule>, overrides: &str) -> Result<Self, RuleError> {
-        #[derive(Deserialize)]
-        struct Overrides {
-            #[serde(default)]
-            rules: Vec<Rule>,
-        }
-        let overrides: Overrides = toml::from_str(overrides)
-            .map_err(|error| RuleError::InvalidOverrides(error.to_string()))?;
-        for mut rule in overrides.rules {
+    /// Layers deployment overrides over compiled-in rules. Every override
+    /// ranks above every built-in rule.
+    pub fn with_overrides(
+        mut built_in: Vec<Rule>,
+        overrides: impl IntoIterator<Item = Rule>,
+    ) -> Result<Self, RuleError> {
+        for mut rule in overrides {
             rule.deployment_override = true;
             built_in.push(rule);
         }
@@ -467,8 +483,8 @@ pub enum RuleError {
     #[error("rule id must not be empty")]
     EmptyId,
     /// Two rules use the same identifier.
-    #[error("rule ids must be unique")]
-    DuplicateId,
+    #[error("rule id {id} is used more than once")]
+    DuplicateId { id: String },
     /// A rule decides nothing.
     #[error("rule {id} selects no capability and adds no quirk")]
     EmptyRule { id: String },
@@ -490,9 +506,15 @@ pub enum RuleError {
     /// A firmware range was attached to a non-version identity field.
     #[error("rule {id} applies a firmware range to non-firmware field {field:?}")]
     VersionRangeOnNonFirmwareField { id: String, field: IdentityField },
-    /// The override document is not valid TOML in the rule wire format.
-    #[error("deployment override rules are invalid: {0}")]
-    InvalidOverrides(String),
+    /// A MAC address pattern was attached to another field, or a MAC address
+    /// field to another pattern.
+    #[error(
+        "rule {id} must match {field:?} with a mac_address pattern, and only MAC address fields"
+    )]
+    MacAddressPatternMismatch { id: String, field: IdentityField },
+    /// A compiled rule names individual BMCs by MAC address.
+    #[error("rule {id} matches a MAC address, which only deployment overrides may do")]
+    MacAddressInCompiledRule { id: String },
 }
 
 /// Failure to choose one rule for an identity.
