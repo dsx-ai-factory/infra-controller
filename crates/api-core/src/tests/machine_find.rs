@@ -959,3 +959,397 @@ async fn test_find_machine_by_instance_type(
 
     Ok(())
 }
+
+#[crate::sqlx_test]
+async fn test_find_machine_states_by_ids(pool: sqlx::PgPool) {
+    use carbide_test_support::Outcome::{FailsWith, Yields};
+    use carbide_test_support::{Case, check_cases_async};
+
+    let env = create_test_env(pool).await;
+    let host = site_explorer::new_host(&env, env.managed_host_config())
+        .await
+        .unwrap();
+    let host_id: MachineId = host.host_snapshot.id.into();
+    let dpu_id = host.dpu_snapshots[0].id;
+    let other_config = env.managed_host_config();
+    let standalone_id = create_dpu_machine(&env, &other_config).await;
+    let predicted_id: MachineId = host_id_from_dpu_hardware_info(&HardwareInfo::from(
+        other_config.get_and_assert_single_dpu(),
+    ))
+    .unwrap();
+    let missing_id = MachineId::new(MachineIdSource::Tpm, [255; 32], MachineType::Dpu);
+
+    // The requested DPU differs from both its host and the least-advanced DPU.
+    let dpu_state = ManagedHostState::DPUInit {
+        dpu_states: model::machine::DpuInitStates {
+            states: [
+                (
+                    dpu_id,
+                    model::machine::DpuInitState::WaitingForNetworkConfig,
+                ),
+                (standalone_id, model::machine::DpuInitState::Init),
+            ]
+            .into(),
+        },
+    };
+    for (id, state) in [
+        (host_id, ManagedHostState::Ready),
+        (dpu_id.into(), dpu_state),
+    ] {
+        let updated = sqlx::query("UPDATE machines SET controller_state = $2 WHERE id = $1")
+            .bind(id)
+            .bind(sqlx::types::Json(state))
+            .execute(&env.pool)
+            .await
+            .unwrap();
+        assert_eq!(updated.rows_affected(), 1);
+    }
+    // Retain a real DPU row while removing its host association.
+    let detached = sqlx::query(
+        "UPDATE machine_interfaces SET attached_dpu_machine_id = NULL \
+         WHERE attached_dpu_machine_id = $1 AND machine_id != $1",
+    )
+    .bind(standalone_id)
+    .execute(&env.pool)
+    .await
+    .unwrap();
+    assert!(detached.rows_affected() > 0);
+    assert!(
+        db::machine::DpuHostAssociations::load(&env.pool, &[standalone_id])
+            .await
+            .unwrap()
+            .host_machine_id(&standalone_id)
+            .is_none()
+    );
+    // Early discovery can leave a standalone DPU without a loopback address.
+    let updated = sqlx::query(
+        "UPDATE machines SET network_config = network_config - 'loopback_ip' WHERE id = $1",
+    )
+    .bind(standalone_id)
+    .execute(&env.pool)
+    .await
+    .unwrap();
+    assert_eq!(updated.rows_affected(), 1);
+    assert!(
+        !sqlx::query_scalar::<_, bool>(
+            "SELECT network_config ? 'loopback_ip' FROM machines WHERE id = $1",
+        )
+        .bind(standalone_id)
+        .fetch_one(&env.pool)
+        .await
+        .unwrap()
+    );
+
+    let ids = vec![
+        standalone_id.into(),
+        host_id,
+        dpu_id.into(),
+        predicted_id,
+        missing_id,
+        host_id,
+    ];
+    let full = env
+        .api
+        .find_machines_by_ids(tonic::Request::new(rpc::forge::MachinesByIdsRequest {
+            machine_ids: ids.clone(),
+            include_history: false,
+        }))
+        .await
+        .unwrap()
+        .into_inner()
+        .machines;
+    let expected: std::collections::BTreeMap<_, _> = full
+        .into_iter()
+        .map(|machine| (machine.id.unwrap(), machine.state))
+        .collect();
+    assert_eq!(expected.len(), 4);
+    assert_eq!(expected[&host_id], "Ready");
+    assert_eq!(
+        expected[&dpu_id.into()],
+        "DPUInitializing/WaitingForNetworkConfig"
+    );
+    let compact = env
+        .api
+        .find_machine_states_by_ids(tonic::Request::new(rpc::forge::MachineStatesByIdsRequest {
+            machine_ids: ids.clone(),
+        }))
+        .await
+        .unwrap()
+        .into_inner()
+        .machines;
+    assert_eq!(compact.len(), expected.len());
+    assert_eq!(
+        compact
+            .into_iter()
+            .map(|machine| (machine.id.unwrap(), machine.state))
+            .collect::<Vec<_>>(),
+        expected.into_iter().collect::<Vec<_>>()
+    );
+
+    check_cases_async(
+        [
+            Case {
+                scenario: "empty request is rejected",
+                input: Vec::new(),
+                expect: FailsWith(tonic::Code::InvalidArgument),
+            },
+            Case {
+                scenario: "duplicates still count toward the limit",
+                input: vec![host_id; env.config.max_find_by_ids as usize + 1],
+                expect: FailsWith(tonic::Code::InvalidArgument),
+            },
+            Case {
+                scenario: "nonempty request with only missing IDs succeeds empty",
+                input: vec![missing_id],
+                expect: Yields(Vec::new()),
+            },
+            Case {
+                scenario: "exactly the maximum IDs succeeds with duplicates deduplicated",
+                input: vec![host_id; env.config.max_find_by_ids as usize],
+                expect: Yields(vec![(host_id, "Ready".to_string())]),
+            },
+        ],
+        |machine_ids| {
+            let api = &env.api;
+            async move {
+                api.find_machine_states_by_ids(tonic::Request::new(
+                    rpc::forge::MachineStatesByIdsRequest { machine_ids },
+                ))
+                .await
+                .map(|response| {
+                    response
+                        .into_inner()
+                        .machines
+                        .into_iter()
+                        .map(|machine| (machine.id.unwrap(), machine.state))
+                        .collect::<Vec<_>>()
+                })
+                .map_err(|error| error.code())
+            }
+        },
+    )
+    .await;
+
+    let updated = sqlx::query("UPDATE machines SET controller_state = '{}'::jsonb WHERE id = $1")
+        .bind(dpu_id)
+        .execute(&env.pool)
+        .await
+        .unwrap();
+    assert_eq!(updated.rows_affected(), 1);
+
+    let error = env
+        .api
+        .find_machine_states_by_ids(tonic::Request::new(rpc::forge::MachineStatesByIdsRequest {
+            machine_ids: vec![host_id, dpu_id.into()],
+        }))
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), tonic::Code::Internal);
+
+    let healthy = env
+        .api
+        .find_machine_states_by_ids(tonic::Request::new(rpc::forge::MachineStatesByIdsRequest {
+            machine_ids: vec![host_id],
+        }))
+        .await
+        .unwrap()
+        .into_inner()
+        .machines;
+    assert_eq!(
+        healthy,
+        vec![rpc::forge::MachineStateSummary {
+            id: Some(host_id),
+            state: "Ready".to_string(),
+        }],
+        "a malformed unrequested state must not prevent healthy-only requests"
+    );
+}
+
+/// Cancelling a blocked read releases local capacity before unlocking the table.
+/// A tighter operator SQL limit also ends the abandoned backend while it is blocked.
+#[crate::sqlx_test]
+async fn test_find_machine_states_releases_blocked_connection(pool: sqlx::PgPool) {
+    use std::time::Duration;
+
+    use crate::tests::common::postgres::wait_for_blocked_query;
+
+    let env = create_test_env(pool.clone()).await;
+    for statement_timeout_ms in [0, 2000] {
+        let reader_pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect_with(pool.connect_options().as_ref().clone())
+            .await
+            .unwrap();
+        sqlx::query("SELECT set_config('statement_timeout', $1, false)")
+            .bind(statement_timeout_ms.to_string())
+            .execute(&reader_pool)
+            .await
+            .unwrap();
+        let reader_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&reader_pool)
+            .await
+            .unwrap();
+        let api = crate::test_support::builder::TestApiBuilder::new(
+            reader_pool.clone(),
+            env.common_pools.clone(),
+            env.api.work_lock_manager_handle.clone(),
+        )
+        .build();
+
+        let mut blocker = pool.begin().await.unwrap();
+        sqlx::query("LOCK TABLE machines IN ACCESS EXCLUSIVE MODE")
+            .execute(&mut *blocker)
+            .await
+            .unwrap();
+        let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *blocker)
+            .await
+            .unwrap();
+        let id = MachineId::new(MachineIdSource::Tpm, [42; 32], MachineType::Host);
+        let mut request = Box::pin(api.find_machine_states_by_ids(tonic::Request::new(
+            rpc::forge::MachineStatesByIdsRequest {
+                machine_ids: vec![id],
+            },
+        )));
+        let blocked_pid = tokio::select! {
+            result = tokio::time::timeout(
+                Duration::from_secs(10),
+                wait_for_blocked_query(&pool, blocker_pid, "SELECT id, controller_state FROM machines"),
+            ) => result.expect("state query must block before its deadline"),
+            result = &mut request => panic!("request finished before the query blocked: {result:?}"),
+        };
+        assert_eq!(blocked_pid, reader_pid);
+
+        // Tokio time advances independently of PostgreSQL's real SQL timer.
+        // Leave room for the bounded ten-second wait that observed the lock.
+        tokio::time::pause();
+        tokio::time::advance(Duration::from_secs(290)).await;
+        assert!(futures::poll!(&mut request).is_pending());
+        tokio::time::advance(Duration::from_secs(10)).await;
+        let result = tokio::time::timeout(Duration::from_millis(1), &mut request).await;
+        tokio::time::resume();
+        let error = result
+            .expect("state read must finish at its deadline")
+            .unwrap_err();
+        assert_eq!(error.code(), tonic::Code::Internal);
+        assert_eq!(
+            error.message(),
+            "internal error: machine state read timed out"
+        );
+        drop(request);
+        assert_eq!(
+            reader_pool.size(),
+            0,
+            "cancelled query must release local capacity"
+        );
+        let replacement_pid = tokio::time::timeout(
+            Duration::from_secs(10),
+            sqlx::query_scalar::<_, i32>("SELECT pg_backend_pid()").fetch_one(&reader_pool),
+        )
+        .await
+        .expect("pool must recover while the lock is held")
+        .unwrap();
+        assert_ne!(replacement_pid, blocked_pid);
+
+        if statement_timeout_ms != 0 {
+            tokio::time::timeout(Duration::from_secs(10), async {
+                loop {
+                    let alive: bool = sqlx::query_scalar(
+                        "SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE pid = $1)",
+                    )
+                    .bind(blocked_pid)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+                    if !alive {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("the SQL timeout must end the abandoned backend before unlock");
+        }
+        blocker.rollback().await.unwrap();
+
+        let healthy = api
+            .find_machine_states_by_ids(tonic::Request::new(
+                rpc::forge::MachineStatesByIdsRequest {
+                    machine_ids: vec![id],
+                },
+            ))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(healthy.machines.is_empty());
+        let reused_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&reader_pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            reused_pid, replacement_pid,
+            "successful reads must return the connection"
+        );
+        reader_pool.close().await;
+    }
+}
+
+/// Waiting for pool capacity belongs to the same deadline as executing the query.
+#[crate::sqlx_test]
+async fn test_find_machine_states_bounds_connection_acquisition(pool: sqlx::PgPool) {
+    use std::time::Duration;
+
+    let env = create_test_env(pool.clone()).await;
+    let reader_pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .acquire_timeout(Duration::from_secs(600))
+        .connect_with(pool.connect_options().as_ref().clone())
+        .await
+        .unwrap();
+    let api = crate::test_support::builder::TestApiBuilder::new(
+        reader_pool.clone(),
+        env.common_pools.clone(),
+        env.api.work_lock_manager_handle.clone(),
+    )
+    .build();
+    let mut held = reader_pool.acquire().await.unwrap();
+    let held_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *held)
+        .await
+        .unwrap();
+    let mut request = Box::pin(api.find_machine_states_by_ids(tonic::Request::new(
+        rpc::forge::MachineStatesByIdsRequest {
+            machine_ids: vec![MachineId::new(
+                MachineIdSource::Tpm,
+                [42; 32],
+                MachineType::Host,
+            )],
+        },
+    )));
+    tokio::time::pause();
+    assert!(futures::poll!(&mut request).is_pending());
+    tokio::time::advance(Duration::from_secs(299)).await;
+    assert!(futures::poll!(&mut request).is_pending());
+    tokio::time::advance(Duration::from_secs(1)).await;
+    let result = tokio::time::timeout(Duration::from_millis(1), &mut request).await;
+    tokio::time::resume();
+    let error = result
+        .expect("acquisition must finish at the API deadline")
+        .unwrap_err();
+    assert_eq!(error.code(), tonic::Code::Internal);
+    assert_eq!(
+        error.message(),
+        "internal error: machine state read timed out"
+    );
+    drop(request);
+    drop(held);
+    let recovered_pid = tokio::time::timeout(
+        Duration::from_secs(10),
+        sqlx::query_scalar::<_, i32>("SELECT pg_backend_pid()").fetch_one(&reader_pool),
+    )
+    .await
+    .expect("pool capacity must be usable after releasing the held connection")
+    .unwrap();
+    assert_eq!(recovered_pid, held_pid);
+    reader_pool.close().await;
+}

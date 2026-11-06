@@ -27,6 +27,7 @@ mod nvlink_info;
 mod positions;
 mod reboot;
 mod show;
+mod states;
 
 #[cfg(test)]
 mod tests;
@@ -46,6 +47,8 @@ use crate::cfg::dispatch::Dispatch;
 pub(crate) enum Cmd {
     #[clap(about = "Display Machine information")]
     Show(show::Args),
+    #[clap(about = "Display machine lifecycle states without full records")]
+    States(states::Args),
     // Hidden: the view moved to the top-level `boot-interface show`. This
     // variant keeps `machine boot-interfaces` parsing for existing scripts and
     // runs the exact same handler (the payload type is the new command's Args).

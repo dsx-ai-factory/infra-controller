@@ -300,6 +300,9 @@ service Forge {
   rpc FindIpAddress(FindIpAddressRequest) returns (FindIpAddressResponse);
   rpc FindMachineIds(MachineSearchConfig) returns (common.MachineIdList);
   rpc FindMachinesByIds(MachinesByIdsRequest) returns (MachineList);
+  // Current host and DPU lifecycle states without full machine records.
+  // Query or state-decoding errors fail the entire request with INTERNAL.
+  rpc FindMachineStatesByIds(MachineStatesByIdsRequest) returns (MachineStateList);
   // Compact per-host state for monitoring: allocatability, update eligibility
   // and the explored firmware report, read from one database snapshot.
   rpc FindHostStatesByIds(HostStatesByIdsRequest) returns (HostStateList);
@@ -13260,4 +13263,31 @@ message AddNetworkSegmentPrefixRequest {
   // Exact link-address matches take precedence over prefix matching. Operators
   // must choose a selector that does not redirect another network's requests.
   optional string dhcpv6_link_address = 5;
+}
+
+// Select current machine states without hardware, network, health, or history data.
+// Database acquisition and execution share a 300-second outer deadline; its
+// expiry fails the whole request with INTERNAL. Each SQL statement is capped
+// at 300 seconds, preserving shorter PostgreSQL limits. Configured pool or SQL
+// timeouts can fail the request earlier.
+message MachineStatesByIdsRequest {
+  // Host, predicted-host, and DPU IDs. Empty requests and requests exceeding
+  // the server's max_find_by_ids limit fail with INVALID_ARGUMENT. Duplicates
+  // count toward that limit but produce only one result per existing machine.
+  repeated common.MachineId machine_ids = 1;
+}
+
+// One machine's lifecycle state.
+message MachineStateSummary {
+  // Always present in FindMachineStatesByIds responses.
+  common.MachineId id = 1;
+  // The same string as Machine.state, using the machine's own controller state.
+  string state = 2;
+}
+
+// Current lifecycle states for the requested machines.
+message MachineStateList {
+  // Existing requested machines, sorted by ID, including DPUs without a host
+  // or loopback IP. Missing IDs are omitted.
+  repeated MachineStateSummary machines = 1;
 }
