@@ -146,7 +146,7 @@ The `Maintenance` state is entered when `switch_maintenance_requested` is posted
 
 - **PowerOn** — powers the switch on via the component manager.
 - **PowerOff** — powers the switch off.
-- **Reset** — force-restarts the switch.
+- **Reset** — sends `GracefulRestart` when the persisted `graceful` flag is `true`, or `ForceRestart` when it is `false`. Like `PowerOff`, the flag defaults to `false` when absent from older saved requests or states and is explicitly serialized for new writes. Queued `AcPowercycle` requests return an error without creating or replacing maintenance requests ([restart intent tracking](https://github.com/dsx-ai-factory/infra-controller/issues/8753)).
 - **ReconfigureCertificate** — reinstalls or rotates NVOS mTLS certificates via component manager / RMS. Uses the same async certificate flow as bring-up; see [Switch Certificate Configuration](switch_configure_certificate.md).
 
 ## Decommissioning

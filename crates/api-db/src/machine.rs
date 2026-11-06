@@ -3840,7 +3840,7 @@ pub async fn try_set_machine_maintenance_requested(
     Ok(claimed)
 }
 
-/// Cancels only an unstarted Reboot or legacy Reset owned by the rack initiator.
+/// Cancels only an unstarted Reboot or Reset owned by the rack initiator.
 /// Requests already claimed by a machine controller or owned by others are preserved.
 pub async fn clear_unclaimed_machine_restart_request(
     txn: &mut PgConnection,
@@ -3853,12 +3853,17 @@ pub async fn clear_unclaimed_machine_restart_request(
     let query = r#"UPDATE machines SET machine_maintenance_requested = NULL
         WHERE id = $1 AND controller_state->>'state' <> 'maintenance'
           AND machine_maintenance_requested->>'initiator' = $2
-          AND machine_maintenance_requested->'operation' IN ($3, $4)
+          AND machine_maintenance_requested->'operation' IN ($3, $4, $5)
         RETURNING id"#;
     Ok(sqlx::query_as::<_, MachineId>(query)
         .bind(machine_id)
         .bind(initiator)
-        .bind(sqlx::types::Json(MachineMaintenanceOperation::Reset))
+        .bind(sqlx::types::Json(MachineMaintenanceOperation::Reset {
+            graceful: false,
+        }))
+        .bind(sqlx::types::Json(MachineMaintenanceOperation::Reset {
+            graceful: true,
+        }))
         .bind(sqlx::types::Json(MachineMaintenanceOperation::Reboot))
         .fetch_optional(txn)
         .await
@@ -7680,7 +7685,7 @@ mod test {
                 txn.as_mut(),
                 machine_id,
                 "rack-test",
-                super::MachineMaintenanceOperation::Reset,
+                super::MachineMaintenanceOperation::Reset { graceful: false },
             )
             .await?;
             txn.commit().await?;
@@ -7853,7 +7858,7 @@ mod test {
                 txn.as_mut(),
                 machine_id,
                 "rack-test",
-                super::MachineMaintenanceOperation::Reset
+                super::MachineMaintenanceOperation::Reset { graceful: false }
             )
             .await?
         );
@@ -7888,10 +7893,11 @@ mod test {
             ("rack-test", Reboot, false, true),
             ("operator", Reboot, false, false),
             ("rack-test", Reboot, true, false),
-            ("rack-test", Reset, false, true),
-            ("operator", Reset, false, false),
+            ("rack-test", Reset { graceful: false }, false, true),
+            ("rack-test", Reset { graceful: true }, false, true),
+            ("operator", Reset { graceful: false }, false, false),
             ("rack-test", PowerOn, false, false),
-            ("rack-test", Reset, true, false),
+            ("rack-test", Reset { graceful: false }, true, false),
         ] {
             let mut txn = pool.begin().await?;
             super::create(
@@ -8057,7 +8063,7 @@ mod test {
                 txn.as_mut(),
                 machine_id,
                 "component-manager",
-                Reset,
+                Reset { graceful: false },
             )
             .await?;
             let snapshot = super::find_one(txn.as_mut(), &machine_id, Default::default())
@@ -8066,7 +8072,7 @@ mod test {
             let captured = snapshot.machine_maintenance_requested.clone().unwrap();
             let next = if matches!(case, Pending::Legacy) {
                 ManagedHostState::Maintenance {
-                    operation: Reset,
+                    operation: Reset { graceful: false },
                     request: None,
                 }
             } else {

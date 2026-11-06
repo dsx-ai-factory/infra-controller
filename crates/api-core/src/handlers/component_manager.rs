@@ -818,24 +818,34 @@ fn map_power_action(raw: i32) -> Result<PowerAction, Status> {
     }
 }
 
-fn map_switch_maintenance_operation(action: PowerAction) -> SwitchMaintenanceOperation {
+fn map_switch_maintenance_operation(
+    action: PowerAction,
+) -> Result<SwitchMaintenanceOperation, &'static str> {
     match action {
-        PowerAction::On => SwitchMaintenanceOperation::PowerOn,
-        PowerAction::GracefulShutdown => SwitchMaintenanceOperation::PowerOff { graceful: true },
-        PowerAction::ForceOff => SwitchMaintenanceOperation::PowerOff { graceful: false },
-        PowerAction::GracefulRestart | PowerAction::ForceRestart | PowerAction::AcPowercycle => {
-            SwitchMaintenanceOperation::Reset
+        PowerAction::On => Ok(SwitchMaintenanceOperation::PowerOn),
+        PowerAction::GracefulShutdown => {
+            Ok(SwitchMaintenanceOperation::PowerOff { graceful: true })
         }
+        PowerAction::ForceOff => Ok(SwitchMaintenanceOperation::PowerOff { graceful: false }),
+        PowerAction::GracefulRestart => Ok(SwitchMaintenanceOperation::Reset { graceful: true }),
+        PowerAction::ForceRestart => Ok(SwitchMaintenanceOperation::Reset { graceful: false }),
+        PowerAction::AcPowercycle => Err("switch state controller does not support AC power cycle"),
     }
 }
 
-fn map_machine_maintenance_operation(action: PowerAction) -> MachineMaintenanceOperation {
+fn map_machine_maintenance_operation(
+    action: PowerAction,
+) -> Result<MachineMaintenanceOperation, &'static str> {
     match action {
-        PowerAction::On => MachineMaintenanceOperation::PowerOn,
-        PowerAction::GracefulShutdown => MachineMaintenanceOperation::PowerOff { graceful: true },
-        PowerAction::ForceOff => MachineMaintenanceOperation::PowerOff { graceful: false },
-        PowerAction::GracefulRestart | PowerAction::ForceRestart | PowerAction::AcPowercycle => {
-            MachineMaintenanceOperation::Reset
+        PowerAction::On => Ok(MachineMaintenanceOperation::PowerOn),
+        PowerAction::GracefulShutdown => {
+            Ok(MachineMaintenanceOperation::PowerOff { graceful: true })
+        }
+        PowerAction::ForceOff => Ok(MachineMaintenanceOperation::PowerOff { graceful: false }),
+        PowerAction::GracefulRestart => Ok(MachineMaintenanceOperation::Reset { graceful: true }),
+        PowerAction::ForceRestart => Ok(MachineMaintenanceOperation::Reset { graceful: false }),
+        PowerAction::AcPowercycle => {
+            Err("machine state controller does not support AC power cycle")
         }
     }
 }
@@ -861,7 +871,15 @@ async fn queue_switch_power_control_via_state_controller(
     switch_ids: &[SwitchId],
     action: PowerAction,
 ) -> Result<Vec<rpc::ComponentResult>, Status> {
-    let operation = map_switch_maintenance_operation(action);
+    let operation = match map_switch_maintenance_operation(action) {
+        Ok(operation) => operation,
+        Err(reason) => {
+            return Ok(switch_ids
+                .iter()
+                .map(|id| error_result(&id.to_string(), reason.to_string()))
+                .collect());
+        }
+    };
     queue_switch_maintenance_via_state_controller(api, cm, switch_ids, operation).await
 }
 
@@ -902,7 +920,15 @@ async fn queue_machine_power_control_via_state_controller(
     machine_ids: &[HostMachineId],
     action: PowerAction,
 ) -> Result<Vec<rpc::ComponentResult>, Status> {
-    let operation = map_machine_maintenance_operation(action);
+    let operation = match map_machine_maintenance_operation(action) {
+        Ok(operation) => operation,
+        Err(reason) => {
+            return Ok(machine_ids
+                .iter()
+                .map(|id| error_result(&id.to_string(), reason.to_string()))
+                .collect());
+        }
+    };
     queue_machine_maintenance_via_state_controller(api, cm, machine_ids, operation).await
 }
 
@@ -2974,6 +3000,19 @@ async fn power_control_ingested_machine_ids(
                 continue;
             }
         };
+
+        // Reject RMS AC cycles before changing the desired power
+        // state, which could otherwise cause the power manager to turn on the host.
+        if is_rack_scale
+            && action == PowerAction::AcPowercycle
+            && cm.compute_tray.backend() == ComputeTrayBackend::Rms
+        {
+            results.push(error_result(
+                &machine_id.to_string(),
+                "RMS power control does not support AC power cycle".to_string(),
+            ));
+            continue;
+        }
 
         let override_inserted = power_control_health_override(api, machine_id, true).await;
 
@@ -8028,49 +8067,49 @@ mod tests {
 
     #[test]
     fn map_switch_maintenance_operation_variants() {
+        use carbide_test_support::Outcome::{FailsWith, Yields};
+        use carbide_test_support::scenarios;
         use model::switch::SwitchMaintenanceOperation;
 
         use super::map_switch_maintenance_operation;
 
-        assert_eq!(
-            map_switch_maintenance_operation(PowerAction::On),
-            SwitchMaintenanceOperation::PowerOn,
-        );
-        assert_eq!(
-            map_switch_maintenance_operation(PowerAction::ForceOff),
-            SwitchMaintenanceOperation::PowerOff { graceful: false },
-        );
-        assert_eq!(
-            map_switch_maintenance_operation(PowerAction::GracefulShutdown),
-            SwitchMaintenanceOperation::PowerOff { graceful: true },
-        );
-        assert_eq!(
-            map_switch_maintenance_operation(PowerAction::ForceRestart),
-            SwitchMaintenanceOperation::Reset,
+        scenarios!(map_switch_maintenance_operation:
+            "power on/off" {
+                PowerAction::On => Yields(SwitchMaintenanceOperation::PowerOn),
+                PowerAction::ForceOff => Yields(SwitchMaintenanceOperation::PowerOff { graceful: false }),
+                PowerAction::GracefulShutdown => Yields(SwitchMaintenanceOperation::PowerOff { graceful: true }),
+            }
+            "restart intent" {
+                PowerAction::GracefulRestart => Yields(SwitchMaintenanceOperation::Reset { graceful: true }),
+                PowerAction::ForceRestart => Yields(SwitchMaintenanceOperation::Reset { graceful: false }),
+            }
+            "unsupported AC cycle" {
+                PowerAction::AcPowercycle => FailsWith("switch state controller does not support AC power cycle"),
+            }
         );
     }
 
     #[test]
     fn map_machine_maintenance_operation_variants() {
+        use carbide_test_support::Outcome::{FailsWith, Yields};
+        use carbide_test_support::scenarios;
         use model::machine::MachineMaintenanceOperation;
 
         use super::map_machine_maintenance_operation;
 
-        assert_eq!(
-            map_machine_maintenance_operation(PowerAction::On),
-            MachineMaintenanceOperation::PowerOn,
-        );
-        assert_eq!(
-            map_machine_maintenance_operation(PowerAction::ForceOff),
-            MachineMaintenanceOperation::PowerOff { graceful: false },
-        );
-        assert_eq!(
-            map_machine_maintenance_operation(PowerAction::GracefulShutdown),
-            MachineMaintenanceOperation::PowerOff { graceful: true },
-        );
-        assert_eq!(
-            map_machine_maintenance_operation(PowerAction::ForceRestart),
-            MachineMaintenanceOperation::Reset,
+        scenarios!(map_machine_maintenance_operation:
+            "power on/off" {
+                PowerAction::On => Yields(MachineMaintenanceOperation::PowerOn),
+                PowerAction::ForceOff => Yields(MachineMaintenanceOperation::PowerOff { graceful: false }),
+                PowerAction::GracefulShutdown => Yields(MachineMaintenanceOperation::PowerOff { graceful: true }),
+            }
+            "restart intent" {
+                PowerAction::GracefulRestart => Yields(MachineMaintenanceOperation::Reset { graceful: true }),
+                PowerAction::ForceRestart => Yields(MachineMaintenanceOperation::Reset { graceful: false }),
+            }
+            "unsupported AC cycle" {
+                PowerAction::AcPowercycle => FailsWith("machine state controller does not support AC power cycle"),
+            }
         );
     }
 

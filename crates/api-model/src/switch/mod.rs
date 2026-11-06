@@ -79,8 +79,11 @@ pub enum SwitchMaintenanceOperation {
         #[serde(default)]
         graceful: bool,
     },
-    /// Reset the switch (restart / AC power cycle).
-    Reset,
+    /// Restart the switch gracefully or forcibly.
+    Reset {
+        #[serde(default)]
+        graceful: bool,
+    },
     /// Reinstall or rotate the switch NVOS mTLS certificate via Component Manager.
     ReconfigureCertificate,
 }
@@ -823,11 +826,11 @@ mod tests {
 
             "maintenance: reset" {
                 SwitchControllerState::Maintenance {
-                    operation: SwitchMaintenanceOperation::Reset,
+                    operation: SwitchMaintenanceOperation::Reset { graceful: false },
                     request: None,
                     configure_certificate: None,
                 } => Yields(
-                    r#"{"state":"maintenance","operation":{"operation":"reset"}}"#.to_string(),
+                    r#"{"state":"maintenance","operation":{"operation":"reset","graceful":false}}"#.to_string(),
                 ),
             }
 
@@ -950,7 +953,7 @@ mod tests {
 
             "maintenance: reset" {
                 r#"{"state":"maintenance","operation":{"operation":"reset"}}"# => Yields(SwitchControllerState::Maintenance {
-                    operation: SwitchMaintenanceOperation::Reset,
+                    operation: SwitchMaintenanceOperation::Reset { graceful: false },
                     request: None,
                     configure_certificate: None,
                 }),
@@ -1001,7 +1004,8 @@ mod tests {
             }
 
             "reset" {
-                SwitchMaintenanceOperation::Reset => Yields(r#"{"operation":"reset"}"#.to_string()),
+                SwitchMaintenanceOperation::Reset { graceful: false } => Yields(r#"{"operation":"reset","graceful":false}"#.to_string()),
+                SwitchMaintenanceOperation::Reset { graceful: true } => Yields(r#"{"operation":"reset","graceful":true}"#.to_string()),
             }
 
             "reconfigure certificate" {
@@ -1029,7 +1033,9 @@ mod tests {
             }
 
             "reset" {
-                r#"{"operation":"reset"}"# => Yields(SwitchMaintenanceOperation::Reset),
+                r#"{"operation":"reset"}"# => Yields(SwitchMaintenanceOperation::Reset { graceful: false }),
+                r#"{"operation":"reset","graceful":false}"# => Yields(SwitchMaintenanceOperation::Reset { graceful: false }),
+                r#"{"operation":"reset","graceful":true}"# => Yields(SwitchMaintenanceOperation::Reset { graceful: true }),
             }
 
             "reconfigure certificate" {

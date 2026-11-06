@@ -2131,7 +2131,7 @@ async fn test_legacy_power_reset_submits_and_resumes_batch(
     }
     // A saved batch can contain a Reset queued before graceful reboots were
     // introduced. Resume it without rejecting or rewriting that operation.
-    requests[0].operation = MachineMaintenanceOperation::Reset;
+    requests[0].operation = MachineMaintenanceOperation::Reset { graceful: false };
     assert_eq!(
         sqlx::query("UPDATE machines SET machine_maintenance_requested = $1 WHERE id = $2")
             .bind(sqlx::types::Json(&requests[0]))

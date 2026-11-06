@@ -208,7 +208,8 @@ async fn wait_for_compute_host_restarts(
                 request.initiator != initiator
                     || !matches!(
                         request.operation,
-                        MachineMaintenanceOperation::Reboot | MachineMaintenanceOperation::Reset
+                        MachineMaintenanceOperation::Reboot
+                            | MachineMaintenanceOperation::Reset { .. }
                     )
             })
     }) {

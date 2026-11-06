@@ -195,7 +195,7 @@ impl StateControllerIO for SwitchStateControllerIO {
                 let substate = match operation {
                     SwitchMaintenanceOperation::PowerOn => "power_on",
                     SwitchMaintenanceOperation::PowerOff { .. } => "power_off",
-                    SwitchMaintenanceOperation::Reset => "reset",
+                    SwitchMaintenanceOperation::Reset { .. } => "reset",
                     SwitchMaintenanceOperation::ReconfigureCertificate => {
                         return match configure_certificate {
                             Some(ConfigureCertificateState::WaitForComplete { .. }) => {
