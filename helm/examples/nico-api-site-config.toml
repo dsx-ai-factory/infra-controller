@@ -33,8 +33,9 @@ site_fabric_prefixes = ["SITE_FABRIC_PREFIX_1"]
 # Omission combines site_fabric_prefixes with all retained tenant SitePrefixes.
 # Removed operator roots remain covered by exact VpcPrefix references, contained
 # VpcPrefixes without parentage, or contained VPC-attached direct NetworkPrefixes.
-# A direct prefix releases retiring roots when a Ready operator root fully covers it;
-# otherwise it retains them until its segment is hard-deleted.
+# A direct prefix retains retiring roots while its segment exists and no Ready operator
+# root fully covers it, including during draining. Adding or restoring Ready operator
+# coverage releases those roots without deleting the segment.
 # Exact parentage takes precedence over containment. Inherited roots are collapsed.
 # Explicit lists preserve distinct prefix boundaries. Under mutual isolation they must
 # cover every retained tenant root, so [] cannot support tenant roots. Open
