@@ -114,7 +114,13 @@ func (manager ManageSitePrefix) UpdateSitePrefixesInDB(ctx context.Context, site
 		id := uuid.MustParse(prefix.GetId().GetValue()) // validated before the transaction
 		var reconciledBlock *cdbm.IPBlock
 		err = cdb.WithTx(ctx, manager.dbSession, func(tx *cdb.Tx) error {
-			err := tx.TryAcquireAdvisoryLock(ctx, cdbm.SiteFabricIPBlockLockID(site.InfrastructureProviderID, siteID), nil)
+			// Never hold a Site-wide lock while waiting for an in-flight Core call.
+			err := tx.AcquireAdvisoryLock(ctx, cdbm.SitePrefixIPBlockLockID(siteID, id), false)
+			if err != nil {
+				isLockContention = errors.Is(err, cdb.ErrXactAdvisoryLockFailed)
+				return err
+			}
+			err = tx.TryAcquireAdvisoryLock(ctx, cdbm.SiteFabricIPBlockLockID(site.InfrastructureProviderID, siteID), nil)
 			if err != nil {
 				// The retry aggregate includes earlier failures; classify its last attempt.
 				lastErr := errors.Unwrap(err)
@@ -174,6 +180,9 @@ func (manager ManageSitePrefix) UpdateSitePrefixesInDB(ctx context.Context, site
 			// REST owns metadata after creation, including on adopted and restored
 			// roots. Only lifecycle changes produce writes and status details.
 			status := getSitePrefixStatus(prefix.Status.LifecycleState)
+			if !block.Managed && block.Status == cdbm.IPBlockStatusDeleting {
+				status = cdbm.IPBlockStatusDeleting
+			}
 			if status != block.Status {
 				block, err = dao.Update(ctx, tx, cdbm.IPBlockUpdateInput{IPBlockID: block.ID, Status: &status})
 				if err != nil {
@@ -192,7 +201,7 @@ func (manager ManageSitePrefix) UpdateSitePrefixesInDB(ctx context.Context, site
 		if err != nil {
 			if isLockContention {
 				logger.Warn().Err(err).Str("Site Prefix ID", prefix.GetId().GetValue()).
-					Msg("skipping SitePrefix after bounded Site fabric lock contention retries")
+					Msg("skipping SitePrefix due to mutation or Site fabric lock contention")
 				continue
 			}
 			var applicationErr *temporal.ApplicationError
@@ -350,8 +359,13 @@ func (manager ManageSitePrefix) createOrUpdateSitePrefixFromSite(ctx context.Con
 		return dao.Clear(ctx, tx, cdbm.IPBlockClearInput{IPBlockID: existingBlock.ID, Deleted: true})
 	}
 	status := getSitePrefixStatus(prefix.Status.LifecycleState)
+	var blockID *uuid.UUID
+	if tenantID != nil {
+		blockID = &id
+	}
 	block, err := dao.Create(ctx, tx, cdbm.IPBlockCreateInput{
-		Name: name, Description: description,
+		IPBlockID: blockID,
+		Name:      name, Description: description,
 		SiteID: site.ID, InfrastructureProviderID: site.InfrastructureProviderID, TenantID: tenantID,
 		SitePrefixID: &id, Prefix: cidr.Addr().String(), PrefixLength: cidr.Bits(),
 		Managed:         cutil.GetPtr(tenantID == nil),
