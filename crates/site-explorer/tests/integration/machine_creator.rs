@@ -61,6 +61,16 @@ use super::machine_fixtures::{
 // the other needs until `wait_for_blocked_queries` times out.
 static ADMIN_LOCK_ADMISSION_TEST_SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+// Serializes the tests whose iteration records a failed managed-host creation
+// with the test that asserts that count. The latency histogram lives in the
+// process-wide test registry and `MetricsCapture` serializes only the tests
+// that assert on it, so a failure recorded by a test running alongside lands
+// in the asserted delta. To find the emitters again, print from
+// `create_identified_host` on an error and run the binary with
+// `--test-threads=1 --nocapture`.
+pub(super) static FAILED_CREATION_METRIC_TEST_SERIAL: tokio::sync::Mutex<()> =
+    tokio::sync::Mutex::const_new(());
+
 async fn assert_no_machines_created(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
     let machines = db::machine::find(
         pool,
@@ -284,6 +294,113 @@ async fn test_zero_dpu_rediscovery_after_stable_registration(
     .await?;
     assert_eq!(machines.len(), 1);
     assert_eq!(machines[0].id, stable_id.into());
+    Ok(())
+}
+
+/// A reported MAC belonging to another BMC must prevent both creation and refresh,
+/// whether ownership is still predicted or has already been promoted by DHCP.
+#[sqlx_test]
+async fn test_zero_dpu_rejects_interfaces_of_another_bmc(
+    pool: PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let test_harness = TestHarness::builder(pool.clone()).build().await;
+    let domain = test_harness.test_domain().await;
+    let network_controller = test_harness.network_controller();
+    let underlay_segment = network_controller.create_underlay_segment(&domain).await;
+    let host_inband_segment = network_controller.create_host_inband_segment(&domain).await;
+    let env = Env {
+        pool,
+        underlay_segment,
+        test_harness,
+    };
+    let creator = machine_creator(&env, machine_creator_config());
+    let owner = ManagedHostConfig::zero_dpu();
+    let shared_mac = owner.non_dpu_macs[0];
+    let mut owner_fixture = explored_host_fixture(&env, &owner).await;
+    assert!(
+        creator
+            .create_managed_host(
+                &owner_fixture.host,
+                &mut owner_fixture.host_report,
+                Some(&expected_machine(&owner)),
+                &env.pool,
+            )
+            .await?
+    );
+    let mut txn = env.pool.begin().await?;
+    let owner_machine_id: HostMachineId =
+        db::predicted_machine_interface::find_by_mac_address(txn.as_mut(), shared_mac)
+            .await?
+            .expect("initial creation should predict the owner's NIC")
+            .machine_id
+            .try_into()?;
+    txn.rollback().await?;
+
+    let candidate = ManagedHostConfig::zero_dpu();
+    let extra_mac = candidate.non_dpu_macs[0];
+    let candidate = ManagedHostConfig {
+        non_dpu_macs: vec![shared_mac, extra_mac],
+        ..candidate
+    };
+    let mut candidate_fixture = explored_host_fixture(&env, &candidate).await;
+
+    for (scenario, promote_interface) in [("pending prediction", false), ("leased interface", true)]
+    {
+        if promote_interface {
+            env.api()
+                .discover_dhcp(
+                    rpc::forge::DhcpDiscovery::builder(
+                        shared_mac,
+                        host_inband_segment.relay_address,
+                    )
+                    .vendor_string("Bluefield")
+                    .tonic_request(),
+                )
+                .await?;
+        }
+
+        // Missing boot metadata makes an accidental refresh of the owner observable.
+        sqlx::query("DELETE FROM machine_boot_interfaces WHERE machine_id = $1")
+            .bind(owner_machine_id)
+            .execute(&env.pool)
+            .await?;
+        assert!(
+            !creator
+                .create_managed_host(
+                    &candidate_fixture.host,
+                    &mut candidate_fixture.host_report,
+                    Some(&expected_machine(&candidate)),
+                    &env.pool,
+                )
+                .await?,
+            "{scenario}: the conflicting report must not create a host",
+        );
+
+        let mut txn = env.pool.begin().await?;
+        assert!(
+            db::machine_desired_boot_interface::get(txn.as_mut(), &owner_machine_id)
+                .await?
+                .is_none(),
+            "{scenario}: the conflicting report must not refresh the owner's boot target",
+        );
+        assert!(
+            db::predicted_machine_interface::find_by_mac_address(txn.as_mut(), extra_mac)
+                .await?
+                .is_none(),
+            "{scenario}: the conflicting report must not add its other NIC",
+        );
+        assert!(
+            db::machine_topology::find_machine_id_by_bmc_mac::<HostMachineId>(
+                txn.as_mut(),
+                candidate.bmc_mac_address,
+            )
+            .await?
+            .is_none(),
+            "{scenario}: the conflicting BMC must remain unassociated",
+        );
+        txn.rollback().await?;
+    }
+
     Ok(())
 }
 
@@ -1137,6 +1254,162 @@ async fn register_ingestible_hosts(
     Ok((fixtures, endpoints))
 }
 
+/// Immediate identification of an owned BMC alias must preserve the ingested
+/// host/DPU identities and avoid reconfiguring a DPU already in its target mode.
+#[sqlx_test]
+async fn test_ingested_host_ipv6_alias_preserves_inventory_and_settled_dpu_mode(
+    pool: PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use model::allocation_type::AllocationType;
+    use model::site_explorer::{BlueFieldOperatingMode, PreingestionState};
+
+    let env = Env::new(pool).await;
+    let host = ingestible_host(ExpectedMachineData::default());
+    let (fixtures, endpoints) =
+        register_ingestible_hosts(&env, std::slice::from_ref(&host)).await?;
+    let fixture = &fixtures[0];
+    let dpu = &fixture.host.dpus[0];
+    // This BF3 already reports the default target mode. Discovery of a second
+    // host BMC address must not request a mode change or a host power cycle.
+    assert_eq!(
+        dpu.report.systems[0].attributes.nic_mode,
+        Some(BlueFieldOperatingMode::Dpu)
+    );
+    let explorer = super::env::test_site_explorer(
+        &env.test_harness,
+        SiteExplorerConfig {
+            explorations_per_run: 1,
+            create_machines: Arc::new(true.into()),
+            ..Default::default()
+        },
+    );
+    explorer.insert_endpoints(endpoints);
+    explorer.run_single_iteration().await?;
+
+    let search = MachineSearchConfig {
+        include_predicted_host: true,
+        ..Default::default()
+    };
+    let mut machine_ids =
+        db::machine::find(&env.pool, ObjectFilter::<MachineId>::All, search.clone())
+            .await?
+            .into_iter()
+            .map(|machine| machine.id)
+            .collect::<Vec<_>>();
+    machine_ids.sort();
+    assert_eq!(machine_ids.len(), 2, "the host and DPU were ingested");
+    let bmc_macs = [host.bmc_mac_address, host.dpus[0].bmc_mac_address];
+    let mut bmc_interfaces = Vec::new();
+    for mac in bmc_macs {
+        let mut interfaces = db::machine_interface::find_by_mac_address(&env.pool, mac).await?;
+        assert_eq!(interfaces.len(), 1);
+        assert!(interfaces[0].machine_id.is_some());
+        bmc_interfaces.push(interfaces.remove(0));
+    }
+    let host_machine_id = bmc_interfaces[0].machine_id.expect("host BMC has an owner");
+    assert_eq!(bmc_interfaces[1].machine_id, dpu.report.machine_id);
+    let mut txn = env.pool.begin().await?;
+    let topology =
+        db::machine_topology::find_latest_by_machine_ids(txn.as_mut(), &[host_machine_id])
+            .await?
+            .remove(&host_machine_id)
+            .expect("ingestion saved the host topology");
+    txn.commit().await?;
+    let mock = explorer.endpoint_explorer();
+    let mode_requests = mock.set_nic_mode_calls.lock().unwrap().len();
+    let power_requests = mock.redfish_power_control_calls.lock().unwrap().len();
+    assert_eq!(mode_requests, 0, "the DPU already matches its target mode");
+
+    // Add only an address: the existing BMC interface and its machine owner
+    // are the evidence that lets the alias bypass preingestion immediately.
+    let alias: IpAddr = "2001:db8::8734".parse()?;
+    let mut txn = env.pool.begin().await?;
+    db::machine_interface_address::insert(
+        txn.as_mut(),
+        bmc_interfaces[0].id,
+        alias,
+        AllocationType::Dhcp,
+    )
+    .await?;
+    txn.commit().await?;
+    explorer.insert_endpoints(vec![(alias, fixture.host_report.clone())]);
+    explorer.run_single_iteration().await?;
+
+    assert!(
+        mock.explore_endpoint_calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|call| call.ip_address == alias)
+    );
+    let mut txn = env.pool.begin().await?;
+    let discovered = db::explored_endpoints::find_all_by_ip(alias, txn.as_mut()).await?;
+    assert_eq!(discovered.len(), 1);
+    assert_eq!(
+        discovered[0].preingestion_state,
+        PreingestionState::Complete
+    );
+    assert_eq!(discovered[0].report.systems, fixture.host_report.systems);
+    let topology_after =
+        db::machine_topology::find_latest_by_machine_ids(txn.as_mut(), &[host_machine_id])
+            .await?
+            .remove(&host_machine_id)
+            .expect("the host topology remains saved");
+    txn.commit().await?;
+    let identified = db::explored_managed_host::find_all(&env.pool).await?;
+    let aliased_host = identified
+        .iter()
+        .find(|identified| identified.host_bmc_ip == alias)
+        .expect("the alias reached host identification in the same iteration");
+    assert_eq!(aliased_host.dpus.len(), 1);
+    assert_eq!(aliased_host.dpus[0].bmc_ip, dpu.bmc_ip);
+
+    let mut machine_ids_after =
+        db::machine::find(&env.pool, ObjectFilter::<MachineId>::All, search)
+            .await?
+            .into_iter()
+            .map(|machine| machine.id)
+            .collect::<Vec<_>>();
+    machine_ids_after.sort();
+    assert_eq!(machine_ids_after, machine_ids);
+    for (mac, before) in bmc_macs.into_iter().zip(&bmc_interfaces) {
+        let after = db::machine_interface::find_by_mac_address(&env.pool, mac).await?;
+        assert_eq!(after.len(), 1);
+        assert_eq!(after[0].id, before.id);
+        assert_eq!(after[0].machine_id, before.machine_id);
+        assert_eq!(
+            after[0].attached_dpu_machine_id,
+            before.attached_dpu_machine_id
+        );
+        if mac == host.bmc_mac_address {
+            let mut addresses = after[0].addresses.clone();
+            addresses.sort();
+            let mut expected = vec![fixture.host.host_bmc_ip, alias];
+            expected.sort();
+            assert_eq!(addresses, expected);
+        } else {
+            assert_eq!(after[0].addresses, before.addresses);
+        }
+    }
+    assert_eq!(topology_after.machine_id, topology.machine_id);
+    assert_eq!(topology_after.created, topology.created);
+    let bmc_before = topology.topology.bmc_info;
+    let bmc_after = topology_after.topology.bmc_info;
+    assert_eq!(
+        bmc_after.machine_interface_id,
+        bmc_before.machine_interface_id
+    );
+    assert_eq!(bmc_after.mac, bmc_before.mac);
+    assert_eq!(bmc_after.ip, bmc_before.ip);
+    assert_eq!(bmc_after.port, bmc_before.port);
+    assert_eq!(mock.set_nic_mode_calls.lock().unwrap().len(), mode_requests);
+    assert_eq!(
+        mock.redfish_power_control_calls.lock().unwrap().len(),
+        power_requests
+    );
+    Ok(())
+}
+
 /// The identify phase trusts the stored power state of an uningested host
 /// whose probe produced a report in this iteration and reads it live only for
 /// the host whose stored report is older.
@@ -1464,6 +1737,7 @@ async fn test_create_machines_continues_when_the_rack_pre_creation_fails(
 async fn test_create_machines_moves_on_after_a_failed_attempt_within_the_cap(
     pool: PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let _failed_creation_guard = FAILED_CREATION_METRIC_TEST_SERIAL.lock().await;
     let env = Env::new(pool).await;
     let rack_a = RackId::new(format!("rack-a-{}", uuid::Uuid::new_v4()));
     let rack_b = RackId::new(format!("rack-b-{}", uuid::Uuid::new_v4()));

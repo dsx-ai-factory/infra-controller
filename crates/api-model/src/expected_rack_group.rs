@@ -87,7 +87,7 @@ pub struct ExpectedRackGroup {
     pub rack_group_id: RackGroupId,
     /// NVLink topology declared for the group.
     pub topology: RackGroupTopology,
-    /// Rack-management protocol declared for the group. Legacy rows may omit it.
+    /// Optional rack-management protocol declared for the group.
     pub protocol: Option<RackGroupProtocol>,
     /// Ordered racks; may be empty. RPC conversion requires non-blank, unique rack IDs,
     /// non-blank member manufacturer/ID values, and group-wide unique (type, manufacturer, id)

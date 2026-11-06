@@ -156,6 +156,7 @@ impl From<Args> for forge::NetworkSegmentCreationRequest {
                     svi_ip: None,
                     free_ip_count_v2: None,
                     free_ip_count_saturated: false,
+                    dhcpv6_link_address: None,
                 }
             })
             .collect();

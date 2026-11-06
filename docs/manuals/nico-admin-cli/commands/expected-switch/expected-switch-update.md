@@ -109,7 +109,9 @@ Rack ID for this switch
 
 `--bmc-ip-address <BMC_IP_ADDRESS>`
 
-BMC IP address of the expected switch
+BMC IP address of the expected switch. Must not be unspecified,
+multicast, or IPv4 limited broadcast, including the IPv4-mapped IPv6
+form of each
 
 `--extended`
 
@@ -125,7 +127,9 @@ Static IP for the single wired NVOS port. The updated switch must have
 exactly one NVOS port. When Core supports PATCH or masked updates, omit
 --nvos-interface only if the stored set already contains exactly one
 port; otherwise, supply exactly one --nvos-interface to replace the set.
-Servers without NVOS IP support ignore this field
+Servers without NVOS IP support ignore this field. Must not be
+unspecified, multicast, or IPv4 limited broadcast, including the
+IPv4-mapped IPv6 form of each
 
 `--bmc-retain-credentials <BMC_RETAIN_CREDENTIALS>`
 

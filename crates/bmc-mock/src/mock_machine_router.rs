@@ -23,8 +23,8 @@ use crate::bmc_state::BmcState;
 use crate::injection::InjectionStore;
 use crate::redfish::manager::ManagerState;
 use crate::{
-    Callbacks, EventServiceConfig, HardwareType, MachineInfo, VirtualMediaDeviceConfig,
-    auth_router, middleware_router, redfish,
+    Callbacks, EventServiceConfig, MachineInfo, VirtualMediaDeviceConfig, auth_router,
+    middleware_router, redfish,
 };
 
 /// Caller control over the hardware profile's EventService.
@@ -132,9 +132,7 @@ fn machine_router_inner<C: Callbacks>(
         update_service_config.task_completion_jitter =
             crate::redfish::update_service::DEFAULT_TASK_COMPLETION_JITTER.min(delay);
     }
-    let bmc_vendor = machine_info.bmc_vendor();
-    let bmc_product = machine_info.bmc_product();
-    let bmc_redfish_version = machine_info.bmc_redfish_version();
+    let service_root_config = machine_info.service_root_config();
     let oem_state = machine_info.oem_state();
     let factory_default_account = machine_info.factory_default_account();
     let event_service_config = match &options.event_service {
@@ -192,12 +190,16 @@ fn machine_router_inner<C: Callbacks>(
         .bmc_reset_duration
         .filter(|d| !d.is_zero())
         .map(|d| Arc::new(crate::availability::BmcAvailabilityState::new(d)));
+    let component_integrities = machine_info.component_integrity_config();
+    let service_root_state = Arc::new(redfish::service_root::ServiceRootState::from_config(
+        service_root_config,
+        event_service_config.is_some(),
+        component_integrities.is_some(),
+    ));
     let state = BmcState {
         event_service: event_service_config.map(crate::EventServiceState::new),
         event_sequence: Arc::default(),
-        bmc_vendor,
-        bmc_product,
-        bmc_redfish_version,
+        service_root_state,
         oem_state,
         manager,
         system_state,
@@ -208,20 +210,19 @@ fn machine_router_inner<C: Callbacks>(
         injection: injection.clone(),
         availability: availability.clone(),
         callbacks: Some(callbacks.clone()),
-        exposes_computer_systems: machine_info.exposes_computer_systems(),
-        component_integrities: machine_info.component_integrity_config(),
+        component_integrities,
     };
     let account_service_state = state.account_service_state.clone();
     let session_service_state = state.session_service_state.clone();
+    // DPU BMCs always require the factory password to be changed first.
     let permit_factory_default_password = matches!(
         &machine_info,
-        MachineInfo::Host(h) if matches!(
-            h.hw_type,
-            HardwareType::LiteOnPowerShelf | HardwareType::DeltaPowerShelf
-        )
+        MachineInfo::Host(h) if !h.hw_type.bmc_requires_factory_password_change()
     );
     let router = router
-        .add_routes(|router| crate::redfish::computer_system::add_routes(router, bmc_vendor))
+        .add_routes(|router| {
+            crate::redfish::computer_system::add_routes(router, service_root_config.vendor)
+        })
         .add_routes(crate::ipmi::add_routes)
         .with_state(state.clone())
         .merge(crate::injection::management_router(injection.clone()));
@@ -371,6 +372,111 @@ mod tests {
                 };
                 assert_eq!(actual, expected, "{scenario}");
             }
+        }
+    }
+
+    #[tokio::test]
+    async fn factory_default_password_outside_account_service_follows_the_profile() {
+        use axum_extra::headers::{Authorization, HeaderMapExt};
+
+        use crate::machine_info::DpuSettings;
+        use crate::test_support::TEST_MAC_POOL;
+        use crate::{DpuMachineInfo, HardwareType};
+
+        async fn get(router: &Router, path: &str, username: &str, password: &str) -> StatusCode {
+            let mut request = Request::builder().uri(path).body(Body::empty()).unwrap();
+            request
+                .headers_mut()
+                .typed_insert(Authorization::basic(username, password));
+            router.clone().oneshot(request).await.unwrap().status()
+        }
+
+        let dpu = {
+            let mut pool = TEST_MAC_POOL.lock().unwrap();
+            MachineInfo::Dpu(DpuMachineInfo::new(
+                HardwareType::DellPowerEdgeR750,
+                &mut pool,
+                DpuSettings::default(),
+            ))
+        };
+        // HPE iLO and the power shelves serve every resource with factory
+        // credentials; the other profiles refuse everything outside
+        // AccountService until the password has been changed.
+        let profiles = [
+            (
+                host_info(HardwareType::HpeProliantDl380aGen11),
+                StatusCode::OK,
+            ),
+            (host_info(HardwareType::LiteOnPowerShelf), StatusCode::OK),
+            (host_info(HardwareType::DeltaPowerShelf), StatusCode::OK),
+            (
+                host_info(HardwareType::DellPowerEdgeR750),
+                StatusCode::FORBIDDEN,
+            ),
+            (
+                host_info(HardwareType::LenovoGB300Nvl),
+                StatusCode::FORBIDDEN,
+            ),
+            (
+                host_info(HardwareType::SupermicroGb300Nvl),
+                StatusCode::FORBIDDEN,
+            ),
+            (
+                host_info(HardwareType::NvidiaDgxGb300),
+                StatusCode::FORBIDDEN,
+            ),
+            (dpu, StatusCode::FORBIDDEN),
+        ];
+        for (machine_info, expected) in profiles {
+            let scenario = match &machine_info {
+                MachineInfo::Host(host) => host.hw_type.to_string(),
+                MachineInfo::Dpu(_) => "DPU".to_string(),
+            };
+            let (router, state) = machine_router_inner(
+                &machine_info,
+                Arc::new(TestCallbacks::default()),
+                "factory-password".into(),
+                true,
+                Arc::new(InjectionStore::new()),
+                MachineRouterOptions::default(),
+                None,
+            );
+            let (username, factory) = state
+                .account_service_state
+                .administrator_credentials()
+                .expect("an administrator account");
+            for path in ["/redfish/v1/Managers", "/redfish/v1/Chassis"] {
+                assert_eq!(
+                    get(&router, path, &username, &factory).await,
+                    expected,
+                    "{scenario}: {path} with factory credentials"
+                );
+            }
+            assert_eq!(
+                get(
+                    &router,
+                    "/redfish/v1/AccountService/Accounts",
+                    &username,
+                    &factory
+                )
+                .await,
+                StatusCode::OK,
+                "{scenario}: AccountService with factory credentials"
+            );
+            assert_eq!(
+                get(&router, "/redfish/v1/Managers", &username, "wrong").await,
+                StatusCode::UNAUTHORIZED,
+                "{scenario}: wrong password"
+            );
+
+            state
+                .account_service_state
+                .change_factory_default_password("rotated");
+            assert_eq!(
+                get(&router, "/redfish/v1/Managers", &username, "rotated").await,
+                StatusCode::OK,
+                "{scenario}: rotated password"
+            );
         }
     }
 }

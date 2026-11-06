@@ -228,6 +228,10 @@ machineATron:
     namespace: nico-system
     name: nico-site-credentials
     key: credentials.yaml
+  ## Interval for fetching desired firmware versions from Core and adopting them
+  ## in host actors. Duration string such as "2s" or "500ms"; chart default: "2s".
+  ## Sets `api_refresh_interval` in generated `mat.toml`. A nonempty per-pod
+  ## `configFiles.matConfigs` entry replaces that entire config.
   apiRefreshInterval: "2s"
   ## Delay before a simulated Scout reopens its ScoutStream after the stream
   ## closes or fails. A stream nico-api denies is not reopened. A duration

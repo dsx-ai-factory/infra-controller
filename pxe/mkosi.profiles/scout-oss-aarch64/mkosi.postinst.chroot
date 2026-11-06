@@ -16,7 +16,19 @@ NV_PACKAGES="nvidia-open datacenter-gpu-manager-4-cuda13 datacenter-gpu-manager-
 APT_SANDBOX_OPTS="-o APT::Sandbox::User=root"
 export DEBIAN_FRONTEND=noninteractive
 
-apt-get ${APT_SANDBOX_OPTS} update
+# Refresh all indexes again if the CUDA CDN serves mismatched repository metadata.
+for attempt in 1 2 3; do
+  if apt-get ${APT_SANDBOX_OPTS} update; then
+    break
+  else
+    apt_update_status=$?
+  fi
+  if [ "$attempt" -eq 3 ]; then
+    exit "$apt_update_status"
+  fi
+  echo "APT index update failed; retrying in 30 seconds (${attempt}/3)" >&2
+  sleep 30
+done
 apt-get ${APT_SANDBOX_OPTS} -y install nvidia-driver-pinning-615
 
 # Debug: Check what NVIDIA driver packages are actually available

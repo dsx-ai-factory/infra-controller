@@ -467,6 +467,10 @@ mod tests {
             eprintln!("pykmip-server not available, skipping test");
             return;
         };
+        // The CI build container exposes the console script through a symlink
+        // in /usr/local/bin into a virtual environment; the interpreter that can
+        // import `kmip` sits next to the resolved script, not next to the link.
+        let server_binary = std::fs::canonicalize(&server_binary).expect("resolve pykmip-server");
         let dir = tempfile::tempdir().expect("temporary directory");
         let pki = carbide_kmip::test_support::write_test_pki(dir.path());
         let port = std::net::TcpListener::bind("127.0.0.1:0")

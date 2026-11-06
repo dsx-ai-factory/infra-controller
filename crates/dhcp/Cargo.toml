@@ -65,6 +65,7 @@ prometheus = { workspace = true }
 [build-dependencies]
 cbindgen = "*"
 cc = "1.0"
+pkg-config = { workspace = true }
 
 [lints]
 workspace = true

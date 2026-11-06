@@ -1,0 +1,130 @@
+suite: inventory read bindings
+templates:
+  - inventory-rbac.yaml
+release:
+  name: run
+  namespace: run-ns
+tests:
+  - it: renders nothing when the inventory suite is disabled
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: grants namespace-scoped Pod and Service reads in the target MAT namespace
+    set:
+      suites.inventory.enabled: true
+      inventory.namespace: mat-ns
+    asserts:
+      - hasDocuments:
+          count: 2
+      - isKind:
+          of: Role
+        documentIndex: 0
+      - equal:
+          path: metadata.namespace
+          value: mat-ns
+        documentIndex: 0
+      - equal:
+          path: rules[0].resources
+          value: ["pods", "services"]
+        documentIndex: 0
+      - equal:
+          path: rules[0].verbs
+          value: ["get", "list"]
+        documentIndex: 0
+      - equal:
+          path: metadata.name
+          value: run-scale-test-inv-064025987a
+        documentIndex: 0
+      - isKind:
+          of: RoleBinding
+        documentIndex: 1
+      - equal:
+          path: metadata.namespace
+          value: mat-ns
+        documentIndex: 1
+      - equal:
+          path: metadata.name
+          value: run-scale-test-inv-064025987a
+        documentIndex: 1
+      - equal:
+          path: roleRef.name
+          value: run-scale-test-inv-064025987a
+        documentIndex: 1
+      - equal:
+          path: subjects[0].namespace
+          value: run-ns
+        documentIndex: 1
+      - equal:
+          path: subjects[0].name
+          value: run-scale-test
+        documentIndex: 1
+
+  - it: gives the same release name in another runner namespace a distinct identity
+    release:
+      name: run
+      namespace: run-ns2
+    set:
+      suites.inventory.enabled: true
+      inventory.namespace: mat-ns
+    asserts:
+      - equal:
+          path: metadata.name
+          value: run-scale-test-inv-7796a67e24
+        documentIndex: 0
+      - equal:
+          path: metadata.name
+          value: run-scale-test-inv-7796a67e24
+        documentIndex: 1
+      - equal:
+          path: subjects[0].namespace
+          value: run-ns2
+        documentIndex: 1
+
+  # Two 53-char release names sharing their first 50 chars fall into one display
+  # prefix, so only the full-identity hash keeps them distinct (a namespace-only
+  # hash would collide them).
+  - it: gives same-prefix long release aaa...one a distinct hashed identity
+    release:
+      name: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaone
+      namespace: run-ns
+    set:
+      suites.inventory.enabled: true
+      inventory.namespace: mat-ns
+    asserts:
+      - matchRegex:
+          path: metadata.name
+          pattern: -inv-c85b78289d$
+        documentIndex: 0
+      - matchRegex:
+          path: metadata.name
+          pattern: -inv-c85b78289d$
+        documentIndex: 1
+      - matchRegex:
+          path: roleRef.name
+          pattern: -inv-c85b78289d$
+        documentIndex: 1
+
+  - it: gives same-prefix long release aaa...two a different hashed identity
+    release:
+      name: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaatwo
+      namespace: run-ns
+    set:
+      suites.inventory.enabled: true
+      inventory.namespace: mat-ns
+    asserts:
+      - matchRegex:
+          path: metadata.name
+          pattern: -inv-a82b84e604$
+        documentIndex: 0
+      - matchRegex:
+          path: metadata.name
+          pattern: -inv-a82b84e604$
+        documentIndex: 1
+
+  - it: fails when enabled without a target namespace
+    set:
+      suites.inventory.enabled: true
+    asserts:
+      - failedTemplate:
+          errorMessage: inventory.namespace is required when the inventory suite is enabled

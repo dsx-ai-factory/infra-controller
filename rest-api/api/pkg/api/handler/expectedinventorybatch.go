@@ -27,8 +27,6 @@ type expectedInventoryBatchBase struct {
 	scp       *sc.ClientPool
 }
 
-const expectedInventoryMutationLockPrefix = "expected-inventory-mutation:"
-
 func newExpectedInventoryBatchBase(dbSession *cdb.Session, scp *sc.ClientPool, _ *config.Config) expectedInventoryBatchBase {
 	return expectedInventoryBatchBase{
 		dbSession: dbSession,
@@ -77,7 +75,7 @@ func validateDeleteAllSiteID(c echo.Context) (string, *cutil.APIError) {
 // Expected Inventory mutations for one Site share one lock key across resource
 // types because rack membership and derived inventory fields cross resource
 // boundaries. Ordinary mutations take a shared lock, while complete mutations
-// take the exclusive form of the same lock.
+// and batch serial admission take the exclusive form of the same lock.
 func acquireExpectedInventorySharedMutationLock(ctx context.Context, logger zerolog.Logger, tx *cdb.Tx, siteID uuid.UUID) *cutil.APIError {
 	return acquireExpectedInventoryMutationLock(ctx, logger, tx, siteID, true)
 }
@@ -87,7 +85,7 @@ func acquireExpectedInventoryExclusiveMutationLock(ctx context.Context, logger z
 }
 
 func acquireExpectedInventoryMutationLock(ctx context.Context, logger zerolog.Logger, tx *cdb.Tx, siteID uuid.UUID, shared bool) *cutil.APIError {
-	lockID := cdb.GetAdvisoryLockIDFromString(expectedInventoryMutationLockPrefix + siteID.String())
+	lockID := cdbm.ExpectedInventoryMutationLockID(siteID)
 	var err error
 	if shared {
 		err = tx.TryAcquireSharedAdvisoryLock(ctx, lockID, nil)
@@ -133,6 +131,10 @@ func (b expectedInventoryBatchBase) deleteAll(c echo.Context, resource, method s
 		}
 		derr := deleteDB(ctx, tx, site.ID)
 		if derr != nil {
+			var callbackErr *cutil.APIError
+			if errors.As(derr, &callbackErr) {
+				return callbackErr
+			}
 			logger.Error().Err(derr).Msg("error deleting Expected Inventory records from DB")
 			return cutil.NewAPIError(http.StatusInternalServerError, "Failed to delete Expected Inventory due to DB error", nil)
 		}

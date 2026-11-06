@@ -62,8 +62,9 @@ config:
   ## Log level (debug, info, warn, error)
   logLevel: "info"
 
-  ## Include machine state annotations (api-state, power-state) on Services.
-  ## These annotations change frequently and cause K8s API update churn.
+  ## Include power-state annotations on individual device Services, including
+  ## fallbacks in pod mode. Shared per-pod Services omit these annotations.
+  ## Changes cause K8s API update churn.
   ## Disable (default) to reduce cluster load in large-scale deployments.
   enableStateAnnotations: false
 

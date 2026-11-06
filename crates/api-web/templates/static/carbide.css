@@ -2,33 +2,90 @@
    CSS Variables - Color Palette & Design Tokens
    ------------------------------------------------------------------------ */
 :root {
+  color-scheme: light;
+
   /* Background colors */
   --bg-primary: #ffffff;
   --bg-secondary: #f8f9fa;
   --bg-tertiary: #f0f2f4;
+  --bg-nav: rgba(255, 255, 255, 0.95);
+  --bg-table: rgba(255, 255, 255, 0.9);
+  --bg-card: rgba(255, 255, 255, 0.8);
+  --bg-run-status: rgba(255, 255, 255, 0.78);
+  --bg-warning: #fff5eb;
   
   --text-primary: #0d0d0d;
   --text-secondary: #2d3748;
   --text-muted: #4a5568;
+  --text-on-accent: #ffffff;
+  --text-warning-title: #b65a17;
   
   /* Brand colors */
   --accent-green: #76b900;
   --accent-green-hover: #5a8c00;
   --accent-green-light: #e8f5cc;
+  --bg-accent-button: rgba(118, 185, 0, 0.85);
   
   /* Semantic colors */
   --success: #76b900;
   --error: #e53e3e;
   --warning: #ed8936;
   --info: #3182ce;
+  --bg-error-button: rgba(229, 62, 62, 0.85);
+  --bg-warning-button: rgba(237, 137, 54, 0.85);
   
   /* Borders */
   --border-color: #e2e8f0;
+  --scrollbar-thumb: rgba(0, 0, 0, 0.2);
+  --scrollbar-thumb-hover: rgba(0, 0, 0, 0.3);
   
   /* Shadows */
   --shadow-sm: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
   --shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
   --shadow-md: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
+}
+
+/* Follow the desktop preference, including changes while a page is open.
+   color-scheme also themes browser-provided controls and scrollbars. */
+@media (prefers-color-scheme: dark) {
+  :root {
+    color-scheme: dark;
+
+    --bg-primary: #1b2027;
+    --bg-secondary: #12161c;
+    --bg-tertiary: #272e38;
+    --bg-nav: rgba(27, 32, 39, 0.95);
+    --bg-table: rgba(27, 32, 39, 0.9);
+    --bg-card: rgba(27, 32, 39, 0.8);
+    --bg-run-status: rgba(27, 32, 39, 0.78);
+    --bg-warning: #35291c;
+
+    --text-primary: #f0f3f6;
+    --text-secondary: #d0d7e0;
+    --text-muted: #a3afbf;
+    --text-on-accent: #12161c;
+    --text-warning-title: #ffb86b;
+
+    --accent-green: #96d641;
+    --accent-green-hover: #b3ec6b;
+    --accent-green-light: #293b1e;
+    --bg-accent-button: #76b900;
+
+    --success: #96d641;
+    --error: #ff8585;
+    --warning: #ffb86b;
+    --info: #80bfff;
+    --bg-error-button: #ff8585;
+    --bg-warning-button: #ffb86b;
+
+    --border-color: #414b59;
+    --scrollbar-thumb: rgba(255, 255, 255, 0.25);
+    --scrollbar-thumb-hover: rgba(255, 255, 255, 0.4);
+
+    --shadow-sm: 0 1px 2px 0 rgba(0, 0, 0, 0.25);
+    --shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.3), 0 2px 4px -1px rgba(0, 0, 0, 0.2);
+    --shadow-md: 0 10px 15px -3px rgba(0, 0, 0, 0.3), 0 4px 6px -2px rgba(0, 0, 0, 0.2);
+  }
 }
 
 /* ------------------------------------------------------------------------
@@ -138,7 +195,7 @@ nav {
   position: fixed;
   left: 0;
   top: 0;
-  background-color: rgba(255, 255, 255, 0.95);
+  background-color: var(--bg-nav);
   -webkit-backdrop-filter: blur(10px);
   backdrop-filter: blur(10px);
   border-right: 1px solid var(--border-color);
@@ -170,11 +227,11 @@ nav::-webkit-scrollbar-thumb {
 }
 
 nav:hover::-webkit-scrollbar-thumb {
-  background-color: rgba(0, 0, 0, 0.2);
+  background-color: var(--scrollbar-thumb);
 }
 
 nav::-webkit-scrollbar-thumb:hover {
-  background-color: rgba(0, 0, 0, 0.3);
+  background-color: var(--scrollbar-thumb-hover);
 }
 
 nav h3 {
@@ -316,7 +373,7 @@ main {
 table {
   width: 100%;
   border-collapse: collapse;
-  background-color: rgba(255, 255, 255, 0.9);
+  background-color: var(--bg-table);
   -webkit-backdrop-filter: blur(10px);
   backdrop-filter: blur(10px);
   border-radius: 12px;
@@ -585,8 +642,8 @@ input[type="checkbox"] {
 
 /* Special styling for update button to match inputs */
 .filter-item input[type="submit"] {
-  background-color: rgba(118, 185, 0, 0.85);
-  color: white;
+  background-color: var(--bg-accent-button);
+  color: var(--text-on-accent);
   border: 1px solid var(--accent-green);
   font-weight: normal;
   cursor: pointer;
@@ -601,8 +658,8 @@ input[type="checkbox"] {
 /* Base button styles */
 button,
 input[type="submit"] {
-  background-color: rgba(118, 185, 0, 0.85);
-  color: white;
+  background-color: var(--bg-accent-button);
+  color: var(--text-on-accent);
   border: 1px solid var(--accent-green);
   padding: 0.5rem 1.25rem;
   border-radius: 8px;
@@ -665,7 +722,7 @@ input[type="submit"]:hover:not(.disabled) {
 .missing-credentials-banner {
   margin: 0 0 20px 0;
   padding: 14px 18px;
-  background-color: #fff5eb;
+  background-color: var(--bg-warning);
   border: 1px solid var(--warning);
   border-left: 6px solid var(--warning);
   border-radius: 8px;
@@ -676,7 +733,7 @@ input[type="submit"]:hover:not(.disabled) {
 .missing-credentials-banner-title {
   font-weight: 700;
   font-size: 1.05rem;
-  color: #b65a17;
+  color: var(--text-warning-title);
   margin-bottom: 6px;
 }
 
@@ -708,7 +765,7 @@ input[type="submit"]:hover:not(.disabled) {
 .site-explorer-run-status {
   margin: 0 0 20px 0;
   padding: 14px 18px;
-  background-color: rgba(255, 255, 255, 0.78);
+  background-color: var(--bg-run-status);
   border: 1px solid var(--border-color);
   border-left: 6px solid var(--border-color);
   border-radius: 8px;
@@ -797,8 +854,8 @@ input[type="submit"]:hover:not(.disabled) {
 /* Delete buttons */
 #delete-link,
 .delete-button {
-  background-color: rgba(229, 62, 62, 0.85) !important;
-  color: white !important;
+  background-color: var(--bg-error-button) !important;
+  color: var(--text-on-accent) !important;
   border: 1px solid var(--error) !important;
   text-decoration: none;
   display: inline-block;
@@ -833,8 +890,8 @@ input[type="submit"]:hover:not(.disabled) {
 
 /* Warning buttons */
 .warning-button {
-  background-color: rgba(237, 137, 54, 0.85) !important;
-  color: white !important;
+  background-color: var(--bg-warning-button) !important;
+  color: var(--text-on-accent) !important;
   border: 1px solid var(--warning) !important;
   text-decoration: none;
   display: inline-block;
@@ -860,8 +917,8 @@ div#json {
 }
 
 div#json a {
-  background-color: rgba(118, 185, 0, 0.85);
-  color: white;
+  background-color: var(--bg-accent-button);
+  color: var(--text-on-accent);
   padding: 0.5rem 1.25rem;
   border-radius: 8px;
   border: 1px solid var(--accent-green);
@@ -877,7 +934,7 @@ div#json a {
 
 div#json a:hover {
   background-color: var(--accent-green);
-  color: white;
+  color: var(--text-on-accent);
   text-decoration: none;
   box-shadow: var(--shadow-md);
   border-color: var(--accent-green-hover);
@@ -1070,7 +1127,7 @@ div.health_alert_classification {
   margin: 2px;
   display: inline-block;
   padding: 0.4rem 1rem;
-  color: white;
+  color: var(--text-on-accent);
   font-size: 0.9rem;
   font-weight: 500;
   box-shadow: var(--shadow-sm);
@@ -1163,7 +1220,7 @@ details > *:not(summary) {
 
 /* Card containers */
 .card {
-  background-color: rgba(255, 255, 255, 0.8);
+  background-color: var(--bg-card);
   -webkit-backdrop-filter: blur(10px);
   backdrop-filter: blur(10px);
   border-radius: 12px;
@@ -1930,7 +1987,7 @@ span.page-link.active {
   border-radius: 6px;
   font-size: 0.85rem;
   font-weight: 600;
-  color: white;
+  color: var(--text-on-accent);
   background-color: var(--accent-green);
   border: 1px solid var(--accent-green);
 }

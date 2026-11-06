@@ -24,14 +24,17 @@ use std::time::Duration;
 
 use forge_ssh::ssh_client::{AuthConfig, HostKeyVerification, SshClientConfig};
 use tokio::io::AsyncWriteExt;
+use tokio::time::{Instant, timeout_at};
 use tracing;
 
+use super::artifact_writer::{ArtifactWriter, MAX_ARTIFACT_BYTES};
 use crate::firmware::credentials::Credentials;
 use crate::firmware::error::{FirmwareError, FirmwareResult};
 
 // Administrative network limit per artifact, matching the long firmware-command
-// budget. It includes connection, authentication, and the complete response.
-const SOURCE_TRANSFER_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+// budget. It includes connection, authentication, SiteCache readiness and retries,
+// and the complete response body for either checked delivery mode.
+pub(super) const SOURCE_TRANSFER_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 
 // FirmwareSource represents a firmware binary location. Supported
 // source types are local filesystem, HTTPS, and SSH/SCP.
@@ -151,14 +154,7 @@ impl FirmwareSource {
         match self {
             Self::Local { path } => resolve_local(path).await,
             Self::Http { url, credentials } => {
-                resolve_http(
-                    url,
-                    credentials.as_ref(),
-                    work_dir,
-                    SOURCE_TRANSFER_TIMEOUT,
-                    reqwest::redirect::Policy::default(),
-                )
-                .await
+                resolve_http(url, credentials.as_ref(), work_dir, SOURCE_TRANSFER_TIMEOUT).await
             }
             Self::Ssh(ssh_source) => {
                 resolve_ssh(ssh_source, work_dir, None, SOURCE_TRANSFER_TIMEOUT).await
@@ -166,9 +162,10 @@ impl FirmwareSource {
         }
     }
 
-    /// Checked updates accept only unauthenticated HTTP(S), with no redirects.
-    /// Reuse the legacy transfer deadline and file-writing path, but never let
-    /// a redirect change the source policy established at admission.
+    /// Checked updates stream only unauthenticated HTTP(S), with no redirects.
+    /// Each artifact has a 16 GiB byte limit and the legacy 30-minute network
+    /// deadline. Local writes may finish after the deadline and settle before
+    /// returning a transfer failure.
     pub(super) async fn resolve_for_update(&self, work_dir: &Path) -> FirmwareResult<PathBuf> {
         let Self::Http {
             url,
@@ -180,14 +177,7 @@ impl FirmwareSource {
             ));
         };
         super::config::validate_update_source(url)?;
-        resolve_http(
-            url,
-            None,
-            work_dir,
-            SOURCE_TRANSFER_TIMEOUT,
-            reqwest::redirect::Policy::none(),
-        )
-        .await
+        resolve_checked_http(url, work_dir, SOURCE_TRANSFER_TIMEOUT, MAX_ARTIFACT_BYTES).await
     }
 
     // description returns a human-readable description of the
@@ -216,6 +206,77 @@ async fn resolve_local(path: &Path) -> FirmwareResult<PathBuf> {
     Ok(path.to_path_buf())
 }
 
+/// Stream one checked artifact within a fixed network deadline and byte ceiling.
+/// The enclosing preparation owner decides whether to retain partial inputs.
+async fn resolve_checked_http(
+    url: &str,
+    work_dir: &Path,
+    transfer_timeout: Duration,
+    max_bytes: u64,
+) -> FirmwareResult<PathBuf> {
+    let address = url::Url::parse(url)
+        .map_err(|_| FirmwareError::ConfigError("invalid firmware update source".into()))?;
+    let filename = address
+        .path_segments()
+        .and_then(|mut segments| segments.next_back())
+        .filter(|name| !name.is_empty())
+        .unwrap_or("firmware.bin");
+    let destination = work_dir.join(filename);
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|error| FirmwareError::HttpError(error.to_string()))?;
+    let client = reqwest_middleware::ClientBuilder::new(client)
+        .with(reqwest_tracing::TracingMiddleware::default())
+        .build();
+    let deadline = Instant::now() + transfer_timeout;
+    let timed_out = || FirmwareError::SourceTransferTimeout {
+        timeout: transfer_timeout,
+    };
+    if Instant::now() >= deadline {
+        return Err(timed_out());
+    }
+    let mut response = timeout_at(deadline, client.get(url).send())
+        .await
+        .map_err(|_| timed_out())?
+        .map_err(|error| {
+            FirmwareError::HttpError(format!("failed to download firmware: {error}"))
+        })?;
+    if !response.status().is_success() {
+        return Err(FirmwareError::HttpError(format!(
+            "HTTP {} from {url}",
+            response.status(),
+        )));
+    }
+
+    let mut writer =
+        ArtifactWriter::create(&destination, max_bytes, response.content_length()).await?;
+    let transfer = async {
+        loop {
+            if Instant::now() >= deadline {
+                return Err(timed_out());
+            }
+            let Some(chunk) = timeout_at(deadline, response.chunk())
+                .await
+                .map_err(|_| timed_out())?
+                .map_err(|error| {
+                    FirmwareError::HttpError(format!("failed to read firmware response: {error}"))
+                })?
+            else {
+                break;
+            };
+            writer.write_chunk(&chunk).await?;
+        }
+        FirmwareResult::Ok(())
+    }
+    .await;
+    // A settled network or byte-limit error lets preparation remove the file.
+    // Finish local I/O even after the deadline so no write outlives that cleanup.
+    writer.finish().await?;
+    transfer?;
+    Ok(destination)
+}
+
 // resolve_http downloads firmware from an HTTP(S) URL with optional
 // credentials to the work directory.
 async fn resolve_http(
@@ -223,7 +284,6 @@ async fn resolve_http(
     credentials: Option<&Credentials>,
     work_dir: &Path,
     transfer_timeout: Duration,
-    redirects: reqwest::redirect::Policy,
 ) -> FirmwareResult<PathBuf> {
     // Extract filename from URL, falling back to a generic name.
     let filename = url::Url::parse(url)
@@ -246,7 +306,6 @@ async fn resolve_http(
     // Build the HTTP request with optional credentials. The `reqwest-tracing` middleware injects
     // the current span's W3C trace context into the outgoing request (#2438).
     let client = reqwest::Client::builder()
-        .redirect(redirects)
         .build()
         .map_err(|error| FirmwareError::HttpError(error.to_string()))?;
     let client = reqwest_middleware::ClientBuilder::new(client)
@@ -497,22 +556,33 @@ mod tests {
     use russh::keys::ssh_key::rand_core::UnwrapErr;
     use tempfile::tempdir;
     use tokio::io::{AsyncBufReadExt, BufReader};
-    use tokio::net::TcpListener;
+    use tokio::net::{TcpListener, TcpStream};
     use tokio::sync::oneshot;
     use tokio::task::JoinSet;
 
     use super::*;
 
+    #[derive(Clone, Copy, Debug)]
+    enum Submission {
+        Legacy,
+        Checked,
+    }
+
+    async fn read_request_headers(stream: &mut BufReader<TcpStream>) {
+        let mut line = String::new();
+        loop {
+            line.clear();
+            assert_ne!(stream.read_line(&mut line).await.unwrap(), 0);
+            if line == "\r\n" {
+                return;
+            }
+        }
+    }
+
     /// Checked downloads reject the redirect itself, while the public legacy
     /// resolver must still follow it and preserve the destination's bytes.
     #[tokio::test]
     async fn download_redirect_policy_preserves_legacy_and_rejects_checked_updates() {
-        #[derive(Clone, Copy, Debug)]
-        enum Submission {
-            Legacy,
-            Checked,
-        }
-
         for submission in [Submission::Legacy, Submission::Checked] {
             let directory = tempdir().unwrap();
             let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -528,14 +598,7 @@ mod tests {
                         accepted = listener.accept() => accepted.unwrap(),
                     };
                     let mut stream = BufReader::new(stream);
-                    let mut line = String::new();
-                    loop {
-                        line.clear();
-                        assert_ne!(stream.read_line(&mut line).await.unwrap(), 0);
-                        if line == "\r\n" {
-                            break;
-                        }
-                    }
+                    read_request_headers(&mut stream).await;
                     requests += 1;
                     let response = if requests == 1 {
                         b"HTTP/1.1 302 Found\r\nLocation: /redirected.bin\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".as_slice()
@@ -578,52 +641,155 @@ mod tests {
     /// A successful response header must not leave an unfinished body unbounded.
     #[tokio::test]
     async fn http_transfer_deadline_includes_the_response_body() {
-        let directory = tempdir().unwrap();
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let url = format!("http://{}/image.bin", listener.local_addr().unwrap());
-        let (ready, body_started) = oneshot::channel();
-        let (release, released) = oneshot::channel();
-        let mut server = JoinSet::new();
-        server.spawn(async move {
-            let (stream, _) = listener.accept().await.unwrap();
-            let mut stream = BufReader::new(stream);
-            let mut line = String::new();
-            loop {
-                line.clear();
-                assert_ne!(stream.read_line(&mut line).await.unwrap(), 0);
-                if line == "\r\n" {
-                    break;
-                }
-            }
-            stream
-                .get_mut()
-                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 1024\r\n\r\npartial image")
-                .await
-                .unwrap();
-            stream.get_mut().flush().await.unwrap();
-            ready.send(()).unwrap();
-            released.await.unwrap();
-        });
+        for submission in [Submission::Legacy, Submission::Checked] {
+            let directory = tempdir().unwrap();
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("http://{}/image.bin", listener.local_addr().unwrap());
+            let (ready, body_started) = oneshot::channel();
+            let (release, released) = oneshot::channel();
+            let mut server = JoinSet::new();
+            server.spawn(async move {
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut stream = BufReader::new(stream);
+                read_request_headers(&mut stream).await;
+                stream
+                    .get_mut()
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 1024\r\n\r\npartial image")
+                    .await
+                    .unwrap();
+                stream.get_mut().flush().await.unwrap();
+                ready.send(()).unwrap();
+                released.await.unwrap();
+            });
 
-        let transfer_timeout = Duration::from_secs(1);
-        tokio::time::timeout(Duration::from_secs(5), async {
-            let transfer = resolve_http(&url, None, directory.path(), transfer_timeout, reqwest::redirect::Policy::default());
-            tokio::pin!(transfer);
-            tokio::select! {
-                started = body_started => started.unwrap(),
-                result = &mut transfer => panic!("transfer finished before the body was held: {result:?}"),
-            }
-            assert!(matches!(
-                transfer.await,
-                Err(FirmwareError::SourceTransferTimeout { timeout })
-                    if timeout == transfer_timeout
-            ));
-            assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
-            release.send(()).unwrap();
-            server.join_next().await.unwrap().unwrap();
-        })
-        .await
-        .expect("the transfer deadline settles an incomplete HTTP body");
+            let transfer_timeout = Duration::from_secs(1);
+            tokio::time::timeout(Duration::from_secs(5), async {
+                let transfer = async {
+                    match submission {
+                        Submission::Legacy => {
+                            resolve_http(
+                                &url,
+                                None,
+                                directory.path(),
+                                transfer_timeout,
+                            )
+                            .await
+                        }
+                        Submission::Checked => {
+                            resolve_checked_http(
+                                &url,
+                                directory.path(),
+                                transfer_timeout,
+                                MAX_ARTIFACT_BYTES,
+                            )
+                            .await
+                        }
+                    }
+                };
+                tokio::pin!(transfer);
+                tokio::select! {
+                    started = body_started => started.unwrap(),
+                    result = &mut transfer => panic!("transfer finished before the body was held: {result:?}"),
+                }
+                assert!(matches!(
+                    transfer.await,
+                    Err(FirmwareError::SourceTransferTimeout { timeout })
+                        if timeout == transfer_timeout
+                ));
+                match submission {
+                    Submission::Legacy => {
+                        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
+                    }
+                    Submission::Checked => {
+                        let path = directory.path().join("image.bin");
+                        assert_eq!(std::fs::read(&path).unwrap(), b"partial image");
+                        std::fs::remove_file(path).unwrap();
+                    }
+                }
+                release.send(()).unwrap();
+                server.join_next().await.unwrap().unwrap();
+            })
+            .await
+            .unwrap_or_else(|_| panic!("{submission:?} body deadline exceeds watchdog"));
+        }
+    }
+
+    #[tokio::test]
+    async fn checked_downloads_bound_advertised_and_streamed_bytes() {
+        enum Expected {
+            RejectedBeforeFile,
+            RejectedDuringBody,
+            Bytes(&'static [u8]),
+        }
+
+        struct Case {
+            scenario: &'static str,
+            response: &'static [u8],
+            expected: Expected,
+        }
+
+        let cases = [
+            Case {
+                scenario: "oversized advertised length creates no file",
+                response: b"HTTP/1.1 200 OK\r\nContent-Length: 6\r\nConnection: close\r\n\r\n",
+                expected: Expected::RejectedBeforeFile,
+            },
+            Case {
+                scenario: "chunked body cannot exceed the byte limit",
+                response: b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n3\r\nabc\r\n3\r\ndef\r\n0\r\n\r\n",
+                expected: Expected::RejectedDuringBody,
+            },
+            Case {
+                scenario: "multiple chunks may exactly fill the byte limit",
+                response: b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n3\r\nabc\r\n2\r\nde\r\n0\r\n\r\n",
+                expected: Expected::Bytes(b"abcde"),
+            },
+        ];
+
+        for case in cases {
+            let directory = tempdir().unwrap();
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("http://{}/image.bin", listener.local_addr().unwrap());
+            let mut server = JoinSet::new();
+            server.spawn(async move {
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut stream = BufReader::new(stream);
+                read_request_headers(&mut stream).await;
+                stream.get_mut().write_all(case.response).await.unwrap();
+                stream.get_mut().flush().await.unwrap();
+            });
+
+            tokio::time::timeout(Duration::from_secs(5), async {
+                let result =
+                    resolve_checked_http(&url, directory.path(), SOURCE_TRANSFER_TIMEOUT, 5).await;
+                server.join_next().await.unwrap().unwrap();
+                match case.expected {
+                    Expected::Bytes(expected) => {
+                        let path = result.expect(case.scenario);
+                        assert_eq!(std::fs::read(path).unwrap(), expected, "{}", case.scenario);
+                    }
+                    rejected => {
+                        let error = result.expect_err(case.scenario);
+                        assert!(
+                            matches!(error, FirmwareError::HttpError(ref message) if message.contains("byte limit")),
+                            "{}: {error:?}",
+                            case.scenario,
+                        );
+                        let path = directory.path().join("image.bin");
+                        if matches!(rejected, Expected::RejectedBeforeFile) {
+                            assert!(!path.exists(), "{}", case.scenario);
+                        } else {
+                            let bytes = std::fs::read(&path).unwrap();
+                            assert!(bytes.len() <= 5, "{}", case.scenario);
+                            assert!(b"abcdef".starts_with(&bytes), "{}", case.scenario);
+                            std::fs::remove_file(path).unwrap();
+                        }
+                    }
+                }
+            })
+            .await
+            .unwrap_or_else(|_| panic!("{} exceeds watchdog", case.scenario));
+        }
     }
 
     #[tokio::test]

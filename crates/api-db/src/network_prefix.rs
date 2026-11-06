@@ -46,6 +46,16 @@ pub fn is_overlap_constraint(constraint: Option<&str>) -> bool {
     )
 }
 
+/// Identifies the one-prefix-per-family index for mutation precondition errors.
+pub fn is_family_constraint(constraint: Option<&str>) -> bool {
+    constraint == Some("network_prefix_family")
+}
+
+/// Identifies a reused authoritative DHCPv6 relay link-address.
+pub fn is_dhcpv6_link_address_constraint(constraint: Option<&str>) -> bool {
+    constraint == Some("network_prefix_dhcpv6_link_address")
+}
+
 fn ip_to_u128(ip: IpAddr) -> u128 {
     match ip {
         IpAddr::V4(ip) => u128::from(u32::from(ip)),
@@ -130,16 +140,18 @@ pub async fn containing_prefix(
     txn: impl DbReader<'_>,
     prefix: &str,
 ) -> Result<Vec<NetworkPrefix>, DatabaseError> {
-    let query = "SELECT id, segment_id, prefix, gateway, dhcpv6_link_address,
-            num_reserved, vpc_prefix_id, vpc_prefix, svi_ip
+    let query = format!(
+        "SELECT {}
         FROM network_prefixes
         WHERE prefix && $1::inet
-        ORDER BY segment_id, prefix";
-    let container = sqlx::query_as(query)
+        ORDER BY segment_id, prefix",
+        NetworkPrefix::db_table_columns(),
+    );
+    let container = sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
         .bind(prefix)
         .fetch_all(txn)
         .await
-        .map_err(|e| DatabaseError::query(query, e))?;
+        .map_err(|e| DatabaseError::query(&query, e))?;
     Ok(container)
 }
 
@@ -178,14 +190,15 @@ pub async fn find(
     txn: &mut PgConnection,
     uuid: NetworkPrefixId,
 ) -> Result<NetworkPrefix, DatabaseError> {
-    let query = "SELECT id, segment_id, prefix, gateway, dhcpv6_link_address,
-            num_reserved, vpc_prefix_id, vpc_prefix, svi_ip
-        FROM network_prefixes WHERE id=$1";
-    sqlx::query_as(query)
+    let query = format!(
+        "SELECT {} FROM network_prefixes WHERE id=$1",
+        NetworkPrefix::db_table_columns(),
+    );
+    sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
         .bind(uuid)
         .fetch_one(txn)
         .await
-        .map_err(|e| DatabaseError::query(query, e))
+        .map_err(|e| DatabaseError::query(&query, e))
 }
 
 /*
@@ -195,11 +208,10 @@ pub async fn find_by<'a, C: super::ColumnInfo<'a, TableType = NetworkPrefix>>(
     txn: &mut PgConnection,
     filter: super::ObjectColumnFilter<'a, C>,
 ) -> Result<Vec<NetworkPrefix>, DatabaseError> {
-    let mut query = super::FilterableQueryBuilder::new(
-        "SELECT id, segment_id, prefix, gateway, dhcpv6_link_address,
-            num_reserved, vpc_prefix_id, vpc_prefix, svi_ip
-        FROM network_prefixes",
-    )
+    let mut query = super::FilterableQueryBuilder::new(format!(
+        "SELECT {} FROM network_prefixes",
+        NetworkPrefix::db_table_columns(),
+    ))
     .filter(&filter);
 
     query
@@ -300,7 +312,8 @@ pub async fn create_for(
     // tiny amounts of time.
     //
     let mut inserted_prefixes: Vec<NetworkPrefix> = Vec::with_capacity(prefixes.len());
-    let query = r#"
+    let query = format!(
+        r#"
         INSERT INTO network_prefixes
             (segment_id, prefix, gateway, dhcpv6_link_address, num_reserved,
              vpc_prefix_id, vpc_prefix, overlap_vpc_id)
@@ -311,11 +324,12 @@ pub async fn create_for(
         FROM network_segments ns
         LEFT JOIN network_vpc_prefixes vp ON vp.id = $6
         WHERE ns.id = $1 AND ($6::uuid IS NULL OR vp.id IS NOT NULL)
-        RETURNING id, segment_id, prefix, gateway, dhcpv6_link_address,
-            num_reserved, vpc_prefix_id, vpc_prefix, svi_ip
-    "#;
+        RETURNING {}
+    "#,
+        NetworkPrefix::db_table_columns(),
+    );
     for prefix in prefixes {
-        let new_prefix: NetworkPrefix = sqlx::query_as(query)
+        let new_prefix: NetworkPrefix = sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
             .bind(segment_id)
             .bind(prefix.prefix)
             .bind(prefix.gateway)
@@ -324,7 +338,7 @@ pub async fn create_for(
             .bind(vpc_prefix_id)
             .fetch_one(inner_transaction.as_pgconn())
             .await
-            .map_err(|e| DatabaseError::query(query, e))?;
+            .map_err(|e| DatabaseError::query(&query, e))?;
 
         inserted_prefixes.push(new_prefix);
     }
@@ -386,15 +400,17 @@ pub async fn set_svi_ip(
     prefix_id: NetworkPrefixId,
     svi_ip: &IpAddr,
 ) -> Result<(), DatabaseError> {
-    let query = "UPDATE network_prefixes SET svi_ip=$1::inet WHERE id=$2
-        RETURNING id, segment_id, prefix, gateway, dhcpv6_link_address,
-            num_reserved, vpc_prefix_id, vpc_prefix, svi_ip";
-    sqlx::query_as::<_, NetworkPrefix>(query)
+    let query = format!(
+        "UPDATE network_prefixes SET svi_ip=$1::inet WHERE id=$2
+        RETURNING {}",
+        NetworkPrefix::db_table_columns(),
+    );
+    sqlx::query_as::<_, NetworkPrefix>(sqlx::AssertSqlSafe(query.as_str()))
         .bind(svi_ip)
         .bind(prefix_id)
         .fetch_one(txn)
         .await
-        .map_err(|e| DatabaseError::query(query, e))?;
+        .map_err(|e| DatabaseError::query(&query, e))?;
 
     Ok(())
 }

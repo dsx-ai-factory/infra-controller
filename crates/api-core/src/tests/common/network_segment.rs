@@ -47,6 +47,7 @@ impl NetworkSegmentHelper {
             svi_ip: None,
             free_ip_count_v2: None,
             free_ip_count_saturated: false,
+            dhcpv6_link_address: None,
         }];
         let inner = NetworkSegmentCreationRequest {
             vpc_id: Some(vpc_id),
@@ -104,6 +105,7 @@ pub(in crate::tests) async fn create_network_segment_with_api(
             svi_ip: None,
             free_ip_count_v2: None,
             free_ip_count_saturated: false,
+            dhcpv6_link_address: None,
         }],
         subdomain_id: use_subdomain.then(|| env.domain.into()),
         vpc_id,
