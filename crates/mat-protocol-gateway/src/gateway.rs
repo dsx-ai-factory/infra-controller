@@ -338,6 +338,7 @@ pub async fn run_with_listener(
     tracing::info!(
         address = %gateway.config.listen_address,
         tls = gateway.config.tls.is_some(),
+        rms_job_retention_seconds = gateway.config.rms.job_retention.as_secs(),
         "Starting machine-a-tron protocol gateway"
     );
 
