@@ -950,7 +950,8 @@ docker_build(
 )
 docker_build(
     'build-container-localdev',
-    os.path.join(repo_root, 'dev/docker'),
+    repo_root,
+    only=['dev/docker'],
     dockerfile=os.path.join(
         repo_root,
         'dev/docker/Dockerfile.build-container-x86_64',

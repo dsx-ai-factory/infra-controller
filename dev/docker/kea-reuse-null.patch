@@ -1,0 +1,24 @@
+--- a/src/lib/dhcpsrv/alloc_engine.cc
++++ b/src/lib/dhcpsrv/alloc_engine.cc
+@@ -1012,7 +1012,9 @@
+                                           callout_status);
+ 
+                 /// @todo: We support only one lease per ia for now
+-                leases.push_back(lease);
++                if (lease) {
++                    leases.push_back(lease);
++                }
+                 return (leases);
+ 
+             } else {
+@@ -1205,7 +1207,9 @@
+                 existing = reuseExpiredLease(existing, ctx, prefix_len,
+                                              callout_status);
+ 
+-                leases.push_back(existing);
++                if (existing) {
++                    leases.push_back(existing);
++                }
+                 return (leases);
+             }
+         }
