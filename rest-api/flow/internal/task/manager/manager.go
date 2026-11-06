@@ -240,6 +240,10 @@ func (m *ManagerImpl) SubmitTask(
 		return nil, err
 	}
 
+	if req.Operation.Type == taskcommon.TaskTypeComponentReset {
+		return m.createResetTasks(ctx, req, rackMap)
+	}
+
 	// Create and execute task for each rack.
 	var taskIDs []uuid.UUID
 	for _, targetRack := range rackMap {
@@ -457,10 +461,10 @@ func validateRuleTargetApplicability(
 
 // requiresRuleTargetApplicability reports whether the resolved operation rule
 // must contain a step for at least one targeted component type. The
-// InjectExpectation workflow executes directly without consuming rule steps.
+// InjectExpectation and ComponentReset execute directly without consuming rule steps.
 func requiresRuleTargetApplicability(taskType taskcommon.TaskType) bool {
 	switch taskType {
-	case taskcommon.TaskTypeInjectExpectation:
+	case taskcommon.TaskTypeInjectExpectation, taskcommon.TaskTypeComponentReset:
 		return false
 	default:
 		return true
@@ -495,6 +499,9 @@ func validateResolvedRackTargets(
 			continue
 		}
 		for _, comp := range resolvedRack.Components {
+			if op.Type == taskcommon.TaskTypeComponentReset && comp.Type != devicetypes.ComponentTypeNVSwitch {
+				return flowerrors.GRPCErrorInvalidArgument("NVOS factory reset requires switch targets")
+			}
 			if comp.ComponentID == "" &&
 				(!macTargetSupported || comp.ManagementMAC() == "") {
 				unlinkedComponents = append(
@@ -1050,6 +1057,11 @@ func (m *ManagerImpl) resolveOperationRule(
 	op operation.Wrapper,
 	rackID uuid.UUID,
 ) (*operationrules.OperationRule, error) {
+	// Reset has fixed execution semantics; user rules must not add retries or
+	// unrelated actions around this destructive operation.
+	if op.Type == taskcommon.TaskTypeComponentReset {
+		return &operationrules.OperationRule{Name: "Fixed NVOS factory reset", OperationType: op.Type, OperationCode: op.Code, RuleDefinition: operationrules.RuleDefinition{Version: operationrules.CurrentRuleDefinitionVersion}}, nil
+	}
 	ruleID, err := operations.ExtractRuleID(op.Info)
 	if err != nil {
 		return nil, fmt.Errorf("extract operation rule ID: %w", err)

@@ -18819,8 +18819,141 @@ paths:
         '503':
           description: Core gRPC API is unavailable.
           $ref: '#/components/responses/GenericHttpError'
+  '/v2/org/{org}/nico/tray/{id}/factory-reset':
+    post:
+      tags: [Tray]
+      operationId: factory-reset-tray-nvos
+      summary: Restore NVOS factory defaults on a switch tray
+      description: >-
+        Provider Admin operation. Clears switch NVOS configuration and reboots the selected switches.
+        Only ingested switches are supported. Domain targets expand to their switch members.
+        Flow blocks conflicting rack tasks and applies its rack-host readiness gate without an override.
+        Returns task IDs, one per owning rack; submission does not imply reset completion.
+        Query the Task APIs for completed, failed, or terminated outcomes and the task report.
+        Completion means Core reports reset completed, not that the Domain is operational.
+        NICo does not automatically restore configuration or re-ingest devices in this operation.
+        Core must implement NVOS_FACTORY_RESET; unsupported Core versions fail the task explicitly.
+        Failed or unknown submissions are not automatically repeated. After a timeout or lost response,
+        inspect existing tasks and hardware before submitting again. Core status observes the latest
+        recorded device/action reference; another out-of-band reset can replace that reference.
+      security:
+        - JWTBearerToken: []
+      parameters:
+        - name: org
+          in: path
+          required: true
+          schema: {type: string}
+        - name: id
+          in: path
+          required: true
+          description: Switch inventory identifier
+          schema: {type: string}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/NVOSFactoryResetRequest'
+      responses:
+        '202':
+          description: Reset tasks created; hardware work is asynchronous.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NVOSFactoryResetResponse'
+        '400':
+          description: Invalid request, unregistered site, or unsupported target type.
+        '403':
+          description: Provider Admin membership is required; site must belong to the provider.
+        '404':
+          description: Target does not exist at the selected site.
+        '409':
+          description: A conflicting rack task prevents reset admission.
+        '500':
+          description: Internal failure.
+        '502':
+          description: Flow returned missing or invalid task references.
+        '504':
+          description: Submission outcome is unknown; do not automatically resubmit.
+  '/v2/org/{org}/nico/domain/nvlink/{id}/factory-reset':
+    post:
+      tags: [Domain]
+      operationId: factory-reset-nvlink-domain-nvos
+      summary: Restore NVOS factory defaults on an NVLink Domain’s switches
+      description: >-
+        Provider Admin operation. Clears switch NVOS configuration and reboots the selected switches.
+        Only ingested switches are supported. Domain targets expand to their switch members.
+        Flow blocks conflicting rack tasks and applies its rack-host readiness gate without an override.
+        Returns task IDs, one per owning rack; submission does not imply reset completion.
+        Query the Task APIs for completed, failed, or terminated outcomes and the task report.
+        Completion means Core reports reset completed, not that the Domain is operational.
+        NICo does not automatically restore configuration or re-ingest devices in this operation.
+        Core must implement NVOS_FACTORY_RESET; unsupported Core versions fail the task explicitly.
+        Failed or unknown submissions are not automatically repeated. After a timeout or lost response,
+        inspect existing tasks and hardware before submitting again. Core status observes the latest
+        recorded device/action reference; another out-of-band reset can replace that reference.
+      security:
+        - JWTBearerToken: []
+      parameters:
+        - name: org
+          in: path
+          required: true
+          schema: {type: string}
+        - name: id
+          in: path
+          required: true
+          description: Core NVLink Domain ID
+          schema: {type: string}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/NVOSFactoryResetRequest'
+      responses:
+        '202':
+          description: Reset tasks created; hardware work is asynchronous.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NVOSFactoryResetResponse'
+        '400':
+          description: Invalid request, unregistered site, or unsupported target type.
+        '403':
+          description: Provider Admin membership is required; site must belong to the provider.
+        '404':
+          description: Target does not exist at the selected site.
+        '409':
+          description: A conflicting rack task prevents reset admission.
+        '500':
+          description: Internal failure.
+        '502':
+          description: Flow returned missing or invalid task references.
+        '504':
+          description: Submission outcome is unknown; do not automatically resubmit.
+
+
 components:
   schemas:
+    NVOSFactoryResetRequest:
+      type: object
+      required: [siteId]
+      properties:
+        siteId:
+          type: string
+          format: uuid
+          description: Registered site owned by the current organization’s provider.
+    NVOSFactoryResetResponse:
+      type: object
+      required: [taskIds]
+      properties:
+        taskIds:
+          type: array
+          minItems: 1
+          items:
+            type: string
+            format: uuid
+          description: Asynchronous reset task IDs, one per owning rack; ordering is unspecified.
     PageNumber:
       title: PageNumber
       type: integer
@@ -28114,6 +28247,7 @@ components:
           - BringUp
           - Decommission
           - InjectExpectation
+          - ComponentReset
           - Unknown
         status:
           type: string
