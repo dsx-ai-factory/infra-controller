@@ -19,12 +19,14 @@ use std::collections::HashMap;
 
 use carbide_uuid::DbTable;
 use carbide_uuid::extension_service::ExtensionServiceId;
+use carbide_uuid::machine::DpuMachineId;
 use config_version::{ConfigVersion, ConfigVersionChange};
 use model::controller_outcome::PersistentStateHandlerOutcome;
 use model::extension_service::{
-    ExtensionService, ExtensionServiceDeploymentType, ExtensionServiceInterfaceMac,
-    ExtensionServiceLifecycleState, ExtensionServiceObservability, ExtensionServiceSnapshot,
-    ExtensionServiceType, ExtensionServiceVersionInfo, ServiceVpcInterfaceRequirement,
+    ExtensionService, ExtensionServiceChainSelector, ExtensionServiceDeploymentType,
+    ExtensionServiceInterfaceMac, ExtensionServiceLifecycleState, ExtensionServiceObservability,
+    ExtensionServiceSnapshot, ExtensionServiceType, ExtensionServiceVersionInfo,
+    ServiceVpcInterfaceRequirement,
 };
 use model::tenant::TenantOrganizationId;
 use sqlx::PgConnection;
@@ -39,6 +41,123 @@ const SQL_VIOLATION_INTERFACE_MAC_ADDRESS_COLLISION: &str =
     "extension_service_interface_macs_mac_address_key";
 const SQL_VIOLATION_INTERFACE_MAC_SERVICE_NOT_FOUND: &str =
     "extension_service_interface_macs_service_id_fkey";
+
+/// Changes one DPU's chain eligibility without replacing sibling exclusions.
+#[derive(Debug, Clone, Copy)]
+pub enum ServiceVpcChainExclusion {
+    /// Prevent the chain from selecting this DPU.
+    Exclude,
+    /// Remove this DPU's exclusion after the caller validates activation.
+    Allow,
+}
+
+/// Rejects an exclusion update when the row's presence or version no longer matches.
+/// Missing rows and version mismatches share this rejection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ChainSelectorNotCurrent;
+
+/// Reads retained chain exclusions in interface and slot order for registration repair.
+/// An absent row represents an empty exclusion set without a configuration version.
+pub async fn find_chain_selectors(
+    db: impl DbReader<'_>,
+    service_id: ExtensionServiceId,
+) -> DatabaseResult<Vec<ExtensionServiceChainSelector>> {
+    let query = "SELECT service_id, interface_ordinal, slot, excluded_dpu_ids, version
+                 FROM extension_service_chain_selectors
+                 WHERE service_id = $1
+                 ORDER BY interface_ordinal, slot";
+    sqlx::query_as(query)
+        .bind(service_id)
+        .fetch_all(db)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))
+}
+
+/// Changes one DPU exclusion at the expected version while preserving other DPUs.
+///
+/// Callers must serialize attachment/configuration validation and this exclusion
+/// update with concurrent attachment/configuration changes in the same transaction.
+/// Commit before changing Kubernetes resources.
+///
+/// `expected_version = None` creates only an absent row. `Some` updates only a matching
+/// existing row. Repeated membership requests retain the version; membership changes
+/// advance it. Empty rows remain for version fencing. An unmet presence or version
+/// precondition returns `NotApplied`; database failures remain errors.
+pub async fn try_update_chain_exclusion(
+    txn: &mut PgConnection,
+    service_id: ExtensionServiceId,
+    interface_ordinal: u32,
+    slot: u32,
+    dpu_id: DpuMachineId,
+    expected_version: Option<ConfigVersion>,
+    change: ServiceVpcChainExclusion,
+) -> DatabaseResult<ConditionalWrite<ExtensionServiceChainSelector, ChainSelectorNotCurrent>> {
+    // Reject values that cannot represent the persisted selector identity.
+    let interface_ordinal = i32::try_from(interface_ordinal).map_err(|_| {
+        DatabaseError::InvalidArgument(
+            "interface ordinal exceeds the database representation".into(),
+        )
+    })?;
+    let slot = i32::try_from(slot).map_err(|_| {
+        DatabaseError::InvalidArgument(
+            "service VPC slot exceeds the database representation".into(),
+        )
+    })?;
+    let exclude = matches!(change, ServiceVpcChainExclusion::Exclude);
+
+    // Creation cannot replace a selector committed by another activation or retirement.
+    let Some(expected_version) = expected_version else {
+        let excluded_dpu_ids = if exclude { vec![dpu_id] } else { Vec::new() };
+        let query = "INSERT INTO extension_service_chain_selectors
+                         (service_id, interface_ordinal, slot, excluded_dpu_ids, version)
+                     VALUES ($1, $2, $3, $4, $5)
+                     ON CONFLICT (service_id, interface_ordinal, slot) DO NOTHING
+                     RETURNING service_id, interface_ordinal, slot, excluded_dpu_ids, version";
+        let inserted = sqlx::query_as(query)
+            .bind(service_id)
+            .bind(interface_ordinal)
+            .bind(slot)
+            .bind(excluded_dpu_ids)
+            .bind(ConfigVersion::initial())
+            .fetch_optional(txn)
+            .await
+            .map_err(|error| DatabaseError::query(query, error))?;
+        return Ok(match inserted {
+            Some(inserted) => ConditionalWrite::Applied(inserted),
+            None => ConditionalWrite::NotApplied(ChainSelectorNotCurrent),
+        });
+    };
+
+    // Change only this DPU's membership, retaining the version for idempotent retries.
+    let query = "UPDATE extension_service_chain_selectors
+                 SET excluded_dpu_ids = CASE
+                     WHEN $6 AND NOT ($4 = ANY(excluded_dpu_ids))
+                         THEN array_append(excluded_dpu_ids, $4)
+                     WHEN NOT $6 THEN array_remove(excluded_dpu_ids, $4)
+                     ELSE excluded_dpu_ids
+                 END,
+                 version = CASE
+                     WHEN ($4 = ANY(excluded_dpu_ids)) = $6 THEN version ELSE $7
+                 END
+                 WHERE service_id = $1 AND interface_ordinal = $2 AND slot = $3
+                     AND version = $5
+                 RETURNING service_id, interface_ordinal, slot, excluded_dpu_ids, version";
+    let updated = sqlx::query_as(query)
+        .bind(service_id)
+        .bind(interface_ordinal)
+        .bind(slot)
+        .bind(dpu_id)
+        .bind(expected_version)
+        .bind(exclude)
+        .bind(expected_version.increment())
+        .fetch_optional(txn)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))?;
+    Ok(match updated {
+        Some(updated) => ConditionalWrite::Applied(updated),
+        None => ConditionalWrite::NotApplied(ChainSelectorNotCurrent),
+    })
+}
 
 /// Reports MAC assignment outcomes that registration must handle differently.
 #[derive(Debug, thiserror::Error)]
@@ -1687,6 +1806,305 @@ mod test_batched_lookups {
         }
         txn.commit().await.expect("commit");
         seeded
+    }
+
+    /// Commits one exclusion change so separate reads can verify durable selector state.
+    /// Ordinal zero and slot zero keep these tests focused on membership and version checks.
+    async fn commit_chain_exclusion(
+        pool: &sqlx::PgPool,
+        service_id: ExtensionServiceId,
+        dpu_id: DpuMachineId,
+        expected_version: Option<ConfigVersion>,
+        change: ServiceVpcChainExclusion,
+    ) -> ConditionalWrite<ExtensionServiceChainSelector, ChainSelectorNotCurrent> {
+        // Give each writer its own transaction, including concurrent test writers.
+        let mut txn = pool.begin().await.expect("begin exclusion update");
+        let outcome = try_update_chain_exclusion(
+            txn.as_mut(),
+            service_id,
+            0,
+            0,
+            dpu_id,
+            expected_version,
+            change,
+        )
+        .await
+        .expect("update chain exclusion");
+
+        // Finish the write before another connection checks persisted membership.
+        txn.commit().await.expect("commit exclusion update");
+        outcome
+    }
+
+    /// Rejects one of two competing exclusion updates and preserves both DPUs after retry,
+    /// preventing retirement on one DPU from reopening the chain on another.
+    /// Allowing one DPU afterward must preserve the sibling's committed exclusion.
+    #[crate::sqlx_test]
+    async fn chain_exclusions_preserve_siblings_after_version_conflict(pool: sqlx::PgPool) {
+        // The registration supplies the foreign key; the two DPU IDs drive membership.
+        let [(service_id, _)] = seed_services(&pool, 1)
+            .await
+            .try_into()
+            .expect("one registration");
+        let dpu_ids: [DpuMachineId; 2] = [
+            "fm100dsvstfujf6mis0gpsoi81tadmllicv7rqo4s7gc16gi0t2478672vg",
+            "fm100ds7blqjsadm2uuh3qqbf1h7k8pmf47um6v9uckrg7l03po8mhqgvng",
+        ]
+        .map(|id| id.parse().expect("valid DPU ID"));
+        let ConditionalWrite::Applied(initial) = commit_chain_exclusion(
+            &pool,
+            service_id,
+            dpu_ids[0],
+            None,
+            ServiceVpcChainExclusion::Allow,
+        )
+        .await
+        else {
+            panic!("an absent selector must be created");
+        };
+
+        // Confirm the empty selector exists before both writers use its version.
+        assert!(initial.excluded_dpu_ids.is_empty());
+        assert_eq!(
+            find_chain_selectors(&pool, service_id)
+                .await
+                .expect("read initial selector"),
+            vec![initial.clone()],
+        );
+
+        // Race independent transactions against the same persisted version.
+        let (first, second) = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            tokio::join!(
+                commit_chain_exclusion(
+                    &pool,
+                    service_id,
+                    dpu_ids[0],
+                    Some(initial.version),
+                    ServiceVpcChainExclusion::Exclude,
+                ),
+                commit_chain_exclusion(
+                    &pool,
+                    service_id,
+                    dpu_ids[1],
+                    Some(initial.version),
+                    ServiceVpcChainExclusion::Exclude,
+                ),
+            )
+        })
+        .await
+        .expect("competing exclusion writes must finish");
+
+        // Exactly one writer may consume the version, leaving one exclusion persisted.
+        assert_eq!(
+            usize::from(matches!(first, ConditionalWrite::Applied(_)))
+                + usize::from(matches!(second, ConditionalWrite::Applied(_))),
+            1,
+        );
+        let committed = find_chain_selectors(&pool, service_id)
+            .await
+            .expect("read winning exclusion")
+            .pop()
+            .expect("selector remains");
+        assert_eq!(committed.excluded_dpu_ids.len(), 1);
+        assert_eq!(
+            committed.version.version_nr(),
+            initial.version.version_nr() + 1
+        );
+        let pending_dpu = dpu_ids
+            .into_iter()
+            .find(|id| !committed.excluded_dpu_ids.contains(id))
+            .expect("one DPU still needs exclusion");
+
+        // Retry only the rejected DPU against the refreshed version.
+        let ConditionalWrite::Applied(retried) = commit_chain_exclusion(
+            &pool,
+            service_id,
+            pending_dpu,
+            Some(committed.version),
+            ServiceVpcChainExclusion::Exclude,
+        )
+        .await
+        else {
+            panic!("retry with the current version must apply");
+        };
+
+        // The retry must retain the winning writer's exclusion as well as its own.
+        assert_eq!(retried.excluded_dpu_ids.len(), 2);
+        assert!(
+            dpu_ids
+                .iter()
+                .all(|id| retried.excluded_dpu_ids.contains(id))
+        );
+        assert_eq!(
+            retried.version.version_nr(),
+            committed.version.version_nr() + 1
+        );
+        assert_eq!(
+            find_chain_selectors(&pool, service_id)
+                .await
+                .expect("read merged exclusions"),
+            vec![retried.clone()],
+        );
+
+        // Activate only one DPU using the version that contains both exclusions.
+        let ConditionalWrite::Applied(activation) = commit_chain_exclusion(
+            &pool,
+            service_id,
+            dpu_ids[0],
+            Some(retried.version),
+            ServiceVpcChainExclusion::Allow,
+        )
+        .await
+        else {
+            panic!("current activation must remove only its own exclusion");
+        };
+
+        // The independent read must retain the sibling and the advanced membership version.
+        assert_eq!(activation.excluded_dpu_ids, vec![dpu_ids[1]]);
+        assert_eq!(
+            activation.version.version_nr(),
+            retried.version.version_nr() + 1
+        );
+        assert_eq!(
+            find_chain_selectors(&pool, service_id)
+                .await
+                .expect("read sibling exclusion after activation"),
+            vec![activation],
+        );
+    }
+
+    /// Retains empty selector versions and rejects stale activation after another retirement,
+    /// preventing delayed work from reconnecting a service to a reused slot.
+    #[crate::sqlx_test]
+    async fn chain_exclusions_reject_stale_activation_and_retain_empty_versions(
+        pool: sqlx::PgPool,
+    ) {
+        // The registration supplies the foreign key; one DPU drives the lifecycle changes.
+        let [(service_id, _)] = seed_services(&pool, 1)
+            .await
+            .try_into()
+            .expect("one registration");
+        let dpu_id: DpuMachineId = "fm100dsvstfujf6mis0gpsoi81tadmllicv7rqo4s7gc16gi0t2478672vg"
+            .parse()
+            .expect("valid DPU ID");
+
+        // Record the first retirement and check it through a separate database read.
+        let ConditionalWrite::Applied(first_retirement) = commit_chain_exclusion(
+            &pool,
+            service_id,
+            dpu_id,
+            None,
+            ServiceVpcChainExclusion::Exclude,
+        )
+        .await
+        else {
+            panic!("first retirement must create the selector");
+        };
+        assert_eq!(first_retirement.excluded_dpu_ids, vec![dpu_id]);
+        assert_eq!(
+            find_chain_selectors(&pool, service_id)
+                .await
+                .expect("read first retirement"),
+            vec![first_retirement.clone()],
+        );
+
+        // Repeat the same membership request without creating another desired version.
+        assert_eq!(
+            commit_chain_exclusion(
+                &pool,
+                service_id,
+                dpu_id,
+                Some(first_retirement.version),
+                ServiceVpcChainExclusion::Exclude,
+            )
+            .await,
+            ConditionalWrite::Applied(first_retirement.clone()),
+        );
+        assert_eq!(
+            find_chain_selectors(&pool, service_id)
+                .await
+                .expect("read repeated retirement"),
+            vec![first_retirement.clone()],
+        );
+
+        // Model the exclusion removal that follows a caller-validated activation.
+        let ConditionalWrite::Applied(activation) = commit_chain_exclusion(
+            &pool,
+            service_id,
+            dpu_id,
+            Some(first_retirement.version),
+            ServiceVpcChainExclusion::Allow,
+        )
+        .await
+        else {
+            panic!("current activation must remove the exclusion");
+        };
+
+        // Keep the empty row and its new version so absence cannot reset concurrency checks.
+        assert!(activation.excluded_dpu_ids.is_empty());
+        assert_eq!(
+            activation.version.version_nr(),
+            first_retirement.version.version_nr() + 1
+        );
+        assert_eq!(
+            find_chain_selectors(&pool, service_id)
+                .await
+                .expect("read retained empty selector"),
+            vec![activation.clone()],
+        );
+
+        // Retire the same DPU again using the version established by activation.
+        let ConditionalWrite::Applied(second_retirement) = commit_chain_exclusion(
+            &pool,
+            service_id,
+            dpu_id,
+            Some(activation.version),
+            ServiceVpcChainExclusion::Exclude,
+        )
+        .await
+        else {
+            panic!("second retirement must restore the exclusion");
+        };
+        assert_eq!(second_retirement.excluded_dpu_ids, vec![dpu_id]);
+        assert_eq!(
+            second_retirement.version.version_nr(),
+            activation.version.version_nr() + 1
+        );
+        assert_eq!(
+            find_chain_selectors(&pool, service_id)
+                .await
+                .expect("read second retirement"),
+            vec![second_retirement.clone()],
+        );
+
+        let stale_activations = [
+            // A delayed activation cannot consume the earlier retirement's version again.
+            ("old activation", Some(first_retirement.version)),
+            // A stale absence snapshot cannot replace an existing selector.
+            ("old absence observation", None),
+        ];
+        for (scenario, expected_version) in stale_activations {
+            // Attempt the stale removal, then read the retained exclusion independently.
+            assert_eq!(
+                commit_chain_exclusion(
+                    &pool,
+                    service_id,
+                    dpu_id,
+                    expected_version,
+                    ServiceVpcChainExclusion::Allow,
+                )
+                .await,
+                ConditionalWrite::NotApplied(ChainSelectorNotCurrent),
+                "{scenario}",
+            );
+            assert_eq!(
+                find_chain_selectors(&pool, service_id)
+                    .await
+                    .expect("read after stale activation"),
+                vec![second_retirement.clone()],
+                "{scenario}",
+            );
+        }
     }
 
     /// Concurrent creates using case variants must serialize on one advisory lock,

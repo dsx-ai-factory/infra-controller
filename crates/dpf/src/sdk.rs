@@ -18,6 +18,8 @@
 //! DPF SDK - High-level interface for DPF operations.
 
 mod bmc_credentials;
+mod node_identity;
+mod service_vpc;
 mod version;
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -49,9 +51,9 @@ use crate::crds::dpudeployments_generated::{
     DpuDeploymentServiceChainsUpgradePolicy, DpuDeploymentServices, DpuDeploymentServicesDependsOn,
     DpuDeploymentSpec,
 };
-#[cfg(test)]
-use crate::crds::dpudevices_generated::DpuDeviceCluster;
-use crate::crds::dpudevices_generated::{DPUDevice, DpuDeviceBmcFactoryResetPolicy, DpuDeviceSpec};
+use crate::crds::dpudevices_generated::{
+    DPUDevice, DpuDeviceBmcFactoryResetPolicy, DpuDeviceCluster, DpuDeviceSpec,
+};
 use crate::crds::dpunodes_generated::{
     DPUNode, DpuNodeDpus, DpuNodeNodeRebootMethod, DpuNodeNodeRebootMethodExternal, DpuNodeSpec,
 };
@@ -112,18 +114,19 @@ use crate::service_vpc_slot::MAX_HBN_SERVICE_INTERFACES;
 use crate::types::{
     AstraRoutePrefixes, BlueFieldSoftwareParams, BmcPasswordProvider, ConfigPortsServiceType,
     DHCP_SERVER_SERVICE_NAME, DOCA_HBN_SERVICE_NAME, DOCA_WEAVE_DHCP_AGENT_PF_TOTAL_SF,
-    DPU_AGENT_SERVICE_NAME, DPU_ENABLED_NODE_LABEL, DTS_SERVICE_NAME,
+    DPU_AGENT_SERVICE_NAME, DPU_ENABLED_NODE_LABEL, DPU_MACHINE_ID_LABEL, DTS_SERVICE_NAME,
     DetachedDpfResourceObservation, DetachedDpuServiceChainDefinition,
     DetachedDpuServiceDefinition, DetachedDpuServiceInterface,
     DetachedDpuServiceInterfaceDefinition, DpfDeletePreconditions, DpfInterceptBridging,
-    DpuDeploymentType, DpuDeviceInfo, DpuDeviceSummary, DpuFailureObservation, DpuMismatch,
-    DpuNodeInfo, DpuNodeSummary, DpuPhase, DpuPhaseObservation, DpuServiceDaemonSetObservation,
-    DpuServiceHelmChartObservation, DpuServiceInterfacePatch,
+    DpfResourcePreconditions, DpuDeploymentType, DpuDeviceInfo, DpuDeviceSummary,
+    DpuFailureObservation, DpuMismatch, DpuNodeInfo, DpuNodeSummary, DpuPhase, DpuPhaseObservation,
+    DpuServiceDaemonSetObservation, DpuServiceHelmChartObservation, DpuServiceInterfacePatch,
     DpuServiceInterfaceTemplateDefinition, DpuServiceInterfaceTemplateType, DpuServiceObservation,
     DpuServiceSecurityObservation, DpuServiceVersion, DpuSummary, FMDS_SERVICE_NAME,
     HostDpfSnapshot, InitDpfResourcesConfig, MAX_BLUEFIELD_VFS_PER_PF, OTEL_COLLECTOR_SERVICE_NAME,
-    PF_TOTAL_SF_BF4_ASTRA_FUDGE, ServiceConfigPortProtocol, ServiceDefinition, ServiceNAD,
-    ServiceNADResourceType, ServiceTemplateVersion,
+    PF_TOTAL_SF_BF4_ASTRA_FUDGE, SERVICE_VPC_CHAIN_REGISTRATION_UID_LABEL,
+    SERVICE_VPC_CHAIN_SELECTOR_VERSION_ANNOTATION, ServiceConfigPortProtocol, ServiceDefinition,
+    ServiceNAD, ServiceNADResourceType, ServiceTemplateVersion,
 };
 #[cfg(test)]
 use crate::types::{DEFAULT_PF_TOTAL_SF_RESERVED, InitDpfResourcesConfigBuilder};
@@ -2894,6 +2897,24 @@ fn detached_dpu_service_interface_to_resource(
 fn detached_dpu_service_chain_to_resource(
     chain: &DetachedDpuServiceChainDefinition,
 ) -> Result<DPUServiceChain, DpfError> {
+    // Require identity independently of NotIn, which also matches Nodes without this label.
+    let mut expressions = vec![json!({"key": DPU_MACHINE_ID_LABEL, "operator": "Exists"})];
+    let excluded_dpu_ids = chain
+        .excluded_dpu_ids
+        .iter()
+        .map(ToString::to_string)
+        .collect::<BTreeSet<_>>();
+    if !excluded_dpu_ids.is_empty() {
+        expressions.push(
+            json!({"key": DPU_MACHINE_ID_LABEL, "operator": "NotIn", "values": excluded_dpu_ids}),
+        );
+    }
+    let annotations = chain.selector_version.map(|version| {
+        BTreeMap::from([(
+            SERVICE_VPC_CHAIN_SELECTOR_VERSION_ANNOTATION,
+            version.to_string(),
+        )])
+    });
     let ports = chain
         .interface_selectors
         .iter()
@@ -2909,11 +2930,11 @@ fn detached_dpu_service_chain_to_resource(
         },
         "spec": {
             "template": {
-                "metadata": {"labels": chain.template_labels},
+                "metadata": {"labels": chain.template_labels, "annotations": annotations},
                 "spec": {
-                    "nodeSelector": {"matchLabels": chain.node_selector_labels},
+                    "nodeSelector": {"matchLabels": chain.node_selector_labels, "matchExpressions": expressions},
                     "template": {
-                        "metadata": {"labels": chain.template_labels},
+                        "metadata": {"labels": chain.template_labels, "annotations": annotations},
                         "spec": {
                             "switches": [{
                                 "ports": ports,
@@ -2946,6 +2967,26 @@ pub fn detached_dpu_service_chain_spec(
     Ok(serde_json::to_value(
         detached_dpu_service_chain_to_resource(chain)?.spec,
     )?)
+}
+
+/// Builds a chain spec with the supplied registration UID in both templates so remote sets and
+/// chains can be correlated with their management DPUServiceChain.
+/// Callers must supply the UID from their DPUServiceChain observation. Empty UIDs are rejected.
+pub fn registered_dpu_service_chain_spec(
+    chain: &DetachedDpuServiceChainDefinition,
+    registration_uid: &str,
+) -> Result<serde_json::Value, DpfError> {
+    if registration_uid.is_empty() {
+        return Err(DpfError::InvalidState(
+            "DPUServiceChain registration UID is empty".to_owned(),
+        ));
+    }
+    let mut registered = chain.clone();
+    registered.template_labels.insert(
+        SERVICE_VPC_CHAIN_REGISTRATION_UID_LABEL.to_owned(),
+        registration_uid.to_owned(),
+    );
+    detached_dpu_service_chain_spec(&registered)
 }
 
 /// Converts a checked DPUServiceInterface into a DetachedDpfResourceObservation while
@@ -3044,6 +3085,20 @@ impl<R: DpuServiceInterfaceRepository, L> DpfSdk<R, L> {
     }
 }
 
+// Match the ten-second management request budget used for operator-version and identity reads.
+// Each call includes client capacity waits; retries belong to later controller iterations.
+const DPF_MANAGEMENT_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Bounds one DPF management request so partial registration work can resume on a later iteration.
+async fn bounded_management_request<T>(
+    operation: &'static str,
+    request: impl std::future::Future<Output = Result<T, DpfError>>,
+) -> Result<T, DpfError> {
+    tokio::time::timeout(DPF_MANAGEMENT_REQUEST_TIMEOUT, request)
+        .await
+        .map_err(|_| DpfError::timeout(operation, "ten-second attempt deadline exceeded"))?
+}
+
 impl<R: DpuServiceChainRepository, L> DpfSdk<R, L> {
     /// Lists dynamic service chains, optionally restricted by a Kubernetes label selector.
     pub async fn list_detached_dpu_service_chains(
@@ -3068,26 +3123,93 @@ impl<R: DpuServiceChainRepository, L> DpfSdk<R, L> {
             .transpose()
     }
 
-    /// Creates one detached service chain without force-applying an existing deterministic name.
+    /// Creates a detached chain and stamps its assigned UID into both templates before returning.
+    /// Existing names are never force-applied. Each POST or PATCH has a ten-second attempt deadline;
+    /// a stale-UID validation failure can add one bounded GET. Partial creation remains repairable.
     pub async fn create_detached_dpu_service_chain(
         &self,
         definition: &DetachedDpuServiceChainDefinition,
     ) -> Result<DetachedDpfResourceObservation, DpfError> {
         let mut resource = detached_dpu_service_chain_to_resource(definition)?;
         resource.metadata.namespace = Some(self.namespace.clone());
-        let created = DpuServiceChainRepository::create(&*self.repo, &resource).await?;
-        detached_dpu_service_chain_from_resource(created)
+        // Publish the chain first because Kubernetes assigns the UID used by both templates.
+        let created = bounded_management_request(
+            "create DPUServiceChain",
+            DpuServiceChainRepository::create(&*self.repo, &resource),
+        )
+        .await?;
+        let observed = detached_dpu_service_chain_from_resource(created)?;
+
+        // Check the create response before mutating its templates so an unexpected identity is not adopted.
+        if observed.name.as_deref() != Some(definition.name.as_str())
+            || observed.namespace.as_deref() != Some(self.namespace.as_str())
+            || observed.is_deleting
+            || !definition
+                .labels
+                .iter()
+                .all(|(key, value)| observed.labels.get(key) == Some(value))
+        {
+            return Err(DpfError::InvalidState(
+                "created DPUServiceChain identity does not match its definition".to_owned(),
+            ));
+        }
+        let preconditions = observed.delete_preconditions()?;
+
+        // Return only after the current UID has been published through the fenced spec update.
+        self.patch_detached_dpu_service_chain(definition, &preconditions)
+            .await
     }
 
-    /// Applies a revision-fenced JSON Patch and returns the resulting service-chain observation.
+    /// Replaces the owned chain spec in the SDK namespace using both observed write preconditions.
+    /// Stamps the observed UID into both templates. Each PATCH or conflict-verification GET has a
+    /// ten-second deadline without automatic retries. Stale identities return PatchConflict;
+    /// a validation failure against the same observed identity remains a validation error.
     pub async fn patch_detached_dpu_service_chain(
         &self,
-        name: &str,
-        patch: serde_json::Value,
+        definition: &DetachedDpuServiceChainDefinition,
+        preconditions: &DpfResourcePreconditions,
     ) -> Result<DetachedDpfResourceObservation, DpfError> {
-        let patched =
-            DpuServiceChainRepository::patch(&*self.repo, name, &self.namespace, patch).await?;
-        detached_dpu_service_chain_from_resource(patched)
+        if preconditions.resource_version.is_empty() {
+            return Err(DpfError::InvalidState(
+                "DPUServiceChain resource version is empty".to_owned(),
+            ));
+        }
+        let name = &definition.name;
+        let spec = registered_dpu_service_chain_spec(definition, &preconditions.uid)?;
+        let patch = json!([
+            {"op": "test", "path": "/metadata/uid", "value": preconditions.uid},
+            {"op": "replace", "path": "/metadata/resourceVersion", "value": preconditions.resource_version},
+            {"op": "replace", "path": "/spec", "value": spec},
+        ]);
+        let result = bounded_management_request(
+            "patch DPUServiceChain",
+            DpuServiceChainRepository::patch(&*self.repo, name, &self.namespace, patch),
+        )
+        .await;
+        match result {
+            Ok(patched) => detached_dpu_service_chain_from_resource(patched),
+            // Recheck identity before treating a validation rejection as terminal for this registration.
+            Err(error) if matches!(&error, DpfError::KubeError(kube::Error::Api(status)) if matches!(status.code, 400 | 422)) =>
+            {
+                let current = bounded_management_request(
+                    "verify DPUServiceChain patch identity",
+                    DpuServiceChainRepository::get(&*self.repo, name, &self.namespace),
+                )
+                .await?;
+                if current.as_ref().is_none_or(|chain| {
+                    chain.metadata.uid.as_deref() != Some(preconditions.uid.as_str())
+                        || chain.metadata.resource_version.as_deref()
+                            != Some(preconditions.resource_version.as_str())
+                }) {
+                    return Err(DpfError::PatchConflict {
+                        kind: "DPUServiceChain",
+                        name: name.clone(),
+                    });
+                }
+                Err(error)
+            }
+            Err(error) => Err(error),
+        }
     }
 
     /// Deletes the exact detached service chain previously observed.
@@ -3305,12 +3427,19 @@ impl<R: DpuDeviceRepository, L: ResourceLabeler> DpfSdk<R, L> {
     /// `dpu_device_name` is the raw device ID (without the `device-` CR
     /// prefix); the SDK applies the prefix internally. `Some(value)` adds or
     /// replaces a label, while `None` removes it. Existing node labels and
-    /// cluster fields not named by `changes` are preserved.
+    /// cluster fields not named by `changes` are preserved. The DPU machine identity label is
+    /// reserved; attempts to set or remove it fail.
     pub async fn merge_dpu_device_node_labels(
         &self,
         dpu_device_name: &str,
         changes: BTreeMap<String, Option<String>>,
     ) -> Result<(), DpfError> {
+        // Keep placement updates from reassigning the identity used by chain exclusions.
+        if changes.contains_key(DPU_MACHINE_ID_LABEL) {
+            return Err(DpfError::InvalidState(
+                "DPU identity cannot be changed through placement label updates".to_owned(),
+            ));
+        }
         let cr_name = dpu_device_cr_name(dpu_device_name);
         let patch = json!({
             "spec": {
@@ -3477,7 +3606,15 @@ impl<R: DpuDeviceRepository, L: ResourceLabeler> DpfSdk<R, L> {
                 psid: None,
                 serial_number: info.serial_number,
                 bmc_credential_secret_name: credential_secret_name.clone(),
-                cluster: None,
+                // DPF propagates spec.cluster.nodeLabels to the remote Node; metadata labels alone
+                // cannot satisfy the chain selector's DPU identity requirement.
+                cluster: Some(DpuDeviceCluster {
+                    node_annotations: None,
+                    node_labels: Some(BTreeMap::from([(
+                        DPU_MACHINE_ID_LABEL.to_owned(),
+                        info.dpu_machine_id.clone(),
+                    )])),
+                }),
                 nic_device_count: None,
                 values,
                 // NICo owns BMC initialization and decommissioning. Resetting
@@ -4966,6 +5103,9 @@ impl<R: DpuRepository, L: ResourceLabeler> DpfSdk<R, L> {
 
 #[cfg(test)]
 mod tests {
+    mod chain_deadlines;
+    pub(in crate::sdk) mod service_vpc;
+
     use std::collections::BTreeMap;
     use std::future::Future;
     use std::sync::{Arc, RwLock};
@@ -4973,7 +5113,9 @@ mod tests {
     use async_trait::async_trait;
     use carbide_test_support::Outcome::{Fails, FailsWith, Yields};
     use carbide_test_support::{scenarios, value_scenarios};
+    use config_version::ConfigVersion;
     use kube::Resource;
+    use kube::core::SelectorExt as _;
 
     use super::*;
     use crate::crds::dpuflavors_generated::DPUFlavor;
@@ -6507,6 +6649,9 @@ mod tests {
 
     #[derive(Clone, Default)]
     struct SdkMock {
+        clusters: Arc<RwLock<BTreeMap<String, crate::crds::dpuclusters_generated::DPUCluster>>>,
+        observer_clients: Arc<RwLock<BTreeMap<String, kube::Client>>>,
+        observer_requests: Arc<RwLock<Vec<crate::types::DpuClusterIdentity>>>,
         devices: Arc<RwLock<BTreeMap<String, DPUDevice>>>,
         nodes: Arc<RwLock<BTreeMap<String, DPUNode>>>,
         dpus: Arc<RwLock<BTreeMap<String, DPU>>>,
@@ -6515,6 +6660,8 @@ mod tests {
         services: Arc<RwLock<BTreeMap<String, DPUService>>>,
         service_interfaces: Arc<RwLock<BTreeMap<String, DPUServiceInterface>>>,
         service_chains: Arc<RwLock<BTreeMap<String, DPUServiceChain>>>,
+        chain_patch_requests: Arc<RwLock<Vec<serde_json::Value>>>,
+        chain_patch_error: Arc<RwLock<Option<DpfError>>>,
         service_patch: Arc<RwLock<Option<(String, String, serde_json::Value)>>>,
         service_delete_preconditions: Arc<RwLock<Option<(String, String, DpfDeletePreconditions)>>>,
         service_interface_delete_preconditions:
@@ -6782,8 +6929,14 @@ mod tests {
                     chain.meta().name.as_deref().unwrap_or(""),
                 ));
             }
-            chains.insert(key, chain.clone());
-            Ok(chain.clone())
+            let mut created = chain.clone();
+            created.metadata.uid = Some(format!(
+                "uid-{}",
+                chain.metadata.name.as_deref().expect("chain name")
+            ));
+            created.metadata.resource_version = Some("1".to_owned());
+            chains.insert(key, created.clone());
+            Ok(created)
         }
 
         async fn patch(
@@ -6792,6 +6945,13 @@ mod tests {
             ns: &str,
             patch: serde_json::Value,
         ) -> Result<DPUServiceChain, DpfError> {
+            self.chain_patch_requests
+                .write()
+                .unwrap()
+                .push(patch.clone());
+            if let Some(error) = self.chain_patch_error.write().unwrap().take() {
+                return Err(error);
+            }
             Self::patch_resource(
                 &self.service_chains,
                 Self::ns_key(ns, name),
@@ -7150,10 +7310,288 @@ mod tests {
         }
     }
 
+    /// Rejects unidentified or excluded Nodes while retaining placement requirements, preventing
+    /// cached Node labels from reconnecting a retired service chain.
+    #[test]
+    fn detached_chain_selector_fences_unidentified_and_excluded_nodes() {
+        // Vary identity, exclusion and placement; other fields provide a complete chain definition.
+        let retiring_dpu: carbide_uuid::machine::DpuMachineId =
+            "fm100dsvstfujf6mis0gpsoi81tadmllicv7rqo4s7gc16gi0t2478672vg"
+                .parse()
+                .expect("valid retiring DPU ID");
+        let sibling_dpu: carbide_uuid::machine::DpuMachineId =
+            "fm100ds7blqjsadm2uuh3qqbf1h7k8pmf47um6v9uckrg7l03po8mhqgvng"
+                .parse()
+                .expect("valid sibling DPU ID");
+        let cases = [
+            // NotIn alone accepts missing identity, so Exists must reject the cached Node.
+            ("missing identity", vec![retiring_dpu], None, true, false),
+            // Fresh active placement remains selectable before any retirement.
+            ("active DPU", vec![], Some(retiring_dpu), true, true),
+            // An old placement label cannot override this DPU's committed exclusion.
+            (
+                "excluded DPU",
+                vec![retiring_dpu],
+                Some(retiring_dpu),
+                true,
+                false,
+            ),
+            // Retirement on one DPU must leave the same service eligible on another.
+            (
+                "unexcluded sibling",
+                vec![retiring_dpu],
+                Some(sibling_dpu),
+                true,
+                true,
+            ),
+            // Identity does not replace the existing slot placement requirement.
+            (
+                "missing placement",
+                vec![retiring_dpu],
+                Some(sibling_dpu),
+                false,
+                false,
+            ),
+        ];
+        carbide_test_support::check_values(
+            cases.into_iter().map(
+                |(scenario, excluded_dpu_ids, node_identity, placed, expected)| {
+                    carbide_test_support::Check {
+                        scenario,
+                        input: (excluded_dpu_ids, node_identity, placed),
+                        expect: expected,
+                    }
+                },
+            ),
+            |(excluded_dpu_ids, node_identity, placed)| {
+                // Selector inputs drive matching; other fields provide a complete checked chain.
+                let chain = DetachedDpuServiceChainDefinition {
+                    name: "chain".to_owned(),
+                    namespace: TEST_NAMESPACE.to_owned(),
+                    labels: BTreeMap::new(),
+                    node_selector_labels: BTreeMap::from([(
+                        "slot-placement".to_owned(),
+                        "enabled".to_owned(),
+                    )]), // Retain slot placement alongside identity.
+                    excluded_dpu_ids, // Fence only these physical DPUs.
+                    selector_version: None,
+                    template_labels: BTreeMap::new(),
+                    interface_selectors: vec![BTreeMap::from([(
+                        "interface".to_owned(),
+                        "service".to_owned(),
+                    )])],
+                    service_mtu: 9_000,
+                };
+                let mut labels = BTreeMap::new();
+                if placed {
+                    labels.insert("slot-placement".to_owned(), "enabled".to_owned());
+                }
+                if let Some(identity) = node_identity {
+                    labels.insert(DPU_MACHINE_ID_LABEL.to_owned(), identity.to_string());
+                }
+
+                // Evaluate the checked CR's selector using Kubernetes label-matching semantics.
+                let spec = detached_dpu_service_chain_spec(&chain)
+                    .expect("convert checked chain specification");
+                let selector: k8s_openapi::apimachinery::pkg::apis::meta::v1::LabelSelector =
+                    serde_json::from_value(spec["template"]["spec"]["nodeSelector"].clone())
+                        .expect("decode Node selector");
+                let selector =
+                    kube::core::Selector::try_from(selector).expect("valid Node selector");
+
+                // Every placement and identity requirement must hold before a Node receives a chain.
+                selector.matches(&labels)
+            },
+        );
+    }
+
+    /// Provides an owned chain definition so identity tests vary observed metadata and patch failures.
+    fn registration_chain_definition() -> DetachedDpuServiceChainDefinition {
+        DetachedDpuServiceChainDefinition {
+            name: "registration-chain".to_owned(),
+            namespace: TEST_NAMESPACE.to_owned(),
+            labels: BTreeMap::from([("owner".to_owned(), "service".to_owned())]),
+            node_selector_labels: BTreeMap::from([("slot".to_owned(), "enabled".to_owned())]),
+            excluded_dpu_ids: Vec::new(),
+            selector_version: None,
+            template_labels: BTreeMap::from([("owner".to_owned(), "service".to_owned())]),
+            interface_selectors: vec![
+                BTreeMap::from([("interface".to_owned(), "service".to_owned())]),
+                BTreeMap::from([("interface".to_owned(), "patch".to_owned())]),
+            ],
+            service_mtu: 9_000,
+        }
+    }
+
+    /// Repairs a partially created chain after a transient stamp failure while retaining exclusions,
+    /// so callers can recover without reopening the chain on a retiring DPU.
+    #[tokio::test]
+    async fn partial_chain_creation_retains_exclusions_until_uid_stamp_repair() {
+        // Build independent SDK and repository state for the failed creation and subsequent repair.
+        let mock = SdkMock::new();
+        let sdk = DpfSdkBuilder::new(mock.clone(), TEST_NAMESPACE, String::new())
+            .build_without_resources()
+            .await
+            .expect("SDK");
+        // Only the excluded DPU and selector version drive recovery; other fields supply a valid chain.
+        let mut definition = registration_chain_definition();
+        definition.excluded_dpu_ids = vec![
+            "fm100dsvstfujf6mis0gpsoi81tadmllicv7rqo4s7gc16gi0t2478672vg"
+                .parse()
+                .expect("DPU ID"),
+        ];
+        definition.selector_version = Some(ConfigVersion::initial());
+        // Fail the first stamp PATCH with a transient ServiceUnavailable response.
+        *mock.chain_patch_error.write().unwrap() = Some(DpfError::KubeError(kube::Error::Api(
+            kube::core::Status::failure("temporary unavailable", "ServiceUnavailable")
+                .with_code(503)
+                .boxed(),
+        )));
+
+        // Create through the SDK before checking the failed stamp result.
+        let created = sdk.create_detached_dpu_service_chain(&definition).await;
+        assert!(
+            matches!(created, Err(DpfError::KubeError(kube::Error::Api(status))) if status.code == 503)
+        );
+        let partial = sdk
+            .get_detached_dpu_service_chain(&definition.name)
+            .await
+            .expect("read partial creation")
+            .expect("created chain persists");
+
+        // Failed stamping must retain the exclusion while leaving the missing UID stamp observable.
+        let selector = partial
+            .spec
+            .pointer("/template/spec/nodeSelector")
+            .expect("selector")
+            .clone();
+        assert!(
+            selector["matchExpressions"]
+                .as_array()
+                .expect("expressions")
+                .iter()
+                .any(|expression| expression["operator"] == "NotIn"
+                    && expression["values"] == json!([definition.excluded_dpu_ids[0].to_string()]))
+        );
+        assert!(
+            partial
+                .spec
+                .pointer("/template/metadata/labels")
+                .expect("template labels")
+                .get(SERVICE_VPC_CHAIN_REGISTRATION_UID_LABEL)
+                .is_none()
+        );
+
+        // Repair the observed object instead of replaying a create or discarding persisted desire.
+        let preconditions = partial
+            .delete_preconditions()
+            .expect("observed write identity");
+        let repaired = sdk
+            .patch_detached_dpu_service_chain(&definition, &preconditions)
+            .await
+            .expect("repair current UID stamp");
+        assert_eq!(repaired.uid, partial.uid);
+        let persisted = sdk
+            .get_detached_dpu_service_chain(&definition.name)
+            .await
+            .expect("read repaired chain")
+            .expect("chain remains");
+
+        // A fresh read must contain both UID stamps and retain the original excluded-DPU selector.
+        assert_eq!(persisted.spec, repaired.spec);
+        assert_eq!(
+            persisted.spec.pointer("/template/spec/nodeSelector"),
+            Some(&selector)
+        );
+        for metadata in ["/template/metadata", "/template/spec/template/metadata"] {
+            assert_eq!(
+                persisted.spec.pointer(metadata).expect("metadata")["labels"]
+                    .get(SERVICE_VPC_CHAIN_REGISTRATION_UID_LABEL),
+                Some(&json!(preconditions.uid))
+            );
+        }
+    }
+
+    /// Preserves genuine validation failures while making replaced or disappeared registrations
+    /// retryable, so an old UID test cannot permanently fail a newly recreated registration.
+    /// An advanced resourceVersion also requires a fresh observation before validation is terminal.
+    #[tokio::test]
+    async fn chain_validation_errors_are_conflicts_only_after_identity_changes() {
+        let cases = [
+            // Validation failure on the same observation remains terminal for unchanged desire.
+            ("same observed object", Some(("original", "1")), false),
+            // An intervening write invalidates the observation even while the UID remains current.
+            ("same object advanced", Some(("original", "2")), true),
+            // A failed old-UID test requires a new registration observation.
+            ("same-name replacement", Some(("replacement", "2")), true),
+            // Disappearance before the verification read cannot establish a validation failure.
+            ("object disappeared", None, true),
+        ];
+        carbide_test_support::check_cases_async(
+            cases
+                .into_iter()
+                .map(|(scenario, current, conflict)| carbide_test_support::Case {
+                    scenario,
+                    input: current,
+                    expect: Yields(conflict),
+                }),
+            |current| async move {
+                // Vary only the current object identity; the definition supplies a complete owned chain.
+                let mock = SdkMock::new();
+                let sdk = DpfSdkBuilder::new(mock.clone(), TEST_NAMESPACE, String::new())
+                    .build_without_resources()
+                    .await
+                    .expect("SDK");
+                let definition = registration_chain_definition();
+
+                // Store the observed UID and resource version, or leave the disappeared object absent.
+                if let Some((uid, version)) = current {
+                    let mut resource =
+                        detached_dpu_service_chain_to_resource(&definition).expect("chain");
+                    resource.metadata.uid = Some(uid.to_owned());
+                    resource.metadata.resource_version = Some(version.to_owned());
+                    mock.service_chains
+                        .write()
+                        .unwrap()
+                        .insert(SdkMock::key(&resource), resource);
+                }
+
+                // Inject a 422 from PATCH, then let the SDK read the actual current metadata.
+                *mock.chain_patch_error.write().unwrap() = Some(invalid_field_error(
+                    "FieldValueInvalid",
+                    "spec",
+                    "validation rejected",
+                ));
+                let result = sdk
+                    .patch_detached_dpu_service_chain(
+                        &definition,
+                        &DpfResourcePreconditions {
+                            uid: "original".to_owned(),
+                            resource_version: "1".to_owned(),
+                        },
+                    )
+                    .await;
+
+                // Distinguish changed identity from validation failure without retrying the write.
+                assert_eq!(mock.chain_patch_requests.read().unwrap().len(), 1);
+                match result {
+                    Err(DpfError::PatchConflict { .. }) => Ok(true),
+                    Err(DpfError::KubeError(kube::Error::Api(status))) if status.code == 422 => {
+                        Ok(false)
+                    }
+                    other => Err(format!("unexpected patch result: {other:?}")),
+                }
+            },
+        )
+        .await;
+    }
+
     /// Verifies detached parents preserve specs, scoped observations, patch results, and delete
     /// preconditions.
     /// Scoped lists prevent cross-owner reconciliation, while delete preconditions preserve
     /// same-name replacements.
+    /// Both chain template annotations retain the durable selector version for remote observations.
+    /// Chain templates also carry their assigned management UID, and spec updates send both write preconditions.
     #[tokio::test]
     async fn detached_parent_lifecycle_preserves_specs_scoping_and_delete_preconditions() {
         let mock = SdkMock::new();
@@ -7191,11 +7629,14 @@ mod tests {
 
         // The owner-A chain carries two distinct ports and a nondefault MTU through checked
         // conversion.
-        let chain_a = DetachedDpuServiceChainDefinition {
+        let selector_version = ConfigVersion::initial();
+        let chain_definition = DetachedDpuServiceChainDefinition {
             name: "chain-a".to_string(),
             namespace: TEST_NAMESPACE.to_string(),
             labels: labels("a"),
             node_selector_labels: BTreeMap::from([("node".to_string(), "a".to_string())]),
+            excluded_dpu_ids: Vec::new(),
+            selector_version: Some(selector_version),
             template_labels: BTreeMap::from([("template".to_string(), "a".to_string())]),
             interface_selectors: vec![labels("a"), labels("b")],
             service_mtu: 9_000,
@@ -7208,6 +7649,8 @@ mod tests {
             namespace: TEST_NAMESPACE.to_string(),
             labels: labels("b"),
             node_selector_labels: BTreeMap::from([("node".to_string(), "b".to_string())]),
+            excluded_dpu_ids: Vec::new(),
+            selector_version: None,
             template_labels: BTreeMap::from([("template".to_string(), "b".to_string())]),
             interface_selectors: vec![labels("b")],
             service_mtu: 1_500,
@@ -7276,7 +7719,7 @@ mod tests {
             Some(&json!("br-svc-1"))
         );
         let observed_chain = sdk
-            .create_detached_dpu_service_chain(&chain_a)
+            .create_detached_dpu_service_chain(&chain_definition)
             .await
             .expect("create owner-a chain");
         sdk.create_detached_dpu_service_chain(&chain_b)
@@ -7284,7 +7727,9 @@ mod tests {
             .expect("create owner-b chain");
         assert_eq!(
             observed_chain.spec.pointer("/template/metadata/labels"),
-            Some(&json!({"template": "a"}))
+            Some(
+                &json!({"template": "a", SERVICE_VPC_CHAIN_REGISTRATION_UID_LABEL: "uid-chain-a"})
+            )
         );
         assert_eq!(
             observed_chain
@@ -7296,7 +7741,9 @@ mod tests {
             observed_chain
                 .spec
                 .pointer("/template/spec/template/metadata/labels"),
-            Some(&json!({"template": "a"}))
+            Some(
+                &json!({"template": "a", SERVICE_VPC_CHAIN_REGISTRATION_UID_LABEL: "uid-chain-a"})
+            )
         );
         assert_eq!(
             observed_chain
@@ -7310,6 +7757,36 @@ mod tests {
                 "serviceMTU": 9_000,
             }))
         );
+
+        // Correlate both generated objects with the same durable selector version.
+        for metadata in ["/template/metadata", "/template/spec/template/metadata"] {
+            let annotations = observed_chain
+                .spec
+                .pointer(metadata)
+                .expect("template metadata")
+                .get("annotations")
+                .expect("selector version annotation");
+            assert_eq!(
+                annotations.get(SERVICE_VPC_CHAIN_SELECTOR_VERSION_ANNOTATION),
+                Some(&json!(selector_version.to_string()))
+            );
+        }
+
+        // Both creation stamps must use the assigned UID and the exact POST resource version.
+        {
+            let requests = mock.chain_patch_requests.read().unwrap();
+            assert_eq!(requests.len(), 2);
+            for (patch, uid) in requests.iter().zip(["uid-chain-a", "uid-chain-b"]) {
+                assert_eq!(
+                    patch[0],
+                    json!({"op": "test", "path": "/metadata/uid", "value": uid})
+                );
+                assert_eq!(
+                    patch[1],
+                    json!({"op": "replace", "path": "/metadata/resourceVersion", "value": "1"})
+                );
+            }
+        }
 
         // Seed API-assigned identities and finalizers so SDK observations drive safe deletion.
         {
@@ -7330,7 +7807,7 @@ mod tests {
             let chain_a = chains
                 .get_mut(&SdkMock::ns_key(TEST_NAMESPACE, "chain-a"))
                 .expect("owner-a chain is retained by the mock");
-            chain_a.metadata.uid = Some("chain-uid".to_string());
+            chain_a.metadata.uid = Some("uid-chain-a".to_string());
             chain_a.metadata.resource_version = Some("9".to_string());
             chains
                 .get_mut(&SdkMock::ns_key(TEST_NAMESPACE, "chain-b"))
@@ -7369,7 +7846,7 @@ mod tests {
             .delete_preconditions()
             .expect("observed interface has complete deletion identity");
         let chain_a = chains.first().expect("owner-a chain is listed");
-        assert_eq!(chain_a.uid.as_deref(), Some("chain-uid"));
+        assert_eq!(chain_a.uid.as_deref(), Some("uid-chain-a"));
         assert_eq!(chain_a.resource_version.as_deref(), Some("9"));
         let chain_preconditions = chain_a
             .delete_preconditions()
@@ -7400,21 +7877,13 @@ mod tests {
             Some(&json!("dpf-operator/repaired"))
         );
 
-        let mut chain_spec = chain_a.spec.clone();
-        *chain_spec
-            .pointer_mut("/template/spec/template/spec/switches/0/serviceMTU")
-            .expect("chain carries its service MTU") = json!(1_500);
+        let mut repair_definition = chain_definition.clone();
+        repair_definition.service_mtu = 1_500;
         let patched_chain = sdk
-            .patch_detached_dpu_service_chain(
-                "chain-a",
-                json!([
-                    {"op": "test", "path": "/metadata/resourceVersion", "value": "9"},
-                    {"op": "replace", "path": "/spec", "value": chain_spec},
-                ]),
-            )
+            .patch_detached_dpu_service_chain(&repair_definition, &chain_preconditions)
             .await
             .expect("patch owner-a chain");
-        assert_eq!(patched_chain.uid.as_deref(), Some("chain-uid"));
+        assert_eq!(patched_chain.uid.as_deref(), Some("uid-chain-a"));
         assert_eq!(patched_chain.resource_version.as_deref(), Some("9"));
         assert_eq!(
             patched_chain
@@ -7490,13 +7959,19 @@ mod tests {
         );
     }
 
+    /// Declares DPU identity in cluster.nodeLabels for generic and Astra registration so DPF can
+    /// propagate the identity required by service-chain selectors.
     #[tokio::test]
     async fn test_register_dpu_device() {
         for (scenario, astra, server_name) in [
+            // Generic provisioning must declare Node identity without Astra values.
             ("generic", false, None),
+            // Astra must retain Node identity alongside an explicitly supplied server name.
             ("Astra with server name", true, Some("server-01")),
+            // An omitted server name must not suppress identity or Astra's empty-name fallback.
             ("Astra without server name", true, None),
         ] {
+            // Build the SDK and provisioning inputs, including credential-leak sentinels.
             let mock = SdkMock::new();
             let sdk = DpfSdkBuilder::new(mock.clone(), TEST_NAMESPACE, String::new())
                 .build_without_resources()
@@ -7520,14 +7995,31 @@ mod tests {
                     software_plane_route_prefix_len: 13,
                 },
             ));
-            sdk.register_dpu_device(test_dpu_device_info(), astra_provisioning_inputs)
-                .await
-                .unwrap();
+            // The DPU ID drives the Node label; remaining fields supply normal provisioning data.
+            let registration = test_dpu_device_info();
+            let expected_node_identity = registration.dpu_machine_id.clone();
 
+            // Register through the SDK to exercise the checked DPUDevice sent to Kubernetes.
+            sdk.register_dpu_device(registration, astra_provisioning_inputs)
+                .await
+                .expect("register DPU device");
+
+            // Read the stored resource to verify the declared Node identity and provisioning fields.
             let devices = DpuDeviceRepository::list(&mock, TEST_NAMESPACE)
                 .await
                 .unwrap();
             assert_eq!(devices.len(), 1, "{scenario}");
+            let declared_node_identity = devices[0]
+                .spec
+                .cluster
+                .as_ref()
+                .and_then(|cluster| cluster.node_labels.as_ref())
+                .and_then(|labels| labels.get(DPU_MACHINE_ID_LABEL));
+            assert_eq!(
+                declared_node_identity,
+                Some(&expected_node_identity),
+                "{scenario}"
+            );
             assert_eq!(devices[0].spec.serial_number, "SN123456", "{scenario}");
             assert!(matches!(
                 devices[0].spec.bmc_factory_reset_policy.as_ref(),
@@ -7544,6 +8036,7 @@ mod tests {
             } else {
                 assert!(devices[0].spec.values.is_none());
             }
+            // Node label propagation must not expose the ExpectedMachine's BMC credentials.
             let serialized = serde_json::to_string(&devices[0]).unwrap();
             assert!(!serialized.contains("fixture-user"));
             assert!(!serialized.contains("fixture-password-must-not-leak"));

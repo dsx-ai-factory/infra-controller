@@ -28,7 +28,7 @@ use carbide_dpf::{
     DetachedDpfResourceObservation, DetachedDpuServiceChainDefinition,
     DetachedDpuServiceDefinition, DetachedDpuServiceInterfaceDefinition, DpfError,
     DpuServiceDaemonSetObservation, DpuServiceHelmChartObservation, DpuServiceObservation,
-    ServiceVpcSlots, detached_dpu_service_chain_spec, detached_dpu_service_interface_spec,
+    ServiceVpcSlots, detached_dpu_service_interface_spec, registered_dpu_service_chain_spec,
 };
 use carbide_extension_service_controller::dpu_service::{
     dpu_service_mutable_patch, project_dpu_service, project_service_vpc_registration,
@@ -38,19 +38,22 @@ use carbide_instrument::testing::MetricsCapture;
 use carbide_machine_controller::dpf::{DpfOperations, MockDpfOperations};
 use carbide_secrets::credentials::{CredentialKey, Credentials};
 use carbide_uuid::extension_service::ExtensionServiceId;
+use carbide_uuid::machine::DpuMachineId;
 use carbide_uuid::network::{NetworkPrefixId, NetworkSegmentId};
 use carbide_uuid::vpc::{VpcId, VpcPrefixId};
 use config_version::ConfigVersion;
 use model::controller_outcome::PersistentStateHandlerOutcome;
 use model::extension_service::{
-    DPF_HELM_CHART_OWNER_LABEL, ExtensionServiceDeploymentType, ExtensionServiceInterfaceMac,
-    ExtensionServiceLifecycleState, ExtensionServiceType, ServiceVpcAddressFamily,
+    DPF_HELM_CHART_OWNER_LABEL, ExtensionServiceChainSelector, ExtensionServiceDeploymentType,
+    ExtensionServiceInterfaceMac, ExtensionServiceLifecycleState, ExtensionServiceType,
+    ServiceVpcAddressFamily,
 };
 use model::instance::config::extension_services::{
     InstanceExtensionServiceConfig, InstanceExtensionServicesConfig,
 };
 use model::instance::config::network::{InstanceNetworkConfig, InstanceServiceInterfaceConfig};
 use model::tenant::TenantOrganizationId;
+use sqlx::Connection;
 use state_controller::controller::Enqueuer;
 use state_controller::io::StateControllerIO;
 use tonic::Request;
@@ -408,6 +411,7 @@ fn service_interface_observation(
 
 /// Converts a desired dynamic chain into a Kubernetes-like observation for controller tests.
 /// Seeds UID and resource version so deletion tests can exercise conditional finalization.
+/// Stamps both templates with that UID to model completed SDK creation.
 fn service_chain_observation(
     chain: &DetachedDpuServiceChainDefinition,
 ) -> DetachedDpfResourceObservation {
@@ -415,7 +419,7 @@ fn service_chain_observation(
         name: Some(chain.name.clone()),
         namespace: Some(chain.namespace.clone()),
         labels: chain.labels.clone(),
-        spec: detached_dpu_service_chain_spec(chain).unwrap(),
+        spec: registered_dpu_service_chain_spec(chain, &format!("uid-{}", chain.name)).unwrap(),
         uid: Some(format!("uid-{}", chain.name)),
         resource_version: Some("1".to_string()),
         is_deleting: false,
@@ -2657,8 +2661,79 @@ async fn test_ready_networked_registration_repairs_mutable_dpu_service_drift(
     Ok(())
 }
 
+/// Commits a sibling exclusion on a fresh connection and separate runtime so synchronous mocks
+/// can wait without blocking database I/O.
+/// Callers must invoke this from the Updating pass's Kubernetes observation.
+fn commit_chain_exclusion_during_observation(
+    options: sqlx::postgres::PgConnectOptions,
+    service_id: ExtensionServiceId,
+    dpu_id: DpuMachineId,
+    expected_version: ConfigVersion,
+) -> ExtensionServiceChainSelector {
+    // Run the write independently because the Kubernetes callback cannot yield its current-thread
+    // runtime.
+    std::thread::spawn(move || {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("exclusion writer runtime")
+            .block_on(async {
+                tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                    // Require persisted Updating so Ready cannot substitute a later retry for this repair.
+                    let mut connection = sqlx::PgConnection::connect_with(&options)
+                        .await
+                        .expect("fresh exclusion writer connection");
+                    let mut txn = connection.begin().await.expect("begin sibling exclusion");
+                    let registration =
+                        db::extension_service::find_by_ids(&mut txn, &[service_id], false, true)
+                            .await
+                            .expect("lock registration during observation")
+                            .pop()
+                            .expect("registration remains during observation");
+                    assert_eq!(
+                        registration.status.controller_state.value,
+                        ExtensionServiceLifecycleState::Updating,
+                    );
+
+                    // Commit retirement desire before the mock publishes its newer Kubernetes selector.
+                    let db::ConditionalWrite::Applied(selector) =
+                        db::extension_service::try_update_chain_exclusion(
+                            &mut txn,
+                            service_id,
+                            0,
+                            0,
+                            dpu_id,
+                            Some(expected_version),
+                            db::extension_service::ServiceVpcChainExclusion::Exclude,
+                        )
+                        .await
+                        .expect("exclude sibling DPU")
+                    else {
+                        panic!("current sibling exclusion must apply");
+                    };
+                    txn.commit().await.expect("commit sibling exclusion");
+
+                    // Check actual persistence before returning the selector that Kubernetes will observe.
+                    assert_eq!(
+                        db::extension_service::find_chain_selectors(&mut connection, service_id)
+                            .await
+                            .expect("read committed sibling exclusion"),
+                        vec![selector.clone()],
+                    );
+                    selector
+                })
+                .await
+                .expect("sibling exclusion must commit within the observation budget")
+            })
+    })
+    .join()
+    .expect("sibling exclusion writer must finish")
+}
+
 /// Verifies mutable parent drift leaves Ready before revision-fenced repair preserves chain wiring
 /// and service-interface placement.
+/// A sibling exclusion committed during Updating observation must survive repair with its current
+/// selector version, preventing an earlier database snapshot from reopening that DPU.
 #[crate::sqlx_test]
 async fn test_ready_networked_registration_repairs_mutable_parent_drift(
     db_pool: sqlx::PgPool,
@@ -2706,6 +2781,43 @@ async fn test_ready_networked_registration_repairs_mutable_parent_drift(
         ServiceVpcSlots::new(1)?,
     )?;
 
+    // Seed one retired DPU through api-db because registration has no exclusion-write RPC.
+    let retired_dpus: [DpuMachineId; 2] = [
+        "fm100dsvstfujf6mis0gpsoi81tadmllicv7rqo4s7gc16gi0t2478672vg",
+        "fm100ds7blqjsadm2uuh3qqbf1h7k8pmf47um6v9uckrg7l03po8mhqgvng",
+    ]
+    .map(|id| id.parse().expect("valid retired DPU ID"));
+    let mut txn = initial_env.pool.begin().await?;
+    assert_eq!(
+        db::extension_service::find_by_ids(&mut txn, &[service_id], false, true)
+            .await?
+            .len(),
+        1,
+    );
+    let db::ConditionalWrite::Applied(initial_selector) =
+        db::extension_service::try_update_chain_exclusion(
+            &mut txn,
+            service_id,
+            0,
+            0,
+            retired_dpus[0],
+            None,
+            db::extension_service::ServiceVpcChainExclusion::Exclude,
+        )
+        .await?
+    else {
+        panic!("initial exclusion must create its selector");
+    };
+    txn.commit().await?;
+
+    // Read committed membership before constructing the Kubernetes observations.
+    assert_eq!(initial_selector.excluded_dpu_ids, vec![retired_dpus[0]]);
+    assert_eq!(
+        db::extension_service::find_chain_selectors(&initial_env.pool, service_id).await?,
+        vec![initial_selector.clone()],
+    );
+    let committed_selector = Arc::new(Mutex::new(initial_selector.clone()));
+
     // Change only service-interface placement and chain selector/MTU while retaining attachment
     // identity.
     let mut alternate_interface = projection.interfaces[0].clone();
@@ -2714,6 +2826,8 @@ async fn test_ready_networked_registration_repairs_mutable_parent_drift(
         "enabled".to_string(),
     );
     let mut alternate_chain = projection.chains[0].clone();
+    alternate_chain.excluded_dpu_ids = initial_selector.excluded_dpu_ids;
+    alternate_chain.selector_version = Some(initial_selector.version);
     alternate_chain
         .node_selector_labels
         .insert("example.com/stale-slot".to_string(), "enabled".to_string());
@@ -2738,6 +2852,7 @@ async fn test_ready_networked_registration_repairs_mutable_parent_drift(
     // The Ready pass observes drift; the queued Updating pass repairs from those revision-bearing
     // observations.
     let restart_pool = initial_env.pool.clone();
+    let writer_options = (*initial_env.pool.connect_options()).clone();
     drop(initial_env);
     let mut mock = MockDpfOperations::new();
     let observed_service = dpu_service_observation(&projection.service);
@@ -2754,7 +2869,37 @@ async fn test_ready_networked_registration_repairs_mutable_parent_drift(
         .times(4)
         .returning({
             let live_chains = Arc::clone(&live_chains);
-            move |_| Ok(live_chains.lock().unwrap().clone())
+            let committed_selector = Arc::clone(&committed_selector);
+            let mut observation_count = 0;
+            move |_| {
+                observation_count += 1;
+                // Interleave with Updating because Ready only records the barrier and would refresh
+                // on retry.
+                if observation_count == 2 {
+                    let expected_version = committed_selector.lock().unwrap().version;
+                    let selector = commit_chain_exclusion_during_observation(
+                        writer_options.clone(),
+                        service_id,
+                        retired_dpus[1],
+                        expected_version,
+                    );
+                    assert_eq!(selector.excluded_dpu_ids, retired_dpus);
+                    assert_eq!(
+                        selector.version.version_nr(),
+                        expected_version.version_nr() + 1
+                    );
+
+                    // Project both exclusions at a newer revision but retain MTU drift to require
+                    // an actual repair.
+                    alternate_chain.excluded_dpu_ids = selector.excluded_dpu_ids.clone();
+                    alternate_chain.selector_version = Some(selector.version);
+                    let mut observed = service_chain_observation(&alternate_chain);
+                    observed.resource_version = Some("2".to_owned());
+                    *live_chains.lock().unwrap() = vec![observed];
+                    *committed_selector.lock().unwrap() = selector;
+                }
+                Ok(live_chains.lock().unwrap().clone())
+            }
         });
     mock.expect_get_detached_dpu_service_interface().times(0);
     mock.expect_get_detached_dpu_service_chain().times(0);
@@ -2791,30 +2936,36 @@ async fn test_ready_networked_registration_repairs_mutable_parent_drift(
                 Ok(repaired)
             }
         });
-    let desired_chain = projection.chains[0].clone();
+    let mut desired_chain = projection.chains[0].clone();
     mock.expect_patch_detached_dpu_service_chain()
         .times(2)
         .returning({
             let live_chains = Arc::clone(&live_chains);
             let chain_patch_attempts = Arc::clone(&chain_patch_attempts);
-            move |name, patch| {
-                assert_eq!(name, desired_chain.name);
+            let committed_selector = Arc::clone(&committed_selector);
+            move |definition, preconditions| {
+                // The first attempted repair must already include the exclusion committed during
+                // its observation.
+                let selector = committed_selector.lock().unwrap().clone();
+                desired_chain.excluded_dpu_ids = selector.excluded_dpu_ids;
+                desired_chain.selector_version = Some(selector.version);
+                assert_eq!(definition, &desired_chain);
+                let name = &definition.name;
                 let attempt = chain_patch_attempts.fetch_add(1, Ordering::Relaxed);
-                assert_eq!(patch[0]["op"], "replace");
-                assert_eq!(patch[0]["value"], if attempt == 0 { "1" } else { "2" });
+                assert_eq!(preconditions.uid, format!("uid-{name}"));
                 assert_eq!(
-                    patch[1]["value"],
-                    detached_dpu_service_chain_spec(&desired_chain).unwrap()
+                    preconditions.resource_version,
+                    if attempt == 0 { "2" } else { "3" }
                 );
                 if attempt == 0 {
-                    live_chains.lock().unwrap()[0].resource_version = Some("2".to_string());
+                    live_chains.lock().unwrap()[0].resource_version = Some("3".to_string());
                     return Err(DpfError::PatchConflict {
                         kind: "DPUServiceChain",
                         name: name.to_string(),
                     });
                 }
                 let mut repaired = service_chain_observation(&desired_chain);
-                repaired.resource_version = Some("3".to_string());
+                repaired.resource_version = Some("4".to_string());
                 live_chains.lock().unwrap()[0] = repaired.clone();
                 Ok(repaired)
             }
@@ -2905,6 +3056,254 @@ async fn test_ready_networked_registration_repairs_mutable_parent_drift(
     assert_eq!(interface_patch_attempts.load(Ordering::Relaxed), 2);
     assert_eq!(chain_patch_attempts.load(Ordering::Relaxed), 2);
 
+    // Fresh database and Kubernetes observations must retain both exclusions and the committed
+    // selector version.
+    let committed_selector = committed_selector.lock().unwrap().clone();
+    assert_eq!(committed_selector.excluded_dpu_ids, retired_dpus);
+    assert_eq!(
+        db::extension_service::find_chain_selectors(&restarted.pool, service_id).await?,
+        vec![committed_selector.clone()],
+    );
+    let mut repaired_chain = projection.chains[0].clone();
+    repaired_chain.excluded_dpu_ids = committed_selector.excluded_dpu_ids;
+    repaired_chain.selector_version = Some(committed_selector.version);
+    let repaired = live_chains.lock().unwrap()[0].clone();
+    assert_eq!(repaired.resource_version.as_deref(), Some("4"));
+    assert_eq!(
+        repaired.spec,
+        registered_dpu_service_chain_spec(
+            &repaired_chain,
+            &format!("uid-{}", repaired_chain.name)
+        )?,
+    );
+
+    Ok(())
+}
+
+/// Restores committed exclusions after Core restart and management DPUServiceChain recreation,
+/// even without retained attachments, preventing registration repair from reactivating a retired DPU.
+#[crate::sqlx_test]
+async fn test_chain_exclusions_survive_restart_repair_and_registration_recreation(
+    db_pool: sqlx::PgPool,
+) -> Result<(), eyre::Report> {
+    // Construct the previously converged registration; no attachment rows retain its exclusion.
+    let service_id = ExtensionServiceId::new();
+    let initial_env =
+        create_service_vpc_controller_test_env(db_pool, MockDpfOperations::new(), 1).await;
+    create_test_tenants(&initial_env).await?;
+    create_networked_dpf_registration(&initial_env, service_id, "durable-chain-exclusion").await?;
+    mark_dpf_service_ready_for_update(&initial_env, service_id).await?;
+    let mac = db::extension_service::find_interface_macs(
+        &mut *initial_env.pool.acquire().await?,
+        service_id,
+    )
+    .await?
+    .pop()
+    .expect("networked registration has a MAC");
+    let data =
+        model::extension_service::DpfHelmChartServiceData::parse(TEST_DPF_HELM_CHART_SERVICE_DATA)?;
+    let original = project_service_vpc_registration(
+        service_id,
+        carbide_dpf::NAMESPACE,
+        &data,
+        ServiceVpcAddressFamily::Ipv4,
+        mac,
+        ServiceVpcSlots::new(1)?,
+    )?;
+    let live_chains = Arc::new(Mutex::new(vec![service_chain_observation(
+        &original.chains[0],
+    )]));
+
+    // Seed retirement desire through api-db because DPF registration has no exclusion-write RPC.
+    // The service lock coordinates this fixture's exclusion write with registration/configuration writers.
+    let retired_dpu = "fm100dsvstfujf6mis0gpsoi81tadmllicv7rqo4s7gc16gi0t2478672vg".parse()?;
+    let mut txn = initial_env.pool.begin().await?;
+    let locked = db::extension_service::find_by_ids(&mut txn, &[service_id], false, true).await?;
+    assert_eq!(locked.len(), 1);
+    let committed_selector = match db::extension_service::try_update_chain_exclusion(
+        &mut txn,
+        service_id,
+        0,
+        0,
+        retired_dpu,
+        None,
+        db::extension_service::ServiceVpcChainExclusion::Exclude,
+    )
+    .await?
+    {
+        db::ConditionalWrite::Applied(selector) => selector,
+        db::ConditionalWrite::NotApplied(_) => {
+            panic!("selector must be absent before its first write")
+        }
+    };
+    txn.commit().await?;
+
+    // Read actual persistence before restart rather than assuming RETURNING proves the committed row.
+    assert_eq!(
+        db::extension_service::find_chain_selectors(&initial_env.pool, service_id).await?,
+        vec![committed_selector.clone()],
+    );
+    let mut desired_chain = original.chains[0].clone();
+    desired_chain.excluded_dpu_ids = vec![retired_dpu];
+    desired_chain.selector_version = Some(committed_selector.version);
+
+    // Restart with independent controller state and the pre-exclusion Kubernetes spec still present.
+    let restart_pool = initial_env.pool.clone();
+    drop(initial_env);
+    let patch_attempts = Arc::new(AtomicUsize::new(0));
+    let create_attempts = Arc::new(AtomicUsize::new(0));
+    let mut mock = MockDpfOperations::new();
+    let observed_service = dpu_service_observation(&original.service);
+    mock.expect_get_dpu_service()
+        .times(4)
+        .returning(move |_| Ok(Some(observed_service.clone())));
+    let observed_interfaces = original
+        .interfaces
+        .iter()
+        .map(service_interface_observation)
+        .collect::<Vec<_>>();
+    mock.expect_list_detached_dpu_service_interfaces()
+        .times(4)
+        .returning(move |_| Ok(observed_interfaces.clone()));
+    mock.expect_list_detached_dpu_service_chains()
+        .times(4)
+        .returning({
+            let live_chains = Arc::clone(&live_chains);
+            move |_| Ok(live_chains.lock().expect("chains").clone())
+        });
+    mock.expect_get_detached_dpu_service_chain()
+        .times(2)
+        .returning(|_| Ok(None));
+    mock.expect_patch_detached_dpu_service_chain()
+        .times(1)
+        .returning({
+            let desired_chain = desired_chain.clone();
+            let live_chains = Arc::clone(&live_chains);
+            let patch_attempts = Arc::clone(&patch_attempts);
+            move |definition, preconditions| {
+                assert_eq!(definition, &desired_chain);
+                assert_eq!(preconditions.uid, format!("uid-{}", definition.name));
+                assert_eq!(preconditions.resource_version, "1");
+                let mut repaired = service_chain_observation(definition);
+                repaired.resource_version = Some("2".to_owned());
+                *live_chains.lock().expect("chains") = vec![repaired.clone()];
+                patch_attempts.fetch_add(1, Ordering::Relaxed);
+                Ok(repaired)
+            }
+        });
+    mock.expect_create_detached_dpu_service_chain()
+        .times(1)
+        .returning({
+            let desired_chain = desired_chain.clone();
+            let live_chains = Arc::clone(&live_chains);
+            let create_attempts = Arc::clone(&create_attempts);
+            move |definition| {
+                assert_eq!(definition, &desired_chain);
+                // Return a newly assigned UID with its own template stamps, as the SDK does after creation.
+                let mut recreated = service_chain_observation(definition);
+                recreated.uid = Some("recreated-chain-uid".to_owned());
+                recreated.spec =
+                    registered_dpu_service_chain_spec(definition, "recreated-chain-uid")?;
+                *live_chains.lock().expect("chains") = vec![recreated.clone()];
+                create_attempts.fetch_add(1, Ordering::Relaxed);
+                Ok(recreated)
+            }
+        });
+    let mut config = get_config();
+    config.dpf.enabled = true;
+    config.dpu_config.service_vpc_slot_count = 1;
+    config.site_global_vpc_vni = None;
+    config
+        .dpf
+        .deployments
+        .bf3
+        .service_vpc_enabled_address_families =
+        [ServiceVpcAddressFamily::Ipv4].into_iter().collect();
+    let mut overrides = TestEnvOverrides::with_config(config).with_dpf_sdk(Arc::new(mock));
+    overrides.create_network_segments = Some(false);
+    let restarted = create_test_env_with_overrides(restart_pool, overrides).await;
+
+    // Persist the Updating barrier before repairing the stale selector after restart.
+    restarted.run_extension_service_controller_iteration().await;
+    let updating = restarted
+        .api
+        .find_dpu_extension_services_by_ids(Request::new(rpc::DpuExtensionServicesByIdsRequest {
+            service_ids: vec![service_id.to_string()],
+        }))
+        .await?
+        .into_inner()
+        .services
+        .pop()
+        .expect("registration persists during repair");
+    assert_eq!(lifecycle_state(&updating), "updating");
+    assert_eq!(patch_attempts.load(Ordering::Relaxed), 0);
+    restarted
+        .run_queued_extension_service_controller_iterations()
+        .await;
+
+    // Reload Ready and the durable selector after the controller consumed the committed exclusion.
+    let repaired = restarted
+        .api
+        .find_dpu_extension_services_by_ids(Request::new(rpc::DpuExtensionServicesByIdsRequest {
+            service_ids: vec![service_id.to_string()],
+        }))
+        .await?
+        .into_inner()
+        .services
+        .pop()
+        .expect("repaired registration persists");
+    assert_eq!(lifecycle_state(&repaired), "ready");
+    assert_eq!(patch_attempts.load(Ordering::Relaxed), 1);
+    assert_eq!(create_attempts.load(Ordering::Relaxed), 0);
+    assert_eq!(
+        db::extension_service::find_chain_selectors(&restarted.pool, service_id).await?,
+        vec![committed_selector.clone()],
+    );
+
+    // Remove only the management chain to model recreation independently of attachment cleanup.
+    live_chains.lock().expect("chains").clear();
+    restarted.run_extension_service_controller_iteration().await;
+    let updating = restarted
+        .api
+        .find_dpu_extension_services_by_ids(Request::new(rpc::DpuExtensionServicesByIdsRequest {
+            service_ids: vec![service_id.to_string()],
+        }))
+        .await?
+        .into_inner()
+        .services
+        .pop()
+        .expect("registration persists before recreation");
+    assert_eq!(lifecycle_state(&updating), "updating");
+    assert_eq!(create_attempts.load(Ordering::Relaxed), 0);
+    restarted
+        .run_queued_extension_service_controller_iterations()
+        .await;
+
+    // Recreated resources retain the exclusion and version while using the new registration UID.
+    let recovered = restarted
+        .api
+        .find_dpu_extension_services_by_ids(Request::new(rpc::DpuExtensionServicesByIdsRequest {
+            service_ids: vec![service_id.to_string()],
+        }))
+        .await?
+        .into_inner()
+        .services
+        .pop()
+        .expect("recreated registration persists");
+    assert_eq!(lifecycle_state(&recovered), "ready");
+    assert_eq!(create_attempts.load(Ordering::Relaxed), 1);
+    assert_eq!(patch_attempts.load(Ordering::Relaxed), 1);
+    let recreated = live_chains.lock().expect("chains").clone();
+    assert_eq!(recreated.len(), 1);
+    assert_eq!(recreated[0].uid.as_deref(), Some("recreated-chain-uid"));
+    assert_eq!(
+        recreated[0].spec,
+        registered_dpu_service_chain_spec(&desired_chain, "recreated-chain-uid")?
+    );
+    assert_eq!(
+        db::extension_service::find_chain_selectors(&restarted.pool, service_id).await?,
+        vec![committed_selector],
+    );
     Ok(())
 }
 

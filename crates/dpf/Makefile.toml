@@ -11,6 +11,7 @@ DOCA_BRANCH = "v30.0.0"
 DOCA_COMMIT = "a23b3ae3b1ebdfbd38659eba3f5bc11080c881d7"                        # DOCA v30.0.0-684c268a-stable (2026-10-19)
 DOCA_CLONE_DIR = "${CARGO_MAKE_WORKING_DIRECTORY}/doca-platform"
 CRD_SOURCE_PATH = "${DOCA_CLONE_DIR}/deploy/charts/dpf-operator/templates/crds"
+DPU_SERVICE_CRD_SOURCE_PATH = "${DOCA_CLONE_DIR}/config/dpuservice/crd/bases"
 CRD_DEST_PATH = "${CARGO_MAKE_WORKING_DIRECTORY}/crds"
 
 [tasks.clone-doca]
@@ -41,6 +42,11 @@ set -eu
 mkdir -p "${CRD_DEST_PATH}"
 rm -f "${CRD_DEST_PATH}"/*.yaml
 cp "${CRD_SOURCE_PATH}"/*.yaml "${CRD_DEST_PATH}/"
+# Remote chain CRDs are shipped by dpu-networking rather than the operator chart.
+for kind in servicechains servicechainsets; do
+    cp "${DPU_SERVICE_CRD_SOURCE_PATH}/svc.dpu.nvidia.com_${kind}.yaml" \
+        "${CRD_DEST_PATH}/apiextensions.k8s.io_v1_customresourcedefinition_${kind}.svc.dpu.nvidia.com.yaml"
+done
 echo "CRD YAML files refreshed"
 [ -d "${DOCA_CLONE_DIR}" ] && rm -rf "${DOCA_CLONE_DIR}"
 '''

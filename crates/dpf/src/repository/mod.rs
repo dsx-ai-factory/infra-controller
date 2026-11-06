@@ -21,8 +21,10 @@
 //! enabling dependency injection and testability.
 
 mod kube;
+mod service_vpc;
 mod traits;
 
 pub use traits::*;
 
 pub use self::kube::KubeRepository;
+pub use self::service_vpc::ServiceVpcClusterReader;
