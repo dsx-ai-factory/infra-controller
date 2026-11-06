@@ -186,6 +186,7 @@ const (
 	Forge_ClearSiteExplorationError_FullMethodName                          = "/forge.Forge/ClearSiteExplorationError"
 	Forge_IsBmcInManagedHost_FullMethodName                                 = "/forge.Forge/IsBmcInManagedHost"
 	Forge_BmcCredentialStatus_FullMethodName                                = "/forge.Forge/BmcCredentialStatus"
+	Forge_FindBmcDriverSelection_FullMethodName                             = "/forge.Forge/FindBmcDriverSelection"
 	Forge_Explore_FullMethodName                                            = "/forge.Forge/Explore"
 	Forge_ReExploreEndpoint_FullMethodName                                  = "/forge.Forge/ReExploreEndpoint"
 	Forge_RefreshEndpointReport_FullMethodName                              = "/forge.Forge/RefreshEndpointReport"
@@ -886,6 +887,9 @@ type ForgeClient interface {
 	IsBmcInManagedHost(ctx context.Context, in *BmcEndpointRequest, opts ...grpc.CallOption) (*IsBmcInManagedHostResponse, error)
 	// BmcCredentialStatus returns true if site explorer has the credentials to login to this BMC
 	BmcCredentialStatus(ctx context.Context, in *BmcEndpointRequest, opts ...grpc.CallOption) (*BmcCredentialStatusResponse, error)
+	// Returns the drivers this API server's rules select for a BMC from its
+	// latest exploration report, and the identity they were selected from
+	FindBmcDriverSelection(ctx context.Context, in *BmcEndpointRequest, opts ...grpc.CallOption) (*BmcDriverSelection, error)
 	// Explore an individual BMC and show the report
 	// The results of this exploration call will not be persisted in the database
 	Explore(ctx context.Context, in *BmcEndpointRequest, opts ...grpc.CallOption) (*EndpointExplorationReport, error)
@@ -3398,6 +3402,16 @@ func (c *forgeClient) BmcCredentialStatus(ctx context.Context, in *BmcEndpointRe
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(BmcCredentialStatusResponse)
 	err := c.cc.Invoke(ctx, Forge_BmcCredentialStatus_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *forgeClient) FindBmcDriverSelection(ctx context.Context, in *BmcEndpointRequest, opts ...grpc.CallOption) (*BmcDriverSelection, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(BmcDriverSelection)
+	err := c.cc.Invoke(ctx, Forge_FindBmcDriverSelection_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -7678,6 +7692,9 @@ type ForgeServer interface {
 	IsBmcInManagedHost(context.Context, *BmcEndpointRequest) (*IsBmcInManagedHostResponse, error)
 	// BmcCredentialStatus returns true if site explorer has the credentials to login to this BMC
 	BmcCredentialStatus(context.Context, *BmcEndpointRequest) (*BmcCredentialStatusResponse, error)
+	// Returns the drivers this API server's rules select for a BMC from its
+	// latest exploration report, and the identity they were selected from
+	FindBmcDriverSelection(context.Context, *BmcEndpointRequest) (*BmcDriverSelection, error)
 	// Explore an individual BMC and show the report
 	// The results of this exploration call will not be persisted in the database
 	Explore(context.Context, *BmcEndpointRequest) (*EndpointExplorationReport, error)
@@ -9037,6 +9054,9 @@ func (UnimplementedForgeServer) IsBmcInManagedHost(context.Context, *BmcEndpoint
 }
 func (UnimplementedForgeServer) BmcCredentialStatus(context.Context, *BmcEndpointRequest) (*BmcCredentialStatusResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method BmcCredentialStatus not implemented")
+}
+func (UnimplementedForgeServer) FindBmcDriverSelection(context.Context, *BmcEndpointRequest) (*BmcDriverSelection, error) {
+	return nil, status.Error(codes.Unimplemented, "method FindBmcDriverSelection not implemented")
 }
 func (UnimplementedForgeServer) Explore(context.Context, *BmcEndpointRequest) (*EndpointExplorationReport, error) {
 	return nil, status.Error(codes.Unimplemented, "method Explore not implemented")
@@ -13172,6 +13192,24 @@ func _Forge_BmcCredentialStatus_Handler(srv interface{}, ctx context.Context, de
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(ForgeServer).BmcCredentialStatus(ctx, req.(*BmcEndpointRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Forge_FindBmcDriverSelection_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(BmcEndpointRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ForgeServer).FindBmcDriverSelection(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Forge_FindBmcDriverSelection_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ForgeServer).FindBmcDriverSelection(ctx, req.(*BmcEndpointRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -20965,6 +21003,10 @@ var Forge_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "BmcCredentialStatus",
 			Handler:    _Forge_BmcCredentialStatus_Handler,
+		},
+		{
+			MethodName: "FindBmcDriverSelection",
+			Handler:    _Forge_FindBmcDriverSelection_Handler,
 		},
 		{
 			MethodName: "Explore",

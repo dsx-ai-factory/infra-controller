@@ -17,12 +17,12 @@ use std::str::FromStr;
 
 use bmc_platform::{
     Accounts, Attestation, Bios, BmcControl, BootOrder, Capability, Console, Dpu, Firmware,
-    Lockdown, Power, SecureBoot, Storage, SuperNic,
+    Lockdown, PlatformIdentity, Power, SecureBoot, Storage, SuperNic,
 };
 use nv_redfish::core::{ActionError, Bmc};
 use thiserror::Error;
 
-use crate::selection::{CapabilitySelection, DriverMap, Rules};
+use crate::selection::{CapabilitySelection, DriverMap, ResolvedSelection, Rules, SelectionError};
 use crate::{
     accounts, attestation, bios, bmc_control, boot_order, console, dpu, firmware, lockdown, power,
     secure_boot, storage, super_nic,
@@ -411,6 +411,28 @@ impl Drivers {
                 .try_for_each(|(capability, selection)| Self::check(*capability, selection))
         })
     }
+
+    /// The selection `rules` make for `identity` over [`Self::default_map`],
+    /// checked against the compiled catalogue.
+    pub fn select(
+        rules: &Rules,
+        identity: &PlatformIdentity,
+    ) -> Result<ResolvedSelection, SelectError> {
+        let selection = rules.resolve(identity, &Self::default_map())?;
+        Self::validate_map(&selection.drivers)?;
+        Ok(selection)
+    }
+}
+
+/// Failure to select drivers for an identity.
+#[derive(Clone, Debug, Eq, Error, PartialEq)]
+pub enum SelectError {
+    /// Matching rules tie for a capability.
+    #[error(transparent)]
+    Rules(#[from] SelectionError),
+    /// The selected map names a driver this binary cannot serve.
+    #[error(transparent)]
+    Catalog(#[from] CatalogError),
 }
 
 /// Failure to resolve a selection against the compiled catalogue.

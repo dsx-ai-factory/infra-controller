@@ -1723,6 +1723,22 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn exploration_records_the_identity_drivers_select_from() {
+        let report = explore_router_in_default_mode(
+            bmc_mock::test_support::lenovo_xcc_router_with_partial_system_network_inventory(),
+        )
+        .await;
+
+        assert_eq!(
+            bmc_explorer::platform_identity(&report)
+                .service_root
+                .vendor
+                .as_deref(),
+            Some("Lenovo")
+        );
+    }
+
+    #[tokio::test]
     async fn default_nvredfish_mode_discovers_lenovo_port_mac_with_partial_system_inventory() {
         let report = explore_router_in_default_mode(
             bmc_mock::test_support::lenovo_xcc_router_with_partial_system_network_inventory(),
