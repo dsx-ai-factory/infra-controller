@@ -208,7 +208,7 @@ workspace = false
 script = '''
 set -e
 if [ -z "$CARGO_HOME" ]; then CARGO_HOME="$HOME/.cargo"; fi
-docker build --build-arg KEA_VERSION=${KEA_VERSION} -f ${REPO_ROOT}/dev/docker/Dockerfile.build-container-x86_64 -t carbide-build-x86_64 ${REPO_ROOT}/dev/docker
+docker build --build-arg KEA_VERSION=${KEA_VERSION} -f ${REPO_ROOT}/dev/docker/Dockerfile.build-container-x86_64 -t carbide-build-x86_64 ${REPO_ROOT}
 echo "Image carbide-build-x86_64 built. Run: cargo make cargo-docker -- build -p nico-admin-cli --release"
 '''
 
@@ -228,7 +228,7 @@ description = "Build the PXE artifact build container image (Ubuntu 24.04 + Rust
 workspace = false
 script = '''
 set -e
-docker build -f ${REPO_ROOT}/dev/docker/Dockerfile.pxe-build-container -t carbide-pxe-builder ${REPO_ROOT}/dev/docker
+docker build --build-arg KEA_VERSION=${KEA_VERSION} -f ${REPO_ROOT}/dev/docker/Dockerfile.pxe-build-container -t carbide-pxe-builder ${REPO_ROOT}
 echo "Image carbide-pxe-builder built. Run: cargo make pxe-docker-x86"
 '''
 
@@ -294,6 +294,7 @@ docker run --rm \
   -v "${CARGO_HOME}":/cargo \
   -w /code \
   -u $(id -u):$(id -g) \
+  --group-add _kea \
   -e CARGO_HOME=/cargo \
   carbide-build-x86_64 \
   cargo ${CARGO_ARGS}
@@ -453,7 +454,7 @@ load=
 docker build --help 2>/dev/null | grep -q -- --load && load=--load
 docker build $load --build-arg "KEA_VERSION=${KEA_VERSION}" -t "${BUILD_CONTAINER_X86_URL}" -f "${REPO_ROOT}/dev/docker/Dockerfile.build-container-x86_64" .
 '''
-cwd = "${REPO_ROOT}/dev/docker"
+cwd = "${REPO_ROOT}"
 
 [tasks.build-arm-build-container]
 condition_script = '''

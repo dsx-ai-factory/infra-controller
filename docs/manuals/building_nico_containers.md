@@ -25,7 +25,8 @@ userns sysctl change take effect.
 `make bootstrap` runs `scripts/setup-build-host.sh`, which is equivalent to the following
 steps on an `apt`-based distribution such as Ubuntu 24.04:
 
-1. `apt-get install build-essential cpio direnv mkosi uidmap curl file fakeroot git docker.io docker-buildx sccache protobuf-compiler libopenipmi-dev libudev-dev libboost-dev libgrpc-dev libprotobuf-dev libssl-dev libtss2-dev kea-dev systemd-boot systemd-ukify jq zip`
+1. `apt-get install build-essential cpio direnv mkosi uidmap curl file fakeroot git docker.io docker-buildx sccache protobuf-compiler libopenipmi-dev libudev-dev libboost-dev libgrpc-dev libprotobuf-dev libssl-dev libtss2-dev systemd-boot systemd-ukify jq zip`
+   Install the pinned Kea packages and activate the `_kea` group as described in [development setup](../development.md).
 2. [Add the correct hook for your shell](https://direnv.net/docs/hook.html)
 3. Install rustup: `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh` (select Option 1)
 4. Start a new shell to pick up changes made from direnv and rustup.

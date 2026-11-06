@@ -4,3 +4,8 @@
 !crates/api
 !crates/api/
 !crates/api/casbin-policy.csv
+!dev
+!dev/docker
+!dev/docker/setup-kea-repository.sh
+!dev/docker/configure-kea-runtime.sh
+!dev/docker/isc-kea-3-0.asc
