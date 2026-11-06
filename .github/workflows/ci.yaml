@@ -2439,6 +2439,9 @@ jobs:
       - name: Check KMIP provider preflight
         run: /usr/bin/python3 -m unittest discover -s helm-prereqs/tests -p 'test_kmip_provider.py'
 
+      - name: Check Vault-free Core values preflight
+        run: /usr/bin/python3 -m unittest discover -s helm-prereqs/tests -p 'test_vault_free.py'
+
       # Uses python3-yaml installed by the configuration check above.
       - name: Test DevSpace bootstrap manifests
         run: /usr/bin/python3 -B dev/deployment/devspace/test_bootstrap_prereqs.py
@@ -2589,6 +2592,15 @@ jobs:
 
       - name: Test KMIP client Secret
         run: bash helm-prereqs/tests/setup-kmip-client-secret_test.sh
+
+      - name: Test setup --skip-vault
+        run: bash helm-prereqs/tests/setup-skip-vault_test.sh
+
+      - name: Test preflight --skip-vault
+        run: bash helm-prereqs/tests/preflight-skip-vault_test.sh
+
+      - name: Test health check without Vault
+        run: bash helm-prereqs/tests/health-check-vault-optional_test.sh
 
   # Waits for the nico chart push. NGC answers an upload with HTTP 409 while
   # another upload to the same namespace is updating its chart index, and the

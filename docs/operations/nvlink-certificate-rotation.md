@@ -222,8 +222,10 @@ site trust anchor.
 
 ### Check the Issuer
 
-The examples below use `vault-nico-issuer`. Confirm that cert-manager and the
-issuer are ready before creating certificate requests:
+The examples below use `vault-nico-issuer`, the default issuer. A site
+installed with `setup.sh --skip-vault` uses `site-issuer` instead, which signs
+with the same `site-root` CA. Confirm that cert-manager and the issuer are
+ready before creating certificate requests:
 
 ```bash
 kubectl get crd certificates.cert-manager.io

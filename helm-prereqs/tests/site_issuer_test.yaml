@@ -1,0 +1,85 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# setup.sh applies templates/site-issuer.yaml with `helm template --show-only`
+# during the cert-manager bootstrap phase, so the issuer must live in that file
+# and keep its pre-install hook order: after site-root (-9), before the Vault
+# TLS Certificates (-4) that reference it. The issuer used to render only with
+# vault.tls.create; a Vault site that disables the TLS bootstrap and manages its
+# own site-issuer must keep that opt-out, while a Vault-free site always gets it.
+suite: site-issuer ClusterIssuer
+templates:
+  - templates/site-issuer.yaml
+  - templates/vault-tls-certs.yaml
+tests:
+  - it: renders the site-root CA issuer as a pre-install hook between site-root and the Vault TLS certificates
+    template: templates/site-issuer.yaml
+    asserts:
+      - hasDocuments:
+          count: 1
+      - isKind:
+          of: ClusterIssuer
+      - equal:
+          path: metadata.name
+          value: site-issuer
+      - equal:
+          path: spec.ca.secretName
+          value: site-root
+      - equal:
+          path: metadata.annotations
+          value:
+            helm.sh/hook: pre-install,pre-upgrade
+            helm.sh/hook-weight: "-5"
+            helm.sh/hook-delete-policy: before-hook-creation
+
+  - it: leaves only the two Vault TLS Certificates in the Vault TLS template, both issued by site-issuer
+    template: templates/vault-tls-certs.yaml
+    asserts:
+      - hasDocuments:
+          count: 2
+      - containsDocument:
+          apiVersion: cert-manager.io/v1
+          kind: ClusterIssuer
+          name: site-issuer
+        not: true
+      - equal:
+          path: spec.issuerRef.name
+          value: site-issuer
+        documentSelector:
+          path: metadata.name
+          value: nicoca-vault-client
+      - equal:
+          path: spec.issuerRef.name
+          value: site-issuer
+        documentSelector:
+          path: metadata.name
+          value: vault-raft-tls
+
+  - it: renders nothing when certManager.siteIssuer.create is false
+    template: templates/site-issuer.yaml
+    set:
+      certManager.siteIssuer.create: false
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: keeps the opt-out of a Vault site that disables the TLS bootstrap
+    template: templates/site-issuer.yaml
+    set:
+      vault.enabled: true
+      vault.tls.create: false
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: renders the issuer on a Vault-free site whatever vault.tls.create says
+    template: templates/site-issuer.yaml
+    set:
+      vault.enabled: false
+      vault.tls.create: false
+    asserts:
+      - hasDocuments:
+          count: 1
+      - equal:
+          path: metadata.name
+          value: site-issuer

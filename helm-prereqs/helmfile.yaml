@@ -119,6 +119,7 @@ releases:
   # No hooks: vault TLS bootstrap (site-root CA + certs) is done by setup.sh
   # phase 2c before this release. IP SAN patch + init/unseal done by setup.sh
   # phases 3b and 4 after this release.
+  # Not synced by setup.sh --skip-vault; an existing release is left as it is.
   # ---------------------------------------------------------------------------
   - name: vault
     namespace: vault
@@ -132,7 +133,8 @@ releases:
 
   # ---------------------------------------------------------------------------
   # External Secrets Operator — syncs site-root CA → nico-roots
-  # No hooks: installed by setup.sh phase 5 after vault is unsealed.
+  # No hooks: installed by setup.sh phase 5 after vault is unsealed (or, with
+  # --skip-vault, after the site CA bootstrap and the nico-system namespace).
   # ---------------------------------------------------------------------------
   - name: external-secrets
     namespace: external-secrets
@@ -224,12 +226,17 @@ releases:
 
   # ---------------------------------------------------------------------------
   # nico-prereqs — local Helm chart (this directory)
-  # Installed by setup.sh phase 6 after vault + external-secrets are ready.
+  # Installed by setup.sh phase 5 after external-secrets (and vault, when
+  # installed) are ready.
   #
-  # values/nico-prereqs-dynamic.yaml.gotmpl: rendered at sync time — reads
-  #   vault ClusterIP and root token live from the cluster via exec.
+  # values/nico-prereqs-dynamic.yaml.gotmpl: rendered at sync time — sets
+  #   vault.enabled from NICO_PREREQS_VAULT_ENABLED, then INSTALL_VAULT, as
+  #   exported by setup.sh (unset means true; setup.sh keeps the Vault
+  #   resources while a running Core still mounts them) and reads the Vault
+  #   root token live from the cluster via exec only while they render.
   #
-  # nico-system namespace Helm ownership is set by unseal_vault.sh before this runs.
+  # nico-system namespace Helm ownership is set by unseal_vault.sh (or by
+  # setup.sh phase 4 with --skip-vault) before this runs.
   # ssh-host-key is generated inline by Helm (_helpers.tpl genPrivateKey "ed25519").
   # postSync hook: labels nico-system for ESO selection, waits for nico-roots.
   # ---------------------------------------------------------------------------

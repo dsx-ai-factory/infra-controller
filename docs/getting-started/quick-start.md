@@ -14,7 +14,7 @@ Push the built images to your container registry before proceeding.
 
 ## Step 2 — Prepare the Kubernetes Cluster
 
-NICo requires a Kubernetes cluster with at least three schedulable nodes (Ready, not tainted NoSchedule/NoExecute) for HA Vault and PostgreSQL. NICo does not provision the cluster itself--operators are expected to provision their own Kubernetes cluster that meets the requirements below using their preferred tooling (kubeadm, Kubespray, managed K8s, etc.).
+NICo requires a Kubernetes cluster with at least three schedulable nodes (Ready, not tainted NoSchedule/NoExecute) for HA PostgreSQL and, unless the site is installed with `--skip-vault`, HA Vault. NICo does not provision the cluster itself--operators are expected to provision their own Kubernetes cluster that meets the requirements below using their preferred tooling (kubeadm, Kubespray, managed K8s, etc.).
 
 **Validated baseline:**
 
@@ -102,6 +102,10 @@ export NICO_DPF_DPU_CLUSTER_VIP=<free-routable-ip>    # DPU cluster control-plan
 # directory holding ca.pem, client.pem, and client.key.
 # export NICO_KMIP_CLIENT_DIR=/path/to/kmip-client
 
+# Optional: install without HashiCorp Vault (credentials in Postgres, service
+# certificates from the site-issuer ClusterIssuer). Same as --skip-vault.
+# export NICO_SKIP_VAULT=true
+
 # RMS (Rack Management Service) installs by default. Set the image tag (there
 # is no safe default), or pass --skip-rms to setup.sh to opt out:
 export NICO_RMS_IMAGE_TAG=v0.10.0-rc2             # your rms-api image tag (git describe of your build)
@@ -124,6 +128,7 @@ For authenticated NGC pulls, obtain an API key at [ngc.nvidia.com](https://ngc.n
 | `NICO_DPF_BMC_ROOT_PASSWORD` | No (DPF only) | Existing site-wide BMC password. After a DPF-enabled Core deployment is accepted, setup stores it in `nico-system/nico-bmc-v0-credentials` and makes that watched Secret the authoritative local version-0 source. When omitted on such a deployment, setup reuses its marked Secret or leaves version 0 backend-managed. Declining deployment leaves the Secret untouched. A later non-DPF Core deployment preserves this configuration only when the installed release already uses it; a stray Secret is not adopted. A rerun rejects a different value, and using the variable with `--skip-core` or `--skip-dpf` is an error. |
 | `NICO_SITE_UUID` | No | Stable UUID for this site. If unset, `setup.sh` tries to reuse the UUID from a prior install (site-agent ConfigMap). If that fails, it adopts an existing REST site with the same name, or mints a UUID and seeds the site record itself. |
 | `NICO_KMIP_CLIENT_DIR` | No | Directory holding `ca.pem`, `client.pem`, and `client.key` for the opt-in [KMIP KEK provider](../configuration/kmip-kek-provider.md). Before Core deploys, setup creates the `nico-system/nico-kmip-client` Secret from them for `nico-api` to mount, and preflight checks that each of the provider's TLS paths lies under a chart-provided mount or under a mounted Secret that exists and has the key the path reads. An error with `--skip-core`. See [helm-prereqs → Opting in to the KMIP KEK provider](https://github.com/dsx-ai-factory/infra-controller/blob/main/helm-prereqs/README.md#opting-in-to-the-kmip-kek-provider). |
+| `NICO_SKIP_VAULT` | No | Install without HashiCorp Vault, which installs by default. Same as `--skip-vault`; `NICO_INSTALL_VAULT=false` is honored too. The site config must keep credentials in Postgres, and preflight checks the Core values for anything that still needs Vault. Refer to [helm-prereqs → Installing without Vault](https://github.com/dsx-ai-factory/infra-controller/blob/main/helm-prereqs/README.md#installing-without-vault). |
 
 ### 3b. Set your Site Name
 
@@ -425,6 +430,7 @@ The `preflight.sh` script checks the following:
 |----------|--------|
 | Environment variables | Conditional image variables are set; registry has no URL scheme; UUID is valid if set; KUBECONFIG path exists if set |
 | Required tools | `helm`, `helmfile`, `kubectl`, `jq`, `ssh-keygen` are in PATH. Core VIP validation also requires Python 3 with PyYAML. The KMIP KEK provider check needs Python 3.11 or later, or the `tomli` package, when the site config mentions KMIP; without either, preflight warns and skips that check, or fails when `NICO_KMIP_CLIENT_DIR` is set. |
+| Vault-free Core values (`--skip-vault` only) | The site config keeps credentials in Postgres: `[secrets]` is present with no `vault` backend, writer, or import source, and no Transit KEK provider. The `[certificates]` table does not set either cert-manager flag to `false`. No `issuerRef` names `vault-nico-issuer`, except `global.certificate.issuerRef` at the top level or in a subchart's own `global` block, which the `setup.sh` override replaces. A nested `issuerRef` that names `site-issuer` does not set a `kind` other than `ClusterIssuer`. An enabled `nico-bmc-proxy.switchTls` sets its own `issuerRef.name` to `site-issuer`, because that Certificate does not follow the global issuer. With a custom `nico-api.configFiles.nicoApiConfig`, the effective `[certificates]` flags (the site TOML wins key by key over the base config) are both `true`, and `[certificates.cert_manager]` does not name `vault-nico-issuer` or a namespaced `Issuer`. The `nico-api.vaultClusterInfo` value is empty. Legacy PSM/NSM hook resources are absent, because their cleanup needs Vault. Each error names the field and stops `setup.sh` even with `-y`; a Vault StatefulSet still running in the cluster is a warning, as is a partial run (`--skip-core`, `--skip-rest`, or `--skip-rms`) while a consumer the run will not redeploy still references Vault, because the `nico-prereqs` Vault resources then stay until a later run redeploys it. Needs Python 3.11 or later, or the `tomli` package. Refer to [helm-prereqs → Installing without Vault](https://github.com/dsx-ai-factory/infra-controller/blob/main/helm-prereqs/README.md#installing-without-vault). |
 | `values/metallb-config.yaml` | File exists; YAML is valid; at least one IPAddressPool defined; exactly one advertisement mode active (BGP or L2, not both); example placeholder hostnames not still present |
 | Cluster reachability | `kubectl` can reach the API server. |
 | Node resources | At least three schedulable nodes |
@@ -462,6 +468,7 @@ You can combine common options as needed:
 | `--skip-core` | Skip the Phase 6 NICo Core Helm release. |
 | `--skip-rest` | Skip all Phase 7 NICo REST phases. |
 | `--skip-rms` | Skip Phase 5c Rack Management Service (installs by default; `NICO_RMS_IMAGE_TAG` required otherwise). |
+| `--skip-vault` | Install without HashiCorp Vault (installs by default). Skips the Phase 3 Vault install and the Phase 4 unseal, renders no Vault resources in Phase 5, and deploys Core, RMS, Flow, and the site-agent with certificates from the `site-issuer` ClusterIssuer and the Core Vault settings disabled. Requires the Core values contract in [helm-prereqs → Installing without Vault](https://github.com/dsx-ai-factory/infra-controller/blob/main/helm-prereqs/README.md#installing-without-vault). Same as `NICO_SKIP_VAULT=true`. |
 | `--with-observability` | Install the optional local metrics, logs, and traces stack before Phase 7. This also runs with `--skip-rest`; see [`helm-prereqs/observability/README.md`](https://github.com/dsx-ai-factory/infra-controller/blob/main/helm-prereqs/observability/README.md) for standalone installation. |
 | `-y` | Accept setup prompts automatically. |
 
@@ -480,9 +487,9 @@ before continuing.
 | 1b | postgres-operator (Zalando) |
 | 1c | MetalLB + site BGP/L2 config |
 | 1d | Optional Contour/Envoy ingress controller (`--install-contour`) |
-| 2 | cert-manager + Vault TLS bootstrap (PKI chain) |
-| 3 | HashiCorp Vault (3-node HA Raft) |
-| 4 | Vault init + unseal + SSH host key |
+| 2 | cert-manager + site CA bootstrap (PKI chain); the Vault TLS bootstrap is skipped with `--skip-vault` |
+| 3 | HashiCorp Vault (3-node HA Raft); skipped with `--skip-vault` |
+| 4 | Vault init + unseal (skipped with `--skip-vault`), `nico-system` namespace, and SSH host key |
 | 5 | external-secrets + nico-prereqs + nico-pg-cluster |
 | 5b | DPF stack for DPU provisioning (default; `--skip-dpf` to opt out) |
 | 5c | RMS (Rack Management Service) (default; `--skip-rms` to opt out) |
@@ -494,12 +501,12 @@ before continuing.
 The following components are deployed:
 
 ```text
-local-path-provisioner     (raw manifest - StorageClasses for Vault + PostgreSQL PVCs)
+local-path-provisioner     (raw manifest - StorageClasses for PostgreSQL PVCs, and Vault PVCs when installed)
 metallb                    (metallb/metallb 0.14.5 - LoadBalancer IPs via BGP or L2)
 contour + envoy            (optional - Ingress controller for REST API FQDN/TLS)
 postgres-operator          (zalando/postgres-operator 1.11.0 - manages nico-pg-cluster)
 cert-manager               (jetstack/cert-manager v1.17.1)
-vault                      (hashicorp/vault 0.25.0, 3-node HA Raft, TLS)
+vault                      (hashicorp/vault 0.25.0, 3-node HA Raft, TLS - default; --skip-vault to opt out)
 external-secrets           (external-secrets/external-secrets 0.14.3)
 DPF stack                  (default; --skip-dpf to opt out: argo-cd, kamaji, NFD,
                             maintenance-operator, dpf-operator from the pinned
@@ -508,7 +515,8 @@ DPF stack                  (default; --skip-dpf to opt out: argo-cd, kamaji, NFD
                             NICO_DPF_SRC override installs an operator-managed
                             checkout instead - see docs/manuals/dpf.md)
 rack-manager (RMS)         (default; --skip-rms to opt out - pinned nv-rms submodule, mTLS
-                            via vault-nico-issuer, rms database on nico-pg-cluster)
+                            via vault-nico-issuer, or site-issuer with --skip-vault,
+                            rms database on nico-pg-cluster)
 nico-prereqs               (this Helm chart - nico-system namespace)
 NICo Core                  (../helm - nico-core.yaml values)
 NICo REST                  (../helm/rest/nico-rest)
@@ -803,7 +811,7 @@ kubectl logs -n nico-system -l app.kubernetes.io/name=nico-api --tail=50 \
 
 ## Upgrading
 
-To upgrade an existing NICo installation to a new release, check out the target release, and re-run `setup.sh` with the new image tags. `setup.sh` is idempotent: each phase upgrades its component in-place while preserving Vault state, PostgreSQL data, MetalLB site config, and the site UUID.
+To upgrade an existing NICo installation to a new release, check out the target release, and re-run `setup.sh` with the new image tags. `setup.sh` is idempotent: each phase upgrades its component in-place while preserving Vault state (when Vault is installed), PostgreSQL data, MetalLB site config, and the site UUID.
 
 Refer to the [Upgrading NICo](../manuals/upgrade.md) guide for the pre-upgrade checklist, version-specific notes (including the 2.0-to-2.1 MetalLB CRD ownership migration), and rollback considerations.
 

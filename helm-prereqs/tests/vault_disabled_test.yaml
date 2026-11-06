@@ -1,0 +1,87 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# `setup.sh --skip-vault` sets vault.enabled=false through the helmfile dynamic
+# values. Every Vault resource must then disappear, whatever its finer toggle
+# says, while the resources a Vault-free site relies on keep rendering.
+suite: Vault resources are gated by vault.enabled
+templates:
+  - templates/vault-tls-certs.yaml
+  - templates/vault-nico-issuer.yaml
+  - templates/cert-manager-vault-sa.yaml
+  - templates/vault-config-job.yaml
+  - templates/configmaps.yaml
+  - templates/secrets.yaml
+  - templates/site-root-certificate.yaml
+  - templates/site-issuer.yaml
+set:
+  vault.enabled: false
+tests:
+  - it: renders no Vault TLS bootstrap, issuer, service account, or configuration Job
+    asserts:
+      - hasDocuments:
+          count: 0
+        template: templates/vault-tls-certs.yaml
+      - hasDocuments:
+          count: 0
+        template: templates/vault-nico-issuer.yaml
+      - hasDocuments:
+          count: 0
+        template: templates/cert-manager-vault-sa.yaml
+      - hasDocuments:
+          count: 0
+        template: templates/vault-config-job.yaml
+
+  - it: keeps the database ConfigMap and drops vault-cluster-info
+    template: templates/configmaps.yaml
+    asserts:
+      - hasDocuments:
+          count: 1
+      - containsDocument:
+          apiVersion: v1
+          kind: ConfigMap
+          name: nico-system-nico-database-config
+          namespace: nico-system
+
+  - it: keeps the SSH host key Secret and drops the Vault Secrets
+    template: templates/secrets.yaml
+    asserts:
+      - containsDocument:
+          apiVersion: v1
+          kind: Secret
+          name: ssh-host-key
+          namespace: nico-system
+          any: true
+      - containsDocument:
+          apiVersion: v1
+          kind: Secret
+          name: nico-vault-token
+          namespace: nico-system
+        not: true
+      - containsDocument:
+          apiVersion: v1
+          kind: Secret
+          name: nico-vault-approle-tokens
+          namespace: nico-system
+        not: true
+
+  - it: still bootstraps the site-root CA and the site-issuer ClusterIssuer
+    asserts:
+      - containsDocument:
+          apiVersion: cert-manager.io/v1
+          kind: ClusterIssuer
+          name: selfsigned-bootstrap
+          any: true
+        template: templates/site-root-certificate.yaml
+      - containsDocument:
+          apiVersion: cert-manager.io/v1
+          kind: Certificate
+          name: site-root
+          namespace: cert-manager
+          any: true
+        template: templates/site-root-certificate.yaml
+      - containsDocument:
+          apiVersion: cert-manager.io/v1
+          kind: ClusterIssuer
+          name: site-issuer
+        template: templates/site-issuer.yaml
