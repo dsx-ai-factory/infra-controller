@@ -64,7 +64,7 @@ use component_integrity::ExploredComponentIntegrity;
 use computer_system::ExploredComputerSystem;
 use drives::ExploredDrives;
 pub use error::Error;
-pub use identity::platform_identity;
+pub use identity::{platform_identity, service_root_identity};
 use inventories::ExploredInventories;
 use itertools::Itertools;
 use mac_address::MacAddress;
@@ -100,6 +100,22 @@ pub enum ErrorClass {
 }
 
 pub type ErrorClassifier<'a, B> = &'a (dyn Fn(&<B as Bmc>::Error) -> Option<ErrorClass> + Sync);
+
+/// The [`ErrorClassifier`] for nv-redfish's HTTP client.
+pub fn nv_redfish_error_class(
+    error: &nv_redfish::bmc_http::reqwest::BmcError,
+) -> Option<ErrorClass> {
+    match error {
+        nv_redfish::bmc_http::reqwest::BmcError::InvalidResponse { status, .. } => {
+            match status.as_u16() {
+                404 => Some(ErrorClass::NotFound),
+                500 => Some(ErrorClass::InternalServerError),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
 
 fn is_bluefield_system_id(id: &str) -> bool {
     matches!(id, "Bluefield" | "BlueField_0")
