@@ -259,12 +259,11 @@ impl StateHandler for SitePrefixReadiness {
 
         if current.status.lifecycle_state == SitePrefixLifecycleState::Deleting {
             if current.status.authority == SitePrefixAuthority::OperatorManaged {
-                let retained =
-                    db::site_prefix::find_operator_managed_prefixes_with_retained_vpc_prefixes(
-                        &mut *txn,
-                    )
-                    .await?;
-                if retained.contains(&current.config.prefix) {
+                if db::site_prefix::operator_managed_prefix_has_retained_children(
+                    &mut *txn, *object_id,
+                )
+                .await?
+                {
                     return Ok(StateHandlerOutcome::wait(
                         "waiting for retained VPC prefixes and direct network prefixes to be physically removed".to_string(),
                     )

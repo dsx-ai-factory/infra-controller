@@ -706,14 +706,47 @@ pub async fn operator_managed_prefixes_exist(db: impl DbReader<'_>) -> DatabaseR
 pub async fn find_operator_managed_prefixes_with_retained_vpc_prefixes(
     db: impl DbReader<'_>,
 ) -> DatabaseResult<Vec<IpNetwork>> {
-    let query = r#"
+    find_retained_operator_prefixes(db, None).await
+}
+
+/// Checks one operator root using the same child-retention rules as routing.
+///
+/// Missing roots and roots outside Ready or Deleting return false. A caller
+/// deciding final removal holds the routing and root row locks through deletion.
+pub async fn operator_managed_prefix_has_retained_children(
+    db: impl DbReader<'_>,
+    site_prefix_id: SitePrefixId,
+) -> DatabaseResult<bool> {
+    Ok(!find_retained_operator_prefixes(db, Some(site_prefix_id))
+        .await?
+        .is_empty())
+}
+
+async fn find_retained_operator_prefixes(
+    db: impl DbReader<'_>,
+    site_prefix_id: Option<SitePrefixId>,
+) -> DatabaseResult<Vec<IpNetwork>> {
+    let mut query = QueryBuilder::new(
+        r#"
         -- Keep routing coverage through soft deletion; either kind of child can
         -- still supply tenant routes until its owning row is physically deleted.
         SELECT site_prefix.prefix
         FROM site_prefixes AS site_prefix
-        WHERE site_prefix.authority = $1
-          AND site_prefix.lifecycle_state IN ($2, $3)
-          AND (
+        WHERE site_prefix.authority = "#,
+    );
+    query
+        .push_bind(SitePrefixAuthority::OperatorManaged)
+        .push(" AND site_prefix.lifecycle_state IN (")
+        .push_bind(SitePrefixLifecycleState::Ready)
+        .push(", ")
+        .push_bind(SitePrefixLifecycleState::Deleting)
+        .push(")");
+    if let Some(id) = site_prefix_id {
+        query.push(" AND site_prefix.id = ").push_bind(id);
+    }
+    query.push(
+        r#"
+        AND (
               EXISTS (
                   SELECT 1
                   FROM network_vpc_prefixes AS vpc_prefix
@@ -739,14 +772,13 @@ pub async fn find_operator_managed_prefixes_with_retained_vpc_prefixes(
               )
           )
         ORDER BY site_prefix.prefix
-    "#;
-    sqlx::query_scalar(query)
-        .bind(SitePrefixAuthority::OperatorManaged)
-        .bind(SitePrefixLifecycleState::Ready)
-        .bind(SitePrefixLifecycleState::Deleting)
+        "#,
+    );
+    query
+        .build_query_scalar()
         .fetch_all(db)
         .await
-        .map_err(|error| DatabaseError::query(query, error))
+        .map_err(|error| DatabaseError::query(query.sql(), error))
 }
 
 /// Counts every tenant-managed row for one tenant. Rows remain in this count
@@ -2237,6 +2269,19 @@ mod tests {
             retained, expected,
             "exact tenant-managed lineage must not geometrically retain a covering operator root"
         );
+        for (id, retained) in [
+            (root_id(ready_root), true),
+            (root_id(retiring_root), true),
+            (root_id(operator_root_covering_tenant_child), false),
+            (tenant_root.id, false),
+            (SitePrefixId::new(), false),
+        ] {
+            assert_eq!(
+                operator_managed_prefix_has_retained_children(&mut *txn, id).await?,
+                retained,
+                "retention must be scoped to operator root {id}"
+            );
+        }
 
         // Soft deletion leaves the row available to generated segments that are draining.
         sqlx::query("UPDATE network_vpc_prefixes SET deleted = now() WHERE id = $1")
@@ -2259,6 +2304,10 @@ mod tests {
         assert_eq!(
             find_operator_managed_prefixes_with_retained_vpc_prefixes(&mut *txn).await?,
             vec![ready_root]
+        );
+        assert!(
+            !operator_managed_prefix_has_retained_children(&mut *txn, root_id(retiring_root))
+                .await?
         );
 
         txn.commit().await?;
