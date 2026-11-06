@@ -60,8 +60,8 @@ Print help (see a summary with -h)
 
 `<NAME>`
 
-Domain name. Reverse zones (in-addr.arpa, ip6.arpa) and duplicate live
-names are rejected
+Lowercase domain name. Reverse zones (in-addr.arpa, ip6.arpa) and
+duplicate live names are rejected
 
 ## Examples
 

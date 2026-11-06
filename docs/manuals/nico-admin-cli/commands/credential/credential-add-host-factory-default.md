@@ -37,6 +37,8 @@ Manufacturer default password
 
 - lenovo-ami
 
+- giga-computing
+
 - dell
 
 - supermicro
