@@ -1244,10 +1244,15 @@ it; an unparented VpcPrefix still retains every containing retired root.
 
 Remediate existing rows while the API is serving. Then stop serving requests on
 all empty-list replicas and repeat the database inspection before restarting.
-If the final inspection finds missing or ambiguous parentage, restore service
-with the old configuration to remediate it, then repeat the stop and inspection.
-Start authoritative Core with the updated configuration first so reconciliation
-and lineage backfill succeed before restarting other replicas. Resume service
+For the shipped Helm chart, set `replicas` to `0` and wait for all API pods to stop
+before final inspection or configuration changes; keep it at zero while applying
+the configuration. The default ConfigMap reload annotation otherwise starts a
+rolling update.
+If the final inspection or startup preflight reports missing or ambiguous
+parentage, restore service with the old configuration to remediate it, then
+repeat the stop and inspection. Start one authoritative Core replica with the
+updated configuration first so reconciliation and lineage backfill succeed
+before restarting other replicas. Resume service
 after every replica has the updated configuration and passes startup preflight.
 Keep requests stopped throughout this final inspection and restart sequence:
 an empty-list replica can otherwise admit another rootless VpcPrefix outside the
