@@ -127,6 +127,8 @@ func (c *Client) Do(method, pathTemplate string, pathParams, queryParams map[str
 	return c.doWithQueryValues(method, pathTemplate, pathParams, queryValues, body)
 }
 
+// doWithQueryValues executes an HTTP request while preserving repeated query
+// values required by generated repeatable flags.
 func (c *Client) doWithQueryValues(method, pathTemplate string, pathParams map[string]string, queryParams url.Values, body []byte) ([]byte, http.Header, error) {
 	doClient := c
 	respBody, respHeader, err := doClient.do(method, pathTemplate, pathParams, queryParams, body)

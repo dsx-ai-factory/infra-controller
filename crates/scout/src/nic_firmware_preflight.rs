@@ -271,6 +271,7 @@ mod tests {
 
     use axum::Router;
     use axum::routing::get;
+    use carbide_instrument::testing::MetricsCapture;
     use carbide_test_support::{Check, check_values};
     use clap::Parser;
     use sha2::{Digest, Sha256};
@@ -741,6 +742,9 @@ mod tests {
                 expected_error: "unexpected HTTP status 302",
             },
         ];
+        // Exhausted artifact retries emit `give_up`, which another test counts
+        // exactly. Hold the shared capture lock until both cases finish.
+        let _metrics = MetricsCapture::start();
         for case in cases {
             let image_requests = Arc::new(AtomicUsize::new(0));
             let redirected_requests = Arc::new(AtomicUsize::new(0));
@@ -796,8 +800,9 @@ mod tests {
                 device_config_sha256: None,
             };
             let inspections = Cell::new(0);
-            let result = args
-                .inspect_with(
+            let result = tokio::time::timeout(
+                Duration::from_secs(30),
+                args.inspect_with(
                     || {
                         FirmwareStaging::new()
                             .map(|staging| staging.with_retry_backoff(Duration::from_millis(10)))
@@ -806,10 +811,14 @@ mod tests {
                         inspections.set(inspections.get() + 1);
                         Ok(())
                     },
-                )
-                .await;
+                ),
+            )
+            .await;
             stop.cancel();
-            server.await.unwrap();
+            tokio::time::timeout(Duration::from_secs(30), server)
+                .await
+                .expect("redirect server did not stop")
+                .unwrap();
 
             // The retained staging retry policy retries only the original URL.
             assert_eq!(
@@ -825,7 +834,9 @@ mod tests {
                 case.scenario
             );
             assert_eq!(inspections.get(), 0, "{}", case.scenario);
-            let error = result.unwrap_err();
+            let error = result
+                .expect("redirect inspection did not finish")
+                .unwrap_err();
             assert!(
                 format!("{error:#}").contains(case.expected_error),
                 "{}: {error:#}",

@@ -571,6 +571,7 @@ Common DPU alert IDs include:
 - `ContainerExists`
 - `ServiceRunning`
 - `DhcpServer`
+- `Fmds`
 - `BgpStats`
 - `BgpPeeringTor`
 - `BgpPeeringRouteServer`
@@ -596,6 +597,8 @@ reloads local DHCP in ContainerExec mode. It includes `PreventAllocations` and
 `PreventHostStateChanges`, then clears when the agent sends a fresh sample. If
 it appears in consecutive reports, check the DPU agent logs for repeated
 configuration applications.
+
+On DPF, `DhcpServer` and `Fmds` mean that the DPU agent could not reach or update the DHCP server or FMDS pod on that DPU, and the message contains the error. Both prevent allocations but not host state changes. Check whether that pod is running on the DPU.
 
 Refer to [DPU ToR Uplink Health](../dpu-management/dpu_configuration.md#dpu-tor-uplink-health)
 for the configuration values, classifications, and complete transport matrix.

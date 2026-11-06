@@ -296,6 +296,12 @@ jobs:
               - '.github/workflows/ci.yaml'
               - 'dev/k8s/machine-a-tron-controller/**'
               - 'dev/k8s/scale-test/**'
+              # The scale-test runner imports the generated Forge stubs from the
+              # rest-api module via a local replace, so a change to its module
+              # files or those stubs must run the runner gate (test-scale-test).
+              - 'rest-api/go.mod'
+              - 'rest-api/go.sum'
+              - 'rest-api/proto/core/**'
             machine_lifecycle:
               - 'tests/machine-lifecycle/**'
               - '.github/workflows/ci.yaml'
@@ -2249,7 +2255,7 @@ jobs:
       - name: Set up uv
         uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
         with:
-          version: "0.11.32"
+          version: "0.13.6"
           enable-cache: false
 
       - name: Install locked dependencies
@@ -2544,6 +2550,9 @@ jobs:
 
       - name: Test REST postgres StatefulSet recreation
         run: bash helm-prereqs/tests/setup-rest-postgres-statefulset-recreate_test.sh
+
+      - name: Test site-agent Core connection verification
+        run: bash helm-prereqs/tests/setup-site-agent-connection_test.sh
 
       - name: Test Temporal/Keycloak HA Postgres resolution
         run: bash helm-prereqs/tests/preflight-ha-postgres-resolution_test.sh

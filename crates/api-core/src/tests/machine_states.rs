@@ -672,6 +672,7 @@ async fn test_machine_creator_created_host_advances_through_dpu_discovery(
     let machine_creator = MachineCreator::new(
         env.pool.clone(),
         (&explorer_config).into(),
+        env.api.resource_pool_registry.clone(),
         env.common_pools.clone(),
         Arc::new(env.config.rack_profiles.clone()),
         None,

@@ -421,7 +421,8 @@ impl<'r> FromRow<'r, PgRow> for Rack {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RackErrorRecoveryPolicy {
-    /// The rack returns to Ready after all attached components become Ready.
+    /// The rack returns to Ready when no switch or power shelf is in Error
+    /// and no machine is Failed.
     /// Also applies when a persisted Error state has no recovery metadata.
     #[default]
     ComponentsReady,

@@ -121,6 +121,20 @@ service Forge {
   rpc FindNetworkSegmentIds(NetworkSegmentSearchFilter) returns (NetworkSegmentIdList);
   rpc FindNetworkSegmentsByIds(NetworkSegmentsByIdsRequest) returns (NetworkSegmentList);
   rpc CreateNetworkSegment(NetworkSegmentCreationRequest) returns (NetworkSegment);
+  // Admin-only: append the missing family to a live, Ready, unattached Underlay
+  // segment with one prefix. Matching any stored same-family prefix and settings
+  // returns the current segment without a write; different same-family settings
+  // fail with FAILED_PRECONDITION. Existing prefixes, IDs, addresses, policy and
+  // lifecycle are unchanged; the stored initial network_def is not modified.
+  // Existing SLAAC inference policy also applies to the added prefix.
+  // Invalid input, overlap with any NetworkPrefix or VPC-scoped VpcPrefix, and
+  // reused relay selectors return INVALID_ARGUMENT. A global VpcPrefix parent
+  // may overlap an unattached Underlay, as with initial network creation.
+  // Unknown segment IDs return NOT_FOUND; unsupported targets return
+  // FAILED_PRECONDITION. Success commits the prefix, version and reverse zone
+  // together; a zone is created only for zone-boundary-aligned prefixes.
+  // It does not configure site routing, router advertisements or DHCP relays.
+  rpc AddNetworkSegmentPrefix(AddNetworkSegmentPrefixRequest) returns (NetworkSegment);
   rpc AttachNetworkSegmentToVpc(AttachNetworkSegmentToVpcRequest) returns (NetworkSegment);
   rpc DeleteNetworkSegment(NetworkSegmentDeletionRequest) returns (NetworkSegmentDeletionResult);
   // TODO: This functionality should get integrated into NetworkSegmentSearchFilter
@@ -3554,6 +3568,10 @@ message NetworkPrefix {
   // True when `free_ip_count_v2` was capped because the exact count exceeds
   // `2^64 - 1`.
   bool free_ip_count_saturated = 11;
+  // Output-only DHCPv6 relay link-address used to identify this prefix in relayed
+  // requests. Set by the initial TOML definition or AddNetworkSegmentPrefix;
+  // CreateNetworkSegment ignores this field.
+  optional string dhcpv6_link_address = 12;
 }
 
 message MachineState {
@@ -5431,6 +5449,12 @@ message SshRequest {
 }
 
 message CopyBfbToDpuRshimRequest {
+  // The DPU BMC IP must resolve to a machine interface. If endpoint_request.mac_address
+  // is supplied, it must match that interface; it does not override credential lookup.
+  // The resolved MAC is retained even when omitted, and rechecked before BFB copy
+  // and host power-off. Invalid requests do not queue recovery or pause remediation.
+  // A changed/missing target at execution fails recovery and releases the host pause.
+  // Legacy queued states without a retained MAC must be explicitly requeued.
   SshRequest ssh_request = 1;
   reserved 2;
   // Host BMC IP address. Required for the mandatory post-copy host
@@ -5698,10 +5722,13 @@ message ManagedHostServiceInterfaceConfig {
   string mac_address = 15;
   // Stable identity used to correlate this service interface across reconciliation.
   common.UUID internal_uuid = 16;
-  // Administrative loopback assigned to the selected VPC's tenant VRF on this DPU.
+  // DPU-local loopback shared by host and service ports in this VPC.
   // Unlike ManagedHostNetworkConfig.loopback_ip, this address is not the DPU VXLAN VTEP.
-  // Host and service interfaces selecting the same VPC on this DPU reuse this address.
+  // If present, must be one non-empty IPv4 or IPv6 address without CIDR notation.
   // Omitted when fnn.use_vpc_vrf_loopback is false.
+  // Omission is valid. A rendered host port in this VPC can supply the loopback.
+  // The VPC has no loopback if no rendered port supplies one.
+  // Present host and service loopback values for the same VNI must match.
   optional string tenant_vrf_loopback_ip = 17;
 }
 
@@ -11539,8 +11566,16 @@ message UpdateOperatingSystemRequest {
   optional string ipxe_script = 20;
   optional common.IpxeTemplateId ipxe_template_id = 22;
   optional IpxeTemplateParameters ipxe_template_parameters = 23;
+  // Omitted lists keep their stored values; present lists replace them, including empty lists.
+  // Caller-supplied cached_url values are ignored. An unchanged template, parameter list,
+  // and artifact definition (including cache_strategy) retain the site's stored cached URLs.
+  // Changing that definition clears the cached URLs and recomputes readiness: an uncached
+  // CACHED_ONLY artifact makes the OS PROVISIONING; otherwise it is READY.
+  // Use UpdateOperatingSystemCachableIpxeTemplateArtifacts to set or clear cached URLs.
   optional IpxeTemplateArtifacts ipxe_template_artifacts = 24;
-  optional string ipxe_template_definition_hash = 25; // if provided, used as-is; otherwise recomputed
+  // If provided, used as-is. Otherwise validate the effective definition and recompute
+  // its hash. Correcting a stored hash alone does not invalidate unchanged artifacts.
+  optional string ipxe_template_definition_hash = 25;
 }
 
 message DeleteOperatingSystemRequest {
@@ -13298,4 +13333,23 @@ message RmsJobStatus {
   optional string node_id = 10;
   google.protobuf.Timestamp created_at = 11;
   google.protobuf.Timestamp updated_at = 12;
+}
+
+// Adds the missing address family to an existing Underlay network segment.
+message AddNetworkSegmentPrefixRequest {
+  // Required; omission returns INVALID_ARGUMENT.
+  common.NetworkSegmentId network_segment_id = 1;
+  // Required network CIDR with an explicit numeric length and no host bits set.
+  // IPv4 must be shorter than /32 to contain its required gateway.
+  string prefix = 2;
+  // Required for IPv4, within that prefix; not accepted for IPv6.
+  optional string gateway = 3;
+  // Non-negative number of initial addresses excluded from dynamic allocation.
+  // Defaults to zero. This does not reserve or move existing allocations.
+  int32 reserve_first = 4;
+  // Optional IPv6 DHCP relay link-address selector, only for an IPv6 addition.
+  // It need not be within the added prefix. Omission uses prefix-based selection.
+  // Exact link-address matches take precedence over prefix matching. Operators
+  // must choose a selector that does not redirect another network's requests.
+  optional string dhcpv6_link_address = 5;
 }

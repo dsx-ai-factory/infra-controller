@@ -11,7 +11,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"slices"
 	"strconv"
@@ -20,6 +22,7 @@ import (
 
 	"golang.org/x/net/http/httpguts"
 	coordv1 "k8s.io/api/coordination/v1"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/rest"
@@ -27,7 +30,17 @@ import (
 )
 
 const (
+	managedByMat        = "app.kubernetes.io/managed-by=mat-k8s-controller"
+	labelMachineID      = "nvidia-infra-controller/mat-machine-id"
+	labelMachineType    = "nvidia-infra-controller/mat-machine-type"
+	labelMatID          = "nvidia-infra-controller/mat-id"
+	annotationBmcIP     = "nvidia-infra-controller/mat-bmc-ip"
+	annotationHwType    = "nvidia-infra-controller/mat-hardware-type"
 	leases              = "/apis/coordination.k8s.io/v1"
+	core                = "/api/v1"
+	listPage            = 500
+	maxListItems        = 100_000
+	listTimeout         = maxListItems / listPage * time.Second // a second a page at the cap
 	maxReplyBytes       = 16 << 20
 	errorBodyWait       = time.Second // how long a non-2xx body is read for its reason
 	serviceAccountToken = "/var/run/secrets/kubernetes.io/serviceaccount/token"
@@ -36,11 +49,13 @@ const (
 // Kube is Cluster on the Kubernetes API, on raw HTTP so that only a 2xx is a
 // success, a 201 stays visible, no redirect is followed, no server text
 // reaches an error and every reply is capped. Every call is bounded by
-// callTimeout whoever calls it. No reply body is ever logged.
+// callTimeout whoever calls it, a list by listTimeout over its pages. No
+// reply body is ever logged.
 type Kube struct {
 	client       *http.Client
 	base, ns     string
 	callTimeout  time.Duration
+	listTimeout  time.Duration
 	maxReplySize int
 }
 
@@ -131,7 +146,7 @@ func NewFor(cfg *rest.Config, namespace string) (*Kube, error) {
 	// A copy: the client may be one client-go shares, http.DefaultClient too.
 	client := *shared
 	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
-	return &Kube{&client, strings.TrimSuffix(base.String(), "/"), namespace, CallTimeout, maxReplyBytes}, nil
+	return &Kube{&client, strings.TrimSuffix(base.String(), "/"), namespace, CallTimeout, listTimeout, maxReplyBytes}, nil
 }
 
 // validServerURL rejects a resolved server URL net/http cannot safely use: a
@@ -344,6 +359,115 @@ func swappable(version string) error {
 		return Error{Kind: Conflict}
 	}
 	return nil
+}
+
+// listAll reads every object with selector in pages, up to max in all. Each
+// page has the call timeout, the whole list listTimeout. A page without a
+// list resource version, a continue token that does not move on, or more
+// than max objects is an error.
+func listAll[T any](ctx context.Context, k *Kube, url, selector string, max int) ([]T, error) {
+	listUntil := time.Now().Add(k.listTimeout)
+	var items []T
+	token := ""
+	for {
+		query := urlValues(selector, token)
+		// The whole-list bound is checked here, before a page is dispatched: an
+		// elapsed listUntil stops the list rather than starting another page
+		// that k.call would only cancel once its timer runs. A caller cancel or
+		// deadline outranks it, so when the caller has stopped this defers to
+		// k.call, which returns the caller's own error.
+		if callerStopped(ctx) == nil && !time.Now().Before(listUntil) {
+			return nil, Error{Kind: Timeout, Secs: int64(k.listTimeout / time.Second)}
+		}
+		until := k.deadline()
+		if listUntil.Before(until) {
+			until = listUntil
+		}
+		var page struct {
+			Metadata metav1.ListMeta `json:"metadata"`
+			Items    []T             `json:"items"`
+		}
+		_, err := k.call(ctx, http.MethodGet, url+"?"+query, nil, &page, until)
+		if hasKind(err, Timeout, 0) && until.Equal(listUntil) {
+			return nil, Error{Kind: Timeout, Secs: int64(k.listTimeout / time.Second)}
+		}
+		switch {
+		case err != nil:
+			return nil, err
+		case page.Metadata.ResourceVersion == "":
+			return nil, Error{Kind: Invalid, Text: "the reply is not a list of the API"}
+		case len(items)+len(page.Items) > max:
+			return nil, Error{Kind: Invalid, Text: fmt.Sprintf("the list holds over %d objects", max)}
+		}
+		items = append(items, page.Items...)
+		next := page.Metadata.Continue
+		if next == "" {
+			return items, nil
+		}
+		if next == token {
+			return nil, Error{Kind: Invalid, Text: "the list continue token did not move on"}
+		}
+		token = next
+	}
+}
+
+func urlValues(selector, token string) string {
+	q := url.Values{"labelSelector": {selector}, "limit": {fmt.Sprint(listPage)}}
+	if token != "" {
+		q.Set("continue", token)
+	}
+	return q.Encode()
+}
+
+func matServiceFrom(s corev1.Service) MatService {
+	ip := func(raw string) netip.Addr { a, _ := netip.ParseAddr(raw); return a }
+	m := MatService{
+		Name: s.Name, MachineType: s.Labels[labelMachineType], MachineID: s.Labels[labelMachineID],
+		MatID: s.Labels[labelMatID], BmcIP: ip(s.Annotations[annotationBmcIP]), HardwareType: s.Annotations[annotationHwType],
+	}
+	for _, raw := range s.Spec.ExternalIPs {
+		if a := ip(raw); a.IsValid() {
+			m.ExternalIPs = append(m.ExternalIPs, a)
+		}
+	}
+	return m
+}
+
+func podFrom(p corev1.Pod) PodInfo {
+	info := PodInfo{
+		Name: p.Name, Labels: p.Labels, Annotations: p.Annotations, Phase: string(p.Status.Phase),
+		CreatedAt: p.CreationTimestamp.UTC(), IP: p.Status.PodIP,
+	}
+	if p.CreationTimestamp.IsZero() {
+		info.CreatedAt = time.Unix(0, 0).UTC()
+	}
+	for _, c := range p.Status.Conditions {
+		info.Ready = info.Ready || c.Type == corev1.PodReady && c.Status == corev1.ConditionTrue
+	}
+	// A restartable init container (a native sidecar) restarts on its own,
+	// so its count goes in with the main containers.
+	for _, c := range slices.Concat(p.Status.ContainerStatuses, p.Status.InitContainerStatuses) {
+		info.Restarts = uint32(min(uint64(info.Restarts)+uint64(max(c.RestartCount, 0)), math.MaxUint32))
+	}
+	return info
+}
+
+func (k *Kube) ListMatServices(ctx context.Context) ([]MatService, error) {
+	list, err := listAll[corev1.Service](ctx, k, k.url(core, k.ns, "services", ""), managedByMat, maxListItems)
+	out := make([]MatService, 0, len(list))
+	for _, s := range list {
+		out = append(out, matServiceFrom(s))
+	}
+	return out, err
+}
+
+func (k *Kube) ListPods(ctx context.Context, namespace, selector string) ([]PodInfo, error) {
+	list, err := listAll[corev1.Pod](ctx, k, k.url(core, namespace, "pods", ""), selector, maxListItems)
+	out := make([]PodInfo, 0, len(list))
+	for _, p := range list {
+		out = append(out, podFrom(p))
+	}
+	return out, err
 }
 
 // The resource version and UID go along: the API refuses a replace when

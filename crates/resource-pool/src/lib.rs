@@ -191,6 +191,18 @@ impl IntegratedResourcePoolBackend {
 /// while identifying when a controller must clean up its previous request.
 #[derive(Debug, thiserror::Error)]
 pub enum ResourcePoolBackendError {
+    /// The caller stopped waiting for a local preparation or admission step.
+    #[error("{operation} was cancelled")]
+    Cancelled {
+        /// The step that was interrupted, such as a DPU loopback lookup.
+        operation: &'static str,
+    },
+    /// A local preparation or admission step exceeded its time budget.
+    #[error("{operation} timed out")]
+    DeadlineExceeded {
+        /// The step that did not finish before its deadline.
+        operation: &'static str,
+    },
     /// A database read, write, or transaction failed.
     #[error(transparent)]
     Database(#[from] DatabaseError),

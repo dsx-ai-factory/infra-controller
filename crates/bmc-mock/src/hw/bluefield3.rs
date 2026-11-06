@@ -52,7 +52,7 @@ impl Bluefield3<'_> {
             vendor: redfish::oem::BmcVendor::Nvidia(redfish::oem::NvidiaNamestyle::Capitalized),
             product: Some("BlueField-3 DPU"),
             redfish_version: "1.17.0",
-            exposes_computer_systems: true,
+            advertises_computer_systems: true,
         }
     }
 
@@ -162,7 +162,7 @@ impl Bluefield3<'_> {
         })).collect::<Vec<_>>();
 
         redfish::computer_system::Config {
-            systems: vec![redfish::computer_system::SingleSystemConfig {
+            systems: Some(vec![redfish::computer_system::SingleSystemConfig {
                 id: Cow::Borrowed("Bluefield"),
                 manufacturer: Some(Cow::Borrowed("Nvidia")),
                 model: Some(Cow::Borrowed("BlueField-3 DPU")),
@@ -193,7 +193,7 @@ impl Bluefield3<'_> {
                 memory: None,
                 serial_console: Some(hw::openbmc::enabled_serial_console()),
                 secure_boot_available: true,
-            }],
+            }]),
         }
     }
 

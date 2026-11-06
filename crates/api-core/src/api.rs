@@ -612,6 +612,13 @@ impl Forge for Api {
         crate::handlers::network_segment::create(self, request).await
     }
 
+    async fn add_network_segment_prefix(
+        &self,
+        request: Request<rpc::AddNetworkSegmentPrefixRequest>,
+    ) -> Result<Response<rpc::NetworkSegment>, Status> {
+        crate::handlers::network_segment::add_prefix(self, request).await
+    }
+
     async fn attach_network_segment_to_vpc(
         &self,
         request: Request<rpc::AttachNetworkSegmentToVpcRequest>,

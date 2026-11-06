@@ -1,0 +1,23 @@
+{{- if or .Values.journal.enabled .Values.persistence.create }}
+{{- if not .Values.persistence.storageClass }}
+{{- fail "persistence.storageClass is required when the run-data claim is created (journal.enabled or persistence.create)" }}
+{{- end }}
+# Shared ReadWriteOnce run-data volume. The journal proof writes a run journal
+# here and a later run-results suite reuses the same claim, so it is created
+# once the journal suite is enabled or a claim is requested on its own.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "scale-test.runDataClaim" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "scale-test.labels" . | nindent 4 }}
+    app.kubernetes.io/component: run-data
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: {{ .Values.persistence.storageClass | quote }}
+  resources:
+    requests:
+      storage: {{ required "persistence.size is required when the run-data claim is created" .Values.persistence.size | quote }}
+{{- end }}

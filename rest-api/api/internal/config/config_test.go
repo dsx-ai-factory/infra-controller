@@ -92,6 +92,35 @@ func TestConfig_GetAPIPort(t *testing.T) {
 	}
 }
 
+func TestConfig_GetExpectedMachineBatchRecoveryEnabled(t *testing.T) {
+	tests := []struct {
+		name   string
+		config string
+		want   bool
+	}{
+		{name: "omission disables new reservations", config: "{}"},
+		{
+			name: "explicit activation enables new reservations",
+			config: `api:
+  expectedMachineBatchRecovery:
+    enabled: true
+`,
+			want: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv(strings.ToUpper(ConfigExpectedMachineBatchRecoveryEnabled), "")
+			configPath := writeConfigForTest(t, tt.config)
+			c := &Config{v: newAPIConfigViper()}
+			c.v.SetConfigFile(configPath)
+			require.NoError(t, c.v.ReadInConfig())
+			assert.Equal(t, configPath, c.v.ConfigFileUsed())
+			assert.Equal(t, tt.want, c.GetExpectedMachineBatchRecoveryEnabled())
+		})
+	}
+}
+
 func TestConfig_GetIssuersConfig(t *testing.T) {
 	tests := []struct {
 		name       string

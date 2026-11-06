@@ -1038,22 +1038,22 @@ func (oscr *APIOperatingSystemCreateRequest) ToProto(os *cdbm.OperatingSystem) *
 }
 
 // ToProto builds the forge.Forge UpdateOperatingSystem request from the
-// post-update entity. The entity conversion keeps unchanged and updated fields
-// populated consistently.
+// post-update entity, including definition changes a previous proxy call may
+// have failed to apply. Omit IpxeTemplateDefinitionHash so Core calculates it
+// from this definition instead of accepting the previously saved hash.
 func (osur *APIOperatingSystemUpdateRequest) ToProto(os *cdbm.OperatingSystem) *corev1.UpdateOperatingSystemRequest {
 	protoOS := os.ToProto()
 	return &corev1.UpdateOperatingSystemRequest{
-		Id:                         protoOS.Id,
-		Name:                       &protoOS.Name,
-		Description:                protoOS.Description,
-		IsActive:                   &protoOS.IsActive,
-		AllowOverride:              &protoOS.AllowOverride,
-		PhoneHomeEnabled:           &protoOS.PhoneHomeEnabled,
-		UserData:                   protoOS.UserData,
-		IpxeScript:                 protoOS.IpxeScript,
-		IpxeTemplateId:             protoOS.IpxeTemplateId,
-		IpxeTemplateParameters:     &corev1.IpxeTemplateParameters{Items: protoOS.IpxeTemplateParameters},
-		IpxeTemplateArtifacts:      &corev1.IpxeTemplateArtifacts{Items: protoOS.IpxeTemplateArtifacts},
-		IpxeTemplateDefinitionHash: protoOS.IpxeTemplateDefinitionHash,
+		Id:                     protoOS.Id,
+		Name:                   &protoOS.Name,
+		Description:            protoOS.Description,
+		IsActive:               &protoOS.IsActive,
+		AllowOverride:          &protoOS.AllowOverride,
+		PhoneHomeEnabled:       &protoOS.PhoneHomeEnabled,
+		UserData:               protoOS.UserData,
+		IpxeScript:             protoOS.IpxeScript,
+		IpxeTemplateId:         protoOS.IpxeTemplateId,
+		IpxeTemplateParameters: &corev1.IpxeTemplateParameters{Items: protoOS.IpxeTemplateParameters},
+		IpxeTemplateArtifacts:  &corev1.IpxeTemplateArtifacts{Items: protoOS.IpxeTemplateArtifacts},
 	}
 }

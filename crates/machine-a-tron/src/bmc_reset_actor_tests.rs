@@ -40,9 +40,12 @@ use crate::power_shelf_simulator::PowerShelfActor;
 use crate::switch_simulator::SwitchActor;
 use crate::{BmcMockRegistry, DeviceHandle, DhcpClient, DpuMachineHandle, MachineATronContext};
 
+const ACTOR_RETRY_DELAY: Duration = Duration::from_millis(500);
+
 #[derive(Clone)]
 struct ObservedRequest {
     mac: MacAddress,
+    xid: u32,
     kind: MessageType,
     vendor: Option<Vec<u8>>,
     link: Ipv4Addr,
@@ -119,6 +122,7 @@ impl DhcpFixture {
                     let address = Ipv4Addr::new(192, 0, state.epoch, index);
                     state.requests.push(ObservedRequest {
                         mac,
+                        xid: request.xid(),
                         kind,
                         vendor,
                         link: *link,
@@ -176,11 +180,14 @@ impl DhcpFixture {
             .count()
     }
 
-    fn suppress(&self, macs: &[MacAddress]) -> HashMap<MacAddress, usize> {
-        let counts = macs
-            .iter()
+    fn rejection_counts(&self, macs: &[MacAddress]) -> HashMap<MacAddress, usize> {
+        macs.iter()
             .map(|&mac| (mac, self.reject_count(mac)))
-            .collect();
+            .collect()
+    }
+
+    fn suppress(&self, macs: &[MacAddress]) -> HashMap<MacAddress, usize> {
+        let counts = self.rejection_counts(macs);
         self.leases.lock().unwrap().suppressed = macs.iter().copied().collect();
         counts
     }
@@ -204,34 +211,24 @@ impl DhcpFixture {
         });
     }
 
-    fn assert_rejections(&self, baseline: &HashMap<MacAddress, usize>, additional: usize) {
-        for (&mac, &count) in baseline {
-            assert_eq!(
-                self.reject_count(mac),
-                count + additional,
-                "unexpected DHCP attempt count for {mac}"
-            );
-        }
-    }
-
-    async fn assert_no_bmc_request(&self, macs: &[MacAddress]) {
-        let count = || {
-            self.leases
-                .lock()
-                .unwrap()
-                .requests
-                .iter()
-                .filter(|request| macs.contains(&request.mac))
-                .count()
+    async fn assert_no_bmc_request(&self, fences: &HashMap<MacAddress, u32>) {
+        let requested_after_boundary = || {
+            self.leases.lock().unwrap().requests.iter().any(|request| {
+                fences.get(&request.mac).is_some_and(|&fence| {
+                    // XIDs are allocated when requests start. This bounded
+                    // fixture uses fewer than half the u32 space, so wrapping
+                    // order excludes late packets from pre-boundary requests.
+                    request.xid.wrapping_sub(fence) < (1_u32 << 31)
+                })
+            })
         };
-        let baseline = count();
-        // A failed first attempt must retry after 4s +/- 1s. Observing beyond
-        // that bound proves pause/shutdown stopped retry advancement.
+        // Observe beyond the controlled retry delay so a pending retry would
+        // reach UDP unless pause/shutdown stopped actor advancement.
         assert!(
-            tokio::time::timeout(Duration::from_secs(6), async {
+            tokio::time::timeout(ACTOR_RETRY_DELAY * 3, async {
                 loop {
                     let changed = self.changed.notified();
-                    if count() != baseline {
+                    if requested_after_boundary() {
                         return;
                     }
                     changed.await;
@@ -435,10 +432,11 @@ async fn bmc_reset_actor_recovery_preserves_devices_and_survives_pause_and_repea
     let (dhcp, client, service) = DhcpFixture::start().await;
     let mut context = Arc::try_unwrap(MachineATronContext::for_test())
         .unwrap_or_else(|_| panic!("test context is shared"));
-    context.dhcp_client = DhcpClient::UdpRelay(client);
+    context.dhcp_client = DhcpClient::UdpRelay(client.clone());
     context.app_config.host_bmc_password = Some("configured-host-password".into());
     context.app_config.dpu_bmc_password = Some("configured-dpu-password".into());
     context.app_config.register_expected_machines = false;
+    context.bmc_dhcp_retry_delay = Some(ACTOR_RETRY_DELAY);
     let mut config = (*context.app_config.machines["config"]).clone();
     config.hw_type = HardwareType::WiwynnGB200Nvl;
     config.run_interval_idle = Duration::from_millis(100);
@@ -478,7 +476,7 @@ async fn bmc_reset_actor_recovery_preserves_devices_and_survives_pause_and_repea
     let devices = [
         DeviceHandle::machine(host.clone()),
         DeviceHandle::switch(switch.clone()),
-        DeviceHandle::power_shelf(shelf),
+        DeviceHandle::power_shelf(shelf.clone()),
     ];
     let actors = std::iter::once(BmcActor::Device(devices[0].clone()))
         .chain(host.dpus().iter().cloned().map(BmcActor::Dpu))
@@ -533,25 +531,31 @@ async fn bmc_reset_actor_recovery_preserves_devices_and_survives_pause_and_repea
             )
             .await;
         }
-        dhcp.wait_for_rejections(&baseline, 1).await;
-        if cycle == 1 {
-            for device in &devices {
-                device.pause().unwrap();
+        let retry_baseline = if cycle == 1 {
+            // Establish an autonomous retry before checking that pause stops it.
+            dhcp.wait_for_rejections(&baseline, 2).await;
+            host.pause_and_wait(Duration::from_secs(5)).await.unwrap();
+            for dpu in host.dpus() {
+                dpu.pause_and_wait(Duration::from_secs(5)).await.unwrap();
             }
-            // This reply acknowledges the host pause and the sends to its DPUs.
-            // The absence of UDP retries below witnesses the child actors too.
-            host.api_state().await.unwrap();
-            // Establish that the next pending deadline is the first 4s +/- 1s
-            // retry, rather than a later exponentially backed-off attempt.
-            dhcp.assert_rejections(&baseline, 1);
-            dhcp.assert_no_bmc_request(&macs).await;
+            switch.pause_and_wait(Duration::from_secs(5)).await.unwrap();
+            shelf.pause_and_wait(Duration::from_secs(5)).await.unwrap();
+            let fence = client.next_transaction_id();
+            let paused_fences = macs.iter().map(|&mac| (mac, fence)).collect();
+            let paused_rejections = dhcp.rejection_counts(&macs);
+            dhcp.assert_no_bmc_request(&paused_fences).await;
             for device in &devices {
                 device.resume().unwrap();
             }
-        }
-        // Two observations after one reset, or three after two rapid resets,
-        // require an actor-owned retry rather than another HTTP trigger.
-        dhcp.wait_for_rejections(&baseline, repeats + 1).await;
+            paused_rejections
+        } else {
+            // Counts from before the last reset cannot prove its later retry.
+            let final_reset_rejections = dhcp.rejection_counts(&macs);
+            dhcp.wait_for_rejections(&final_reset_rejections, 1).await;
+            dhcp.rejection_counts(&macs)
+        };
+        // Require a fresh retry after resume or the final reset's first failure.
+        dhcp.wait_for_rejections(&retry_baseline, 1).await;
         dhcp.lift(epoch);
         wait_for_addresses(&actors, epoch).await;
         for (actor, expected) in actors.iter().zip(&frozen) {
@@ -595,10 +599,16 @@ async fn bmc_reset_actor_recovery_preserves_devices_and_survives_pause_and_repea
             "suppressed BMC still serves its abandoned authority"
         );
     }
+    let mut stopped_fences = HashMap::new();
     for device in &devices {
         device.abort_and_wait().await.unwrap();
+        let fence = client.next_transaction_id();
+        let info = device.host_info();
+        stopped_fences.insert(info.bmc_mac_address, fence);
+        for dpu in &info.dpus {
+            stopped_fences.insert(dpu.bmc_mac_address, fence);
+        }
     }
-    dhcp.assert_rejections(&baseline, 1);
     for (actor, router) in actors.iter().zip(retired_routers) {
         let token = login(&router, actor).await;
         let (_, managers) = http(
@@ -626,7 +636,7 @@ async fn bmc_reset_actor_recovery_preserves_devices_and_survives_pause_and_repea
         );
         assert_eq!(actor.generation(), generation);
     }
-    dhcp.assert_no_bmc_request(&macs).await;
+    dhcp.assert_no_bmc_request(&stopped_fences).await;
     let requests = dhcp.leases.lock().unwrap().requests.clone();
     for actor in &actors {
         let observed = requests

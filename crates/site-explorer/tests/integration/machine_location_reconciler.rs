@@ -290,6 +290,7 @@ async fn test_site_explorer_retries_machine_location_after_request_deadline(
                 Arc::new(env.api().runtime_config.get_firmware_config()),
             )),
             endpoint_explorer.clone(),
+            Default::default(),
             env.api().common_pools().clone(),
             env.api().work_lock_manager_handle(),
             machine_info_rack_profiles(),

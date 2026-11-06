@@ -378,22 +378,19 @@ pub(crate) async fn update_operating_system(
         .as_ref()
         .map(|w| w.items.as_slice());
 
+    let stored_params = params_from_json(existing.ipxe_parameters.as_ref().map(|j| &j.0));
+    let stored_artifacts = artifacts_from_json(existing.ipxe_artifacts.as_ref().map(|j| &j.0));
+    let effective_params = req_params.unwrap_or(&stored_params);
+    let effective_artifacts = req_artifacts.unwrap_or(&stored_artifacts);
+
     let ipxe_definition_hash =
         if let Some(provided_hash) = req.ipxe_template_definition_hash.as_deref() {
             Some(provided_hash.to_owned())
         } else if let Some(tmpl) = effective_template {
-            let effective_params: Vec<rpc::IpxeTemplateParameter> = match req_params {
-                Some(p) => p.to_vec(),
-                None => params_from_json(existing.ipxe_parameters.as_ref().map(|j| &j.0)),
-            };
-            let effective_artifacts: Vec<rpc::IpxeTemplateArtifact> = match req_artifacts {
-                Some(a) => a.to_vec(),
-                None => artifacts_from_json(existing.ipxe_artifacts.as_ref().map(|j| &j.0)),
-            };
             Some(validate_template_requirements(
                 tmpl,
-                &effective_params,
-                &effective_artifacts,
+                effective_params,
+                effective_artifacts,
             )?)
         } else {
             None
@@ -411,33 +408,37 @@ pub(crate) async fn update_operating_system(
         None => None,
     };
 
-    let mut effective_artifacts_for_json = match req_artifacts {
-        Some(a) => {
-            // cached_url can only be set via UpdateOperatingSystemCachableIpxeTemplateArtifacts;
-            // strip it from regular update requests.
-            let mut v = a.to_vec();
-            for art in &mut v {
-                art.cached_url = None;
-            }
-            v
-        }
-        None => artifacts_from_json(existing.ipxe_artifacts.as_ref().map(|j| &j.0)),
-    };
-
-    if hash_changed {
-        for a in &mut effective_artifacts_for_json {
-            a.cached_url = None;
-        }
+    // Only UpdateOperatingSystemCachableIpxeTemplateArtifacts can supply cached_url.
+    let mut artifact_definitions = effective_artifacts.to_vec();
+    for artifact in &mut artifact_definitions {
+        artifact.cached_url = None;
+    }
+    let mut stored_definitions = stored_artifacts.clone();
+    for artifact in &mut stored_definitions {
+        artifact.cached_url = None;
     }
 
-    let ipxe_artifacts = if hash_changed || req_artifacts.is_some() {
-        Some(artifacts_to_json(&effective_artifacts_for_json))
+    // The hash excludes cache_strategy and callers may supply their own hash.
+    // Compare the actual definition before reusing the site's cached URLs.
+    let definition_changed = effective_template != existing.ipxe_template_id.as_deref()
+        || effective_params != stored_params
+        || artifact_definitions != stored_definitions;
+    let update_artifacts = hash_changed || definition_changed || req_artifacts.is_some();
+    // Repairing an old hash does not invalidate a cache for an unchanged definition.
+    let artifacts_to_store = if definition_changed {
+        artifact_definitions
+    } else {
+        stored_artifacts
+    };
+
+    let ipxe_artifacts = if update_artifacts {
+        Some(artifacts_to_json(&artifacts_to_store))
     } else {
         None
     };
 
-    let status = if hash_changed || req_artifacts.is_some() {
-        let needs_provisioning = effective_artifacts_for_json.iter().any(|a| {
+    let status = if update_artifacts {
+        let needs_provisioning = artifacts_to_store.iter().any(|a| {
             a.cache_strategy == rpc::IpxeTemplateArtifactCacheStrategy::CachedOnly as i32
                 && a.cached_url.as_deref().unwrap_or("").is_empty()
         });
