@@ -812,7 +812,13 @@ type ForgeClient interface {
 	// Power Control
 	InvokeInstancePower(ctx context.Context, in *InstancePowerRequest, opts ...grpc.CallOption) (*InstancePowerResult, error)
 	ForgeAgentControl(ctx context.Context, in *ForgeAgentControlRequest, opts ...grpc.CallOption) (*ForgeAgentControlResponse, error)
-	// PRIVILEGED: Creates a new machine from nothing
+	// PRIVILEGED: Creates a new machine from nothing.
+	// Loopback group admission can return FailedPrecondition when the group
+	// changed or is busy. A lock-unavailable database error during loopback
+	// attachment, or a rejected selected-host row/history check, returns
+	// Unavailable. These rejections roll back the complete entity transaction;
+	// retry discovery with a fresh request after contention clears. These checks
+	// do not bound earlier foreign-key waits or later attached-DPU state writes.
 	DiscoverMachine(ctx context.Context, in *MachineDiscoveryInfo, opts ...grpc.CallOption) (*MachineDiscoveryResult, error)
 	RenewMachineCertificate(ctx context.Context, in *MachineCertificateRenewRequest, opts ...grpc.CallOption) (*MachineCertificateResult, error)
 	DiscoveryCompleted(ctx context.Context, in *MachineDiscoveryCompletedRequest, opts ...grpc.CallOption) (*MachineDiscoveryCompletedResponse, error)
@@ -967,7 +973,16 @@ type ForgeClient interface {
 	AdminListResourcePools(ctx context.Context, in *ListResourcePoolsRequest, opts ...grpc.CallOption) (*ResourcePools, error)
 	// Inspects local and remote pools without treating unknown capacity as zero.
 	AdminInspectResourcePools(ctx context.Context, in *InspectResourcePoolsRequest, opts ...grpc.CallOption) (*InspectResourcePoolsResponse, error)
-	// Add capacity to a resource pool
+	// Add capacity to a resource pool.
+	// Adding IPv6 loopback capacity commits the pool before DPU backfill.
+	// Backfill makes up to three fresh attempts per DPU. If the reported failure
+	// is lock contention, the call returns Unavailable. Exhausted capacity returns
+	// ResourceExhausted; exhausted version conflicts or a vanished pool return
+	// FailedPrecondition; other database failures return Internal. Earlier DPU
+	// updates and pool growth remain committed after any backfill failure. The
+	// first DPU that exhausts its attempts supplies its last error, unless another
+	// non-retryable error ends the pass. Inspect current capacity and missing
+	// loopbacks before retrying the same growth request.
 	AdminGrowResourcePool(ctx context.Context, in *GrowResourcePoolRequest, opts ...grpc.CallOption) (*GrowResourcePoolResponse, error)
 	// Update the Metadata of a Machine
 	UpdateMachineMetadata(ctx context.Context, in *MachineMetadataUpdateRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
@@ -7646,7 +7661,13 @@ type ForgeServer interface {
 	// Power Control
 	InvokeInstancePower(context.Context, *InstancePowerRequest) (*InstancePowerResult, error)
 	ForgeAgentControl(context.Context, *ForgeAgentControlRequest) (*ForgeAgentControlResponse, error)
-	// PRIVILEGED: Creates a new machine from nothing
+	// PRIVILEGED: Creates a new machine from nothing.
+	// Loopback group admission can return FailedPrecondition when the group
+	// changed or is busy. A lock-unavailable database error during loopback
+	// attachment, or a rejected selected-host row/history check, returns
+	// Unavailable. These rejections roll back the complete entity transaction;
+	// retry discovery with a fresh request after contention clears. These checks
+	// do not bound earlier foreign-key waits or later attached-DPU state writes.
 	DiscoverMachine(context.Context, *MachineDiscoveryInfo) (*MachineDiscoveryResult, error)
 	RenewMachineCertificate(context.Context, *MachineCertificateRenewRequest) (*MachineCertificateResult, error)
 	DiscoveryCompleted(context.Context, *MachineDiscoveryCompletedRequest) (*MachineDiscoveryCompletedResponse, error)
@@ -7801,7 +7822,16 @@ type ForgeServer interface {
 	AdminListResourcePools(context.Context, *ListResourcePoolsRequest) (*ResourcePools, error)
 	// Inspects local and remote pools without treating unknown capacity as zero.
 	AdminInspectResourcePools(context.Context, *InspectResourcePoolsRequest) (*InspectResourcePoolsResponse, error)
-	// Add capacity to a resource pool
+	// Add capacity to a resource pool.
+	// Adding IPv6 loopback capacity commits the pool before DPU backfill.
+	// Backfill makes up to three fresh attempts per DPU. If the reported failure
+	// is lock contention, the call returns Unavailable. Exhausted capacity returns
+	// ResourceExhausted; exhausted version conflicts or a vanished pool return
+	// FailedPrecondition; other database failures return Internal. Earlier DPU
+	// updates and pool growth remain committed after any backfill failure. The
+	// first DPU that exhausts its attempts supplies its last error, unless another
+	// non-retryable error ends the pass. Inspect current capacity and missing
+	// loopbacks before retrying the same growth request.
 	AdminGrowResourcePool(context.Context, *GrowResourcePoolRequest) (*GrowResourcePoolResponse, error)
 	// Update the Metadata of a Machine
 	UpdateMachineMetadata(context.Context, *MachineMetadataUpdateRequest) (*emptypb.Empty, error)
