@@ -1210,10 +1210,12 @@ prefix. Multiple containing roots are permitted because direct prefixes have no
 exact SitePrefix parent. `Underlay` and `HostInband` paths retain their distinct
 infrastructure admission rules.
 
-A prefix admitted by a replica's configured range but not covered by a
-persisted operator root is rejected with `FailedPrecondition`; stale configuration
-cannot reopen retired space. This also applies to newly configured roots before
-authoritative Core has persisted them. Reconcile added roots on authoritative
+On replicas with nonempty `site_fabric_prefixes`, a VpcPrefix request omitting
+`site_prefix_id` or a direct `Tenant` prefix inside the configured range returns
+`FailedPrecondition` if no persisted operator root covers it. Explicit VpcPrefix
+attachments follow the parent checks described above. This prevents stale
+configuration from reopening retired space and also applies to newly configured
+roots before authoritative Core has persisted them. Reconcile added roots on authoritative
 Core before serving requests that use them on other replicas, including listen-only
 replicas.
 
@@ -1244,8 +1246,9 @@ Including a root in this field alone does not prove isolation on an older agent.
 
 FNN uses the separate `site_fabric_null_routes` response field. When the setting
 is omitted, Core includes configured roots, every retained tenant root, and
-retiring operator roots while their VpcPrefixes or VPC-attached direct
-NetworkPrefixes remain. Soft deletion does not end operator-root retention.
+retiring operator roots retained by exact VpcPrefix references, contained
+VpcPrefixes without parentage, or contained VPC-attached direct NetworkPrefixes.
+Soft deletion does not end operator-root retention.
 These routes are reduced to their minimal exact union and sorted by CIDR string.
 The anonymous `Version` RPC keeps its existing operator-route output: configured
 and retained operator roots, without tenant-managed SitePrefixes. Its
