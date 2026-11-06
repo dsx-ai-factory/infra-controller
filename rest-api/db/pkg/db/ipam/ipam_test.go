@@ -634,17 +634,31 @@ func TestLockAndValidateParentIPBlockForAllocation(t *testing.T) {
 	site := testIpamBuildSite(t, dbSession, ip, "lock-parent-ip-block")
 	tests := []struct {
 		name          string
+		linked        bool
 		storedStatus  string
 		callerStatus  string
 		expectedError bool
 	}{
 		{
+			linked:       true,
 			name:         "refreshes a stale caller from the locked Ready row",
 			storedStatus: cdbm.IPBlockStatusReady,
 			callerStatus: cdbm.IPBlockStatusDeleting,
 		},
 		{
+			linked:        true,
 			name:          "rejects the current locked Deleting row",
+			storedStatus:  cdbm.IPBlockStatusDeleting,
+			callerStatus:  cdbm.IPBlockStatusReady,
+			expectedError: true,
+		},
+		{
+			name:         "allows an unlinked Ready provider root",
+			storedStatus: cdbm.IPBlockStatusReady,
+			callerStatus: cdbm.IPBlockStatusReady,
+		},
+		{
+			name:          "rejects an unlinked Deleting provider root despite stale Ready caller",
 			storedStatus:  cdbm.IPBlockStatusDeleting,
 			callerStatus:  cdbm.IPBlockStatusReady,
 			expectedError: true,
@@ -653,13 +667,16 @@ func TestLockAndValidateParentIPBlockForAllocation(t *testing.T) {
 
 	for index, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			linkedID := uuid.New()
+			var linkedID *uuid.UUID
+			if tc.linked {
+				linkedID = cutil.GetPtr(uuid.New())
+			}
 			linked := testIpamBuildIPBlock(t, dbSession, &cdbm.IPBlock{
 				ID:                       uuid.New(),
 				Name:                     fmt.Sprintf("linked-site-fabric-parent-%d", index),
 				InfrastructureProviderID: ip.ID,
 				SiteID:                   site.ID,
-				SitePrefixID:             &linkedID,
+				SitePrefixID:             linkedID,
 				RoutingType:              cdbm.IPBlockRoutingTypeDatacenterOnly,
 				Prefix:                   fmt.Sprintf("192.172.%d.0", index),
 				PrefixLength:             24,
@@ -676,7 +693,11 @@ func TestLockAndValidateParentIPBlockForAllocation(t *testing.T) {
 			}()
 			err = LockAndValidateParentIPBlockForAllocation(ctx, tx, dbSession, &stale)
 			if tc.expectedError {
-				assert.EqualError(t, err, fmt.Sprintf("parent IP Block %s linked to an OperatorManaged SitePrefix is not Ready", linked.ID))
+				message := fmt.Sprintf("parent IP Block %s is not Ready", linked.ID)
+				if tc.linked {
+					message = fmt.Sprintf("parent IP Block %s linked to an OperatorManaged SitePrefix is not Ready", linked.ID)
+				}
+				assert.EqualError(t, err, message)
 			} else {
 				require.NoError(t, err)
 			}

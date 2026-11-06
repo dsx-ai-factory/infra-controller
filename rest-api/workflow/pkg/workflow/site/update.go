@@ -19,9 +19,11 @@ import (
 	cwm "github.com/NVIDIA/infra-controller/rest-api/workflow/internal/metrics"
 )
 
+const retireSiteFabricImporterChangeID = "retire-site-fabric-prefix-importer"
+
 // UpdateSiteConfigInventory applies Site metadata and runtime configuration
 // reported by the Site Agent. It stores the Core build version and advertised
-// VPC SLAAC capability, then creates IP Blocks for Site fabric prefixes.
+// VPC SLAAC capability. SitePrefix inventory owns IP Block reconciliation.
 //
 // Site Agents now publish UpdateSiteConfigInventoryV2. This stays registered for the rollout
 // window, where Cloud upgrades ahead of the Site Agents still publishing V1.
@@ -49,31 +51,33 @@ func UpdateSiteConfigInventory(ctx workflow.Context, siteIDStr string, coreBuild
 		logger.Warn().Err(siteUpdateErr).Msg("failed to execute UpdateSiteInDB activity")
 	}
 
-	siteFabricPrefixes := coreBuildInfo.GetRuntimeConfig().GetSiteFabricPrefixes()
-	ipBlockUpdateErr := workflow.ExecuteActivity(ctx, manageSite.UpdateIPBlocksInDBFromFabricPrefixes, siteID, siteFabricPrefixes).Get(ctx, nil)
-	if ipBlockUpdateErr != nil {
-		logger.Warn().Err(ipBlockUpdateErr).Msg("failed to execute UpdateIPBlocksInDBFromFabricPrefixes activity")
-	}
-
-	inventoryErr := siteUpdateErr
-	if inventoryErr == nil {
-		inventoryErr = ipBlockUpdateErr
-	} else if ipBlockUpdateErr != nil {
-		inventoryErr = errors.Join(siteUpdateErr, ipBlockUpdateErr)
+	// New workflows use SitePrefix inventory. Preserve the importer command only
+	// when replaying histories that scheduled it before retirement.
+	if workflow.GetVersion(ctx, retireSiteFabricImporterChangeID, workflow.DefaultVersion, 1) == workflow.DefaultVersion {
+		importerErr := workflow.ExecuteActivity(ctx, manageSite.UpdateIPBlocksInDBFromFabricPrefixes,
+			siteID, coreBuildInfo.GetRuntimeConfig().GetSiteFabricPrefixes()).Get(ctx, nil)
+		if importerErr != nil {
+			logger.Warn().Err(importerErr).Msg("failed to replay legacy IP Block importer")
+			if siteUpdateErr == nil {
+				siteUpdateErr = importerErr
+			} else {
+				siteUpdateErr = errors.Join(siteUpdateErr, importerErr)
+			}
+		}
 	}
 
 	// Record latency for this inventory call
 	var inventoryMetricsManager cwm.ManageInventoryMetrics
 
-	serr := workflow.ExecuteActivity(ctx, inventoryMetricsManager.RecordLatency, siteID, "UpdateSiteConfigInventory", inventoryErr != nil, workflow.Now(ctx).Sub(startTime)).Get(ctx, nil)
+	serr := workflow.ExecuteActivity(ctx, inventoryMetricsManager.RecordLatency, siteID, "UpdateSiteConfigInventory", siteUpdateErr != nil, workflow.Now(ctx).Sub(startTime)).Get(ctx, nil)
 	if serr != nil {
 		logger.Warn().Err(serr).Msg("failed to execute activity: RecordLatency")
 	}
 
 	logger.Info().Msg("completing workflow")
 
-	// Return every inventory update error after both updates have been attempted.
-	return inventoryErr
+	// Propagate the Site update error after recording latency.
+	return siteUpdateErr
 }
 
 // UpdateSiteConfigInventoryV2 applies the Site configuration snapshot reported by the Site
@@ -106,29 +110,31 @@ func UpdateSiteConfigInventoryV2(ctx workflow.Context, siteIDStr string, invento
 		logger.Warn().Err(siteUpdateErr).Msg("failed to execute UpdateSiteInDB activity")
 	}
 
-	siteFabricPrefixes := coreBuildInfo.GetRuntimeConfig().GetSiteFabricPrefixes()
-	ipBlockUpdateErr := workflow.ExecuteActivity(ctx, manageSite.UpdateIPBlocksInDBFromFabricPrefixes, siteID, siteFabricPrefixes).Get(ctx, nil)
-	if ipBlockUpdateErr != nil {
-		logger.Warn().Err(ipBlockUpdateErr).Msg("failed to execute UpdateIPBlocksInDBFromFabricPrefixes activity")
-	}
-
-	inventoryErr := siteUpdateErr
-	if inventoryErr == nil {
-		inventoryErr = ipBlockUpdateErr
-	} else if ipBlockUpdateErr != nil {
-		inventoryErr = errors.Join(siteUpdateErr, ipBlockUpdateErr)
+	// New workflows use SitePrefix inventory. Preserve the importer command only
+	// when replaying histories that scheduled it before retirement.
+	if workflow.GetVersion(ctx, retireSiteFabricImporterChangeID, workflow.DefaultVersion, 1) == workflow.DefaultVersion {
+		importerErr := workflow.ExecuteActivity(ctx, manageSite.UpdateIPBlocksInDBFromFabricPrefixes,
+			siteID, coreBuildInfo.GetRuntimeConfig().GetSiteFabricPrefixes()).Get(ctx, nil)
+		if importerErr != nil {
+			logger.Warn().Err(importerErr).Msg("failed to replay legacy IP Block importer")
+			if siteUpdateErr == nil {
+				siteUpdateErr = importerErr
+			} else {
+				siteUpdateErr = errors.Join(siteUpdateErr, importerErr)
+			}
+		}
 	}
 
 	// Record latency under the V1 name so the series stays continuous as Sites move over.
 	var inventoryMetricsManager cwm.ManageInventoryMetrics
 
-	serr := workflow.ExecuteActivity(ctx, inventoryMetricsManager.RecordLatency, siteID, "UpdateSiteConfigInventory", inventoryErr != nil, workflow.Now(ctx).Sub(startTime)).Get(ctx, nil)
+	serr := workflow.ExecuteActivity(ctx, inventoryMetricsManager.RecordLatency, siteID, "UpdateSiteConfigInventory", siteUpdateErr != nil, workflow.Now(ctx).Sub(startTime)).Get(ctx, nil)
 	if serr != nil {
 		logger.Warn().Err(serr).Msg("failed to execute activity: RecordLatency")
 	}
 
 	logger.Info().Msg("completing workflow")
 
-	// Return every inventory update error after both updates have been attempted.
-	return inventoryErr
+	// Propagate the Site update error after recording latency.
+	return siteUpdateErr
 }

@@ -132,8 +132,8 @@ func (cipbh CreateIPBlockHandler) Handle(c echo.Context) error {
 	var ipb *cdbm.IPBlock
 	var ssd *cdbm.StatusDetail
 	err = cdb.WithTx(ctx, cipbh.dbSession, func(tx *cdb.Tx) error {
-		// Site Config prefix import and IP Block creation share this lock;
-		// SitePrefix inventory reconciliation will use it too. Every routing
+		// SitePrefix inventory, legacy Site Config import, and IP Block creation
+		// share this lock. Every routing
 		// type takes it, since the overlap check below spans routing types. Run
 		// uniqueness checks after successful acquisition so a retried loser sees
 		// the root that committed first.
