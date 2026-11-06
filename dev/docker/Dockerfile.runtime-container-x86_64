@@ -18,6 +18,11 @@ FROM debian:12-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990
 
 ARG KEA_VERSION
 
+COPY dev/docker/setup-kea-repository.sh dev/docker/isc-kea-3-0.asc dev/docker/configure-kea-runtime.sh /tmp/kea-repository/
+RUN sh /tmp/kea-repository/setup-kea-repository.sh
+
+ENV KEA_HOOKS_PATH=/usr/lib/kea/hooks
+
 # Set in gitlab-templates/scripts/build-push-container-image.sh
 ARG CI_COMMIT_SHORT_SHA
 ENV CI_COMMIT_SHORT_SHA $CI_COMMIT_SHORT_SHA
@@ -53,9 +58,11 @@ RUN CACHEKEY=${CI_COMMIT_SHORT_SHA} apt-get update && \
 		ipmitool \
 		iproute2 \
 		iputils-ping \
-		kea-dhcp4-server=${KEA_VERSION} \
-		kea-dhcp6-server=${KEA_VERSION} \
-		kea-ctrl-agent=${KEA_VERSION} \
+		isc-kea-common=${KEA_VERSION} \
+		isc-kea-hooks=${KEA_VERSION} \
+		isc-kea-dhcp4=${KEA_VERSION} \
+		isc-kea-dhcp6=${KEA_VERSION} \
+		isc-kea-ctrl-agent=${KEA_VERSION} \
 		libaio1 \
 		libc-ares2 \
 		libgrpc++1.51 \
@@ -72,5 +79,7 @@ RUN CACHEKEY=${CI_COMMIT_SHORT_SHA} apt-get update && \
 		zlib1g && \
 	rm -rf /var/lib/apt/lists/*
 
-RUN test "$(dpkg-query -W -f='${Version}' kea-dhcp6-server)" = "${KEA_VERSION}" && \
+RUN sh /tmp/kea-repository/configure-kea-runtime.sh && rm -rf /tmp/kea-repository
+
+RUN test "$(dpkg-query -W -f='${Version}' isc-kea-dhcp6)" = "${KEA_VERSION}" && \
 	kea-dhcp6 -V

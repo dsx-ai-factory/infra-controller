@@ -33,6 +33,8 @@ data:
           "name": "/var/lib/kea/kea-leases6.csv",
           "lfc-interval": 3600
         },
+        "cache-threshold": 0.0,
+        "multi-threading": { "enable-multi-threading": false },
         "preferred-lifetime": 3600,
         "valid-lifetime": 7200,
         "renew-timer": 1800,
@@ -53,6 +55,7 @@ data:
         ],
         "subnet6": [
           {
+            "id": 1,
             "subnet": "::/0",
             "rapid-commit": true,
             "pools": [{"pool": "::1-ffff:ffff:ffff:ffff:ffff:ffff:ffff:fffe"}]
