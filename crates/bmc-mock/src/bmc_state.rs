@@ -171,7 +171,7 @@ impl<C: Callbacks> BmcState<C> {
     /// way HPE iLO's Integrated Event Log does. Backends call this once the
     /// command has taken effect, not when the Redfish request is accepted;
     /// a failed command is never logged. BMCs without such a log ignore it.
-    pub(crate) fn record_power_command_completed(&self, reset_type: crate::ResourceResetType) {
+    pub fn record_power_command_completed(&self, reset_type: crate::ResourceResetType) {
         let Some(system) = self.system_state.primary_system_odata_id() else {
             return;
         };
