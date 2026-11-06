@@ -1789,7 +1789,7 @@ func (e *managerExecutor) Execute(
 func (e *managerExecutor) CheckStatus(
 	context.Context,
 	string,
-) (taskcommon.TaskStatus, error) {
+) (*taskdef.ExecutionStatus, error) {
 	panic("managerExecutor.CheckStatus: not implemented")
 }
 
@@ -1812,4 +1812,11 @@ func (e *managerExecutor) TerminateTask(
 // ListTaskContextForRack fails unexpected context reads in task-manager tests.
 func (s *managerTaskStore) ListTaskContextForRack(_ context.Context, _ uuid.UUID) ([]taskdef.TaskContextMetadata, error) {
 	panic("unexpected task context read")
+}
+
+func (s *managerTaskStore) ListTasksForReconciliation(context.Context, taskcommon.ExecutorType, uuid.UUID, int) ([]*taskdef.Task, error) {
+	panic("unexpected ListTasksForReconciliation")
+}
+func (s *managerTaskStore) FinishTaskExecution(context.Context, *taskdef.Task, *taskdef.ExecutionStatus) (bool, error) {
+	panic("unexpected FinishTaskExecution")
 }

@@ -186,3 +186,10 @@ func (m *mockStore) ListRackRuleAssociations(_ context.Context, _ uuid.UUID) ([]
 func (m *mockStore) ListTaskContextForRack(_ context.Context, _ uuid.UUID) ([]taskdef.TaskContextMetadata, error) {
 	panic("unexpected task context read")
 }
+
+func (s *mockStore) ListTasksForReconciliation(context.Context, taskcommon.ExecutorType, uuid.UUID, int) ([]*taskdef.Task, error) {
+	panic("unexpected ListTasksForReconciliation")
+}
+func (s *mockStore) FinishTaskExecution(context.Context, *taskdef.Task, *taskdef.ExecutionStatus) (bool, error) {
+	panic("unexpected FinishTaskExecution")
+}
