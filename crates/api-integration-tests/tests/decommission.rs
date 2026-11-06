@@ -499,6 +499,7 @@ fn mat_config(api_url: &str) -> eyre::Result<MachineATronConfig> {
             power_off_force = "100ms"
             reboot = "1s"
             bmc_reset = "100ms"
+            firmware_upgrade = "100ms"
             "#,
         ))?;
         machine.hw_type = hw_type;
@@ -535,7 +536,7 @@ impl View {
             .clone()
             .find_machines_by_ids(forge::MachinesByIdsRequest {
                 machine_ids: ids,
-                include_history: true,
+                include_history: false,
             }))
         .await?
         .machines;
@@ -601,18 +602,28 @@ impl View {
     }
 }
 
+#[derive(Debug)]
+enum ViewTarget {
+    /// Return the first Ready cohort with a finalized, verified boot fingerprint.
+    Ready,
+    /// Also hold that fingerprint across multiple controller periods.
+    StableReady,
+    /// Wait for the host, switch and shelf to reach their terminal decommission states.
+    Decommissioned,
+}
+
 async fn wait_for_view(
     env: &IntegrationTestEnvironment,
     client: &ForgeClientT,
     host: &DeviceHandle,
-    decommissioned: bool,
+    target: ViewTarget,
 ) -> eyre::Result<View> {
     let deadline = Instant::now() + CONVERGENCE_TIMEOUT;
     let mut last = Value::Null;
     let mut stable_ready: Option<(Value, Instant)> = None;
     loop {
         if let Some(view) = View::read(env, client, host).await? {
-            if decommissioned {
+            if matches!(target, ViewTarget::Decommissioned) {
                 if view.decommissioned(host.observed_machine_id().context("no host id")?)? {
                     return Ok(view);
                 }
@@ -621,6 +632,11 @@ async fn wait_for_view(
                 let (converged, fingerprint) = ready_fingerprint(client, host, &view).await?;
                 last = fingerprint.clone();
                 if converged {
+                    if matches!(target, ViewTarget::Ready) {
+                        return Ok(view);
+                    }
+                    // Hold all five state versions and the boot fingerprint
+                    // across multiple configured 100 ms controller periods.
                     match &stable_ready {
                         Some((previous, since)) if *previous == fingerprint => {
                             if since.elapsed() >= READY_STABILITY_WINDOW {
@@ -638,15 +654,15 @@ async fn wait_for_view(
         }
         eyre::ensure!(
             Instant::now() < deadline,
-            "timed out waiting for decommissioned={decommissioned}; last states: {last}"
+            "timed out waiting for {target:?}; last states: {last}"
         );
         sleep(Duration::from_millis(200)).await;
     }
 }
 
 /// A provisional chassis/serial pick can be replaced by the first Scout PCI report
-/// even after Ready. Wait for its final source and verified generation, then hold
-/// all five state versions across multiple configured 100 ms controller periods.
+/// even after Ready. Check its final source and verified generation, and capture
+/// the boot selection and all five state versions for optional stability polling.
 async fn ready_fingerprint(
     client: &ForgeClientT,
     host: &DeviceHandle,
@@ -966,6 +982,7 @@ async fn bmc_interface_generations(
 
 /// Prepare can delete Ready rows without resetting the hardware. Only periodic
 /// BMC DHCP can recreate these interfaces: the actors and their BMCs stay alive.
+/// Return the rebuilt cohort's stable Ready view for the next admission baseline.
 async fn ready_force_delete_rebuild(
     env: &IntegrationTestEnvironment,
     client: &ForgeClientT,
@@ -974,9 +991,9 @@ async fn ready_force_delete_rebuild(
     bmc_addr: SocketAddr,
     credentials: &dyn CredentialReader,
     evidence: &Path,
-) -> eyre::Result<()> {
+) -> eyre::Result<View> {
     let host = &handles["host"];
-    let ready = wait_for_view(env, client, host, false).await?;
+    let ready = wait_for_view(env, client, host, ViewTarget::StableReady).await?;
     let (_, before_ready) = ready_fingerprint(client, host, &ready).await?;
     let host_id = host.observed_machine_id().context("ready host has no id")?;
     let dpu_ids: BTreeSet<_> = host
@@ -1042,6 +1059,8 @@ async fn ready_force_delete_rebuild(
                 delete_retained_boot_interfaces: true,
                 release_preserved_addresses: false,
                 allow_delete_with_orphaned_dpf_crds: false,
+                allow_delete_with_instance_type: false,
+                allow_delete_with_instance: false,
                 wait_for_instance_dpu: false,
             }))
         .await?;
@@ -1079,7 +1098,7 @@ async fn ready_force_delete_rebuild(
         old_interfaces, 0,
         "Ready force-delete retained old BMC interfaces"
     );
-    let rebuilt = wait_for_view(env, client, host, false).await?;
+    let rebuilt = wait_for_view(env, client, host, ViewTarget::StableReady).await?;
     let (_, after_ready) = ready_fingerprint(client, host, &rebuilt).await?;
     assert_eq!(core_identity(env, &rebuilt, handles).await?, core_before);
     let after_generations = generations(env).await?;
@@ -1155,7 +1174,7 @@ async fn ready_force_delete_rebuild(
             "aux_generations": before_aux,
         }))?,
     )?;
-    Ok(())
+    Ok(rebuilt)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1180,13 +1199,13 @@ async fn cycles(
         .timeout(RPC_TIMEOUT)
         .build()?;
     let credentials = create_credential_manager(&env.credential_config).await?;
-    wait_for_view(env, client, host, false).await?;
+    wait_for_view(env, client, host, ViewTarget::Ready).await?;
     let initial_fabric = configure_fabric(env, client).await?;
     std::fs::write(
         evidence.join("initial-fabric-maintenance.json"),
         serde_json::to_vec_pretty(&initial_fabric)?,
     )?;
-    ready_force_delete_rebuild(
+    let mut ready = ready_force_delete_rebuild(
         env,
         client,
         handles,
@@ -1196,7 +1215,6 @@ async fn cycles(
         evidence,
     )
     .await?;
-    let mut ready = wait_for_view(env, client, host, false).await?;
     let mut previous_generations = generations(env).await?;
     assert_eq!(previous_generations.len(), 5);
     let rms_client_config = librms::client_config::RmsClientConfig::new(None, None, None, false);
@@ -1352,7 +1370,7 @@ async fn cycles(
         let ((boot_pre_ingestion, os_pre_ingestion), aux_power, terminal, ()) = tokio::try_join!(
             observe_pre_ingestion_boots(&http, bmc_addr, host, credentials.as_ref(), &os_before),
             observe_aux_power_cycle(client, host, bmc_addr.port(), &aux_before),
-            wait_for_view(env, client, host, true),
+            wait_for_view(env, client, host, ViewTarget::Decommissioned),
             async {
                 rpc(client.clone().decommission_managed_host(
                     forge::DecommissionManagedHostRequest {
@@ -1729,6 +1747,8 @@ async fn cycles(
                     delete_retained_boot_interfaces: true,
                     release_preserved_addresses: false,
                     allow_delete_with_orphaned_dpf_crds: false,
+                    allow_delete_with_instance_type: false,
+                    allow_delete_with_instance: false,
                     wait_for_instance_dpu: false,
                 }))
             .await?;
@@ -1801,9 +1821,9 @@ async fn cycles(
             }
             txn.commit().await?;
         }
-        wait_for_view(env, client, host, false).await?;
+        wait_for_view(env, client, host, ViewTarget::Ready).await?;
         let fabric_maintenance = configure_fabric(env, client).await?;
-        ready = wait_for_view(env, client, host, false).await?;
+        ready = wait_for_view(env, client, host, ViewTarget::StableReady).await?;
         let new_ip = host.bmc_ip().context("rebuilt host has no BMC IP")?;
         if cycle == 2 {
             assert_ne!(new_ip, old_ip, "Core reused the occupied BMC address");

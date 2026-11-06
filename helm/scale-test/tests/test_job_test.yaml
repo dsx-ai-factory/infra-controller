@@ -1,0 +1,680 @@
+suite: scale-test acceptance Jobs
+templates:
+  - test-job.yaml
+release:
+  name: run
+  namespace: scale-ns
+set:
+  image:
+    repository: registry.example/scale-test-acceptance
+    digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
+tests:
+  - it: renders only the cluster suite that is enabled by default
+    asserts:
+      - hasDocuments:
+          count: 1
+      - isKind:
+          of: Job
+      - equal:
+          path: metadata.name
+          value: run-scale-test-cluster
+      - equal:
+          path: metadata.annotations["helm.sh/hook"]
+          value: test
+      - equal:
+          path: metadata.annotations["helm.sh/hook-weight"]
+          value: "1"
+      - equal:
+          path: metadata.annotations["helm.sh/hook-delete-policy"]
+          value: before-hook-creation
+      - equal:
+          path: spec.backoffLimit
+          value: 0
+      - equal:
+          path: spec.activeDeadlineSeconds
+          value: 600
+      - equal:
+          path: spec.template.spec.restartPolicy
+          value: Never
+      - equal:
+          path: spec.template.spec.serviceAccountName
+          value: run-scale-test
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: registry.example/scale-test-acceptance@sha256:0000000000000000000000000000000000000000000000000000000000000000
+      - equal:
+          path: spec.template.spec.containers[0].command
+          value: ["/tests/cluster.test"]
+      # The amd64-only image pins the Jobs to amd64 nodes.
+      - equal:
+          path: spec.template.spec.nodeSelector["kubernetes.io/arch"]
+          value: amd64
+      # The run pattern is anchored to the exact fixture, so a partial match cannot run the wrong test or none.
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: "-test.run=^TestAgainstARealCluster$"
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: "-test.timeout=480s"
+      - equal:
+          path: spec.template.spec.securityContext.runAsNonRoot
+          value: true
+      - equal:
+          path: spec.template.spec.securityContext.seccompProfile.type
+          value: RuntimeDefault
+      - equal:
+          path: spec.template.spec.containers[0].securityContext.readOnlyRootFilesystem
+          value: true
+      - equal:
+          path: spec.template.spec.containers[0].securityContext.allowPrivilegeEscalation
+          value: false
+      - contains:
+          path: spec.template.spec.containers[0].securityContext.capabilities.drop
+          content: ALL
+      - equal:
+          path: spec.template.spec.containers[0].env[0].valueFrom.fieldRef.fieldPath
+          value: metadata.namespace
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: SCALE_TEST_PROBE_URL
+          any: true
+
+  - it: gives the probe suite its URL and leaves the cluster suite without it
+    set:
+      suites.probe.enabled: true
+      probeUrl: http://probe.scale-ns.svc:8080
+    asserts:
+      - hasDocuments:
+          count: 2
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: SCALE_TEST_PROBE_URL
+          any: true
+        documentIndex: 0
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: "-test.run=^TestAgainstARealProbe$"
+        documentIndex: 1
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: SCALE_TEST_PROBE_URL
+            value: http://probe.scale-ns.svc:8080
+          any: true
+        documentIndex: 1
+
+  - it: keeps each suite's Job name distinct at the maximum release length
+    release:
+      name: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    set:
+      suites.probe.enabled: true
+    asserts:
+      - hasDocuments:
+          count: 2
+      - matchRegex:
+          path: metadata.name
+          pattern: ^.{1,63}$
+      - matchRegex:
+          path: metadata.name
+          pattern: -cluster$
+        documentIndex: 0
+      - matchRegex:
+          path: metadata.name
+          pattern: -probe$
+        documentIndex: 1
+
+  - it: accepts positive custom budgets and renders the timeout as a duration
+    set:
+      testBudget:
+        activeDeadlineSeconds: 1200
+        testTimeoutSeconds: 900
+    asserts:
+      - equal:
+          path: spec.activeDeadlineSeconds
+          value: 1200
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: "-test.timeout=900s"
+
+  - it: fails when no suite is enabled
+    set:
+      suites.cluster.enabled: false
+      suites.probe.enabled: false
+      suites.lock.enabled: false
+    asserts:
+      - failedTemplate:
+          errorMessage: at least one suite must be enabled under suites.<name>.enabled (or journal.enabled)
+
+  - it: renders the lock suite with its own binary, anchored tests and namespace
+    set:
+      suites.cluster.enabled: false
+      suites.lock.enabled: true
+    asserts:
+      - hasDocuments:
+          count: 1
+      - equal:
+          path: metadata.name
+          value: run-scale-test-lock
+      - equal:
+          path: spec.template.spec.containers[0].command
+          value: ["/tests/lock.test"]
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: "-test.run=^(TestEnvLock|TestEnvCleanupIsBounded)$"
+      - equal:
+          path: spec.template.spec.containers[0].env[0].valueFrom.fieldRef.fieldPath
+          value: metadata.namespace
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: SCALE_TEST_PROBE_URL
+          any: true
+
+  - it: fails when an unknown suite is enabled
+    set:
+      suites.bogus.enabled: true
+    asserts:
+      - failedTemplate:
+          errorMessage: unknown suite "bogus"; the known suites are cluster, probe, inventory, history, lock, store, store-transition and result
+
+  - it: points suites.journal at journal.enabled instead of rejecting it as unknown
+    set:
+      suites.journal.enabled: true
+    asserts:
+      - failedTemplate:
+          errorMessage: enable the journal proof with journal.enabled=true, not suites.journal.enabled
+
+  - it: renders the history suite with a ConfigMap capture mount and provenance
+    set:
+      suites.cluster.enabled: false
+      suites.history.enabled: true
+      historyCapture.configMap: run-capture
+      historyCapture.producerImage: registry.example/site-health-probe:v1
+      historyCapture.producerRevision: abc123
+    asserts:
+      - hasDocuments:
+          count: 1
+      - equal:
+          path: metadata.name
+          value: run-scale-test-history
+      - equal:
+          path: spec.template.spec.containers[0].command
+          value: ["/tests/history.test"]
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: "-test.run=^TestAcceptanceReplaysARealProbeCapture$"
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: SCALE_TEST_HISTORY_CAPTURE
+            value: /capture/capture.json
+          any: true
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: SCALE_TEST_CAPTURE_PROBE_IMAGE
+            value: registry.example/site-health-probe:v1
+          any: true
+      - contains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content:
+            name: capture
+            mountPath: /capture
+            readOnly: true
+          any: true
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: capture
+            configMap:
+              name: run-capture
+          any: true
+
+  - it: renders the history suite with an existing-claim capture at its subPath
+    set:
+      suites.cluster.enabled: false
+      suites.history.enabled: true
+      historyCapture.existingClaim: run-capture-pvc
+      historyCapture.subPath: run/capture.json
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: SCALE_TEST_HISTORY_CAPTURE
+            value: /capture/run/capture.json
+          any: true
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: capture
+            persistentVolumeClaim:
+              claimName: run-capture-pvc
+              readOnly: true
+          any: true
+
+  - it: fails when the history suite has no capture source
+    set:
+      suites.history.enabled: true
+    asserts:
+      - failedTemplate:
+          errorMessage: the history suite needs historyCapture.configMap or historyCapture.existingClaim
+
+  - it: fails when the history suite sets both capture sources
+    set:
+      suites.history.enabled: true
+      historyCapture.configMap: a
+      historyCapture.existingClaim: b
+    asserts:
+      - failedTemplate:
+          errorMessage: set only one of historyCapture.configMap or historyCapture.existingClaim
+
+  - it: renders the store suite with the store and probe URLs and a token mount
+    set:
+      suites.cluster.enabled: false
+      suites.store.enabled: true
+      probeUrl: http://probe.scale-test.svc:8080
+      store.url: http://prometheus.monitoring.svc:9090
+      store.ingestionDelaySeconds: 30
+      store.tokenSecret: store-bearer
+    asserts:
+      - equal:
+          path: metadata.name
+          value: run-scale-test-store
+      - equal:
+          path: spec.template.spec.containers[0].command
+          value: ["/tests/store.test"]
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: "-test.run=^TestAgainstARealStore$"
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: SCALE_TEST_STORE_URL
+            value: http://prometheus.monitoring.svc:9090
+          any: true
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: SCALE_TEST_PROBE_URL
+            value: http://probe.scale-test.svc:8080
+          any: true
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: SCALE_TEST_STORE_INGESTION_DELAY
+            value: "30"
+          any: true
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: SCALE_TEST_STORE_TOKEN_FILE
+            value: /var/run/secrets/store-token/token
+          any: true
+      - contains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content:
+            name: store-token
+            mountPath: /var/run/secrets/store-token
+            readOnly: true
+          any: true
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: store-token
+            secret:
+              secretName: store-bearer
+          any: true
+
+  - it: renders the store-transition suite with the capture window and a CA mount
+    set:
+      suites.cluster.enabled: false
+      suites.store-transition.enabled: true
+      probeUrl: http://probe.scale-test.svc:8080
+      store.url: http://prometheus.monitoring.svc:9090
+      store.caSecret: store-ca-bundle
+      store.transition:
+        start: "2026-11-04T00:00:00Z"
+        end: "2026-11-04T06:00:00Z"
+        n: "3"
+        targets: "100,200,300"
+        reached: "100,200,300"
+        minTimingErrorSeconds: "90"
+    asserts:
+      - equal:
+          path: metadata.name
+          value: run-scale-test-store-transition
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: "-test.run=^TestControlledTransition$"
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: SCALE_TEST_CAPTURE_START
+            value: "2026-11-04T00:00:00Z"
+          any: true
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: SCALE_TEST_STORE_CA_FILE
+            value: /var/run/secrets/store-ca/ca.crt
+          any: true
+      - contains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content:
+            name: store-ca
+            mountPath: /var/run/secrets/store-ca
+            readOnly: true
+          any: true
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: store-ca
+            secret:
+              secretName: store-ca-bundle
+          any: true
+      - notContains:  # this suite sets no delay, so none is emitted (any value fails)
+          path: spec.template.spec.containers[0].env
+          content:
+            name: SCALE_TEST_STORE_INGESTION_DELAY
+          any: true
+
+  - it: renders the result suite with its result directory and the run namespace
+    set:
+      suites.cluster.enabled: false
+      suites.result.enabled: true
+    asserts:
+      - hasDocuments:
+          count: 1
+      - equal:
+          path: metadata.name
+          value: run-scale-test-result
+      - equal:
+          path: spec.template.spec.containers[0].command
+          value: ["/tests/result.test"]
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: "-test.run=^TestEnvResult$"
+      - equal:
+          path: spec.template.spec.containers[0].env[0].valueFrom.fieldRef.fieldPath
+          value: metadata.namespace
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: SCALE_TEST_RESULT_DIR
+            value: /results
+          any: true
+      - contains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content:
+            name: results
+            mountPath: /results
+          any: true
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: results
+            emptyDir: {}
+          any: true
+
+  # Each rejection fails the whole render, so only the bad value is set; the
+  # leading-zero and overflow forms would pass a digit check fed to Sprig int.
+  - it: rejects a store ingestion delay over 60
+    set:
+      suites.store.enabled: true
+      store.ingestionDelaySeconds: 61
+    asserts:
+      - failedTemplate:
+          errorMessage: store.ingestionDelaySeconds must be a whole number of seconds from 0 to 60, got "61"
+
+  - it: rejects a negative store ingestion delay
+    set:
+      suites.store.enabled: true
+      store.ingestionDelaySeconds: -1
+    asserts:
+      - failedTemplate:
+          errorMessage: store.ingestionDelaySeconds must be a whole number of seconds from 0 to 60, got "-1"
+
+  - it: rejects a fractional store ingestion delay
+    set:
+      suites.store.enabled: true
+      store.ingestionDelaySeconds: 0.5
+    asserts:
+      - failedTemplate:
+          errorMessage: store.ingestionDelaySeconds must be a whole number of seconds from 0 to 60, got "0.5"
+
+  - it: rejects a leading-zero store ingestion delay
+    set:
+      suites.store.enabled: true
+      store.ingestionDelaySeconds: "08"
+    asserts:
+      - failedTemplate:
+          errorMessage: store.ingestionDelaySeconds must be a whole number of seconds from 0 to 60, got "08"
+
+  - it: rejects a store ingestion delay that overflows an integer
+    set:
+      suites.store.enabled: true
+      store.ingestionDelaySeconds: "9223372036854775808"
+    asserts:
+      - failedTemplate:
+          errorMessage: store.ingestionDelaySeconds must be a whole number of seconds from 0 to 60, got "9223372036854775808"
+
+  - it: fails when the image repository is missing
+    set:
+      image.repository: ""
+    asserts:
+      - failedTemplate:
+          errorMessage: image.repository is required
+
+  - it: fails when neither image digest nor tag is set
+    set:
+      image:
+        repository: registry.example/scale-test-acceptance
+        digest: ""
+        tag: ""
+    asserts:
+      - failedTemplate:
+          errorMessage: image.digest or image.tag is required
+
+  - it: fails when the Job deadline is null
+    set:
+      testBudget.activeDeadlineSeconds: null
+    asserts:
+      - failedTemplate:
+          errorMessage: testBudget.activeDeadlineSeconds must be a positive integer number of seconds (1 to 2147483647)
+
+  - it: fails when the Job deadline is zero or negative
+    set:
+      testBudget.activeDeadlineSeconds: -1
+    asserts:
+      - failedTemplate:
+          errorMessage: testBudget.activeDeadlineSeconds must be a positive integer number of seconds (1 to 2147483647)
+
+  - it: fails when the Job deadline is fractional
+    set:
+      testBudget.activeDeadlineSeconds: 10.5
+    asserts:
+      - failedTemplate:
+          errorMessage: testBudget.activeDeadlineSeconds must be a positive integer number of seconds (1 to 2147483647)
+
+  - it: fails when the Job deadline overflows
+    set:
+      testBudget.activeDeadlineSeconds: 9999999999
+    asserts:
+      - failedTemplate:
+          errorMessage: testBudget.activeDeadlineSeconds must be a positive integer number of seconds (1 to 2147483647)
+
+  - it: fails when the test timeout is zero
+    set:
+      testBudget.testTimeoutSeconds: 0
+    asserts:
+      - failedTemplate:
+          errorMessage: testBudget.testTimeoutSeconds must be a positive integer number of seconds (1 to 2147483647)
+
+  - it: fails when the test timeout is fractional
+    set:
+      testBudget.testTimeoutSeconds: 0.5
+    asserts:
+      - failedTemplate:
+          errorMessage: testBudget.testTimeoutSeconds must be a positive integer number of seconds (1 to 2147483647)
+
+  - it: fails when the test timeout overflows
+    set:
+      testBudget.testTimeoutSeconds: 9999999999
+    asserts:
+      - failedTemplate:
+          errorMessage: testBudget.testTimeoutSeconds must be a positive integer number of seconds (1 to 2147483647)
+
+  - it: fails when the test timeout is malformed
+    set:
+      testBudget.testTimeoutSeconds: "5s"
+    asserts:
+      - failedTemplate:
+          errorMessage: testBudget.testTimeoutSeconds must be a positive integer number of seconds (1 to 2147483647)
+
+  - it: renders the inventory suite with its target namespace, prechecks and cert mount
+    set:
+      suites.cluster.enabled: false
+      suites.inventory.enabled: true
+      inventory:
+        namespace: mat-ns
+        clientSecret: nico-cert
+        expected:
+          racks: 0
+          release: v2026.1
+    asserts:
+      - hasDocuments:
+          count: 1
+      - equal:
+          path: spec.template.spec.containers[0].command
+          value: ["/tests/inventory.test"]
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: "-test.run=^TestAcceptance$"
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: SCALE_TEST_NAMESPACE
+            value: mat-ns
+          any: true
+      - contains:  # explicit zero renders "0"; an omitted count renders "" (fails)
+          path: spec.template.spec.containers[0].env
+          content:
+            name: SCALE_TEST_EXPECTED_RACKS
+            value: "0"
+          any: true
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: SCALE_TEST_EXPECTED_HOSTS
+            value: ""
+          any: true
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: SCALE_TEST_EXPECTED_SWITCHES
+            value: ""
+          any: true
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: SCALE_TEST_EXPECTED_POWER_SHELVES
+            value: ""
+          any: true
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: SCALE_TEST_EXPECTED_DPUS
+            value: ""
+          any: true
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: SCALE_TEST_EXPECTED_MIN_SERVICES
+            value: ""
+          any: true
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: SCALE_TEST_RELEASE
+            value: v2026.1
+          any: true
+      - contains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content:
+            name: nico-client-cert
+            mountPath: /var/run/secrets/spiffe.io
+            readOnly: true
+          any: true
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: nico-client-cert
+            secret:
+              secretName: nico-cert
+          any: true
+
+  - it: defaults an omitted racks count to empty, not zero
+    set:
+      suites.cluster.enabled: false
+      suites.inventory.enabled: true
+      inventory.namespace: mat-ns
+      inventory.clientSecret: nico-cert
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: SCALE_TEST_EXPECTED_RACKS
+            value: ""
+          any: true
+
+  - it: supplies no dev default for the SPIFFE settings, so an unset one renders empty and the fixture fails loudly
+    set:
+      suites.cluster.enabled: false
+      suites.inventory.enabled: true
+      inventory.namespace: mat-ns
+      inventory.clientSecret: nico-cert
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: SCALE_TEST_TRUST_DOMAIN
+            value: ""
+          any: true
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: SCALE_TEST_SERVICE_BASE_PATHS
+            value: ""
+          any: true
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: SCALE_TEST_MACHINE_BASE_PATH
+            value: ""
+          any: true
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: SCALE_TEST_SERVER_NAME
+            value: ""
+          any: true
+
+  - it: fails when the inventory suite lacks its namespace
+    set:
+      suites.cluster.enabled: false
+      suites.inventory.enabled: true
+      inventory.clientSecret: nico-cert
+    asserts:
+      - failedTemplate:
+          errorMessage: inventory.namespace is required when the inventory suite is enabled
+
+  - it: fails when the inventory suite lacks its client Secret
+    set:
+      suites.cluster.enabled: false
+      suites.inventory.enabled: true
+      inventory.namespace: mat-ns
+    asserts:
+      - failedTemplate:
+          errorMessage: inventory.clientSecret is required when the inventory suite is enabled

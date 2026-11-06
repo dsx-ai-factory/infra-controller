@@ -1,0 +1,143 @@
+# Acceptance test image holding the current scale-test suite binaries. Supply a
+# repository and either an exact digest (preferred) or a tag at install time;
+# rendering fails without them.
+image:
+  repository: ""
+  tag: ""
+  digest: ""
+  pullPolicy: IfNotPresent
+
+# References to existing image pull secrets in the release namespace.
+imagePullSecrets: []
+
+# The acceptance image is built for amd64 only, so the Jobs pin to amd64 nodes.
+# Override (or set to {}) to schedule elsewhere once a multi-arch image exists.
+nodeSelector:
+  kubernetes.io/arch: amd64
+
+# Default ServiceAccount, Role, Binding and Job names derive from the release
+# name. Set this to override that base name.
+fullnameOverride: ""
+
+# Suites. Each enabled entry renders one `helm test` Job that runs a fixed
+# binary and anchored test; only the suites the chart knows (cluster, probe,
+# inventory, history, lock, store, store-transition, result) may be enabled, and
+# at least one must be. Lower weight runs first. The lock suite proves the Lease
+# site lock, and the result suite the result claim, status write and result.json,
+# against the real API server.
+suites:
+  cluster:
+    enabled: true
+    weight: 1
+  probe:
+    enabled: false
+    weight: 2
+  inventory:
+    enabled: false
+    weight: 3
+  history:
+    enabled: false
+    weight: 4
+  store:
+    enabled: false
+    weight: 5
+  store-transition:
+    enabled: false
+    weight: 6
+  lock:
+    enabled: false
+    weight: 7
+  result:
+    enabled: false
+    weight: 8
+
+# Base URL of the probe Service (SCALE_TEST_PROBE_URL) for the probe suite. When
+# unset, the enabled probe fixture fails rather than skipping.
+probeUrl: ""
+
+# The inventory suite reads MAT Pods and Services in a target namespace and
+# makes one verified nico-api Version call. When enabled, `namespace` and
+# `clientSecret` are required and a namespace-scoped read Role/Binding is made
+# there; the expected counts/release come from a precheck (the fixture fails if
+# any is unset). No secret values are set inline.
+inventory:
+  namespace: ""         # the MAT namespace to read and bind reads in
+  selector: "app.kubernetes.io/component=machine-a-tron"
+  clientSecret: ""      # existing Secret (tls.crt, tls.key, ca.crt) in the release namespace
+  spiffe:
+    trustDomain: ""
+    serviceBasePaths: "" # comma-separated
+    machineBasePath: ""
+    serverName: ""
+  # Each count defaults to empty so an omitted one fails the fixture, not passes
+  # as a supplied zero; set an explicit 0 only where a type is genuinely absent.
+  expected:
+    racks: ""
+    hosts: ""
+    switches: ""
+    powerShelves: ""
+    dpus: ""
+    minServices: ""
+    release: ""
+
+# The history suite replays a real probe capture mounted into the test pod. The
+# source is required when the suite is enabled: a ConfigMap (name plus key) or
+# an existing read PVC (claimName plus subPath), not both, else rendering fails.
+# The capture mounts read-only at /capture as SCALE_TEST_HISTORY_CAPTURE.
+# producerImage and producerRevision are the provenance of the probe that
+# produced it, logged by the test with the capture's SHA-256.
+historyCapture:
+  configMap: ""
+  key: capture.json
+  existingClaim: ""
+  subPath: capture.json
+  producerImage: ""
+  producerRevision: ""
+
+# The store and store-transition suites read the history store that scrapes the
+# probe: url is SCALE_TEST_STORE_URL, probeUrl above SCALE_TEST_PROBE_URL, both
+# required (empty fails). Credentials are mounted read-only Secret files:
+# tokenSecret a "token" key, caSecret a "ca.crt" key; ingestionDelaySeconds the delay.
+store:
+  url: ""
+  ingestionDelaySeconds: 0
+  tokenSecret: ""
+  caSecret: ""
+  transition:
+    start: ""
+    end: ""
+    n: ""
+    targets: ""
+    reached: ""
+    minTimingErrorSeconds: ""
+
+# The Job deadline and the go test timeout for each suite, both positive
+# integer seconds (the timeout renders as a Go duration such as 480s).
+testBudget:
+  activeDeadlineSeconds: 600
+  testTimeoutSeconds: 480
+
+# Shared run-data volume. One ReadWriteOnce PersistentVolumeClaim holds the run
+# journal that the journal proof writes and that a later run-results suite
+# reuses, so the claim is shared rather than suite-specific. It is created when
+# the journal suite is enabled or when create is set on its own. storageClass is
+# required whenever the claim is created (no silent default-class binding), and
+# fsGroup makes the volume group-writable by the nonroot test user (65532).
+persistence:
+  create: false
+  claimName: ""        # defaults to <fullname>-run-data
+  storageClass: ""     # required when the claim is created
+  size: 1Gi
+  fsGroup: 65532
+  mountPath: /run-data
+
+# Journal persistence proof. Off by default. When enabled it creates the shared
+# claim (above) and renders two chart-weighted helm test Jobs through the
+# ordinary test-job template: a writer that writes a run journal through the
+# real journal package with fsync, and a verifier that mounts the same claim
+# read-only and fails, rather than skips, unless the journal reads back whole
+# and matches this run. runId binds both Jobs to the current run; set a fresh
+# value per qualification so an older proof left on the volume cannot pass.
+journal:
+  enabled: false
+  runId: ""

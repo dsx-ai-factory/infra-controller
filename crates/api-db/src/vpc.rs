@@ -71,17 +71,16 @@ pub async fn persist(
     status: VpcStatus,
     txn: &mut PgConnection,
 ) -> Result<Vpc, DatabaseError> {
-    let query =
-                "INSERT INTO vpcs (id, name, organization_id, network_security_group_id, version, network_virtualization_type,
+    let query = format!(
+        "INSERT INTO vpcs (id, name, organization_id, network_security_group_id, version, network_virtualization_type,
                 description,
                 labels, routing_profile_type, routing_profile_overrides, vni, status, power_resource_group,
                 slaac_enabled)
                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
-                RETURNING id, version, organization_id, network_security_group_id,
-                network_virtualization_type, routing_profile_type, routing_profile_overrides,
-                power_resource_group, slaac_enabled, vni, status, name, description, labels,
-                created, updated, deleted";
-    sqlx::query_as(query)
+                RETURNING {}",
+        Vpc::db_table_columns(),
+    );
+    sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
         .bind(value.id)
         .bind(&value.metadata.name)
         .bind(&value.tenant_organization_id)
@@ -98,7 +97,7 @@ pub async fn persist(
         .bind(value.slaac_enabled)
         .fetch_one(txn)
         .await
-        .map_err(|e| DatabaseError::query(query, e))
+        .map_err(|e| DatabaseError::query(&query, e))
 }
 
 pub async fn find_ids(
@@ -203,14 +202,9 @@ async fn find_by_inner<'a, C: ColumnInfo<'a, TableType = Vpc>>(
     row_lock: VpcRowLock,
     include_deleted: bool,
 ) -> Result<Vec<Vpc>, DatabaseError> {
-    let mut query = FilterableQueryBuilder::new(
-        "SELECT id, version, organization_id, network_security_group_id,
-                network_virtualization_type, routing_profile_type, routing_profile_overrides,
-                power_resource_group, slaac_enabled, vni, status, name, description, labels,
-                created, updated, deleted
-         FROM vpcs",
-    )
-    .filter(&filter);
+    let mut query =
+        FilterableQueryBuilder::new(format!("SELECT {} FROM vpcs", Vpc::db_table_columns()))
+            .filter(&filter);
 
     if !include_deleted {
         query.push(" AND deleted IS NULL");
@@ -261,35 +255,34 @@ pub async fn find_by_id_including_deleted(
 }
 
 pub async fn find_by_vni(txn: &mut PgConnection, vni: i32) -> Result<Vec<Vpc>, DatabaseError> {
-    let query = "SELECT id, version, organization_id, network_security_group_id,
-                network_virtualization_type, routing_profile_type, routing_profile_overrides,
-                power_resource_group, slaac_enabled, vni, status, name, description, labels,
-                created, updated, deleted
-        from vpcs WHERE (status->>'vni')::integer = $1 AND DELETED IS NULL";
+    let query = format!(
+        "SELECT {} from vpcs WHERE (status->>'vni')::integer = $1 AND DELETED IS NULL",
+        Vpc::db_table_columns(),
+    );
 
-    sqlx::query_as(query)
+    sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
         .bind(vni)
         .fetch_all(txn)
         .await
-        .map_err(|e| DatabaseError::query(query, e))
+        .map_err(|e| DatabaseError::query(&query, e))
 }
 
 /// Pins the configured admin VPC's requested and active VNI together.
 /// Routing-profile transitions preserve creation intent with [`change_routing_profile`].
 pub async fn set_vni(value: &Vpc, txn: &mut PgConnection, vni: i32) -> DatabaseResult<Vpc> {
-    let query = "UPDATE vpcs
-            SET vni=$1, status=jsonb_set(status, '{vni}', to_jsonb($1::integer), true), updated=NOW()
+    let query = format!(
+        "UPDATE vpcs
+            SET vni=$1, status=jsonb_set(status, '{{vni}}', to_jsonb($1::integer), true), updated=NOW()
             WHERE id=$2 AND deleted is null
-            RETURNING id, version, organization_id, network_security_group_id,
-                network_virtualization_type, routing_profile_type, routing_profile_overrides,
-                power_resource_group, slaac_enabled, vni, status, name, description, labels,
-                created, updated, deleted";
-    sqlx::query_as(query)
+            RETURNING {}",
+        Vpc::db_table_columns(),
+    );
+    sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
         .bind(vni)
         .bind(value.id)
         .fetch_one(txn)
         .await
-        .map_err(|e| DatabaseError::query(query, e))
+        .map_err(|e| DatabaseError::query(&query, e))
 }
 
 /// Changes a VPC's named routing profile and active VNI, advancing its version.
@@ -304,16 +297,16 @@ pub async fn change_routing_profile(
     txn: &mut PgConnection,
     vni: i32,
 ) -> DatabaseResult<Vpc> {
-    let query = "UPDATE vpcs
+    let query = format!(
+        "UPDATE vpcs
         SET routing_profile_type = $1,
-            status = jsonb_set(status, '{vni}', to_jsonb($2::integer), true),
+            status = jsonb_set(status, '{{vni}}', to_jsonb($2::integer), true),
             version = $3, updated = NOW()
         WHERE id = $4 AND version = $5 AND deleted IS NULL
-        RETURNING id, version, organization_id, network_security_group_id,
-                network_virtualization_type, routing_profile_type, routing_profile_overrides,
-                power_resource_group, slaac_enabled, vni, status, name, description, labels,
-                created, updated, deleted";
-    let result = sqlx::query_as(query)
+        RETURNING {}",
+        Vpc::db_table_columns(),
+    );
+    let result = sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
         .bind(&value.routing_profile_type)
         .bind(vni)
         .bind(value.if_version_match.increment())
@@ -328,7 +321,7 @@ pub async fn change_routing_profile(
             "vpc",
             value.if_version_match.to_string(),
         )),
-        Err(error) => Err(DatabaseError::query(query, error)),
+        Err(error) => Err(DatabaseError::query(&query, error)),
     }
 }
 
@@ -443,15 +436,19 @@ pub async fn try_delete(txn: &mut PgConnection, id: VpcId) -> Result<Option<Vpc>
         )));
     }
 
-    let query = "UPDATE vpcs SET updated=NOW(), deleted=NOW() WHERE id=$1 AND deleted IS NULL
-        RETURNING id, version, organization_id, network_security_group_id,
-                network_virtualization_type, routing_profile_type, routing_profile_overrides,
-                power_resource_group, slaac_enabled, vni, status, name, description, labels,
-                created, updated, deleted";
-    match sqlx::query_as(query).bind(id).fetch_one(txn).await {
+    let query = format!(
+        "UPDATE vpcs SET updated=NOW(), deleted=NOW() WHERE id=$1 AND deleted IS NULL
+        RETURNING {}",
+        Vpc::db_table_columns(),
+    );
+    match sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
+        .bind(id)
+        .fetch_one(txn)
+        .await
+    {
         Ok(vpc) => Ok(Some(vpc)),
         Err(sqlx::Error::RowNotFound) => Ok(None),
-        Err(e) => Err(DatabaseError::query(query, e)),
+        Err(e) => Err(DatabaseError::query(&query, e)),
     }
 }
 
@@ -478,17 +475,17 @@ pub async fn update(value: &UpdateVpc, txn: &mut PgConnection) -> DatabaseResult
     // Set replaces it and clear stores NULL.
     // network_virtualization_type cannot be changed currently
     // TODO check number of changed rows
-    let query = "UPDATE vpcs
+    let query = format!(
+        "UPDATE vpcs
             SET name=$1, version=$2, description=$3, network_security_group_id=$4,
                 labels=$5::json,
                 routing_profile_overrides=COALESCE($6::jsonb, routing_profile_overrides),
                 power_resource_group=CASE WHEN $7 THEN $8 ELSE power_resource_group END,
                 updated=NOW()
             WHERE id=$9 AND version=$10 AND deleted is null
-            RETURNING id, version, organization_id, network_security_group_id,
-                network_virtualization_type, routing_profile_type, routing_profile_overrides,
-                power_resource_group, slaac_enabled, vni, status, name, description, labels,
-                created, updated, deleted";
+            RETURNING {}",
+        Vpc::db_table_columns(),
+    );
     let (update_power_resource_group, power_resource_group) =
         match value.power_resource_group.as_ref() {
             Some(PowerResourceGroupUpdate::Set(resource_group)) => {
@@ -497,7 +494,7 @@ pub async fn update(value: &UpdateVpc, txn: &mut PgConnection) -> DatabaseResult
             Some(PowerResourceGroupUpdate::Clear) => (true, None),
             None => (false, None),
         };
-    let query_result = sqlx::query_as(query)
+    let query_result = sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
         .bind(&value.metadata.name)
         .bind(next_version)
         .bind(&value.metadata.description)
@@ -526,7 +523,7 @@ pub async fn update(value: &UpdateVpc, txn: &mut PgConnection) -> DatabaseResult
                 current_version.to_string(),
             ))
         }
-        Err(e) => Err(DatabaseError::query(query, e)),
+        Err(e) => Err(DatabaseError::query(&query, e)),
     }
 }
 
@@ -536,13 +533,13 @@ pub async fn update_virtualization(
     // which must happen in a transaction.
     txn: &mut PgTransaction<'_>,
 ) -> DatabaseResult<Vpc> {
-    let query = "UPDATE vpcs
+    let query = format!(
+        "UPDATE vpcs
             SET version=$1, network_virtualization_type=$2, updated=NOW()
             WHERE id=$3 AND version=$4 AND deleted is null
-            RETURNING id, version, organization_id, network_security_group_id,
-                network_virtualization_type, routing_profile_type, routing_profile_overrides,
-                power_resource_group, slaac_enabled, vni, status, name, description, labels,
-                created, updated, deleted";
+            RETURNING {}",
+        Vpc::db_table_columns(),
+    );
 
     let current_version = match value.if_version_match {
         Some(version) => version,
@@ -562,7 +559,7 @@ pub async fn update_virtualization(
     };
     let next_version = current_version.increment();
 
-    let query_result = sqlx::query_as(query)
+    let query_result = sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
         .bind(next_version)
         .bind(value.network_virtualization_type)
         .bind(value.id)
@@ -581,7 +578,7 @@ pub async fn update_virtualization(
                 current_version.to_string(),
             ))
         }
-        Err(e) => Err(DatabaseError::query(query, e)),
+        Err(e) => Err(DatabaseError::query(&query, e)),
     }?;
 
     // Update SVI IP for stretchable segments.

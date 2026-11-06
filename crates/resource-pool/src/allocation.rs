@@ -389,6 +389,16 @@ where
         database: &PgPool,
         cancel: &CancellationToken,
     ) -> Result<Allocation<'a, T>, ResourcePoolBackendError> {
+        self.resolve_with_timeout(database, cancel, ALLOCATION_TIMEOUT)
+            .await
+    }
+
+    async fn resolve_with_timeout(
+        self,
+        database: &PgPool,
+        cancel: &CancellationToken,
+        timeout: Duration,
+    ) -> Result<Allocation<'a, T>, ResourcePoolBackendError> {
         let state = match self.state {
             PreparedState::Integrated {
                 backend,
@@ -408,7 +418,7 @@ where
                 eligibility,
             } => {
                 let assignment = cancel
-                    .run_until_cancelled(tokio::time::timeout(ALLOCATION_TIMEOUT, async {
+                    .run_until_cancelled(tokio::time::timeout(timeout, async {
                         loop {
                             // Box the large coordinator future so the enclosing
                             // timeout and caller futures stay small.

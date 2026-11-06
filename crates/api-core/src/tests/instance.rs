@@ -27,6 +27,7 @@ use carbide_machine_controller::dpf::{DpfOperations, MockDpfOperations};
 use carbide_network::virtualization::VpcVirtualizationType;
 use carbide_redfish::libredfish::test_support::RedfishSimAction;
 use carbide_uuid::extension_service::ExtensionServiceId;
+use carbide_uuid::external_validation::ExternalValidationRequestId;
 use carbide_uuid::instance::InstanceId;
 use carbide_uuid::machine::{DpuMachineId, StableHostMachineId};
 use carbide_uuid::machine_validation::MachineValidationId;
@@ -64,8 +65,8 @@ use model::instance::config::extension_services::{
 };
 use model::instance::config::network::{
     DeviceLocator, InstanceInterfaceIpFamilyMode, InstanceInterfaceVpcSelection,
-    InstanceNetworkConfig, InstanceServiceInterfaceConfig, InterfaceFunctionId,
-    Ipv6InterfaceConfig, NetworkDetails,
+    InstanceNetworkConfig, InstanceServiceInterfaceConfig, InstanceVpcLocalInterfaceConfig,
+    InterfaceFunctionId, Ipv6InterfaceConfig, NetworkDetails,
 };
 use model::instance::snapshot::InstanceSnapshot;
 use model::machine::{
@@ -139,6 +140,63 @@ async fn join_test_task<T>(task: TestTaskHandle<T>, description: &str) -> T {
     match tokio::time::timeout(std::time::Duration::from_secs(30), task.join()).await {
         Ok(result) => result.unwrap_or_else(|error| panic!("{description} task failed: {error}")),
         Err(_) => panic!("{description} did not finish within 30 seconds"),
+    }
+}
+
+/// Unsupported bindings must fail before legacy hydration acquires a connection.
+#[crate::sqlx_test]
+async fn test_external_validation_binding_rejected_before_hydration(
+    _: PgPoolOptions,
+    options: PgConnectOptions,
+) {
+    let pool = PgPoolOptions::new().connect_with(options).await.unwrap();
+    let env = create_test_env(pool).await;
+    // Hydration must not acquire a connection for an unsupported binding.
+    env.pool.close().await;
+
+    #[allow(deprecated)]
+    let legacy_request = rpc::InstanceAllocationRequest {
+        machine_id: Some(
+            "fm100htjtiaehv1n5vh67tbmqq4eabcjdng40f7jupsadbedhruh6rag1l0"
+                .parse()
+                .unwrap(),
+        ),
+        config: Some(rpc::InstanceConfig {
+            network: Some(rpc::forge::InstanceNetworkConfig {
+                auto: true,
+                ..Default::default()
+            }),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let bound_request = rpc::InstanceAllocationRequest {
+        external_validation_request_id: Some(ExternalValidationRequestId::new()),
+        ..legacy_request.clone()
+    };
+
+    for (scenario, batch) in [
+        ("single legacy allocation", false),
+        ("batch with an earlier unbound legacy allocation", true),
+    ] {
+        let error = if batch {
+            env.api
+                .allocate_instances(Request::new(rpc::forge::BatchInstanceAllocationRequest {
+                    instance_requests: vec![legacy_request.clone(), bound_request.clone()],
+                }))
+                .await
+                .unwrap_err()
+        } else {
+            env.api
+                .allocate_instance(Request::new(bound_request.clone()))
+                .await
+                .unwrap_err()
+        };
+        assert_eq!(error.code(), tonic::Code::FailedPrecondition, "{scenario}");
+        assert!(
+            error.message().contains("external validation allocation"),
+            "{scenario}"
+        );
     }
 }
 
@@ -459,6 +517,7 @@ async fn test_measurement_assigned_ready_to_waiting_for_measurements_to_ca_faile
             config: Some(instance_config),
             metadata: None,
             allow_unhealthy_machine: false,
+            external_validation_request_id: None,
         }))
         .await
         .expect("Create instance failed.")
@@ -1558,7 +1617,8 @@ async fn test_instance_null_hostname(_: PgPoolOptions, options: PgConnectOptions
 async fn test_instance_search_based_on_labels(pool: sqlx::PgPool) {
     let env = create_test_env(pool.clone()).await;
     let segment_id = env.create_vpc_and_tenant_segment().await;
-    for i in 0..=9 {
+    // Each search has one matching instance and two nonmatching instances.
+    for i in [1, 4, 8] {
         let mh = create_managed_host(&env).await;
 
         mh.instance_builer(&env)
@@ -1581,56 +1641,50 @@ async fn test_instance_search_based_on_labels(pool: sqlx::PgPool) {
             .await;
     }
 
-    // Test searching based on value.
-    let instance_matched_by_label = find_instances_by_label(
-        &env,
-        rpc::forge::Label {
-            key: "".to_string(),
-            value: Some("value_A_444".to_string()),
+    struct Case {
+        scenario: &'static str,
+        label: rpc::forge::Label,
+        expected_name: &'static str,
+    }
+
+    let cases = [
+        Case {
+            scenario: "value only",
+            label: rpc::forge::Label {
+                key: "".to_string(),
+                value: Some("value_A_444".to_string()),
+            },
+            expected_name: "instance_444",
         },
-    )
-    .await
-    .instances
-    .remove(0);
-
-    assert_eq!(
-        instance_matched_by_label.metadata.unwrap().name,
-        "instance_444"
-    );
-
-    // Test searching based on key.
-    let instance_matched_by_label = find_instances_by_label(
-        &env,
-        rpc::forge::Label {
-            key: "key_A_111".to_string(),
-            value: None,
+        Case {
+            scenario: "key only",
+            label: rpc::forge::Label {
+                key: "key_A_111".to_string(),
+                value: None,
+            },
+            expected_name: "instance_111",
         },
-    )
-    .await
-    .instances
-    .remove(0);
-
-    assert_eq!(
-        instance_matched_by_label.metadata.unwrap().name,
-        "instance_111"
-    );
-
-    // Test searching based on key and value.
-    let instance_matched_by_label = find_instances_by_label(
-        &env,
-        rpc::forge::Label {
-            key: "key_A_888".to_string(),
-            value: Some("value_A_888".to_string()),
+        Case {
+            scenario: "key and value",
+            label: rpc::forge::Label {
+                key: "key_A_888".to_string(),
+                value: Some("value_A_888".to_string()),
+            },
+            expected_name: "instance_888",
         },
-    )
-    .await
-    .instances
-    .remove(0);
+    ];
 
-    assert_eq!(
-        instance_matched_by_label.metadata.unwrap().name,
-        "instance_888"
-    );
+    for case in cases {
+        let instances = find_instances_by_label(&env, case.label).await.instances;
+
+        assert_eq!(instances.len(), 1, "{}", case.scenario);
+        assert_eq!(
+            instances[0].metadata.as_ref().unwrap().name,
+            case.expected_name,
+            "{}",
+            case.scenario
+        );
+    }
 }
 
 #[crate::sqlx_test]
@@ -4714,6 +4768,8 @@ async fn test_auto_vpc_prefix_selection_force_delete_marks_generated_segment_del
         .unwrap();
 
     let request = AdminForceDeleteMachineRequest {
+        allow_delete_with_instance_type: false,
+        allow_delete_with_instance: true,
         host_query: managed_host.id.to_string(),
         delete_interfaces: false,
         delete_bmc_interfaces: false,
@@ -6569,6 +6625,7 @@ async fn test_batch_allocate_instances_rolls_back_earlier_service_vpc_allocation
                 labels: vec![],
             }),
             allow_unhealthy_machine: false,
+            external_validation_request_id: None,
         },
     )
     .collect_vec();
@@ -7379,7 +7436,7 @@ async fn test_service_vpc_coordinator_serializes_with_default_force_delete(
         )))
         .await
     }));
-    wait_for_blocked_query(&env.pool, activation_pid, "UPDATE machines").await;
+    wait_for_blocked_query(&env.pool, activation_pid, "SELECT row_to_json(m.*)").await;
     activation.commit().await?;
     let error = join_test_task(pending_force_delete, "default force deletion")
         .await
@@ -7481,7 +7538,7 @@ async fn test_service_vpc_coordinator_serializes_with_orphan_force_delete(
         )))
         .await
     }));
-    wait_for_blocked_query(&env.pool, activation_pid, "UPDATE machines").await;
+    wait_for_blocked_query(&env.pool, activation_pid, "SELECT row_to_json(m.*)").await;
     activation.commit().await?;
     let response = join_test_task(pending_force_delete, "orphan force deletion")
         .await?
@@ -7535,7 +7592,30 @@ async fn test_update_instance_service_vpc_uses_persisted_expected_machine_astra_
         }
     });
     let pool = PgPoolOptions::new().connect_with(options).await?;
-    let env = create_service_vpc_coordinator_test_env_with_dpf_sdk(pool, Arc::new(dpf_sdk)).await;
+    // Configure Astra so the instance builder can fetch DPU network configuration before Ready.
+    let mut config = get_config();
+    config.dpf.enabled = true;
+    config.dpf.deployment_scoped_service_interfaces = true; // Required for the Astra deployment.
+    config.site_global_vpc_vni = None;
+    config.dpu_config.service_vpc_slot_count = 2;
+    config.dpu_config.max_active_service_vpc_interfaces_per_dpu = 2;
+    config.dpf.deployments.bf4_astra = Some(super::dpf::bf4_deployment_config("bf4-astra"));
+    // Enable BF3 IPv4 for service registration while leaving Astra's address families empty.
+    config
+        .dpf
+        .deployments
+        .bf3
+        .service_vpc_enabled_address_families =
+        [model::extension_service::ServiceVpcAddressFamily::Ipv4]
+            .into_iter()
+            .collect();
+    let env = create_test_env_with_overrides(
+        pool,
+        TestEnvOverrides::with_config(config)
+            .with_dpf_sdk(Arc::new(dpf_sdk))
+            .with_fnn_config(None),
+    )
+    .await;
     create_fixture_tenant(&env, FIXTURE_TENANT_ORG_ID).await?;
     create_fixture_tenant(&env, "best_org").await?;
     let (_, host_segment_id) = create_fnn_host_segment(
@@ -7553,19 +7633,22 @@ async fn test_update_instance_service_vpc_uses_persisted_expected_machine_astra_
     )
     .await;
     let host = create_bf4_astra_host(&env, 9).await;
-    let instance = host
+    // Allocate publicly so admission reads a stored Instance, then acknowledge DPU networking
+    // through the instance builder to reach Assigned/Ready.
+    let instance_id = host
         .instance_builer(&env)
         .single_interface_network_config(host_segment_id)
         .build()
-        .await;
+        .await
+        .id;
     let service = create_networked_dpf_service(&env, "expected-machine-astra-service").await?;
     mark_networked_dpf_service_ready(&env, service.service_id.parse()?).await?;
-    let baseline = db::instance::find_by_id(&env.pool, instance.id)
+    let baseline = db::instance::find_by_id(&env.pool, instance_id)
         .await?
         .expect("Astra fixture instance remains stored");
 
     // Submit a public attachment so the handler must derive the classifier signal from persistence.
-    let current = instance.rpc_instance().await.into_inner();
+    let current = env.one_instance(instance_id).await.into_inner();
     let mut requested_config = current.config.expect("Astra fixture has a public config");
     requested_config.dpu_extension_services =
         Some(rpc::forge::InstanceDpuExtensionServicesConfig {
@@ -7581,7 +7664,7 @@ async fn test_update_instance_service_vpc_uses_persisted_expected_machine_astra_
     let error = crate::instance::service_vpc::with_service_vpc_implementation_support_for_test(
         env.api
             .update_instance_config(Request::new(rpc::forge::InstanceConfigUpdateRequest {
-                instance_id: Some(instance.id),
+                instance_id: Some(instance_id),
                 if_version_match: None,
                 config: Some(requested_config),
                 metadata: current.metadata,
@@ -7599,7 +7682,7 @@ async fn test_update_instance_service_vpc_uses_persisted_expected_machine_astra_
 
     // Fresh reads prove classification rejected before storing the attachment, service interface,
     // or `last_used_prefix`.
-    let persisted = db::instance::find_by_id(&env.pool, instance.id)
+    let persisted = db::instance::find_by_id(&env.pool, instance_id)
         .await?
         .expect("Astra fixture instance remains stored after rejection");
     assert_eq!(
@@ -11020,8 +11103,10 @@ async fn test_fnn_vrf_loopback_release_uses_remaining_host_and_service_membershi
     // the retained-membership half of the test.
     let mut config = get_config();
     config.dpf.enabled = true;
+    // Configure one service slot so retained endpoints can appear in DPU network responses.
+    config.dpu_config.service_vpc_slot_count = 1;
     let mut overrides = TestEnvOverrides::with_config(config)
-        .with_dpf_sdk(service_vpc_deployment_mock())
+        .with_dpf_sdk(service_vpc_placement_mock())
         .with_fnn_config(None);
     overrides.fnn_config.as_mut().unwrap().use_vpc_vrf_loopback = true;
     let env = create_test_env_with_overrides(pool, overrides).await;
@@ -11514,6 +11599,8 @@ async fn test_fnn_vrf_loopback_release_is_exact_across_dpus_and_vpcs(pool: sqlx:
     // Enable per-VPC loopbacks and DPF service registration for the service-owned pair.
     let mut config = get_config();
     config.dpf.enabled = true;
+    // Configure one service slot so retained endpoints can appear in DPU network responses.
+    config.dpu_config.service_vpc_slot_count = 1;
     let mut overrides = TestEnvOverrides::with_config(config)
         .with_dpf_sdk(service_vpc_deployment_mock())
         .with_fnn_config(None);
@@ -13288,7 +13375,7 @@ async fn test_implicit_sparse_vf_noop_update_bypasses_overlap_lock(
 
 /// Builds a BF4 service-VPC fixture through ordinary ingestion so persisted CX9 classification
 /// can be tested without DPA rows or Kubernetes DPF provisioning.
-async fn create_bf4_astra_host(env: &TestEnv, cx9_mac_suffix: u8) -> TestManagedHost {
+pub(super) async fn create_bf4_astra_host(env: &TestEnv, cx9_mac_suffix: u8) -> TestManagedHost {
     let host = create_managed_host_with_config(env, service_vpc_test_host_config()).await;
     let mut txn = env.db_txn().await;
 
@@ -13686,6 +13773,7 @@ async fn test_public_instance_endpoints_reject_out_of_range_wire_vfs(
                 instance_type_id: None,
                 metadata: Some(metadata("create", wire_vf_id)),
                 allow_unhealthy_machine: false,
+                external_validation_request_id: None,
             }))
             .await
             .expect_err("out-of-range wire VF must be rejected during instance creation");
@@ -13723,6 +13811,7 @@ async fn test_public_instance_endpoints_reject_out_of_range_wire_vfs(
             instance_type_id: None,
             metadata: Some(metadata("create", 15)),
             allow_unhealthy_machine: false,
+            external_validation_request_id: None,
         }))
         .await
         .expect("VF15 must remain valid during instance creation");
@@ -13883,6 +13972,7 @@ async fn create_service_vpc_coordinator_test_env_with_capacity_and_families(
 
 /// Builds the minimal public force-delete request used to verify both service-endpoint membership
 /// decisions while leaving unrelated device-deletion options disabled.
+/// These fixtures authorize deleting their attached Instance so the request reaches endpoint checks.
 fn service_vpc_force_delete_request(
     host_id: impl std::fmt::Display,
     allow_orphaned_dpf_resources: bool,
@@ -13893,6 +13983,8 @@ fn service_vpc_force_delete_request(
         delete_bmc_interfaces: false,
         delete_bmc_credentials: false,
         allow_delete_with_orphaned_dpf_crds: allow_orphaned_dpf_resources,
+        allow_delete_with_instance_type: false,
+        allow_delete_with_instance: true,
         delete_bmc_suppressions: false,
         delete_retained_boot_interfaces: false,
         release_preserved_addresses: false,
@@ -14069,6 +14161,23 @@ fn service_vpc_deployment_mock() -> Arc<dyn DpfOperations> {
     dpf_sdk
         .expect_deployment_type_for_dpu()
         .returning(|_, _| Ok(DpuDeploymentType::Bf3));
+    Arc::new(dpf_sdk)
+}
+
+/// Extends the deployment lookup with the placement-label calls the Assigned/Ready handler makes
+/// for an attached DPF Helm service. A test controller pass keeps dispatching while another host's
+/// task is in flight, so a host can reach that handler before the test's state checks run.
+fn service_vpc_placement_mock() -> Arc<dyn DpfOperations> {
+    let mut dpf_sdk = MockDpfOperations::new();
+    dpf_sdk
+        .expect_deployment_type_for_dpu()
+        .returning(|_, _| Ok(DpuDeploymentType::Bf3));
+    dpf_sdk
+        .expect_merge_dpu_device_node_labels()
+        .returning(|_, _| Ok(()));
+    dpf_sdk
+        .expect_get_dpu_device_node_labels()
+        .returning(|_| Ok(Default::default()));
     Arc::new(dpf_sdk)
 }
 
@@ -14541,6 +14650,7 @@ async fn test_allocate_instance_activates_service_vpc_and_preserves_host_network
                     labels: vec![],
                 }),
                 allow_unhealthy_machine: false,
+                external_validation_request_id: None,
             })),
     )
     .await?
@@ -14709,6 +14819,7 @@ async fn test_allocate_instance_rejects_networked_service_without_vpc_selection(
                 labels: vec![],
             }),
             allow_unhealthy_machine: false,
+            external_validation_request_id: None,
         }))
         .await
         .expect_err("networked attachment without a VPC must be rejected");
@@ -14989,16 +15100,23 @@ async fn test_update_existing_networked_attachment_preserves_service_interfaces(
     let pool = PgPoolOptions::new().connect_with(options).await?;
     let mut config = get_config();
     config.dpf.enabled = true;
+    // Configure one service slot for the nested managed-host network response.
+    config.dpu_config.service_vpc_slot_count = 1;
     let env = create_test_env_with_overrides(
         pool,
-        TestEnvOverrides::with_config(config).with_dpf_sdk(service_vpc_deployment_mock()),
+        TestEnvOverrides::with_config(config)
+            .with_dpf_sdk(service_vpc_deployment_mock())
+            .with_fnn_config(None),
     )
     .await;
-    let segment_id = env.create_vpc_and_tenant_segment().await;
-    let selected_vpc = db::vpc::find_by_segment(&env.pool, segment_id)
-        .await?
-        .expect("created segment belongs to a VPC")
-        .id;
+    // Use an FNN VPC so the persisted endpoint can be rendered by the public DPU response.
+    create_fixture_tenant(&env, FIXTURE_TENANT_ORG_ID).await?;
+    let (selected_vpc, segment_id) = create_fnn_host_segment(
+        &env,
+        "existing networked attachment VPC",
+        FIXTURE_TENANT_NETWORK_SEGMENT_GATEWAYS[0],
+    )
+    .await;
     let managed_host = create_service_vpc_test_host(&env).await?;
     let instance = managed_host
         .instance_builer(&env)
@@ -15456,6 +15574,7 @@ async fn test_allocate_instance_with_extension_services_rejected_on_dpf_host(
                 labels: vec![],
             }),
             allow_unhealthy_machine: false,
+            external_validation_request_id: None,
         }))
         .await
         .expect_err("extension services must be rejected on a DPF-managed host");
@@ -15636,6 +15755,7 @@ async fn test_allocate_instance_with_duplicate_extension_services(
                 labels: vec![],
             }),
             allow_unhealthy_machine: false,
+            external_validation_request_id: None,
         }))
         .await;
     println!("instance: {:?}", instance);
@@ -16304,16 +16424,16 @@ async fn test_attach_extension_service_rejected_on_dpf_host(
     Ok(())
 }
 
-/// Verifies generic Kubernetes Pod termination reclaims only endpoint-free attachments while an
-/// all-protected follow-up scan still performs unrelated Ready work, preventing retained endpoint
-/// ownership from monopolizing controller iterations.
+/// Verifies generic Kubernetes Pod termination reclaims only attachments that no service-interface
+/// or VPC-local record names while an all-protected follow-up scan still performs unrelated Ready
+/// work, preventing retained endpoint ownership from monopolizing controller iterations.
 #[crate::sqlx_test]
 async fn test_extension_service_cleanup_reclaims_only_endpoint_free_attachments(
     _: PgPoolOptions,
     options: PgConnectOptions,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // Create three Pod attachments so cleanup must distinguish active,
-    // endpoint-backed terminating, and endpoint-free terminating ownership.
+    // Create four Pod attachments so cleanup must distinguish active, endpoint-backed
+    // terminating, VPC-local-backed terminating, and endpoint-free terminating ownership.
     let pool = PgPoolOptions::new().connect_with(options).await?;
     let env = create_test_env(pool).await;
     let segment_id = env.create_vpc_and_tenant_segment().await;
@@ -16324,9 +16444,32 @@ async fn test_extension_service_cleanup_reclaims_only_endpoint_free_attachments(
     let mh = create_managed_host(&env).await;
     let (retained_service, endpoint_backed_service, endpoint_free_service) =
         create_dpu_extension_services(&env).await?;
+    // A fourth service stands in for a VPC-local service: its attachment is named by a
+    // VPC-local record and by no service interface.
+    let vpc_local_backed_service = env
+        .api
+        .create_dpu_extension_service(tonic::Request::new(
+            rpc::forge::CreateDpuExtensionServiceRequest {
+                dpu_target: None,
+                service_vpc_interfaces: vec![],
+                service_id: None,
+                service_name: "test-service4".to_string(),
+                description: Some("Test service for instance".to_string()),
+                tenant_organization_id: "best_org".to_string(),
+                service_type: rpc::forge::DpuExtensionServiceType::KubernetesPod.into(),
+                data: create_dpu_extension_service_data("test-service4-v1"),
+                credential: None,
+                observability: None,
+                deployment_type: 0,
+            },
+        ))
+        .await?
+        .into_inner();
     let retained_service_id: ExtensionServiceId = retained_service.service_id.parse()?;
     let endpoint_backed_service_id: ExtensionServiceId =
         endpoint_backed_service.service_id.parse()?;
+    let vpc_local_backed_service_id: ExtensionServiceId =
+        vpc_local_backed_service.service_id.parse()?;
     let endpoint_free_service_id: ExtensionServiceId = endpoint_free_service.service_id.parse()?;
     let retained_version = retained_service
         .latest_version_info
@@ -16340,6 +16483,12 @@ async fn test_extension_service_cleanup_reclaims_only_endpoint_free_attachments(
         .expect("endpoint-backed service has a version")
         .version
         .clone();
+    let vpc_local_backed_version = vpc_local_backed_service
+        .latest_version_info
+        .as_ref()
+        .expect("VPC-local-backed service has a version")
+        .version
+        .clone();
     let endpoint_free_version = endpoint_free_service
         .latest_version_info
         .as_ref()
@@ -16347,7 +16496,7 @@ async fn test_extension_service_cleanup_reclaims_only_endpoint_free_attachments(
         .version
         .clone();
     // Each attachment's lifecycle role drives cleanup. Tenant, OS, and host
-    // network fields make the three-service instance otherwise valid.
+    // network fields make the four-service instance otherwise valid.
     let config = rpc::InstanceConfig {
         tenant: Some(default_tenant_config()),
         os: Some(default_os_config()),
@@ -16366,6 +16515,12 @@ async fn test_extension_service_cleanup_reclaims_only_endpoint_free_attachments(
                     version: endpoint_backed_version,
                     service_vpc_ids: vec![],
                 },
+                // Terminating VPC-local-backed attachment survives until its record disappears.
+                rpc::forge::InstanceDpuExtensionServiceConfig {
+                    service_id: vpc_local_backed_service.service_id.clone(),
+                    version: vpc_local_backed_version,
+                    service_vpc_ids: vec![],
+                },
                 // Terminating endpoint-free attachment is independently reclaimable.
                 rpc::forge::InstanceDpuExtensionServiceConfig {
                     service_id: endpoint_free_service.service_id.clone(),
@@ -16378,7 +16533,7 @@ async fn test_extension_service_cleanup_reclaims_only_endpoint_free_attachments(
     };
     let tinstance = mh.instance_builer(&env).config(config).build().await;
 
-    // Establish a synchronized running observation before requesting both detaches.
+    // Establish a synchronized running observation before requesting the three detaches.
     network_configured_with_health_and_ext_services(&env, &mh.dpu_ids[0], None, None).await;
     env.api
         .update_instance_config(Request::new(rpc::forge::InstanceConfigUpdateRequest {
@@ -16414,7 +16569,7 @@ async fn test_extension_service_cleanup_reclaims_only_endpoint_free_attachments(
     .await;
 
     // A fresh read proves callers see only the retained service while status
-    // keeps all three entries.
+    // keeps all four entries.
     let rpc_instance = tinstance.rpc_instance().await.into_inner();
     let active_services = &rpc_instance
         .config
@@ -16434,7 +16589,7 @@ async fn test_extension_service_cleanup_reclaims_only_endpoint_free_attachments(
     let extension_services_status = rpc_status
         .dpu_extension_services
         .expect("instance has extension-service status");
-    assert_eq!(extension_services_status.dpu_extension_services.len(), 3);
+    assert_eq!(extension_services_status.dpu_extension_services.len(), 4);
     assert_eq!(
         extension_services_status.configs_synced,
         rpc::forge::SyncState::Pending as i32
@@ -16442,6 +16597,8 @@ async fn test_extension_service_cleanup_reclaims_only_endpoint_free_attachments(
     for service_id in [
         // Endpoint-backed termination remains visible until endpoint cleanup is observed.
         &endpoint_backed_service.service_id,
+        // VPC-local-backed termination remains visible until its record is removed.
+        &vpc_local_backed_service.service_id,
         // Endpoint-free termination is visible before this iteration reclaims it.
         &endpoint_free_service.service_id,
     ] {
@@ -16456,7 +16613,20 @@ async fn test_extension_service_cleanup_reclaims_only_endpoint_free_attachments(
         );
     }
 
-    // Seed endpoints only for the active and one terminating attachment.
+    // Report all four Pod services terminated without service-network cleanup evidence.
+    // Observe termination before seeding synthetic endpoints so the response renders only the real
+    // host network; cleanup still runs after the seeded endpoint and VPC-local records have
+    // committed.
+    network_configured_with_health_and_ext_services(
+        &env,
+        &mh.dpu_ids[0],
+        None,
+        Some(rpc::forge::DpuExtensionServiceDeploymentStatus::DpuExtensionServiceTerminated),
+    )
+    .await;
+
+    // Seed endpoints only for the active and one terminating attachment, and a
+    // VPC-local record for another terminating attachment.
     let stored = db::instance::find_by_id(&env.pool, tinstance.id)
         .await?
         .expect("instance remains stored");
@@ -16476,6 +16646,14 @@ async fn test_extension_service_cleanup_reclaims_only_endpoint_free_attachments(
         .find(|attachment| attachment.service_id == endpoint_backed_service_id)
         .and_then(|attachment| attachment.id)
         .expect("endpoint-backed attachment has an ID");
+    let vpc_local_backed_attachment_id = stored
+        .config
+        .extension_services
+        .service_configs
+        .iter()
+        .find(|attachment| attachment.service_id == vpc_local_backed_service_id)
+        .and_then(|attachment| attachment.id)
+        .expect("VPC-local-backed attachment has an ID");
     let endpoint_free_attachment_id = stored
         .config
         .extension_services
@@ -16484,8 +16662,8 @@ async fn test_extension_service_cleanup_reclaims_only_endpoint_free_attachments(
         .find(|attachment| attachment.service_id == endpoint_free_service_id)
         .and_then(|attachment| attachment.id)
         .expect("endpoint-free attachment has an ID");
-    // Attachment identity is the cleanup key; the remaining fields make a
-    // valid endpoint that can be persisted, reloaded, and compared afterward.
+    // The attachment_id is the cleanup key; the remaining fields support persistence,
+    // snapshot loading, and comparison without modeling service-network rendering.
     let retained_service_interface = InstanceServiceInterfaceConfig {
         attachment_id: retained_attachment_id, // This active owner must survive cleanup.
         interface_ordinal: 0,
@@ -16506,11 +16684,22 @@ async fn test_extension_service_cleanup_reclaims_only_endpoint_free_attachments(
         internal_uuid: uuid::Uuid::new_v4(),
         ..retained_service_interface.clone()
     };
+    // A VPC-local record names its attachment the same way and allocates no prefix.
+    let vpc_local_interface = InstanceVpcLocalInterfaceConfig {
+        attachment_id: vpc_local_backed_attachment_id, // This terminating owner must survive.
+        interface_ordinal: 0,
+        dpu_id: mh.dpu_ids[0],
+        slot_index: 0,
+        vpc_id: selected_vpc,
+        mac_address: MacAddress::new([0x02, 0, 0, 0, 0, 2]),
+        internal_uuid: uuid::Uuid::new_v4(),
+    };
     let mut seeded_network = stored.config.network.clone();
     seeded_network.service_interfaces = vec![
         retained_service_interface.clone(),
         endpoint_backed_service_interface.clone(),
     ];
+    seeded_network.vpc_local_interfaces = vec![vpc_local_interface.clone()];
     let mut txn = env.db_txn().await;
     db::instance::update_network_config(
         txn.as_mut(),
@@ -16533,23 +16722,21 @@ async fn test_extension_service_cleanup_reclaims_only_endpoint_free_attachments(
             endpoint_backed_service_interface.clone()
         ]
     );
+    assert_eq!(
+        seeded.config.network.vpc_local_interfaces,
+        vec![vpc_local_interface.clone()]
+    );
 
-    // Report all three Pod services terminated without service-network cleanup evidence.
-    network_configured_with_health_and_ext_services(
-        &env,
-        &mh.dpu_ids[0],
-        None,
-        Some(rpc::forge::DpuExtensionServiceDeploymentStatus::DpuExtensionServiceTerminated),
-    )
-    .await;
+    // Run cleanup against the committed endpoint and VPC-local records and the public Pod
+    // termination observation.
     env.run_machine_state_controller_iteration().await;
 
-    // A fresh snapshot proves cleanup removes only the endpoint-free
-    // terminating attachment and preserves both endpoint owners.
+    // A fresh snapshot proves cleanup removes only the endpoint-free terminating
+    // attachment and preserves the endpoint owners and the VPC-local record's owner.
     let mut txn = env.db_txn().await;
     let snapshot = mh.snapshot(&mut txn).await;
     let persisted = snapshot.instance.expect("instance remains assigned");
-    assert_eq!(persisted.config.extension_services.service_configs.len(), 2);
+    assert_eq!(persisted.config.extension_services.service_configs.len(), 3);
     assert_eq!(
         persisted
             .config
@@ -16558,7 +16745,11 @@ async fn test_extension_service_cleanup_reclaims_only_endpoint_free_attachments(
             .iter()
             .map(|attachment| attachment.service_id)
             .collect::<HashSet<_>>(),
-        HashSet::from([retained_service_id, endpoint_backed_service_id])
+        HashSet::from([
+            retained_service_id,
+            endpoint_backed_service_id,
+            vpc_local_backed_service_id,
+        ])
     );
     let retained_attachment = persisted
         .config
@@ -16582,6 +16773,18 @@ async fn test_extension_service_cleanup_reclaims_only_endpoint_free_attachments(
         Some(endpoint_backed_attachment_id)
     );
     assert!(endpoint_backed_attachment.removed.is_some());
+    let vpc_local_backed_attachment = persisted
+        .config
+        .extension_services
+        .service_configs
+        .iter()
+        .find(|attachment| attachment.service_id == vpc_local_backed_service_id)
+        .expect("VPC-local-backed terminating attachment remains as a cleanup tombstone");
+    assert_eq!(
+        vpc_local_backed_attachment.id,
+        Some(vpc_local_backed_attachment_id)
+    );
+    assert!(vpc_local_backed_attachment.removed.is_some());
     assert!(
         persisted
             .config
@@ -16597,6 +16800,10 @@ async fn test_extension_service_cleanup_reclaims_only_endpoint_free_attachments(
             endpoint_backed_service_interface
         ]
     );
+    assert_eq!(
+        persisted.config.network.vpc_local_interfaces,
+        vec![vpc_local_interface]
+    );
 
     // The exact Pod observation proves cleanup ran from the intended generic
     // termination signal rather than DPF label-derived placement status.
@@ -16606,7 +16813,7 @@ async fn test_extension_service_cleanup_reclaims_only_endpoint_free_attachments(
         .get(&mh.dpu_ids[0])
         .and_then(|observations| observations.for_service_type(ExtensionServiceType::KubernetesPod))
         .expect("DPU reported Kubernetes Pod service status");
-    assert_eq!(pod_observation.extension_service_statuses.len(), 3);
+    assert_eq!(pod_observation.extension_service_statuses.len(), 4);
     assert_eq!(
         pod_observation
             .extension_service_statuses
@@ -16616,6 +16823,7 @@ async fn test_extension_service_cleanup_reclaims_only_endpoint_free_attachments(
         HashSet::from([
             retained_service_id,
             endpoint_backed_service_id,
+            vpc_local_backed_service_id,
             endpoint_free_service_id,
         ])
     );
@@ -16644,7 +16852,7 @@ async fn test_extension_service_cleanup_reclaims_only_endpoint_free_attachments(
     assert_eq!(backdate_update.rows_affected(), 1);
     txn.commit().await?;
 
-    // The remaining endpoint-backed tombstones must not suppress periodic boot observation.
+    // The remaining record-backed tombstones must not suppress periodic boot observation.
     env.redfish_sim.set_is_bios_setup(true);
     env.redfish_sim.set_is_boot_order_setup(true);
     let redfish_checkpoint = env.redfish_sim.timepoint();
@@ -16657,7 +16865,7 @@ async fn test_extension_service_cleanup_reclaims_only_endpoint_free_attachments(
         redfish_actions
             .iter()
             .any(|action| matches!(action, RedfishSimAction::IsBootOrderSetup { .. })),
-        "endpoint-protected cleanup must allow unrelated Ready observation: {redfish_actions:?}"
+        "record-protected cleanup must allow unrelated Ready observation: {redfish_actions:?}"
     );
 
     Ok(())
@@ -17026,6 +17234,7 @@ async fn test_allocate_instance_with_invalid_os_image(
                 labels: vec![],
             }),
             allow_unhealthy_machine: false,
+            external_validation_request_id: None,
         }))
         .await;
 
@@ -17089,6 +17298,7 @@ async fn test_allocate_instance_with_invalid_ib_partition(
                 labels: vec![],
             }),
             allow_unhealthy_machine: false,
+            external_validation_request_id: None,
         }))
         .await;
 

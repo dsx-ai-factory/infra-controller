@@ -10,6 +10,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
 
 	appcli "github.com/NVIDIA/infra-controller/rest-api/cli/pkg"
@@ -59,6 +61,44 @@ func TestSession_fetchDPUMachines(t *testing.T) {
 			assert.Equal(t, "bluefield", items[100].Name)
 			assert.Equal(t, "Ready", items[100].Status)
 			assert.Equal(t, 2, requests)
+		})
+	}
+}
+
+func TestSession_fetchNVLinkDomains(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		site      string
+		wantError string
+	}{
+		{name: "selected site", site: "site-1"},
+		{name: "missing site", wantError: "siteId must be resolved before NVLink domains"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			requests := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requests++
+				assert.Equal(t, "/v2/org/acme/nico/domain/nvlink", r.URL.Path)
+				assert.Equal(t, test.site, r.URL.Query().Get("siteId"))
+				_, _ = io.WriteString(w, `[{"id":"domain-1","name":"Domain One"},{"id":"domain-2","name":""}]`)
+			}))
+			defer server.Close()
+			session := NewSession(appcli.NewClient(server.URL, "acme", "token", nil, false), "acme", "")
+			session.Scope.SiteID = test.site
+
+			items, err := session.Resolver.Fetch(context.Background(), "domain")
+
+			if test.wantError != "" {
+				require.ErrorContains(t, err, test.wantError)
+				assert.Zero(t, requests)
+				return
+			}
+			require.NoError(t, err)
+			require.Len(t, items, 2)
+			assert.Equal(t, "Domain One", items[0].Name)
+			assert.Equal(t, "domain-1", items[0].ID)
+			assert.Equal(t, "domain-2", items[1].Name)
+			assert.Equal(t, 1, requests)
 		})
 	}
 }
@@ -304,6 +344,130 @@ func testRunGeneratedTUICommand_ResourceSelectors(t *testing.T) {
 			})
 			require.NoError(t, err)
 			assert.Equal(t, 1, executed)
+		})
+	}
+}
+
+func testRunGeneratedTUICommand_DomainBodyScope(t *testing.T) {
+	t.Helper()
+	const siteID = "550e8400-e29b-41d4-a716-446655440000"
+	const body = `{"siteId":"550e8400-e29b-41d4-a716-446655440000","state":"On"}`
+	for _, test := range []struct {
+		name      string
+		args      []string
+		scope     string
+		fileBody  string
+		stdin     string
+		sites     []NamedItem
+		wantError string
+		// wantRequests lists requests made before a wantError stops the run.
+		wantRequests []string
+		declined     bool
+	}{
+		{
+			name: "JSON supplies site without selected scope",
+			args: []string{"--data", body, "Domain-A"},
+		},
+		{
+			name:  "inline JSON overrides selected scope",
+			args:  []string{"--data=" + body, "Domain-A"},
+			scope: "old-site",
+		},
+		{
+			name:     "file supplies site before domain lookup",
+			scope:    "old-site",
+			fileBody: body,
+		},
+		{
+			name: "scalar flags still supply site",
+			args: []string{"--site-id", siteID, "--state", "On", "Domain-A"},
+		},
+		{
+			name:  "selected scope remains the fallback",
+			args:  []string{"--state", "On", "Domain-A"},
+			scope: siteID,
+		},
+		{
+			name:  "missing scope prompts for site before domain lookup",
+			args:  []string{"--state", "On", "Domain-A"},
+			sites: []NamedItem{{ID: siteID}},
+		},
+		{
+			// The body consumes the rest of stdin, so confirmation is read
+			// first, as when --data-file - is passed through to the request.
+			name:  "stdin body supplies site after confirmation",
+			args:  []string{"--data-file", "-", "Domain-A"},
+			stdin: "y\n" + body,
+		},
+		{
+			name:     "declining before stdin body skips the request",
+			args:     []string{"--data-file", "-", "Domain-A"},
+			stdin:    "n\n" + body,
+			declined: true,
+		},
+		{
+			name:      "invalid body site prevents lookup",
+			args:      []string{"--data", `{"siteId":17,"state":"On"}`, "Domain-A"},
+			scope:     "old-site",
+			wantError: "reading request site",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var requests []string
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requests = append(requests, r.Method+" "+r.URL.Path)
+				w.Header().Set("Content-Type", "application/json")
+				switch r.URL.Path {
+				case "/v2/org/acme/nico/domain/nvlink":
+					assert.Equal(t, http.MethodGet, r.Method)
+					assert.Equal(t, siteID, r.URL.Query().Get("siteId"))
+					_, _ = io.WriteString(w, `[{"id":"domain-1","name":"Domain-A"}]`)
+				case "/v2/org/acme/nico/domain/nvlink/domain-1/power":
+					assert.Equal(t, http.MethodPatch, r.Method)
+					gotBody, err := io.ReadAll(r.Body)
+					assert.NoError(t, err)
+					assert.JSONEq(t, body, string(gotBody))
+					_, _ = io.WriteString(w, `{}`)
+				default:
+					t.Errorf("unexpected request: %s", r.URL)
+					w.WriteHeader(http.StatusNotFound)
+				}
+			}))
+			defer server.Close()
+			session := NewSession(appcli.NewClient(server.URL, "acme", "token", nil, false), "acme", "")
+			session.Scope.SiteID = test.scope
+			sites := test.sites
+			if sites == nil {
+				sites = []NamedItem{{ID: siteID}, {ID: "old-site"}}
+			}
+			session.Cache.Set("site", sites)
+			args := test.args
+			if test.fileBody != "" {
+				path := filepath.Join(t.TempDir(), "request.json")
+				require.NoError(t, os.WriteFile(path, []byte(test.fileBody), 0600))
+				args = []string{"--data-file", path, "Domain-A"}
+			}
+			input := "y\n"
+			if test.stdin != "" {
+				input = test.stdin
+			}
+			_, err := runSpecializedCommandWithInput(t, input, func() error {
+				return requireTUICommand(t, "domain power-control power-control-nvlink-domain").Run(session, args)
+			})
+			if test.wantError != "" {
+				require.ErrorContains(t, err, test.wantError)
+				assert.Equal(t, test.wantRequests, requests)
+				return
+			}
+			require.NoError(t, err)
+			if test.declined {
+				assert.Empty(t, requests)
+				return
+			}
+			assert.Equal(t, []string{
+				"GET /v2/org/acme/nico/domain/nvlink",
+				"PATCH /v2/org/acme/nico/domain/nvlink/domain-1/power",
+			}, requests)
 		})
 	}
 }

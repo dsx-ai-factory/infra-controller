@@ -53,12 +53,43 @@ impl AllocationCleanup {
         database: &PgPool,
         cancel: &CancellationToken,
     ) -> Result<(), ResourcePoolBackendError> {
+        self.wait_with_timing(
+            registry,
+            database,
+            cancel,
+            CLEANUP_TIMEOUT,
+            CLEANUP_INTERVAL,
+        )
+        .await
+    }
+
+    #[cfg(test)]
+    pub(super) async fn wait_with_test_timing(
+        &self,
+        registry: &ResourcePoolRegistry,
+        database: &PgPool,
+        cancel: &CancellationToken,
+        timeout: Duration,
+        interval: Duration,
+    ) -> Result<(), ResourcePoolBackendError> {
+        self.wait_with_timing(registry, database, cancel, timeout, interval)
+            .await
+    }
+
+    async fn wait_with_timing(
+        &self,
+        registry: &ResourcePoolRegistry,
+        database: &PgPool,
+        cancel: &CancellationToken,
+        timeout: Duration,
+        interval: Duration,
+    ) -> Result<(), ResourcePoolBackendError> {
         let Some(request_id) = self.request_id else {
             return Ok(());
         };
 
         cancel
-            .run_until_cancelled(tokio::time::timeout(CLEANUP_TIMEOUT, async {
+            .run_until_cancelled(tokio::time::timeout(timeout, async {
                 let mut txn = database_transaction(database).await?;
                 let saved = storage::load(&mut txn, request_id)
                     .await?
@@ -95,7 +126,7 @@ impl AllocationCleanup {
                         AllocationState::CancelRequested | AllocationState::ReleaseRequested => {}
                         _ => return Err(RemoteResourcePoolError::NotCurrent.into()),
                     }
-                    tokio::time::sleep(CLEANUP_INTERVAL).await;
+                    tokio::time::sleep(interval).await;
                 }
             }))
             .await
@@ -132,10 +163,15 @@ impl ResourcePoolRegistry {
     /// returns `NotCurrent`. If there is no saved request, the handle records
     /// that absence.
     ///
-    /// Preparation and cancellation for the same owner and slot must use the same
-    /// consumer creation lock. Participating attachment and removal paths acquire
-    /// that lock before allocation row locks, which remain held until commit or
-    /// rollback. Replacement outside this lock must use a new owner ID.
+    /// Controllers with saved creation IDs serialize preparation, attachment
+    /// and cancellation with the same creation lock. Take it before allocation
+    /// row locks and hold both until commit or rollback.
+    ///
+    /// Foreground DPU preparation runs before its creation/deletion fence.
+    /// Instead, attachment rechecks the captured machine lifetime and deletion
+    /// state; cleanup locks that lifetime before allocation ownership and skips
+    /// obsolete snapshots. Replacement following neither protocol needs a new
+    /// owner ID.
     ///
     /// This method performs no provider I/O and never commits. It sets no database
     /// deadline of its own; the caller must bound its transaction. Rollback
@@ -146,7 +182,7 @@ impl ResourcePoolRegistry {
     /// Integrated needs only rollback of its entity transaction when no remote
     /// request remains.
     ///
-    /// After waiting, recheck current identity, desire, and
+    /// Before discarding a controller's creation IDs, recheck identity, desire, and
     /// [`AllocationCleanup::is_complete`] under the creation lock before forgetting
     /// creation IDs. A new attempt may have started after the capture committed.
     pub async fn request_cancellation(

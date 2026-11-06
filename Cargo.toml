@@ -62,11 +62,11 @@ opentelemetry-semantic-conventions = "0.32.1"
 tracing-opentelemetry = "0.33.0"
 
 # NV-Redfish
-nv-redfish = { version = "0.22.0" }
-nv-redfish-dispatcher = { version = "0.22.0" }
-nv-redfish-server-core = { version = "0.22.0" }
-nv-redfish-csdl-compiler = { version = "0.22.0" }
-nv-redfish-schema = { version = "0.22.0" }
+nv-redfish = { version = "0.22.1" }
+nv-redfish-dispatcher = { version = "0.22.1" }
+nv-redfish-server-core = { version = "0.22.1" }
+nv-redfish-csdl-compiler = { version = "0.22.1" }
+nv-redfish-schema = { version = "0.22.1" }
 
 ########
 # MARK: - Pinned packages that we can't upgrade due to conflicts or just bugs
@@ -185,6 +185,7 @@ once_cell = "1.19"
 pandoc = "0.8.11"
 pin-project-lite = "0.2"
 pkcs1 = "0.7.5"
+pkg-config = "0.3"
 prettyplease = "0.2.30"
 prettytable-rs = { default-features = false, version = "0.10" }
 procfs = "0.18"
@@ -214,6 +215,7 @@ russh = "0.65.0"
 rustc-hash = "2.1.1"
 rustls-pemfile = "2.2.0"
 schemars = { version = "1.2", features = ["chrono04"] }
+semver = "1.0.28"
 serde = "1.0.228"
 serde_bytes = "0.11"
 serde_derive = "1"

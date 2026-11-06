@@ -66,9 +66,9 @@ const DOCA_XPLANE_IMAGE_REGISTRY: &str = "nvcr.io/nvstaging/doca";
 
 /// HBN service Definitions
 pub(crate) const DOCA_HBN_SERVICE_HELM_NAME: &str = "doca-hbn";
-pub(crate) const DOCA_HBN_SERVICE_HELM_VERSION: &str = "3.4.0";
+pub(crate) const DOCA_HBN_SERVICE_HELM_VERSION: &str = "3.5.0";
 pub(crate) const DOCA_HBN_SERVICE_IMAGE_NAME: &str = "doca_hbn";
-pub(crate) const DOCA_HBN_SERVICE_IMAGE_TAG: &str = "3.4.0-doca3.4.0";
+pub(crate) const DOCA_HBN_SERVICE_IMAGE_TAG: &str = "3.5.0-doca3.5.0";
 
 /// DHCP Service Definitions
 pub(crate) const DHCP_SERVER_SERVICE_HELM_NAME: &str = "nico-dhcp-server";
@@ -89,7 +89,7 @@ pub(crate) const PLATFORM_SERVICE_OWNER_VALUE: &str = "service-vpc";
 /// DTS service definitions
 /// (DTS_SERVICE_NAME lives in carbide_dpf::types so the DPF SDK can wire its dependencies.)
 pub(crate) const DTS_SERVICE_HELM_NAME: &str = "doca-telemetry";
-pub(crate) const DTS_SERVICE_HELM_VERSION: &str = "1.25.5";
+pub(crate) const DTS_SERVICE_HELM_VERSION: &str = "1.26.5";
 
 // DPU Agent Service Definitions
 pub(crate) const DPU_AGENT_SERVICE_HELM_NAME: &str = "nico-dpu-agent";
@@ -605,7 +605,6 @@ pub(crate) fn dpu_agent_service(
 ) -> ServiceDefinition {
     ServiceDefinition {
         helm_values: Some(dpu_agent_helm_values(cfg, bootstrap_ca)),
-        apply_node_effect: Some(false),
 
         service_daemon_set_annotations: Some(BTreeMap::new()),
 
@@ -665,7 +664,6 @@ pub(crate) fn dhcp_server_service(
         helm_values: Some(helm_values),
 
         interfaces: dhcp_server_service_interfaces(dpu_interfaces),
-        apply_node_effect: Some(false),
 
         service_daemon_set_annotations: Some(BTreeMap::new()),
 
@@ -970,7 +968,6 @@ pub(crate) fn fmds_service(
         helm_values: Some(helm_values),
 
         interfaces: fmds_service_interfaces(dpu_interfaces),
-        apply_node_effect: Some(false),
 
         service_daemon_set_annotations: Some(BTreeMap::new()),
 
@@ -1002,7 +999,6 @@ pub(crate) fn otelcol_service(cfg: &DpfServiceConfig) -> ServiceDefinition {
     apply_helm_values(&mut helm_values, cfg);
     ServiceDefinition {
         helm_values: Some(helm_values),
-        apply_node_effect: Some(false),
         service_daemon_set_annotations: Some(BTreeMap::new()),
         config_values: Some(serde_json::json!({
             "nico_dpu_agent": "{{ (index .Services \"carbide-dpu-agent\").Name }}",
@@ -2074,11 +2070,11 @@ mod tests {
                 build_service_configuration(&service, TEST_NS, "", &BTreeMap::new())
                     .spec.upgrade_policy.apply_node_effect
             };
-            "NICo services update without NodeEffect" {
-                dpu_agent_service(&default_dpu_agent_service(), &bootstrap_ca) => Some(false),
-                dhcp_server_service(&default_dhcp_server_service(), &interfaces) => Some(false),
-                fmds_service(&default_fmds_service(), &interfaces, false) => Some(false),
-                otelcol_service(&default_otelcol_service()) => Some(false),
+            "NICo services require the NodeEffect gate" {
+                dpu_agent_service(&default_dpu_agent_service(), &bootstrap_ca) => Some(true),
+                dhcp_server_service(&default_dhcp_server_service(), &interfaces) => Some(true),
+                fmds_service(&default_fmds_service(), &interfaces, false) => Some(true),
+                otelcol_service(&default_otelcol_service()) => Some(true),
             }
             "other services retain the NodeEffect gate" {
                 doca_hbn_service(

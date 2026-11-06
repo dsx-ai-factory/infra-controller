@@ -52,7 +52,7 @@ use crate::framework::{ObservationRecorder, Probe};
 use crate::gate::{CallError, CallGate};
 use crate::nico::host_read::{HostDetail, HostRead, Known};
 use crate::nico::{NicoApi, NicoConnector};
-use crate::readers::{Attempt, Failure, incomplete};
+use crate::readers::{Attempt, Failure, Incomplete};
 use crate::snapshot::{Reader, SnapshotSink, SweepMeta, UnitsBuilder, UnitsData, unix_millis};
 
 /// Unlinked expected records get an explorer read for their reason only up
@@ -174,7 +174,7 @@ impl Probe for DevicesReader {
         };
         // Each family is built, delivered and dropped before the next, so
         // only one new family coexists with the published snapshots.
-        let mut failed = Vec::new();
+        let mut failed = Incomplete::default();
         match reads {
             Ok((reads, links)) => self.build(reads, links, &meta, &mut failed),
             Err(failure) => {
@@ -183,7 +183,7 @@ impl Probe for DevicesReader {
                 }
             }
         }
-        incomplete(&failed)
+        failed.finish()
     }
 }
 
@@ -647,7 +647,7 @@ impl DevicesReader {
         &self,
         meta: &SweepMeta,
         family: Family,
-        failed: &mut Vec<Family>,
+        failed: &mut Incomplete,
         build: impl FnOnce(&[Arc<Unit>]) -> Built,
     ) {
         // Copied, not taken, so a panicking build leaves the last units in
@@ -655,6 +655,7 @@ impl DevicesReader {
         let previous = self.previous().get(&family).cloned().unwrap_or_default();
         let built = build(&previous);
         let units = built.as_ref().ok().map(|data| data.units.clone());
+        let kind = built.as_ref().err().map(|f| f.kind);
         let delivered = self
             .attempt
             .deliver(self.sink.as_ref(), meta, family, built);
@@ -664,7 +665,7 @@ impl DevicesReader {
         };
         self.previous().insert(family, keep);
         if !delivered {
-            failed.push(family);
+            failed.record(family, kind);
         }
     }
 
@@ -675,7 +676,7 @@ impl DevicesReader {
         reads: Reads,
         links: Result<ExpectedLinks, Failure>,
         meta: &SweepMeta,
-        failed: &mut Vec<Family>,
+        failed: &mut Incomplete,
     ) {
         let Reads {
             machines,
@@ -1406,6 +1407,8 @@ mod tests {
     use carbide_site_health_probe_api::VersionSource;
 
     use super::*;
+    use crate::framework::Outcome;
+    use crate::gate::MAX_RETRIES;
     use crate::nico::fake::{self, FakeConnector, FakeNico, FakeSite};
     use crate::snapshot::FailureKind;
     use crate::snapshot::testing::FakeSink;
@@ -1577,6 +1580,56 @@ mod tests {
         );
     }
 
+    /// A census whose every retry times out before the sweep deadline keeps
+    /// its families' last snapshots and records them as timed out, and the
+    /// scheduler counts the run as a timeout, not a failure: a slow nico-api
+    /// is a different incident from a down one.
+    #[tokio::test(start_paused = true)]
+    async fn exhausted_census_timeouts_are_a_timeout_outcome() {
+        let nico = FakeNico::new(small_site());
+        let (sink, reader) = scheduled(
+            &nico,
+            Duration::from_secs(60),
+            Duration::from_secs(10),
+            1000.0,
+        );
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let (mut results, loops) = crate::framework::start(vec![reader], cancel.clone());
+
+        // The first sweep publishes every family.
+        let first = results.recv().await.expect("first result");
+        assert_eq!(first.outcome, Outcome::Success);
+        let host = sink.latest::<UnitsData>(Family::Host).expect("host units");
+
+        // Every attempt of the host census times out, exhausting its retries
+        // before the sweep deadline.
+        for _ in 0..1 + MAX_RETRIES {
+            nico.fail_next("find_machine_ids", CallError::Timeout);
+        }
+        tokio::time::sleep(Duration::from_secs(70)).await;
+        let second = results.recv().await.expect("second result");
+        assert_eq!(second.outcome, Outcome::Timeout);
+
+        assert_eq!(
+            sink.latest::<UnitsData>(Family::Host),
+            Some(host),
+            "the host snapshot and its read time are kept",
+        );
+        for family in [Family::Host, Family::Dpu, Family::HostFirmwareRequests] {
+            assert_eq!(
+                sink.failure_kinds(family),
+                vec![FailureKind::Timeout],
+                "{family:?}",
+            );
+        }
+        assert_eq!(sink.count(Family::Host), 1, "no second host publication");
+
+        cancel.cancel();
+        crate::framework::join_loops(loops)
+            .await
+            .expect("loops end");
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn watchdog_timeout_records_each_family_once() {
         let nico = FakeNico::new(small_site());
@@ -1728,7 +1781,7 @@ mod tests {
         let kept = h.reader.previous().get(&Family::Switch).cloned();
         assert_eq!(kept.as_ref().map(Vec::len), Some(2));
         let meta = h.sink.latest::<UnitsData>(Family::Switch).expect("units").0;
-        let mut failed = Vec::new();
+        let mut failed = Incomplete::default();
         let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             h.reader
                 .deliver_built(&meta, Family::Switch, &mut failed, |_| {

@@ -1,0 +1,313 @@
+{{- $root := . -}}
+{{/* The chart owns the binary and anchored test for each suite: values select
+     only which to run, never an arbitrary executable or pattern. */}}
+{{- $known := dict
+    "cluster" (dict "binary" "/tests/cluster.test" "run" "^TestAgainstARealCluster$")
+    "probe" (dict "binary" "/tests/probe.test" "run" "^TestAgainstARealProbe$")
+    "inventory" (dict "binary" "/tests/inventory.test" "run" "^TestAcceptance$")
+    "history" (dict "binary" "/tests/history.test" "run" "^TestAcceptanceReplaysARealProbeCapture$")
+    "lock" (dict "binary" "/tests/lock.test" "run" "^(TestEnvLock|TestEnvCleanupIsBounded)$")
+    "store" (dict "binary" "/tests/store.test" "run" "^TestAgainstARealStore$")
+    "store-transition" (dict "binary" "/tests/store.test" "run" "^TestControlledTransition$")
+    "result" (dict "binary" "/tests/result.test" "run" "^TestEnvResult$") -}}
+{{- $enabled := list -}}
+{{- range $name, $suite := .Values.suites -}}
+{{- if $suite.enabled -}}
+{{/* The journal proof is not a suites.<name> entry; point there rather than
+     rejecting it as an unknown suite. */}}
+{{- if eq $name "journal" -}}
+{{- fail "enable the journal proof with journal.enabled=true, not suites.journal.enabled" -}}
+{{- end -}}
+{{- if not (hasKey $known $name) -}}
+{{- fail (printf "unknown suite %q; the known suites are cluster, probe, inventory, history, lock, store, store-transition and result" $name) -}}
+{{- end -}}
+{{- $enabled = append $enabled $name -}}
+{{- end -}}
+{{- end -}}
+{{/* The journal proof renders its own helm test Jobs, so it also satisfies the
+     "something must run" rule when no suites.<name> is enabled. */}}
+{{- if and (not $enabled) (not .Values.journal.enabled) -}}
+{{- fail "at least one suite must be enabled under suites.<name>.enabled (or journal.enabled)" -}}
+{{- end -}}
+{{/* The history suite replays a real probe capture mounted into the pod; its
+     source is required and must be exactly one of a ConfigMap or a claim. */}}
+{{- if has "history" $enabled -}}
+{{- $cap := $root.Values.historyCapture -}}
+{{- if and (not $cap.configMap) (not $cap.existingClaim) -}}
+{{- fail "the history suite needs historyCapture.configMap or historyCapture.existingClaim" -}}
+{{- end -}}
+{{- if and $cap.configMap $cap.existingClaim -}}
+{{- fail "set only one of historyCapture.configMap or historyCapture.existingClaim" -}}
+{{- end -}}
+{{- end -}}
+{{/* One descriptor per Job: the enabled suites, then the two journal phases.
+     Journal weights are chart-owned 5 then 6 (after history's 4) so the writer
+     always precedes the verifier; they are not exposed, so no value can reverse
+     the proof. */}}
+{{- $render := list -}}
+{{- range $name := $enabled -}}
+{{- $def := index $known $name -}}
+{{- $suite := index $root.Values.suites $name -}}
+{{- $render = append $render (dict "name" $name "binary" $def.binary "run" $def.run "weight" ($suite.weight | default 0) "journal" false "readOnly" false) -}}
+{{- end -}}
+{{- $journalDir := "" -}}
+{{- $claim := "" -}}
+{{- $runID := "" -}}
+{{- if $root.Values.journal.enabled -}}
+{{- $journalDir = required "persistence.mountPath is required when the journal suite is enabled" $root.Values.persistence.mountPath -}}
+{{- $claim = include "scale-test.runDataClaim" $root -}}
+{{- $runID = required "journal.runId is required when the journal suite is enabled (use a fresh id per run)" $root.Values.journal.runId -}}
+{{- $render = append $render (dict "name" "journal-write" "binary" "/tests/journal.test" "run" "^TestJournalWritesToVolume$" "weight" 5 "journal" true "readOnly" false) -}}
+{{- $render = append $render (dict "name" "journal-verify" "binary" "/tests/journal.test" "run" "^TestJournalReadsBackFromVolume$" "weight" 6 "journal" true "readOnly" true) -}}
+{{- end -}}
+{{- $image := include "scale-test.image" $root -}}
+{{- $deadline := include "scale-test.jobDeadline" $root -}}
+{{- $timeout := include "scale-test.testTimeout" $root -}}
+{{- range $item := $render }}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "scale-test.jobName" (dict "root" $root "suite" $item.name) }}
+  namespace: {{ $root.Release.Namespace }}
+  labels:
+    {{- include "scale-test.labels" $root | nindent 4 }}
+    app.kubernetes.io/component: acceptance
+    scale-test.nvidia.com/suite: {{ $item.name | quote }}
+  annotations:
+    # Weighted test hooks run serially and stop the run on the first failure.
+    helm.sh/hook: test
+    helm.sh/hook-weight: {{ $item.weight | quote }}
+    # Keep the finished Job so its logs stay collectable; the next run replaces it.
+    helm.sh/hook-delete-policy: before-hook-creation
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: {{ $deadline }}
+  template:
+    metadata:
+      labels:
+        {{- include "scale-test.labels" $root | nindent 8 }}
+        scale-test.nvidia.com/suite: {{ $item.name | quote }}
+    spec:
+      restartPolicy: Never
+      serviceAccountName: {{ include "scale-test.fullname" $root }}
+      automountServiceAccountToken: true
+      {{- with $root.Values.nodeSelector }}
+      # The acceptance image is amd64-only; pin the Jobs to amd64 nodes.
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $root.Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        {{- if $item.journal }}
+        # fsGroup makes the mounted claim group-writable by the nonroot user.
+        fsGroup: {{ $root.Values.persistence.fsGroup }}
+        {{- end }}
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: {{ $item.name }}
+          image: {{ $image | quote }}
+          imagePullPolicy: {{ $root.Values.image.pullPolicy }}
+          command: [{{ $item.binary | quote }}]
+          args:
+            - "-test.run={{ $item.run }}"
+            - "-test.v"
+            - "-test.timeout={{ $timeout }}"
+          env:
+            {{- if eq $item.name "inventory" }}
+            {{- $inv := $root.Values.inventory }}
+            # The target MAT namespace, not the run's own.
+            - name: SCALE_TEST_NAMESPACE
+              value: {{ required "inventory.namespace is required when the inventory suite is enabled" $inv.namespace | quote }}
+            - name: SCALE_TEST_SELECTOR
+              value: {{ $inv.selector | quote }}
+            - name: SCALE_TEST_RELEASE
+              value: {{ $inv.expected.release | quote }}
+            - name: SCALE_TEST_EXPECTED_RACKS
+              value: {{ $inv.expected.racks | quote }}
+            - name: SCALE_TEST_EXPECTED_HOSTS
+              value: {{ $inv.expected.hosts | quote }}
+            - name: SCALE_TEST_EXPECTED_SWITCHES
+              value: {{ $inv.expected.switches | quote }}
+            - name: SCALE_TEST_EXPECTED_POWER_SHELVES
+              value: {{ $inv.expected.powerShelves | quote }}
+            - name: SCALE_TEST_EXPECTED_DPUS
+              value: {{ $inv.expected.dpus | quote }}
+            - name: SCALE_TEST_EXPECTED_MIN_SERVICES
+              value: {{ $inv.expected.minServices | quote }}
+            - name: SCALE_TEST_TRUST_DOMAIN
+              value: {{ $inv.spiffe.trustDomain | quote }}
+            - name: SCALE_TEST_SERVICE_BASE_PATHS
+              value: {{ $inv.spiffe.serviceBasePaths | quote }}
+            - name: SCALE_TEST_MACHINE_BASE_PATH
+              value: {{ $inv.spiffe.machineBasePath | quote }}
+            - name: SCALE_TEST_SERVER_NAME
+              value: {{ $inv.spiffe.serverName | quote }}
+            {{- else }}
+            # The run's own namespace, from the Downward API; a fixture fails if unset.
+            - name: SCALE_TEST_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            {{- end }}
+            {{- if and (eq $item.name "probe") $root.Values.probeUrl }}
+            - name: SCALE_TEST_PROBE_URL
+              value: {{ $root.Values.probeUrl | quote }}
+            {{- end }}
+            {{- if $item.journal }}
+            # The mounted claim and the fresh run ID both Jobs are bound to.
+            - name: SCALE_TEST_JOURNAL_DIR
+              value: {{ $journalDir | quote }}
+            - name: SCALE_TEST_JOURNAL_RUN_ID
+              value: {{ $runID | quote }}
+            {{- end }}
+            {{- if eq $item.name "history" }}
+            {{- $cap := $root.Values.historyCapture }}
+            {{- $file := ternary (printf "/capture/%s" (default "capture.json" $cap.subPath)) (printf "/capture/%s" (default "capture.json" $cap.key)) (empty $cap.configMap) }}
+            # The capture and the capture-producer provenance the test logs.
+            - name: SCALE_TEST_HISTORY_CAPTURE
+              value: {{ $file | quote }}
+            {{- if $cap.producerImage }}
+            - name: SCALE_TEST_CAPTURE_PROBE_IMAGE
+              value: {{ $cap.producerImage | quote }}
+            {{- end }}
+            {{- if $cap.producerRevision }}
+            - name: SCALE_TEST_CAPTURE_PROBE_REVISION
+              value: {{ $cap.producerRevision | quote }}
+            {{- end }}
+            {{- end }}
+            {{- if has $item.name (list "store" "store-transition") }}
+            {{- $s := $root.Values.store }}
+            - name: SCALE_TEST_STORE_URL  # the store and the probe; an empty URL fails the test, not skips
+              value: {{ $s.url | quote }}
+            - name: SCALE_TEST_PROBE_URL
+              value: {{ $root.Values.probeUrl | quote }}
+            {{- $delay := $s.ingestionDelaySeconds | toString }}
+            {{- if not (regexMatch "^([0-9]|[1-5][0-9]|60)$" $delay) }}
+            {{- fail (printf "store.ingestionDelaySeconds must be a whole number of seconds from 0 to 60, got %q" $delay) }}
+            {{- end }}
+            {{- if ne $delay "0" }}
+            - name: SCALE_TEST_STORE_INGESTION_DELAY
+              value: {{ $delay | quote }}
+            {{- end }}
+            {{- if $s.tokenSecret }}
+            - name: SCALE_TEST_STORE_TOKEN_FILE
+              value: /var/run/secrets/store-token/token
+            {{- end }}
+            {{- if $s.caSecret }}
+            - name: SCALE_TEST_STORE_CA_FILE
+              value: /var/run/secrets/store-ca/ca.crt
+            {{- end }}
+            {{- end }}
+            {{- if eq $item.name "store-transition" }}
+            {{- $t := $root.Values.store.transition }}
+            - name: SCALE_TEST_CAPTURE_START  # the operator-driven window; the test fails if unset
+              value: {{ $t.start | quote }}
+            - name: SCALE_TEST_CAPTURE_END
+              value: {{ $t.end | quote }}
+            - name: SCALE_TEST_CAPTURE_N
+              value: {{ $t.n | quote }}
+            - name: SCALE_TEST_CAPTURE_TARGETS
+              value: {{ $t.targets | quote }}
+            - name: SCALE_TEST_CAPTURE_REACHED
+              value: {{ $t.reached | quote }}
+            - name: SCALE_TEST_CAPTURE_MIN_TIMING_ERROR
+              value: {{ $t.minTimingErrorSeconds | quote }}
+            {{- end }}
+            {{- if eq $item.name "result" }}
+            # The mounted directory the authoritative result.json is written to.
+            - name: SCALE_TEST_RESULT_DIR
+              value: /results
+            {{- end }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            {{- if eq $item.name "inventory" }}
+            # The nico-api client certificate, referenced (never inline).
+            - name: nico-client-cert
+              mountPath: /var/run/secrets/spiffe.io
+              readOnly: true
+            {{- end }}
+            {{- if eq $item.name "history" }}
+            - name: capture
+              mountPath: /capture
+              readOnly: true
+            {{- end }}
+            {{- if has $item.name (list "store" "store-transition") }}
+            {{- $s := $root.Values.store }}
+            {{- if $s.tokenSecret }}
+            - name: store-token
+              mountPath: /var/run/secrets/store-token
+              readOnly: true
+            {{- end }}
+            {{- if $s.caSecret }}
+            - name: store-ca
+              mountPath: /var/run/secrets/store-ca
+              readOnly: true
+            {{- end }}
+            {{- end }}
+            {{- if $item.journal }}
+            - name: run-data
+              mountPath: {{ $journalDir | quote }}
+              readOnly: {{ $item.readOnly }}
+            {{- end }}
+            {{- if eq $item.name "result" }}
+            - name: results
+              mountPath: /results
+            {{- end }}
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        {{- if eq $item.name "inventory" }}
+        - name: nico-client-cert
+          secret:
+            secretName: {{ required "inventory.clientSecret is required when the inventory suite is enabled" $root.Values.inventory.clientSecret | quote }}
+        {{- end }}
+        {{- if eq $item.name "history" }}
+        {{- $cap := $root.Values.historyCapture }}
+        - name: capture
+          {{- if $cap.configMap }}
+          configMap:
+            name: {{ $cap.configMap | quote }}
+          {{- else }}
+          persistentVolumeClaim:
+            claimName: {{ $cap.existingClaim | quote }}
+            readOnly: true
+          {{- end }}
+        {{- end }}
+        {{- if has $item.name (list "store" "store-transition") }}
+        {{- $s := $root.Values.store }}
+        {{- if $s.tokenSecret }}
+        - name: store-token
+          secret:
+            secretName: {{ $s.tokenSecret | quote }}
+        {{- end }}
+        {{- if $s.caSecret }}
+        - name: store-ca
+          secret:
+            secretName: {{ $s.caSecret | quote }}
+        {{- end }}
+        {{- end }}
+        {{- if $item.journal }}
+        - name: run-data
+          persistentVolumeClaim:
+            claimName: {{ $claim | quote }}
+            readOnly: {{ $item.readOnly }}
+        {{- end }}
+        {{- if eq $item.name "result" }}
+        - name: results
+          emptyDir: {}
+        {{- end }}
+{{- end }}

@@ -123,10 +123,17 @@ This file contains a list of metrics exported by NVIDIA Infra Controller (NICo).
 <tr><td>carbide_extension_service_credential_cleanup_failures_total</td><td>counter</td><td>Number of extension-service credential cleanup failures, by operation.</td></tr>
 <tr><td>carbide_extension_services_count</td><td>gauge</td><td>Number of carbide_extension_services in the system</td></tr>
 <tr><td>carbide_extension_services_enqueuer_iteration_latency_milliseconds</td><td>histogram</td><td>The overall time it took to enqueue state handling tasks for all carbide_extension_services in the system</td></tr>
+<tr><td>carbide_extension_services_handler_latency_in_state_milliseconds</td><td>histogram</td><td>The amount of time it took to invoke the state handler for objects of type carbide_extension_services in a certain state</td></tr>
 <tr><td>carbide_extension_services_iteration_latency_milliseconds</td><td>histogram</td><td>Elapsed time of each completed state processor iteration for objects of type carbide_extension_services</td></tr>
+<tr><td>carbide_extension_services_object_tasks_completed_total</td><td>counter</td><td>Number of object handling tasks completed for objects of type carbide_extension_services</td></tr>
+<tr><td>carbide_extension_services_object_tasks_dispatched_total</td><td>counter</td><td>Number of object handling tasks dequeued and dispatched for processing for objects of type carbide_extension_services</td></tr>
 <tr><td>carbide_extension_services_object_tasks_enqueued_total</td><td>counter</td><td>Number of object handling tasks freshly enqueued for objects of type carbide_extension_services</td></tr>
+<tr><td>carbide_extension_services_object_tasks_requeued_total</td><td>counter</td><td>Number of object handling tasks requeued for objects of type carbide_extension_services</td></tr>
 <tr><td>carbide_extension_services_object_tasks_running</td><td>gauge</td><td>Number of object handling tasks currently running of type carbide_extension_services</td></tr>
+<tr><td>carbide_extension_services_per_state</td><td>gauge</td><td>Number of carbide_extension_services in the system with a given state</td></tr>
+<tr><td>carbide_extension_services_per_state_above_sla</td><td>gauge</td><td>Number of carbide_extension_services currently in a state longer than the SLA allows</td></tr>
 <tr><td>carbide_extension_services_total</td><td>gauge</td><td>Number of carbide_extension_services in the system</td></tr>
+<tr><td>carbide_extension_services_with_state_handling_errors_per_state</td><td>gauge</td><td>Number of carbide_extension_services whose most recent state handler run returned an error, by state, substate, and error; the error=any series is the total across all errors for that state and substate, so exclude it when summing over error</td></tr>
 <tr><td>carbide_external_call_duration_milliseconds</td><td>histogram</td><td>Duration of outbound calls by backend, operation, and outcome; the _count series, split by outcome, gives the request and error rates.</td></tr>
 <tr><td>carbide_firmware_artifact_unavailable_total</td><td>counter</td><td>Number of firmware artifacts unavailable before download, by reason.</td></tr>
 <tr><td>carbide_firmware_download_duration_seconds</td><td>histogram</td><td>Duration of background firmware artifact downloads, by outcome; an ok attempt spans fetch, checksum verification, and publish, and the _count series, split by outcome, is the download and failure rate.</td></tr>
@@ -285,6 +292,7 @@ This file contains a list of metrics exported by NVIDIA Infra Controller (NICo).
 <tr><td>carbide_ib_monitor_machines_with_unknown_pkeys_count</td><td>gauge</td><td>Number of machines where at least one port is assigned to a pkey value not associated with any partition ID</td></tr>
 <tr><td>carbide_ib_monitor_partial_failures_total</td><td>counter</td><td>Number of IB fabric monitor partial failures, by failure stage.</td></tr>
 <tr><td>carbide_ib_monitor_ufm_changes_applied_total</td><td>counter</td><td>Number of changes performed at UFM</td></tr>
+<tr><td>carbide_ib_partition_mtu_fallback_total</td><td>counter</td><td>Number of IB partition MTU fallbacks for unrecognized stored integers during row decoding</td></tr>
 <tr><td>carbide_ib_partition_pkey_missing_total</td><td>counter</td><td>Number of IB partitions missing a pkey, by controller state</td></tr>
 <tr><td>carbide_ib_partitions_count</td><td>gauge</td><td>Number of carbide_ib_partitions in the system</td></tr>
 <tr><td>carbide_ib_partitions_enqueuer_iteration_latency_milliseconds</td><td>histogram</td><td>The overall time it took to enqueue state handling tasks for all carbide_ib_partitions in the system</td></tr>

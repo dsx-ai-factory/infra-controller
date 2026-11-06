@@ -93,7 +93,7 @@ SELECT m.* FROM (
             SELECT
             json_build_array(json_build_object(
                 'machine_id', mt2.machine_id,
-                'topology', mt2.topology,
+                __TOPOLOGY__
                 'created', mt2.created,
                 'updated', mt2.updated,
                 'topology_update_needed', mt2.topology_update_needed
@@ -209,7 +209,7 @@ SELECT m.* FROM (
             SELECT
             json_build_array(json_build_object(
                 'machine_id', mt2.machine_id,
-                'topology', mt2.topology,
+                __TOPOLOGY__
                 'created', mt2.created,
                 'updated', mt2.updated,
                 'topology_update_needed', mt2.topology_update_needed

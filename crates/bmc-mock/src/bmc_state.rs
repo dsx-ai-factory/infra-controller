@@ -31,9 +31,7 @@ use crate::{Callbacks, redfish};
 
 /// BMC state and its concrete backend callbacks.
 pub struct BmcState<C: Callbacks> {
-    pub(crate) bmc_vendor: redfish::oem::BmcVendor,
-    pub(crate) bmc_product: Option<&'static str>,
-    pub(crate) bmc_redfish_version: &'static str,
+    pub(crate) service_root_state: Arc<redfish::service_root::ServiceRootState>,
     pub(crate) oem_state: redfish::oem::State,
     pub manager: Arc<ManagerState>,
     pub system_state: Arc<SystemState<C>>,
@@ -49,11 +47,6 @@ pub struct BmcState<C: Callbacks> {
     /// Sequence of lifecycle Events this BMC has published.
     pub(crate) event_sequence: Arc<AtomicU64>,
     pub(crate) callbacks: Option<Arc<C>>,
-    /// Whether this BMC advertises and serves the `/redfish/v1/Systems`
-    /// collection. Delta power shelves expose no `ComputerSystem` collection,
-    /// so the service root omits the `Systems` link and the collection endpoint
-    /// returns 404.
-    pub(crate) exposes_computer_systems: bool,
     /// What this BMC says it can attest, or `None` for one that advertises no
     /// `ComponentIntegrity` collection: the service root omits the link and
     /// both the collection and its members return 404.
@@ -63,9 +56,7 @@ pub struct BmcState<C: Callbacks> {
 impl<C: Callbacks> Clone for BmcState<C> {
     fn clone(&self) -> Self {
         Self {
-            bmc_vendor: self.bmc_vendor,
-            bmc_product: self.bmc_product,
-            bmc_redfish_version: self.bmc_redfish_version,
+            service_root_state: self.service_root_state.clone(),
             oem_state: self.oem_state.clone(),
             manager: self.manager.clone(),
             system_state: self.system_state.clone(),
@@ -78,7 +69,6 @@ impl<C: Callbacks> Clone for BmcState<C> {
             availability: self.availability.clone(),
             event_sequence: self.event_sequence.clone(),
             callbacks: self.callbacks.clone(),
-            exposes_computer_systems: self.exposes_computer_systems,
             component_integrities: self.component_integrities.clone(),
         }
     }
@@ -175,6 +165,21 @@ impl<C: Callbacks> BmcState<C> {
         let created = chrono::Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true);
         let entry = self.system_state.record_log(draft, &created);
         (created, entry)
+    }
+
+    /// Record a completed host power command in the BMC's own event log, the
+    /// way HPE iLO's Integrated Event Log does. Backends call this once the
+    /// command has taken effect, not when the Redfish request is accepted;
+    /// a failed command is never logged. BMCs without such a log ignore it.
+    pub fn record_power_command_completed(&self, reset_type: crate::ResourceResetType) {
+        let Some(system) = self.system_state.primary_system_odata_id() else {
+            return;
+        };
+        let Some(draft) = LogEntryDraft::power_command_completed(&system, reset_type) else {
+            return;
+        };
+        let created = chrono::Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true);
+        self.manager.record_integrated_event(draft, &created);
     }
 
     /// Returns whether this BMC advertises an enabled SSH serial console.

@@ -72,6 +72,12 @@ struct RedfishSimState {
     next_onboard_nics_error: Option<String>,
     /// Fail the next matching power action before changing the host's power.
     next_power_action_error: Option<(SystemPowerControl, RedfishError)>,
+    /// Delay one matching power action before applying or recording it.
+    next_power_action_delay: Option<(
+        SystemPowerControl,
+        Duration,
+        tokio::sync::oneshot::Sender<()>,
+    )>,
     /// Value of `ac_powercycle_supported_by_power`. Defaults to `false`.
     ac_powercycle_supported: bool,
     next_chassis_reset_error: Option<RedfishError>,
@@ -116,6 +122,7 @@ struct RedfishSimState {
     /// tests can drive `probe_bmc_vendor`'s Lite-On/Delta chassis fallback.
     chassis_manufacturer: Option<String>,
     platform_actions: Vec<RedfishSimPlatformAction>,
+    uefi_setup_job_id: Option<String>,
     /// Lossless `machine_setup_status` target observations. These reads stay
     /// separate from mutating platform actions and preserve both `Pair` fields.
     machine_setup_status_targets: HashMap<String, Vec<Option<RedfishSimBootInterfaceRef>>>,
@@ -491,6 +498,19 @@ impl RedfishSim {
         self.state.lock().unwrap().next_power_action_error = Some((action, error));
     }
 
+    /// Delay the next matching power action before applying or recording it.
+    /// The receiver is notified after its sleep is constructed; cancellation
+    /// during that sleep leaves the simulated power unchanged.
+    pub fn delay_next_power_action(
+        &self,
+        action: SystemPowerControl,
+        delay: Duration,
+    ) -> tokio::sync::oneshot::Receiver<()> {
+        let (started, receiver) = tokio::sync::oneshot::channel();
+        self.state.lock().unwrap().next_power_action_delay = Some((action, delay, started));
+        receiver
+    }
+
     /// Set whether clients report AC power cycle support through `power`.
     pub fn set_ac_powercycle_supported(&self, supported: bool) {
         self.state.lock().unwrap().ac_powercycle_supported = supported;
@@ -642,6 +662,11 @@ impl RedfishSim {
     /// [`Self::set_uefi_setup_client_creation_error`].
     pub fn clear_uefi_setup_client_creation_error(&self) {
         self.state.lock().unwrap().uefi_setup_client_creation_error = None;
+    }
+
+    /// Sets the successful `uefi_setup` result; `Some` models a staged DPU password.
+    pub fn set_uefi_setup_job_id(&self, job_id: Option<String>) {
+        self.state.lock().unwrap().uefi_setup_job_id = job_id;
     }
 
     /// Pause the next successful UEFI setup call. The receiver reports the
@@ -962,6 +987,17 @@ impl Redfish for RedfishSimClient {
         action: libredfish::SystemPowerControl,
     ) -> libredfish::RedfishFuture<'a, Result<(), RedfishError>> {
         Box::pin(async move {
+            let delay = {
+                let mut state = self.state.lock().unwrap();
+                state
+                    .next_power_action_delay
+                    .take_if(|(delayed_action, _, _)| *delayed_action == action)
+            };
+            if let Some((_, delay, started)) = delay {
+                let sleep = tokio::time::sleep(delay);
+                started.send(()).ok();
+                sleep.await;
+            }
             let power_state = match action {
                 libredfish::SystemPowerControl::ForceOff
                 | libredfish::SystemPowerControl::GracefulShutdown => PowerState::Off,
@@ -2966,6 +3002,6 @@ impl super::BmcCredentialOps for RedfishSim {
                 .expect("setup observer dropped");
             resume.await.ok();
         }
-        Ok(None)
+        Ok(self.state.lock().unwrap().uefi_setup_job_id.clone())
     }
 }

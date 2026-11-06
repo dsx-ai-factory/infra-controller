@@ -12,6 +12,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use axum::Router;
+use axum::extract::Request;
+use axum::http::header;
+use axum::middleware::{Next, from_fn};
 use axum::response::Redirect;
 use axum::routing::get;
 use carbide_libmlx_model::device::identity::MlxDeviceSelector;
@@ -22,6 +25,10 @@ use libmlx::firmware::operation::{
     FirmwareOperation, FirmwareOperationPhase, FirmwareOperationState, FirmwareSupervisorClient,
     SupervisorConfig, SupervisorLaunchMode,
 };
+use rcgen::{
+    BasicConstraints, CertificateParams, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair,
+    KeyUsagePurpose, SanType,
+};
 use rpc::forge_agent_control_response as fac;
 use rpc::protos::mlx_device as pb;
 use rpc::protos::mlx_device::mlx_device_update_firmware_result::Result as FirmwareUpdateResult;
@@ -30,6 +37,8 @@ use tokio::net::TcpListener;
 use tokio::process::{Child, Command};
 use tokio::task::JoinSet;
 use tokio::time::{sleep, timeout};
+
+use crate::Options;
 
 const DEVICE: &str = "ffff:fe:1f.0";
 const SLOT: &str = "ffff:fe:1f";
@@ -42,13 +51,16 @@ const TEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// through real supervisor admission; a settled Verify failure retries without
 /// repeating the mutations. A restarted supervisor can still return a retained
 /// receipt, but a replacement that lost its journal cannot admit the work again.
+/// Available Core credentials must never reach the Direct artifact origin.
 #[tokio::test]
 async fn checked_update_stages_owned_inputs_and_publishes_correlated_receipts() {
     timeout(TEST_TIMEOUT, async {
         let directory = private_fixture();
         let fixture = directory.path();
         fake_tools(fixture).await;
-        let (base_url, fetches, mut server) = artifact_server().await;
+        let core_options = core_options_with_usable_identity(fixture);
+        let authenticated_requests = Arc::new(AtomicUsize::new(0));
+        let (base_url, fetches, mut server) = artifact_server(authenticated_requests.clone()).await;
         let mut daemon = TestDaemon::start(fixture).await;
         let config = SupervisorConfig {
             state_directory: fixture.join("state"),
@@ -94,7 +106,9 @@ async fn checked_update_stages_owned_inputs_and_publishes_correlated_receipts() 
         assert_retained_inputs(fixture, &failed_record);
         assert_eq!(fetches.load(Ordering::SeqCst), 2);
 
-        let accepted = deliver(&task, &config)
+        // Production supplies Core options for Direct too. A usable identity
+        // must stay out of both the helper's transport and its origin requests.
+        let accepted = deliver_with_core_options(&task, &config, Some(&core_options))
             .await
             .expect("admit checked firmware");
         assert!(matches!(
@@ -157,6 +171,11 @@ async fn checked_update_stages_owned_inputs_and_publishes_correlated_receipts() 
             );
         }
         assert_eq!(fetches.load(Ordering::SeqCst), 4);
+        assert_eq!(
+            authenticated_requests.load(Ordering::SeqCst),
+            0,
+            "Direct requests must omit Authorization and Proxy-Authorization"
+        );
         let mutations = fs::read_to_string(fixture.join("mutations")).unwrap();
         assert_eq!(mutations, "configure\nburn\n");
 
@@ -310,6 +329,7 @@ async fn checked_update_stages_owned_inputs_and_publishes_correlated_receipts() 
                 &task.phase_id,
                 fac::mlx_device_action::Command::UpdateFirmware(task.clone()),
                 &config,
+                None,
             )
             .await,
             FirmwareUpdateResult::MissingReceipt(pb::FirmwareOperationMissingReceipt {
@@ -353,7 +373,7 @@ async fn checked_update_rejects_source_and_device_mismatches_before_mutation() {
             let directory = private_fixture();
             let fixture = directory.path();
             fake_tools(fixture).await;
-            let (base_url, fetches, mut server) = artifact_server().await;
+            let (base_url, fetches, mut server) = artifact_server(Arc::default()).await;
             let mut task = update_task(&base_url);
             match rejection {
                 Rejection::Redirect => {
@@ -380,6 +400,7 @@ async fn checked_update_rejects_source_and_device_mismatches_before_mutation() {
                 }
             }
             let expected_context = FirmwareUpdateContext {
+                delivery_mode: Default::default(),
                 phase_id: task.phase_id.clone(),
                 expected_digests: task.expected_digests.clone().unwrap().try_into().unwrap(),
                 expected_device: task
@@ -453,6 +474,52 @@ fn private_fixture() -> tempfile::TempDir {
         fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
     }
     directory
+}
+
+/// Supply fresh identity material Scout can load and use to mint a Core JWT.
+fn core_options_with_usable_identity(fixture: &Path) -> Options {
+    let ca_key = KeyPair::generate().expect("Core fixture CA key");
+    let mut ca_params = CertificateParams::default();
+    ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+    ca_params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
+    let ca = ca_params.self_signed(&ca_key).expect("Core fixture CA");
+    let issuer = Issuer::from_params(&ca_params, &ca_key);
+    let client_key = KeyPair::generate().expect("Core fixture client key");
+    let mut client_params = CertificateParams::default();
+    client_params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
+    client_params.subject_alt_names = vec![SanType::URI(
+        "spiffe://direct.test/machine/fm100ht038bg3qsho433vkg684heguv282qaggmrsh2ugn1qk096n2c6hcg"
+            .try_into()
+            .expect("Core fixture machine URI"),
+    )];
+    let client = client_params
+        .signed_by(&client_key, &issuer)
+        .expect("Core fixture client certificate");
+    let write = |name: &str, contents: &str| {
+        let path = fixture.join(name);
+        fs::write(&path, contents).expect("write Core identity fixture");
+        path.to_string_lossy().into_owned()
+    };
+    let mut options = <Options as clap::Parser>::parse_from([
+        "forge-scout",
+        "--api=https://core.example.test:1079",
+    ]);
+    options.root_ca = write("core-ca.pem", &ca.pem());
+    options.client_cert = write("core-client.pem", &client.pem());
+    options.client_key = write("core-client-key.pem", &client_key.serialize_pem());
+    let transport = crate::client::forge_client_config(&options);
+    assert!(transport.root_ca_is_usable());
+    assert!(transport.read_client_cert().is_some());
+    assert!(
+        transport
+            .node_token_provider
+            .as_ref()
+            .expect("Core node token provider")
+            .current()
+            .is_some(),
+        "Core identity must be able to mint the credential Direct must not send"
+    );
+    options
 }
 
 /// The normal test prerequisite builds this cross-package binary beside `deps`.
@@ -611,8 +678,10 @@ esac
     }
 }
 
-/// Count downloads so repeated delivery cannot silently restage immutable work.
-async fn artifact_server() -> (String, Arc<AtomicUsize>, JoinSet<std::io::Result<()>>) {
+/// Count downloads and credential-bearing requests at the actual Direct origin.
+async fn artifact_server(
+    authenticated_requests: Arc<AtomicUsize>,
+) -> (String, Arc<AtomicUsize>, JoinSet<std::io::Result<()>>) {
     let fetches = Arc::new(AtomicUsize::new(0));
     let app = Router::new()
         .route(
@@ -638,7 +707,18 @@ async fn artifact_server() -> (String, Arc<AtomicUsize>, JoinSet<std::io::Result
                     async { CONFIGURATION }
                 }
             }),
-        );
+        )
+        .layer(from_fn(move |request: Request, next: Next| {
+            let authenticated_requests = authenticated_requests.clone();
+            async move {
+                if request.headers().contains_key(header::AUTHORIZATION)
+                    || request.headers().contains_key(header::PROXY_AUTHORIZATION)
+                {
+                    authenticated_requests.fetch_add(1, Ordering::SeqCst);
+                }
+                next.run(request).await
+            }
+        }));
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let mut server = JoinSet::new();
@@ -671,6 +751,7 @@ fn update_task(base_url: &str) -> fac::MlxDeviceUpdateFirmware {
         },
     };
     fac::MlxDeviceUpdateFirmware {
+        delivery_mode: Default::default(),
         operation_id: "checked-update".into(),
         phase_id: "firmware-phase-1".into(),
         profile: Some(profile.into()),
@@ -689,11 +770,21 @@ async fn deliver(
     task: &fac::MlxDeviceUpdateFirmware,
     config: &SupervisorConfig,
 ) -> Result<FirmwareOperation, pb::MlxDeviceUpdateFirmwareError> {
+    deliver_with_core_options(task, config, None).await
+}
+
+/// Deliver checked work with the same optional Core settings production supplies.
+async fn deliver_with_core_options(
+    task: &fac::MlxDeviceUpdateFirmware,
+    config: &SupervisorConfig,
+    core_options: Option<&Options>,
+) -> Result<FirmwareOperation, pb::MlxDeviceUpdateFirmwareError> {
     match deliver_command(
         &task.operation_id,
         &task.phase_id,
         fac::mlx_device_action::Command::UpdateFirmware(task.clone()),
         config,
+        core_options,
     )
     .await
     {
@@ -720,6 +811,7 @@ async fn observe(
         &task.phase_id,
         fac::mlx_device_action::Command::ObserveFirmwareUpdate(
             fac::MlxDeviceObserveFirmwareUpdate {
+                delivery_mode: Default::default(),
                 operation_id: task.operation_id.clone(),
                 phase_id: task.phase_id.clone(),
                 profile: task.profile.clone(),
@@ -728,6 +820,7 @@ async fn observe(
             },
         ),
         config,
+        None,
     )
     .await
 }
@@ -747,6 +840,7 @@ async fn deliver_command(
     phase_id: &str,
     command: fac::mlx_device_action::Command,
     config: &SupervisorConfig,
+    core_options: Option<&Options>,
 ) -> FirmwareUpdateResult {
     let machine_id = "fm100ht038bg3qsho433vkg684heguv282qaggmrsh2ugn1qk096n2c6hcg"
         .parse()
@@ -759,6 +853,7 @@ async fn deliver_command(
             command: Some(command),
         }],
         Ok(config),
+        core_options,
         |_| panic!("generic firmware results must not enter Scout's legacy device discovery"),
         |request| {
             publication = Some(request);

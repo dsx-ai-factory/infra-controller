@@ -37,7 +37,7 @@ type mockClient struct {
 	powerShelfRackIDs          map[string]string // power shelf ID → rack ID
 	switchControllerStates     map[string]string // switch ID → raw core controller_state
 	switchHealth               map[string]*types.HealthReport
-	switchNvosIPs              map[string]string // switch ID → resolved NVOS host IP
+	switchNvosPorts            map[string][]SwitchNvosPort
 	nvLinkDomainMemberships    []NVLinkDomainMembership
 	powerShelfControllerStates map[string]string // shelf ID → raw core controller_state
 	powerShelfHealth           map[string]*types.HealthReport
@@ -113,7 +113,7 @@ func NewMockClient() MockClient {
 		powerShelfRackIDs:             map[string]string{},
 		switchControllerStates:        map[string]string{},
 		switchHealth:                  map[string]*types.HealthReport{},
-		switchNvosIPs:                 map[string]string{},
+		switchNvosPorts:               map[string][]SwitchNvosPort{},
 		powerShelfControllerStates:    map[string]string{},
 		powerShelfHealth:              map[string]*types.HealthReport{},
 		rackHealth:                    map[string]*types.HealthReport{},
@@ -300,14 +300,15 @@ func (c *mockClient) FindSwitchRuntimeStatuses(_ context.Context, switchIds []st
 	return out, nil
 }
 
-func (c *mockClient) FindSwitchNvosIPs(_ context.Context, switchIds []string) (map[string]string, error) {
+func (c *mockClient) FindSwitchNvosPorts(_ context.Context, switchIds []string) (map[string][]SwitchNvosPort, error) {
 	if len(switchIds) == 0 {
 		return nil, nil
 	}
-	out := make(map[string]string, len(switchIds))
+	out := make(map[string][]SwitchNvosPort, len(switchIds))
 	for _, id := range switchIds {
-		if ip, ok := c.switchNvosIPs[id]; ok && ip != "" {
-			out[id] = ip
+		ports, ok := c.switchNvosPorts[id]
+		if ok {
+			out[id] = ports
 		}
 	}
 	return out, nil
@@ -388,10 +389,12 @@ func (c *mockClient) SetSwitchHealth(switchID string, health *types.HealthReport
 	c.switchHealth[switchID] = health
 }
 
-// SetSwitchNvosIP records the resolved NVOS host IP Core reports for a switch
-// (mock only).
-func (c *mockClient) SetSwitchNvosIP(switchID, ip string) {
-	c.switchNvosIPs[switchID] = ip
+// SetSwitchNvosPorts records the observed NVOS ports for a switch (mock only).
+func (c *mockClient) SetSwitchNvosPorts(switchID string, ports []SwitchNvosPort) {
+	if ports == nil {
+		ports = []SwitchNvosPort{}
+	}
+	c.switchNvosPorts[switchID] = ports
 }
 
 // SetPowerShelfControllerState records the raw controller_state Core reports

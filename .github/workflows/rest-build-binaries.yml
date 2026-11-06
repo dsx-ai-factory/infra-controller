@@ -152,8 +152,15 @@ jobs:
         uses: actions/setup-go@v7
         with:
           go-version: ${{ env.GO_VERSION }}
-          cache: true
-          cache-dependency-path: rest-api/go.sum
+          cache: false
+
+      # Per target, because each GOOS/GOARCH pair compiles its own packages.
+      - name: Restore Go caches
+        id: go-cache
+        uses: ./.github/actions/go-cache-restore
+        with:
+          scope: rest-build-${{ matrix.target }}
+          dependency-path: rest-api/go.sum
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -227,3 +234,10 @@ jobs:
           # The bundle is already gzip-compressed; another deflate pass only burns runner time.
           compression-level: 0
           retention-days: 7
+
+      - name: Save Go caches
+        if: ${{ !cancelled() }}
+        uses: ./.github/actions/go-cache-save
+        with:
+          key: ${{ steps.go-cache.outputs.key }}
+          cache-hit: ${{ steps.go-cache.outputs.cache-hit }}
