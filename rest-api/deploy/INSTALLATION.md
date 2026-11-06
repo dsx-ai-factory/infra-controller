@@ -699,6 +699,10 @@ CA defaults to `/etc/credsmgr-ca/ca.crt`, mounted by Helm from
 `nico-rest-site-manager.credsManagerCa.secretName` (`ca-signing-secret`, key
 `tls.crt`). A missing or unusable bundle prevents startup.
 
+Site Manager uses JSON for service logging. The shared TLS reloader writes
+its own text records to stderr. Configure log collection for client identity
+renewal to retain both formats.
+
 #### Trust and certificate lifetimes
 
 The client certificate issuer must match Certificate Manager's trusted client
