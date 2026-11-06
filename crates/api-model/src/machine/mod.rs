@@ -2466,6 +2466,9 @@ pub enum DpuInitState {
     /// idempotent power-on phase begins.
     WaitingForPlatformPowerOff,
     WaitingForPlatformConfiguration,
+    /// Waits for network and agent health observations newer than the UEFI
+    /// password-change restart request before accepting network readiness.
+    WaitingForUefiRestart,
     PollingBiosSetup,
     WaitingForNetworkConfig,
     WaitingForNetworkInstall, // Deprecated now, not used

@@ -5548,7 +5548,11 @@ impl DpuMachineStateHandler {
                 }
 
                 let next_state = if dpf_used_for_ingestion {
-                    DpuInitState::WaitingForNetworkConfig
+                    if credentials_updated {
+                        DpuInitState::WaitingForUefiRestart
+                    } else {
+                        DpuInitState::WaitingForNetworkConfig
+                    }
                 } else {
                     DpuInitState::PollingBiosSetup
                 }
@@ -5575,6 +5579,36 @@ impl DpuMachineStateHandler {
                 } else {
                     Ok(StateHandlerOutcome::transition(next_state))
                 }
+            }
+
+            DpuInitState::WaitingForUefiRestart => {
+                let restart = dpu_snapshot
+                    .status
+                    .last_reboot_requested
+                    .as_ref()
+                    .ok_or_else(|| StateHandlerError::MissingData {
+                        object_id: dpu_snapshot.id.to_string(),
+                        missing: "last_reboot_requested",
+                    })?;
+                let network_is_fresh = dpu_snapshot
+                    .network_status_observation
+                    .as_ref()
+                    .is_some_and(|report| report.observed_at > restart.time);
+                let health_is_fresh = dpu_snapshot
+                    .dpu_agent_health_report()
+                    .and_then(|report| report.observed_at)
+                    .is_some_and(|observed_at| observed_at > restart.time);
+                if !network_is_fresh || !health_is_fresh {
+                    return Ok(StateHandlerOutcome::wait(format!(
+                        "Waiting for DPU {} network and health reports after the UEFI restart request",
+                        dpu_snapshot.id,
+                    )));
+                }
+
+                Ok(StateHandlerOutcome::transition(
+                    DpuInitState::WaitingForNetworkConfig
+                        .next_state(&state.managed_state, dpu_machine_id)?,
+                ))
             }
 
             DpuInitState::PollingBiosSetup => {
@@ -5660,6 +5694,13 @@ impl DpuMachineStateHandler {
             }
 
             DpuInitState::WaitingForNetworkConfig => {
+                if !state.managed_state.all_dpu_states_in_sync()? {
+                    return Ok(StateHandlerOutcome::wait(
+                        "Waiting for all DPUs to finish platform configuration and UEFI restart"
+                            .to_string(),
+                    ));
+                }
+
                 // is_network_ready is syncing over all DPUs.
                 // The code will move only when all DPUs returns network_ready signal.
                 for dsnapshot in &state.dpu_snapshots {
