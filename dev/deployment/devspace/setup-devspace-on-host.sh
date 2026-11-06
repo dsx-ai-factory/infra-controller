@@ -248,6 +248,8 @@ install_host_packages() {
     git \
     jq \
     openssh-client \
+    python3 \
+    python3-yaml \
     rsync
 
   if command -v docker >/dev/null 2>&1 && \
