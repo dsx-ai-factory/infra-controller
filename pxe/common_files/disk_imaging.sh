@@ -51,6 +51,17 @@ function configure_curl_args() {
 	fi
 }
 
+# An HTTPS request must stay on HTTPS throughout its redirect chain.
+function curl_download() {
+	local request_url=$1
+	shift
+	local -a redirect_args=()
+	if [[ "${request_url,,}" == https://* ]]; then
+		redirect_args=(--proto-redir '=https')
+	fi
+	curl "${curl_args[@]}" "${redirect_args[@]}" "$@" "$request_url"
+}
+
 # Downloads the complete request URL to one caller-visible local filename while
 # preserving each forwarded curl argument as a separate value.
 function curl_url() {
@@ -61,8 +72,8 @@ function curl_url() {
 	if [ -z "$file" ]; then
 		file=$(basename "${url%%\?*}")
 	fi
-	curl "${curl_args[@]}" -L "$@" \
-		--output "$file" "$url" 2>&1 | tee "$log_output"
+	curl_download "$url" -L "$@" \
+		--output "$file" 2>&1 | tee "$log_output"
 	return "${PIPESTATUS[0]}"
 }
 
@@ -231,7 +242,7 @@ function get_distro_image() {
 		echo "Distro $distro_name not supported" | tee $log_output
 		exit 1;
 	fi
-	curl "${curl_args[@]}" -L "$shaurl" --output shafile 2>&1 | tee "$log_output"
+	curl_download "$shaurl" -L --output shafile 2>&1 | tee "$log_output"
 	if [ "${PIPESTATUS[0]}" -ne 0 ]; then
 		echo "Failed to download checksum file from $shaurl" | tee "$log_output"
 		return 1
@@ -254,10 +265,18 @@ function add_cloud_init() {
 	mkdir -p "$seed_dir"
 	local cloud_init_file download_status
 	for cloud_init_file in user-data meta-data network-config; do
-		curl "${curl_args[@]}" \
-			"$cloud_init_url/$cloud_init_file" --output "$seed_dir/$cloud_init_file" 2>&1 | tee "$log_output"
+		curl_download "$cloud_init_url/$cloud_init_file" -L \
+			--output "$seed_dir/$cloud_init_file" 2>&1 | tee "$log_output"
 		download_status=${PIPESTATUS[0]}
 		if [ "$download_status" -ne 0 ]; then
+			if [ "$cloud_init_file" == "network-config" ]; then
+				if ! rm -f -- "$seed_dir/$cloud_init_file"; then
+					echo "Failed to remove incomplete cloud-init network-config" | tee "$log_output"
+					return 1
+				fi
+				echo "Skipping optional cloud-init network-config: download failed (curl status $download_status)" | tee "$log_output"
+				continue
+			fi
 			echo "Failed to download cloud-init $cloud_init_file" | tee "$log_output"
 			return "$download_status"
 		fi

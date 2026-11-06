@@ -297,7 +297,7 @@ curl() {
 	# remote naming, malformed operands, and unrelated arguments.
 	while [ "$#" -gt 0 ]; do
 		case "$1" in
-			--retry)
+			--retry|--proto-redir)
 				if [ "$#" -lt 2 ]; then
 					return 2
 				fi
@@ -526,11 +526,11 @@ image_url="https://images.example/image.qcow2"
 image_auth=()
 curl_url "$image_url"
 read_mock_curl_args
-assert_eq "unauthenticated curl arg count" "8" "${#mock_curl_args[@]}"
+assert_eq "unauthenticated curl arg count" "10" "${#mock_curl_args[@]}"
 assert_eq "unauthenticated curl treats HTTP errors as failures" "--fail" "${mock_curl_args[0]}"
-assert_eq "unauthenticated curl output flag" "--output" "${mock_curl_args[5]}"
-assert_eq "unauthenticated curl output filename" "$file" "${mock_curl_args[6]}"
-assert_eq "unauthenticated curl url is the last argument" "$image_url" "${mock_curl_args[7]}"
+assert_eq "unauthenticated curl output flag" "--output" "${mock_curl_args[7]}"
+assert_eq "unauthenticated curl output filename" "$file" "${mock_curl_args[8]}"
+assert_eq "unauthenticated curl url is the last argument" "$image_url" "${mock_curl_args[9]}"
 
 file=
 query_marker="synthetic-query-marker"
@@ -554,13 +554,13 @@ fi
 curl_url "$image_url" "${image_auth[@]}"
 read_mock_curl_args
 assert_eq "authenticated query selects the path filename" "image.qcow2" "$file"
-assert_eq "authenticated curl arg count" "10" "${#mock_curl_args[@]}"
-assert_eq "authenticated curl auth flag" "-K" "${mock_curl_args[5]}"
+assert_eq "authenticated curl arg count" "12" "${#mock_curl_args[@]}"
+assert_eq "authenticated curl auth flag" "-K" "${mock_curl_args[7]}"
 assert_eq "authenticated curl auth value is the header file, not the token" \
-	"$image_auth_header_file" "${mock_curl_args[6]}"
-assert_eq "authenticated curl output flag" "--output" "${mock_curl_args[7]}"
-assert_eq "authenticated curl output filename" "$file" "${mock_curl_args[8]}"
-assert_eq "authenticated curl url preserves the query" "$image_url" "${mock_curl_args[9]}"
+	"$image_auth_header_file" "${mock_curl_args[8]}"
+assert_eq "authenticated curl output flag" "--output" "${mock_curl_args[9]}"
+assert_eq "authenticated curl output filename" "$file" "${mock_curl_args[10]}"
+assert_eq "authenticated curl url preserves the query" "$image_url" "${mock_curl_args[11]}"
 for arg in "${mock_curl_args[@]}"; do
 	case "$arg" in
 		*my-token*) fail "token leaked into curl's argument list: $arg" ;;
@@ -620,7 +620,7 @@ run_tls_policy_tests || exit $?
 
 # Exercise main's cloud-init failure branch with all disk operations replaced.
 # Keep the real cloud-init downloader and its curl/tee status handling.
-echo "cloud-init download failures stop provisioning and unmount the root filesystem"
+echo "required cloud-init failures stop provisioning; optional network-config failures are skipped"
 run_cloud_init_failure_tests() (
 	local cloud_init_function
 	cloud_init_function=$(declare -f add_cloud_init)
@@ -652,18 +652,43 @@ run_cloud_init_failure_tests() (
 	add_testing_user() { touch "$temp_dir/provisioning-continued"; }
 	expand_root_fs() { :; }
 	curl() {
-		local arg
+		local request output_path
 		printf '%s\n' "$@" >>"$temp_dir/cloud-curl-args"
-		for arg in "$@"; do
-			if [[ "$arg" == https://cloud.example/seed/* ]]; then
-				printf '%s\n' "${arg##*/}" >>"$temp_dir/cloud-downloads"
-				if [[ "${arg##*/}" == "$failed_file" ]]; then return 60; fi
-			fi
+		while [ "$#" -gt 0 ]; do
+			case "$1" in
+				--output) shift; output_path=$1 ;;
+				https://cloud.example/seed/*) request=$1 ;;
+			esac
+			shift
 		done
+		printf '%s\n' "${request##*/}" >>"$temp_dir/cloud-downloads"
+		if [[ "${request##*/}" == "$failed_file" ]]; then
+			if [[ "$file_state" == partial ]]; then
+				printf 'partial download\n' >"$output_path"
+			fi
+			return "$download_failure"
+		fi
+		printf 'downloaded %s\n' "${request##*/}" >"$output_path"
 	}
-	local failed_file expected_count result main_output
-	for failed_file in user-data meta-data network-config none; do
+	local scenario failed_file download_failure expected_result file_state
+	local expected_count result main_output network_seed
+	network_seed="$temp_dir/cloud-root/var/lib/cloud/seed/nocloud-net/network-config"
+	mkdir -p "${network_seed%/*}"
+	for scenario in \
+		'user-data|60|1|required' \
+		'meta-data|60|1|required' \
+		'network-config|60|0|stale' \
+		'network-config|22|0|partial' \
+		'none|0|0|present' \
+		'network-config|60|1|cleanup'; do
+		IFS='|' builtin read -r failed_file download_failure expected_result file_state <<<"$scenario"
 		case "$failed_file" in user-data) expected_count=1 ;; meta-data) expected_count=2 ;; *) expected_count=3 ;; esac
+		if [[ "$file_state" == cleanup ]]; then
+			rm -f "$network_seed"
+			mkdir "$network_seed"
+		else
+			printf 'stale network configuration\n' >"$network_seed"
+		fi
 		image_sha=
 		image_auth_token=
 		distro_name=
@@ -677,14 +702,26 @@ run_cloud_init_failure_tests() (
 		assert_eq "$failed_file download attempts" "$expected_count" "$(wc -l <"$temp_dir/cloud-downloads" | tr -d ' ')"
 		assert_eq "$failed_file kernel TLS override" "$expected_count" "$(grep -cx -- -k "$temp_dir/cloud-curl-args")"
 		assert_eq "$failed_file unmount" /mnt "$(cat "$temp_dir/unmounts")"
-		if [[ "$failed_file" == none ]]; then
-			assert_eq "successful cloud-init main status" 0 "$result"
+		assert_eq "$scenario main status" "$expected_result" "$result"
+		if [[ "$expected_result" == 0 ]]; then
 			[[ -f "$temp_dir/provisioning-continued" ]] || fail "successful provisioning stopped"
+			if [[ "$failed_file" == network-config ]]; then
+				[[ ! -e "$network_seed" ]] || fail "failed optional download left a seed file"
+				[[ "$main_output" == *"Skipping optional cloud-init network-config"* ]] ||
+					fail "main did not report the skipped optional file"
+			else
+				assert_eq "successful network-config contents" 'downloaded network-config' "$(cat "$network_seed")"
+			fi
 		else
-			assert_eq "$failed_file main failure" 1 "$result"
 			[[ ! -f "$temp_dir/provisioning-continued" ]] || fail "provisioning continued after $failed_file failed"
-			[[ "$main_output" == *"Failed to download cloud-init $failed_file"* ]] ||
-				fail "main did not report the failed cloud-init file"
+			if [[ "$file_state" == cleanup ]]; then
+				[[ -d "$network_seed" ]] || fail "cleanup failure fixture disappeared"
+				[[ "$main_output" == *"Failed to remove incomplete cloud-init network-config"* ]] ||
+					fail "main did not report the cleanup failure"
+			else
+				[[ "$main_output" == *"Failed to download cloud-init $failed_file"* ]] ||
+					fail "main did not report the failed cloud-init file"
+			fi
 		fi
 	done
 )
