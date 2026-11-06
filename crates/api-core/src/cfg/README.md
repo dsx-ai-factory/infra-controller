@@ -1244,17 +1244,18 @@ it; an unparented VpcPrefix still retains every containing retired root.
 
 Remediate existing rows while the API is serving. Then stop serving requests on
 all empty-list replicas and repeat the database inspection before restarting.
-For the shipped Helm chart, set `replicas` to `0` and wait for all API pods to stop
+For the `nico-api` Helm chart, set its `replicas` value to `0`
+(`nico-api.replicas` through the umbrella chart) and wait for all API pods to stop
 before final inspection or configuration changes; keep it at zero while applying
-the configuration. The default ConfigMap reload annotation otherwise starts a
-rolling update.
+the configuration. Configuration updates can restart pods through Helm's
+`checksum/config` annotation or, when installed, Reloader.
 If the final inspection or startup preflight reports missing or ambiguous
 parentage, restore service with the old configuration to remediate it, then
 repeat the stop and inspection. Start one authoritative Core replica with the
 updated configuration first so reconciliation and lineage backfill succeed
-before restarting other replicas. Resume service
-after every replica has the updated configuration and passes startup preflight.
-Keep requests stopped throughout this final inspection and restart sequence:
+before restarting other replicas with the same configuration. Resume service only
+on replicas with the updated configuration that have passed startup preflight.
+Keep empty-list replicas stopped throughout the final inspection and restart:
 an empty-list replica can otherwise admit another rootless VpcPrefix outside the
 new ranges, causing authoritative and listen-only startups to fail lineage
 preflight. Stopping requests prevents new admissions but does not repair existing
