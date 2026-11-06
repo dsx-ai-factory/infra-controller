@@ -15,7 +15,7 @@ tests:
           value:
             metadata:
               annotations:
-                checksum/config: cec3296caac6c25c8792b601334699dbcbef72b0ccf72391e36cf55ad4bbcb59
+                checksum/config: 7d459cef2340ef5fc53aa2cc9a0d6204ec0ab023771ff99ab68947e081717b6f
               labels:
                 helm.sh/chart: nico-dhcp-1.0.0
                 app.kubernetes.io/managed-by: Helm
