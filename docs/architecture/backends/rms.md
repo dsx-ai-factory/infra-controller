@@ -85,12 +85,13 @@ certificate paths is an override for sites that want different material.
 
 ### RMS APIs NICo Calls
 
-NICo uses a focused slice of the RMS API. Each call belongs to a specific workflow:
+NICo uses a focused slice of the RMS API. The following table lists calls by workflow;
+some calls serve more than one workflow:
 
 | Workflow | RMS APIs |
 | --- | --- |
 | Rack maintenance firmware upgrade | `apply_firmware_object`, `get_firmware_job_status` |
-| Component Manager firmware update | `apply_firmware_object`, `get_firmware_job_status`, `get_node_firmware_inventory`, `list_firmware_objects` |
+| Component Manager firmware update and shelf version listing | `apply_firmware_object`, `get_firmware_job_status`, `get_node_firmware_inventory`, `list_firmware_objects` |
 | Switch system image update | `apply_switch_system_image`, `get_switch_system_image_job_status` |
 | Power control | `batch_set_power_state`, `get_job_status` |
 | Switch certificate installation | `configure_switch_certificate`, `get_configure_switch_certificate_job_status` |
@@ -122,9 +123,45 @@ including when its response was lost; command acceptance and progress persistenc
 are not atomic. Explicit direct/bypass requests retain direct dispatch and do not
 run this maintenance cleanup.
 
-Firmware, image, certificate, and fabric calls are asynchronous. RMS returns a job identifier
-immediately and NICo polls the matching status API until the job reaches a terminal state.
-Treat accepted, queued, and in-progress as nonterminal.
+Firmware updates, system image updates, certificate installation, and fabric configuration run
+asynchronously. RMS normally returns a job identifier when it accepts the request, and NICo
+polls the matching status API until the job reaches a terminal state. Queued and in-progress
+states are nonterminal.
+
+Component Manager also provides these passive status methods through its RMS backend:
+
+| Method purpose | RMS APIs |
+| --- | --- |
+| Power state | `batch_get_power_state` |
+| Installed firmware | `batch_get_firmware_inventory` |
+| Firmware manifest comparison | `compare_firmware_object` |
+| Tracked firmware jobs | `get_firmware_job_status`, `get_switch_system_image_job_status` (switches) |
+
+These passive methods do not submit updates or move a firmware update to its next phase.
+Firmware job reads attempt to query the job identifiers recorded for each requested device.
+The shared deadline can prevent some queries, and repeated device entries can repeat them.
+These reads do not discover other RMS jobs. Neither an empty job list nor a
+completed job establishes that an entire firmware update finished. A missing or unreadable job
+does not establish update failure. Installed firmware, firmware manifest comparisons, and job
+status are independent observations; one does not confirm another.
+
+#### Switch Update Polling
+
+Poll `GetComponentFirmwareStatus` with the switch BMC MAC against the
+`nico-api` instance that submitted the NVOS job, and avoid overlapping caller
+polls. These practices do not establish whole-update or installed-firmware
+completion.
+
+For switches, `get_firmware_jobs` only observes known work. The updater's `get_firmware_status`
+poll can submit a queued firmware-object update after its NVOS image job completes.
+Without that polling, the queued phase does not advance.
+That polling must reach the `nico-api` instance that submitted the NVOS job.
+The queued phase exists only in that instance's memory; restarting it before
+firmware-object submission loses the phase. A poll after restart or through another
+instance can report completion from the persisted NVOS job alone.
+Overlapping `get_firmware_status` polls can also report completion from the NVOS job alone
+while the firmware-object job is still running. A poll can retain the earlier job list after
+another poll submits that phase and removes its in-memory marker.
 
 ### How a Firmware Manifest Reaches RMS
 
@@ -158,9 +195,12 @@ therefore be reachable from the RMS namespace.
   class uses a different backend.
 - **The integration is config-gated at both ends.** NICo builds no RMS client without
   `[rms] api_url`, and RMS accepts no NICo traffic without matching TLS material.
-- **Asynchronous by default.** Firmware, image, certificate, and fabric operations return
-  RMS job identifiers and require polling to a terminal state. Delegated compute AC cycles
-  return Redfish command acceptance without an RMS job.
+- **Job-based updates.** NICo uses the returned job identifiers to follow firmware, image,
+  certificate, and fabric updates until they reach a terminal state.
+  Delegated compute AC cycles return Redfish command acceptance without an RMS job.
+  Direct dispatch does not start a state-controller poller for a pre-ingestion switch.
+  The caller must poll `GetComponentFirmwareStatus` using its BMC MAC to advance a queued
+  firmware-object phase; passive `get_firmware_jobs` reads do not advance it.
 - **Manifests flow through NICo; artifacts do not.** NICo hands RMS the document and RMS
   fetches the binaries, so artifact reachability is an RMS-side network requirement.
 - **Shared PostgreSQL, separate database.** RMS persists to the same cluster as NICo under its
