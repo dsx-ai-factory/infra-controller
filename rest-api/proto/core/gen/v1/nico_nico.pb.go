@@ -13396,6 +13396,7 @@ type VpcUpdateRequest struct {
 	// send a non-empty value to replace it.
 	PowerResourceGroup *string `protobuf:"bytes,20,opt,name=power_resource_group,json=powerResourceGroup,proto3,oneof" json:"power_resource_group,omitempty"`
 	// DHCP option set used by hosts in this VPC unless an instance sets its own.
+	// Omitting it or sending an empty string removes the set; a non-empty value replaces it.
 	DhcpOptionSetId *string `protobuf:"bytes,21,opt,name=dhcp_option_set_id,json=dhcpOptionSetId,proto3,oneof" json:"dhcp_option_set_id,omitempty"`
 	unknownFields   protoimpl.UnknownFields
 	sizeCache       protoimpl.SizeCache
@@ -21462,6 +21463,7 @@ type InstanceConfig struct {
 	// and a non-empty value replaces it.
 	PowerProfile *string `protobuf:"bytes,26,opt,name=power_profile,json=powerProfile,proto3,oneof" json:"power_profile,omitempty"`
 	// DHCP option set for this instance; overrides the VPC's option set per field.
+	// On update, omitting it or sending an empty string removes the set.
 	DhcpOptionSetId *string `protobuf:"bytes,27,opt,name=dhcp_option_set_id,json=dhcpOptionSetId,proto3,oneof" json:"dhcp_option_set_id,omitempty"`
 	unknownFields   protoimpl.UnknownFields
 	sizeCache       protoimpl.SizeCache

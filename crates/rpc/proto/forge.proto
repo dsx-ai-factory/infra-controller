@@ -2551,6 +2551,7 @@ message VpcUpdateRequest {
   // send a non-empty value to replace it.
   optional string power_resource_group = 20;
   // DHCP option set used by hosts in this VPC unless an instance sets its own.
+  // Omitting it or sending an empty string removes the set; a non-empty value replaces it.
   optional string dhcp_option_set_id = 21;
 }
 
@@ -3972,6 +3973,7 @@ message InstanceConfig {
   optional string power_profile = 26;
 
   // DHCP option set for this instance; overrides the VPC's option set per field.
+  // On update, omitting it or sending an empty string removes the set.
   optional string dhcp_option_set_id = 27;
 }
 

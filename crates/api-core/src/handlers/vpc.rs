@@ -454,6 +454,8 @@ pub(crate) async fn update(
     if nsg_locked {
         let _ = find_vpc_update_nsg(&mut txn, &observed_vpc, &vpc_update, true).await?;
     }
+    // Like the NSG, the option set is locked before the VPC row.
+    let _ = find_vpc_update_dhcp_option_set(&mut txn, &observed_vpc, &vpc_update, true).await?;
     let mut current_vpc = db::vpc::find_by_with_lock(
         &mut txn,
         ObjectColumnFilter::One(vpc::IdColumn, &vpc_update.id),
@@ -499,6 +501,7 @@ pub(crate) async fn update(
             db::tenant_prefix_overlap::lock_checks(&mut txn).await?;
         }
         let _ = find_vpc_update_nsg(&mut txn, &observed_vpc, &vpc_update, true).await?;
+        let _ = find_vpc_update_dhcp_option_set(&mut txn, &observed_vpc, &vpc_update, true).await?;
         current_vpc = db::vpc::find_by_with_lock(
             &mut txn,
             ObjectColumnFilter::One(vpc::IdColumn, &vpc_update.id),
@@ -516,31 +519,6 @@ pub(crate) async fn update(
     if policy.needs_overlap_check() && tenant_prefix_overlap::checks_required(api, &mut txn).await?
     {
         tenant_prefix_overlap::validate_vpc_policy(api, &mut txn, &policy.candidate).await?;
-    }
-
-    if let Some(ref id) = vpc_update.dhcp_option_set_id {
-        let tenant_org = current_vpc
-            .config
-            .tenant_organization_id
-            .parse::<TenantOrganizationId>()
-            .map_err(|e: InvalidTenantOrg| {
-                CarbideError::from(RpcDataConversionError::InvalidTenantOrg(e.to_string()))
-            })?;
-        // Lock the set until commit so it cannot be deleted and its ID reused meanwhile.
-        if db::dhcp_option_set::find_by_ids(
-            &mut txn,
-            std::slice::from_ref(id),
-            Some(&tenant_org),
-            true,
-        )
-        .await?
-        .is_empty()
-        {
-            return Err(CarbideError::FailedPrecondition(format!(
-                "DhcpOptionSet `{id}` does not exist or is not owned by tenant `{tenant_org}`"
-            ))
-            .into());
-        }
     }
 
     vpc_update.if_version_match = Some(current_vpc.version);
@@ -596,6 +574,39 @@ async fn find_vpc_update_nsg(
     .ok_or_else(|| {
         CarbideError::FailedPrecondition(format!(
             "NetworkSecurityGroup `{id}` does not exist or is not owned by tenant `{}`",
+            vpc.config.tenant_organization_id
+        ))
+    })
+}
+
+async fn find_vpc_update_dhcp_option_set(
+    txn: &mut PgConnection,
+    vpc: &model::vpc::Vpc,
+    update: &UpdateVpc,
+    for_update: bool,
+) -> Result<Option<model::dhcp_option_set::DhcpOptionSet>, CarbideError> {
+    let Some(id) = update.dhcp_option_set_id.as_ref() else {
+        return Ok(None);
+    };
+    db::dhcp_option_set::find_by_ids(
+        txn,
+        std::slice::from_ref(id),
+        Some(
+            &vpc.config
+                .tenant_organization_id
+                .parse()
+                .map_err(|e: InvalidTenantOrg| {
+                    CarbideError::from(RpcDataConversionError::InvalidTenantOrg(e.to_string()))
+                })?,
+        ),
+        for_update,
+    )
+    .await?
+    .pop()
+    .map(Some)
+    .ok_or_else(|| {
+        CarbideError::FailedPrecondition(format!(
+            "DhcpOptionSet `{id}` does not exist or is not owned by tenant `{}`",
             vpc.config.tenant_organization_id
         ))
     })
