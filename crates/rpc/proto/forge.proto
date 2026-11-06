@@ -310,6 +310,9 @@ service Forge {
   rpc FindIpAddress(FindIpAddressRequest) returns (FindIpAddressResponse);
   rpc FindMachineIds(MachineSearchConfig) returns (common.MachineIdList);
   rpc FindMachinesByIds(MachinesByIdsRequest) returns (MachineList);
+  // Current host and DPU lifecycle states without full machine records.
+  // Query or state-decoding errors fail the entire request with INTERNAL.
+  rpc FindMachineStatesByIds(MachineStatesByIdsRequest) returns (MachineStateList);
   // Compact per-host state for monitoring: allocatability, update eligibility
   // and the explored firmware report, read from one database snapshot.
   rpc FindHostStatesByIds(HostStatesByIdsRequest) returns (HostStateList);
@@ -379,6 +382,9 @@ service Forge {
   rpc IsBmcInManagedHost(BmcEndpointRequest) returns (IsBmcInManagedHostResponse);
   // BmcCredentialStatus returns true if site explorer has the credentials to login to this BMC
   rpc BmcCredentialStatus(BmcEndpointRequest) returns (BmcCredentialStatusResponse);
+  // Returns the drivers this API server's rules select for a BMC from its
+  // latest exploration report, and the identity they were selected from
+  rpc FindBmcDriverSelection(BmcEndpointRequest) returns (BmcDriverSelection);
   // Explore an individual BMC and show the report
   // The results of this exploration call will not be persisted in the database
   rpc Explore(BmcEndpointRequest) returns (site_explorer.EndpointExplorationReport);
@@ -8570,6 +8576,16 @@ message IsBmcInManagedHostResponse {
   bool in_managed_host = 1;
 }
 
+// A BMC's driver selection. Every field is absent until site exploration
+// records the BMC's service root in its report.
+message BmcDriverSelection {
+  // The drivers by capability, the rule that chose each, the quirks, and the
+  // rules hash, as JSON.
+  optional string selection = 1;
+  // What the latest exploration report says about the BMC, as JSON.
+  optional string identity = 2;
+}
+
 message BmcCredentialStatusResponse {
   bool have_credentials = 1;
 }
@@ -12011,8 +12027,16 @@ message UpdateOperatingSystemRequest {
   optional string ipxe_script = 20;
   optional common.IpxeTemplateId ipxe_template_id = 22;
   optional IpxeTemplateParameters ipxe_template_parameters = 23;
+  // Omitted lists keep their stored values; present lists replace them, including empty lists.
+  // Caller-supplied cached_url values are ignored. An unchanged template, parameter list,
+  // and artifact definition (including cache_strategy) retain the site's stored cached URLs.
+  // Changing that definition clears the cached URLs and recomputes readiness: an uncached
+  // CACHED_ONLY artifact makes the OS PROVISIONING; otherwise it is READY.
+  // Use UpdateOperatingSystemCachableIpxeTemplateArtifacts to set or clear cached URLs.
   optional IpxeTemplateArtifacts ipxe_template_artifacts = 24;
-  optional string ipxe_template_definition_hash = 25; // if provided, used as-is; otherwise recomputed
+  // If provided, used as-is. Otherwise validate the effective definition and recompute
+  // its hash. Correcting a stored hash alone does not invalidate unchanged artifacts.
+  optional string ipxe_template_definition_hash = 25;
 }
 
 message DeleteOperatingSystemRequest {
@@ -13754,4 +13778,33 @@ message AddNetworkSegmentPrefixRequest {
   // Exact link-address matches take precedence over prefix matching. Operators
   // must choose a selector that does not redirect another network's requests.
   optional string dhcpv6_link_address = 5;
+}
+
+// Select current machine states without hardware, network, health, or history data.
+// Database acquisition and execution share a 300-second outer deadline; its
+// expiry fails the whole request with INTERNAL. Each SQL statement is capped
+// at 300 seconds, preserving shorter PostgreSQL limits. Configured pool or SQL
+// timeouts can fail the request earlier.
+message MachineStatesByIdsRequest {
+  // Host, predicted-host, and DPU IDs. Empty requests and requests exceeding
+  // the server's max_find_by_ids limit fail with INVALID_ARGUMENT. Duplicates
+  // count toward that limit but produce only one result per existing machine.
+  repeated common.MachineId machine_ids = 1;
+}
+
+// One machine's lifecycle state.
+message MachineStateSummary {
+  option (carbide.codegen.v1.message_derive) = "serde::Serialize";
+  // Always present in FindMachineStatesByIds responses.
+  common.MachineId id = 1;
+  // The same string as Machine.state, using the machine's own controller state.
+  string state = 2;
+}
+
+// Current lifecycle states for the requested machines.
+message MachineStateList {
+  option (carbide.codegen.v1.message_derive) = "serde::Serialize";
+  // Existing requested machines, sorted by ID, including DPUs without a host
+  // or loopback IP. Missing IDs are omitted.
+  repeated MachineStateSummary machines = 1;
 }

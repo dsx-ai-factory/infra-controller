@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 // Package inventory reads the expected inventory every machine-a-tron pod serves on /expected-inventory/records, over the pod IP. Fleet-up proves it and ingestion sends
-// it, so N per type comes from here. The MAT-record to nico-api body conversion and the request digest belong to the ingestion conversion (PR G); this package plans the
-// keyed writes over the records.
+// it, so N per type comes from here. The MAT-record to nico-api body conversion and the request digest belong to the ingestion change; this package reads the records and
+// checks their structural links.
 package inventory
 
 import (
@@ -75,7 +75,7 @@ const (
 	KindPowerShelf DeviceKind = "power_shelf"
 )
 
-// DpuPolicy is the operator's DPU policy for a host, preserved so the ingestion conversion (PR G) can rebuild the write. Optional: absent means site default.
+// DpuPolicy is the operator's DPU policy for a host, preserved so the ingestion conversion can rebuild the write. Optional: absent means site default.
 type DpuPolicy string
 
 const (
@@ -328,7 +328,7 @@ func (o *owners) add(key, owner string) {
 
 // checkPods finds the problems across the served records: registration still on, pods that disagree on the nico-api URL, a BMC MAC or rack served twice, a device naming
 // an unserved rack, a DPU whose parent is no served host, an interface or NVOS MAC on two devices. MACs compare in any case; the record-conversion fault is found by the
-// ingestion conversion (PR G).
+// ingestion conversion.
 func checkPods(pods []MatPod) []string {
 	var problems []string
 	apiURLs := owners{}

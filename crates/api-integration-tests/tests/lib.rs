@@ -522,6 +522,7 @@ async fn run_integration() -> eyre::Result<()> {
     .await?;
 
     exercise_admin_address_reconcile_failures(&test_env).await?;
+    exercise_ib_partition_mtu_fallback(&test_env).await?;
     exercise_nvlink_partition_monitor(&test_env, server_handle_2.ready.meter.clone()).await?;
 
     carbide_api_core::test_support::poll_resource_pool_stats(test_env.db_pool.clone()).await?;
@@ -1039,6 +1040,76 @@ async fn exercise_admin_address_reconcile_failures(
     let mut txn = test_env.db_pool.begin().await?;
     db::machine_interface::set_primary_interface(&primary_id, true, &mut txn).await?;
     txn.commit().await?;
+    Ok(())
+}
+
+/// Proves `FindIBPartitionsByIds` returns a row with an unrecognized stored MTU
+/// and exports the fallback counter for the generated catalogue.
+async fn exercise_ib_partition_mtu_fallback(
+    test_env: &IntegrationTestEnvironment,
+) -> eyre::Result<()> {
+    use carbide_uuid::infiniband::IBPartitionId;
+    use rpc::forge_api_client::ForgeApiClient;
+    use rpc::forge_tls_client::{ApiConfig, ForgeClientConfig};
+
+    let id = IBPartitionId::new();
+    sqlx::query(
+        "INSERT INTO ib_partitions
+            (id, name, organization_id, config_version, controller_state_version,
+             mtu, rate_limit, service_level)
+         VALUES ($1, 'mtu-fallback-partition', 'mtu-fallback-tenant', $2, $2, 3, 200, 0)",
+    )
+    .bind(id)
+    .bind(ConfigVersion::initial())
+    .execute(&test_env.db_pool)
+    .await?;
+
+    let certs = &api_test_helper::utils::LOCALHOST_CERTS;
+    let config = ForgeClientConfig::new(
+        certs.ca_cert.to_string_lossy().into_owned(),
+        Some(forge_tls::client_config::ClientCert {
+            cert_path: certs.client_cert.to_string_lossy().into_owned(),
+            key_path: certs.client_key.to_string_lossy().into_owned(),
+        }),
+    );
+    let client = ForgeApiClient::new(&ApiConfig::new(
+        &format!("https://{}", test_env.carbide_api_addrs[0]),
+        &config,
+    ));
+    let response = client
+        .find_ib_partitions_by_ids(rpc::forge::IbPartitionsByIdsRequest {
+            ib_partition_ids: vec![id],
+            include_history: false,
+        })
+        .await;
+    sqlx::query("DELETE FROM ib_partitions WHERE id = $1")
+        .bind(id)
+        .execute(&test_env.db_pool)
+        .await?;
+    let partitions = response?.ib_partitions;
+    assert_eq!(partitions.len(), 1);
+    assert_eq!(partitions[0].id, Some(id));
+
+    let name = "carbide_ib_partition_mtu_fallback_total";
+    let sample_prefix = format!("{name} ");
+    let samples = metrics::wait_for_metric_line(
+        &test_env.carbide_metrics_addrs,
+        &format!("\n{sample_prefix}"),
+    )
+    .await?;
+    metrics::assert_metric_line(&samples, &format!("\n# TYPE {name} counter\n"));
+    metrics::assert_metric_line(
+        &samples,
+        &format!(
+            "\n# HELP {name} Number of IB partition MTU fallbacks for unrecognized stored integers during row decoding\n"
+        ),
+    );
+    let count: f64 = samples
+        .lines()
+        .find_map(|line| line.strip_prefix(&sample_prefix))
+        .context("IB partition MTU fallback sample missing from live scrape")?
+        .parse()?;
+    assert!(count >= 1.0, "MTU fallback must increment the live counter");
     Ok(())
 }
 

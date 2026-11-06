@@ -33,7 +33,7 @@ use model::machine::ManagedHostStateSnapshot;
 use model::machine_boot_interface::MachineBootInterfaceTarget;
 use model::site_explorer::{
     Chassis, EndpointExplorationError, EndpointExplorationReport, ExploredDpu, ExploredManagedHost,
-    MachineSetupStatus,
+    MachineSetupStatus, Manager, ServiceRoot,
 };
 use model::test_support::{DpuConfig, ManagedHostConfig};
 use rpc::forge::forge_server::Forge;
@@ -749,6 +749,69 @@ async fn test_site_explorer_fixtures_zerodpu_site_explorer_before_host_dhcp(
         .await?;
 
     assert_eq!(snapshot.dpu_snapshots.len(), 0);
+
+    Ok(())
+}
+
+#[sqlx_test]
+async fn test_find_bmc_driver_selection_selects_from_the_latest_report(
+    pool: PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = common::api_fixtures::create_test_env(pool.clone()).await;
+    let find = |ip: &str| {
+        env.api
+            .find_bmc_driver_selection(Request::new(rpc::forge::BmcEndpointRequest {
+                ip_address: ip.to_string(),
+                mac_address: None,
+            }))
+    };
+
+    let error = find("192.0.2.1").await.expect_err("unknown endpoint");
+    assert_eq!(error.code(), tonic::Code::NotFound);
+
+    let unexplored = "192.0.2.2";
+    let xcc3 = "192.0.2.3";
+    let mut txn = env.pool.begin().await?;
+    db::explored_endpoints::insert(
+        IpAddr::from_str(unexplored)?,
+        &EndpointExplorationReport::default(),
+        false,
+        &mut txn,
+    )
+    .await?;
+    db::explored_endpoints::insert(
+        IpAddr::from_str(xcc3)?,
+        &EndpointExplorationReport {
+            service_root: Some(ServiceRoot {
+                vendor: Some("Lenovo".to_string()),
+                ..Default::default()
+            }),
+            managers: vec![Manager {
+                id: "1".to_string(),
+                model: Some("Lenovo XClarity Controller 3".to_string()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        },
+        false,
+        &mut txn,
+    )
+    .await?;
+    txn.commit().await?;
+
+    assert_eq!(
+        find(unexplored).await?.into_inner(),
+        rpc::forge::BmcDriverSelection::default(),
+        "a report without the service root selects nothing"
+    );
+
+    let response = find(xcc3).await?.into_inner();
+    let selection: serde_json::Value =
+        serde_json::from_str(response.selection.as_deref().expect("selection"))?;
+    assert_eq!(selection["drivers"]["boot_order"], "lenovo-xcc3-boot-order");
+    let identity: serde_json::Value =
+        serde_json::from_str(response.identity.as_deref().expect("identity"))?;
+    assert_eq!(identity["service_root"]["vendor"], "Lenovo");
 
     Ok(())
 }

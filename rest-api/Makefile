@@ -30,6 +30,8 @@ REST_IMAGES := nico-rest-api nico-rest-workflow nico-rest-site-manager \
 	nico-rest-site-agent nico-rest-db nico-rest-cert-manager nico-flow \
 	nico-psm nico-nsm nico-mcp
 
+TEST_PACKAGES ?= ./...
+
 # PostgreSQL container configuration
 POSTGRES_CONTAINER_NAME := project-test
 POSTGRES_PORT := 30432

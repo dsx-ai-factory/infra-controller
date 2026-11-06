@@ -47,6 +47,7 @@ mod computer_system;
 mod drives;
 mod error;
 pub mod hw;
+mod identity;
 mod inventories;
 mod manager;
 mod network_adapter;
@@ -63,13 +64,15 @@ use component_integrity::ExploredComponentIntegrity;
 use computer_system::ExploredComputerSystem;
 use drives::ExploredDrives;
 pub use error::Error;
+pub use identity::platform_identity;
 use inventories::ExploredInventories;
 use itertools::Itertools;
 use mac_address::MacAddress;
 use manager::ExploredManager;
 use model::site_explorer::{
     ComputerSystem, EndpointExplorationReport, EndpointType, InternalLockdownStatus,
-    LockdownStatus, MachineSetupDiff, MachineSetupStatus, derive_hardware_class,
+    LockdownStatus, MachineSetupDiff, MachineSetupStatus, ServiceRoot as ModelServiceRoot,
+    derive_hardware_class,
 };
 use nv_redfish::assembly::Model as AssemblyModel;
 use nv_redfish::computer_system::BootOption;
@@ -457,6 +460,7 @@ pub async fn nv_generate_exploration_report<B: Bmc>(
         component_integrities: component_integrities.entries,
         component_integrity_unavailable: component_integrities.unavailable,
         vendor: hw_type.and_then(|hw_type| hw_type.bmc_vendor()),
+        service_root: Some(service_root(&root)),
         hardware_class: Some(hardware_class),
         versions: HashMap::default(),
         model: None,
@@ -533,6 +537,7 @@ async fn build_powershelf_report<B: Bmc>(
         component_integrities: component_integrities.entries,
         component_integrity_unavailable: component_integrities.unavailable,
         vendor: hw_type.bmc_vendor(),
+        service_root: Some(service_root(root)),
         hardware_class: Some(hardware_class),
         versions: HashMap::default(),
         model: None,
@@ -552,6 +557,23 @@ async fn build_powershelf_report<B: Bmc>(
 
 /// The class recorded for an endpoint: the host system's reported identity,
 /// with the service root standing in for the fields it left empty.
+/// The service root fields the report records.
+fn service_root<B: Bmc>(root: &ServiceRoot<B>) -> ModelServiceRoot {
+    ModelServiceRoot {
+        vendor: root.vendor().map(|vendor| vendor.into_inner().to_string()),
+        product: root
+            .product()
+            .map(|product| product.into_inner().to_string()),
+        oem_keys: root
+            .root
+            .oem
+            .as_ref()
+            .and_then(|oem| oem.additional_properties.as_object())
+            .map(|oem| oem.keys().cloned().collect())
+            .unwrap_or_default(),
+    }
+}
+
 fn hardware_class<B: Bmc>(root: &ServiceRoot<B>, system: &ComputerSystem) -> String {
     derive_hardware_class(
         Some(system),

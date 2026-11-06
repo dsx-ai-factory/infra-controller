@@ -19,6 +19,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::str::FromStr;
 
 use ::rpc::forge::{self as rpc, IsBmcInManagedHostResponse};
+use bmc_drivers::{Drivers, built_in_rules};
 use config_version::ConfigVersion;
 use db::ConditionalWrite::{Applied, NotApplied};
 use db::explored_endpoints::EndpointReportNotCurrent;
@@ -423,6 +424,38 @@ pub(crate) async fn is_bmc_in_managed_host(
 
     Ok(Response::new(IsBmcInManagedHostResponse {
         in_managed_host,
+    }))
+}
+
+pub(crate) async fn find_bmc_driver_selection(
+    api: &Api,
+    request: tonic::Request<::rpc::forge::BmcEndpointRequest>,
+) -> Result<Response<rpc::BmcDriverSelection>, tonic::Status> {
+    log_request_data(&request);
+    let bmc_ip = IpAddr::from_str(&request.into_inner().ip_address).map_err(CarbideError::from)?;
+    let Some(endpoint) =
+        db::explored_endpoints::find_by_ips(&api.database_connection, vec![bmc_ip])
+            .await?
+            .into_iter()
+            .next()
+    else {
+        return Err(CarbideError::NotFoundError {
+            kind: "explored_endpoint",
+            id: bmc_ip.to_string(),
+        }
+        .into());
+    };
+    // A report without the service root, from a failed first exploration or
+    // an older binary, cannot tell vendors apart, so it selects nothing.
+    if endpoint.report.service_root.is_none() {
+        return Ok(Response::new(rpc::BmcDriverSelection::default()));
+    }
+    let identity = bmc_explorer::platform_identity(&endpoint.report);
+    let selection = Drivers::select(&built_in_rules(), &identity)
+        .map_err(|error| CarbideError::internal(error.to_string()))?;
+    Ok(Response::new(rpc::BmcDriverSelection {
+        selection: Some(serde_json::to_string(&selection).map_err(CarbideError::from)?),
+        identity: Some(serde_json::to_string(&identity).map_err(CarbideError::from)?),
     }))
 }
 

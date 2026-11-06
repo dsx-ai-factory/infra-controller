@@ -251,10 +251,13 @@ impl<B: Bmc> ExploredManager<B> {
             })
             .collect::<Result<Vec<_>, _>>()?;
 
+        let raw = self.manager.raw();
         Ok(ModelManager {
-            id: self.manager.raw().id.clone(),
+            id: raw.id.clone(),
             ethernet_interfaces,
             ipmi_port: self.ipmi_port,
+            model: raw.model.clone().flatten(),
+            firmware_version: raw.firmware_version.clone().flatten(),
         })
     }
 }

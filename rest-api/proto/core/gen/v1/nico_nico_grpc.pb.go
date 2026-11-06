@@ -142,6 +142,7 @@ const (
 	Forge_FindIpAddress_FullMethodName                                      = "/forge.Forge/FindIpAddress"
 	Forge_FindMachineIds_FullMethodName                                     = "/forge.Forge/FindMachineIds"
 	Forge_FindMachinesByIds_FullMethodName                                  = "/forge.Forge/FindMachinesByIds"
+	Forge_FindMachineStatesByIds_FullMethodName                             = "/forge.Forge/FindMachineStatesByIds"
 	Forge_FindHostStatesByIds_FullMethodName                                = "/forge.Forge/FindHostStatesByIds"
 	Forge_FindMachineStateHistories_FullMethodName                          = "/forge.Forge/FindMachineStateHistories"
 	Forge_FindMachineHealthHistories_FullMethodName                         = "/forge.Forge/FindMachineHealthHistories"
@@ -185,6 +186,7 @@ const (
 	Forge_ClearSiteExplorationError_FullMethodName                          = "/forge.Forge/ClearSiteExplorationError"
 	Forge_IsBmcInManagedHost_FullMethodName                                 = "/forge.Forge/IsBmcInManagedHost"
 	Forge_BmcCredentialStatus_FullMethodName                                = "/forge.Forge/BmcCredentialStatus"
+	Forge_FindBmcDriverSelection_FullMethodName                             = "/forge.Forge/FindBmcDriverSelection"
 	Forge_Explore_FullMethodName                                            = "/forge.Forge/Explore"
 	Forge_ReExploreEndpoint_FullMethodName                                  = "/forge.Forge/ReExploreEndpoint"
 	Forge_RefreshEndpointReport_FullMethodName                              = "/forge.Forge/RefreshEndpointReport"
@@ -828,6 +830,9 @@ type ForgeClient interface {
 	FindIpAddress(ctx context.Context, in *FindIpAddressRequest, opts ...grpc.CallOption) (*FindIpAddressResponse, error)
 	FindMachineIds(ctx context.Context, in *MachineSearchConfig, opts ...grpc.CallOption) (*MachineIdList, error)
 	FindMachinesByIds(ctx context.Context, in *MachinesByIdsRequest, opts ...grpc.CallOption) (*MachineList, error)
+	// Current host and DPU lifecycle states without full machine records.
+	// Query or state-decoding errors fail the entire request with INTERNAL.
+	FindMachineStatesByIds(ctx context.Context, in *MachineStatesByIdsRequest, opts ...grpc.CallOption) (*MachineStateList, error)
 	// Compact per-host state for monitoring: allocatability, update eligibility
 	// and the explored firmware report, read from one database snapshot.
 	FindHostStatesByIds(ctx context.Context, in *HostStatesByIdsRequest, opts ...grpc.CallOption) (*HostStateList, error)
@@ -884,6 +889,9 @@ type ForgeClient interface {
 	IsBmcInManagedHost(ctx context.Context, in *BmcEndpointRequest, opts ...grpc.CallOption) (*IsBmcInManagedHostResponse, error)
 	// BmcCredentialStatus returns true if site explorer has the credentials to login to this BMC
 	BmcCredentialStatus(ctx context.Context, in *BmcEndpointRequest, opts ...grpc.CallOption) (*BmcCredentialStatusResponse, error)
+	// Returns the drivers this API server's rules select for a BMC from its
+	// latest exploration report, and the identity they were selected from
+	FindBmcDriverSelection(ctx context.Context, in *BmcEndpointRequest, opts ...grpc.CallOption) (*BmcDriverSelection, error)
 	// Explore an individual BMC and show the report
 	// The results of this exploration call will not be persisted in the database
 	Explore(ctx context.Context, in *BmcEndpointRequest, opts ...grpc.CallOption) (*EndpointExplorationReport, error)
@@ -2962,6 +2970,16 @@ func (c *forgeClient) FindMachinesByIds(ctx context.Context, in *MachinesByIdsRe
 	return out, nil
 }
 
+func (c *forgeClient) FindMachineStatesByIds(ctx context.Context, in *MachineStatesByIdsRequest, opts ...grpc.CallOption) (*MachineStateList, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(MachineStateList)
+	err := c.cc.Invoke(ctx, Forge_FindMachineStatesByIds_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *forgeClient) FindHostStatesByIds(ctx context.Context, in *HostStatesByIdsRequest, opts ...grpc.CallOption) (*HostStateList, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(HostStateList)
@@ -3386,6 +3404,16 @@ func (c *forgeClient) BmcCredentialStatus(ctx context.Context, in *BmcEndpointRe
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(BmcCredentialStatusResponse)
 	err := c.cc.Invoke(ctx, Forge_BmcCredentialStatus_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *forgeClient) FindBmcDriverSelection(ctx context.Context, in *BmcEndpointRequest, opts ...grpc.CallOption) (*BmcDriverSelection, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(BmcDriverSelection)
+	err := c.cc.Invoke(ctx, Forge_FindBmcDriverSelection_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -7609,6 +7637,9 @@ type ForgeServer interface {
 	FindIpAddress(context.Context, *FindIpAddressRequest) (*FindIpAddressResponse, error)
 	FindMachineIds(context.Context, *MachineSearchConfig) (*MachineIdList, error)
 	FindMachinesByIds(context.Context, *MachinesByIdsRequest) (*MachineList, error)
+	// Current host and DPU lifecycle states without full machine records.
+	// Query or state-decoding errors fail the entire request with INTERNAL.
+	FindMachineStatesByIds(context.Context, *MachineStatesByIdsRequest) (*MachineStateList, error)
 	// Compact per-host state for monitoring: allocatability, update eligibility
 	// and the explored firmware report, read from one database snapshot.
 	FindHostStatesByIds(context.Context, *HostStatesByIdsRequest) (*HostStateList, error)
@@ -7665,6 +7696,9 @@ type ForgeServer interface {
 	IsBmcInManagedHost(context.Context, *BmcEndpointRequest) (*IsBmcInManagedHostResponse, error)
 	// BmcCredentialStatus returns true if site explorer has the credentials to login to this BMC
 	BmcCredentialStatus(context.Context, *BmcEndpointRequest) (*BmcCredentialStatusResponse, error)
+	// Returns the drivers this API server's rules select for a BMC from its
+	// latest exploration report, and the identity they were selected from
+	FindBmcDriverSelection(context.Context, *BmcEndpointRequest) (*BmcDriverSelection, error)
 	// Explore an individual BMC and show the report
 	// The results of this exploration call will not be persisted in the database
 	Explore(context.Context, *BmcEndpointRequest) (*EndpointExplorationReport, error)
@@ -8893,6 +8927,9 @@ func (UnimplementedForgeServer) FindMachineIds(context.Context, *MachineSearchCo
 func (UnimplementedForgeServer) FindMachinesByIds(context.Context, *MachinesByIdsRequest) (*MachineList, error) {
 	return nil, status.Error(codes.Unimplemented, "method FindMachinesByIds not implemented")
 }
+func (UnimplementedForgeServer) FindMachineStatesByIds(context.Context, *MachineStatesByIdsRequest) (*MachineStateList, error) {
+	return nil, status.Error(codes.Unimplemented, "method FindMachineStatesByIds not implemented")
+}
 func (UnimplementedForgeServer) FindHostStatesByIds(context.Context, *HostStatesByIdsRequest) (*HostStateList, error) {
 	return nil, status.Error(codes.Unimplemented, "method FindHostStatesByIds not implemented")
 }
@@ -9021,6 +9058,9 @@ func (UnimplementedForgeServer) IsBmcInManagedHost(context.Context, *BmcEndpoint
 }
 func (UnimplementedForgeServer) BmcCredentialStatus(context.Context, *BmcEndpointRequest) (*BmcCredentialStatusResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method BmcCredentialStatus not implemented")
+}
+func (UnimplementedForgeServer) FindBmcDriverSelection(context.Context, *BmcEndpointRequest) (*BmcDriverSelection, error) {
+	return nil, status.Error(codes.Unimplemented, "method FindBmcDriverSelection not implemented")
 }
 func (UnimplementedForgeServer) Explore(context.Context, *BmcEndpointRequest) (*EndpointExplorationReport, error) {
 	return nil, status.Error(codes.Unimplemented, "method Explore not implemented")
@@ -12368,6 +12408,24 @@ func _Forge_FindMachinesByIds_Handler(srv interface{}, ctx context.Context, dec 
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Forge_FindMachineStatesByIds_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(MachineStatesByIdsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ForgeServer).FindMachineStatesByIds(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Forge_FindMachineStatesByIds_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ForgeServer).FindMachineStatesByIds(ctx, req.(*MachineStatesByIdsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _Forge_FindHostStatesByIds_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(HostStatesByIdsRequest)
 	if err := dec(in); err != nil {
@@ -13138,6 +13196,24 @@ func _Forge_BmcCredentialStatus_Handler(srv interface{}, ctx context.Context, de
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(ForgeServer).BmcCredentialStatus(ctx, req.(*BmcEndpointRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Forge_FindBmcDriverSelection_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(BmcEndpointRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ForgeServer).FindBmcDriverSelection(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Forge_FindBmcDriverSelection_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ForgeServer).FindBmcDriverSelection(ctx, req.(*BmcEndpointRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -20757,6 +20833,10 @@ var Forge_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _Forge_FindMachinesByIds_Handler,
 		},
 		{
+			MethodName: "FindMachineStatesByIds",
+			Handler:    _Forge_FindMachineStatesByIds_Handler,
+		},
+		{
 			MethodName: "FindHostStatesByIds",
 			Handler:    _Forge_FindHostStatesByIds_Handler,
 		},
@@ -20927,6 +21007,10 @@ var Forge_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "BmcCredentialStatus",
 			Handler:    _Forge_BmcCredentialStatus_Handler,
+		},
+		{
+			MethodName: "FindBmcDriverSelection",
+			Handler:    _Forge_FindBmcDriverSelection_Handler,
 		},
 		{
 			MethodName: "Explore",

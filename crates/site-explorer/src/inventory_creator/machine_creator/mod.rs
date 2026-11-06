@@ -21,7 +21,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use carbide_instrument::emit;
-use carbide_resource_pool::{ResourcePoolBackendError, ResourcePoolRegistry};
+use carbide_resource_pool::ResourcePoolRegistry;
 use carbide_utils::none_if_empty::NoneIfEmpty;
 use carbide_uuid::machine::{
     HostMachineId, MachineId, MachineIdSubtype, PredictedHostMachineId, StableHostMachineId,
@@ -57,7 +57,7 @@ use tokio_util::sync::CancellationToken;
 use super::Config;
 use crate::IdentifiedManagedHost;
 use crate::boot_interfaces::reconcile_desired_boot_interface;
-use crate::dpu_loopback::PreparedDpuLoopback;
+use crate::dpu_loopback::{PreparedDpuLoopback, acquire_admin_admission};
 use crate::errors::{SiteExplorerError, SiteExplorerResult};
 use crate::explored_endpoint_index::ExploredEndpointIndex;
 use crate::managed_host::ManagedHost;
@@ -68,10 +68,6 @@ use crate::metrics::{
 
 mod host_identification;
 pub(crate) use host_identification::ConfiguredIngestionCandidate;
-
-// Leave the foreground reservation's remaining lifetime for SQL attachment.
-// This bounds admission only; the transaction retains its statement limits.
-const DPU_ADMISSION_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Creates machines from site-explorer managed-host reports.
 pub struct MachineCreator {
@@ -381,34 +377,13 @@ impl MachineCreator {
             if let Some(error) = preparation_error {
                 return Err(error.into());
             }
-            // Bound admission only while a provider reservation is waiting.
-            // Integrated allocation and repair retain their existing wait.
             let admission_start = Instant::now();
-            let admission: SiteExplorerResult<_> = if !loopbacks
+            let has_provider_reservation = loopbacks
                 .iter()
-                .any(PreparedDpuLoopback::has_provider_reservation)
-            {
-                Ok(db::machine_interface::admin_lock_admission().await)
-            } else {
-                match self
-                    .preparation_cancel_token
-                    .run_until_cancelled(tokio::time::timeout(
-                        DPU_ADMISSION_TIMEOUT,
-                        db::machine_interface::admin_lock_admission(),
-                    ))
-                    .await
-                {
-                    Some(Ok(admission)) => Ok(admission),
-                    None => Err(ResourcePoolBackendError::Cancelled {
-                        operation: "DPU admin lock admission",
-                    }
-                    .into()),
-                    Some(Err(_)) => Err(ResourcePoolBackendError::DeadlineExceeded {
-                        operation: "DPU admin lock admission",
-                    }
-                    .into()),
-                }
-            };
+                .any(PreparedDpuLoopback::has_provider_reservation);
+            let admission =
+                acquire_admin_admission(has_provider_reservation, &self.preparation_cancel_token)
+                    .await;
             record_creation_stage(
                 ManagedHostCreationStage::AdmissionWait,
                 admission_start.elapsed(),

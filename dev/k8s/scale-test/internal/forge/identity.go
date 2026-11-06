@@ -258,23 +258,6 @@ func CheckKeyPairFiles(certPath, keyPath string) error {
 	return nil
 }
 
-// CheckIdentityFiles reads the certificate and key, checks the certificate's identity and that the key belongs to it. The identity error starts with the certificate file
-// path.
-func CheckIdentityFiles(certPath, keyPath string, spiffe SpiffeSettings) (string, error) {
-	cert, err := readFile(certPath)
-	if err != nil {
-		return "", err
-	}
-	id, err := CheckIdentity(cert, spiffe)
-	if err != nil {
-		return "", fmt.Errorf("%s: %w", certPath, err)
-	}
-	if err := CheckKeyPairFiles(certPath, keyPath); err != nil {
-		return "", err
-	}
-	return id, nil
-}
-
 func readFile(path string) ([]byte, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {

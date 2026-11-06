@@ -145,7 +145,7 @@ tests:
       suites.lock.enabled: false
     asserts:
       - failedTemplate:
-          errorMessage: at least one suite must be enabled under suites.<name>.enabled
+          errorMessage: at least one suite must be enabled under suites.<name>.enabled (or journal.enabled)
 
   - it: renders the lock suite with its own binary, anchored tests and namespace
     set:
@@ -177,7 +177,14 @@ tests:
       suites.bogus.enabled: true
     asserts:
       - failedTemplate:
-          errorMessage: unknown suite "bogus"; the known suites are cluster, probe, inventory, history, lock, store and store-transition
+          errorMessage: unknown suite "bogus"; the known suites are cluster, probe, inventory, history, lock, store, store-transition and result
+
+  - it: points suites.journal at journal.enabled instead of rejecting it as unknown
+    set:
+      suites.journal.enabled: true
+    asserts:
+      - failedTemplate:
+          errorMessage: enable the journal proof with journal.enabled=true, not suites.journal.enabled
 
   - it: renders the history suite with a ConfigMap capture mount and provenance
     set:
@@ -371,6 +378,44 @@ tests:
           path: spec.template.spec.containers[0].env
           content:
             name: SCALE_TEST_STORE_INGESTION_DELAY
+          any: true
+
+  - it: renders the result suite with its result directory and the run namespace
+    set:
+      suites.cluster.enabled: false
+      suites.result.enabled: true
+    asserts:
+      - hasDocuments:
+          count: 1
+      - equal:
+          path: metadata.name
+          value: run-scale-test-result
+      - equal:
+          path: spec.template.spec.containers[0].command
+          value: ["/tests/result.test"]
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: "-test.run=^TestEnvResult$"
+      - equal:
+          path: spec.template.spec.containers[0].env[0].valueFrom.fieldRef.fieldPath
+          value: metadata.namespace
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: SCALE_TEST_RESULT_DIR
+            value: /results
+          any: true
+      - contains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content:
+            name: results
+            mountPath: /results
+          any: true
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: results
+            emptyDir: {}
           any: true
 
   # Each rejection fails the whole render, so only the bad value is set; the
@@ -581,6 +626,38 @@ tests:
           path: spec.template.spec.containers[0].env
           content:
             name: SCALE_TEST_EXPECTED_RACKS
+            value: ""
+          any: true
+
+  - it: supplies no dev default for the SPIFFE settings, so an unset one renders empty and the fixture fails loudly
+    set:
+      suites.cluster.enabled: false
+      suites.inventory.enabled: true
+      inventory.namespace: mat-ns
+      inventory.clientSecret: nico-cert
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: SCALE_TEST_TRUST_DOMAIN
+            value: ""
+          any: true
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: SCALE_TEST_SERVICE_BASE_PATHS
+            value: ""
+          any: true
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: SCALE_TEST_MACHINE_BASE_PATH
+            value: ""
+          any: true
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: SCALE_TEST_SERVER_NAME
             value: ""
           any: true
 

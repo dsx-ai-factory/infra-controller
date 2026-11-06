@@ -1617,7 +1617,8 @@ async fn test_instance_null_hostname(_: PgPoolOptions, options: PgConnectOptions
 async fn test_instance_search_based_on_labels(pool: sqlx::PgPool) {
     let env = create_test_env(pool.clone()).await;
     let segment_id = env.create_vpc_and_tenant_segment().await;
-    for i in 0..=9 {
+    // Each search has one matching instance and two nonmatching instances.
+    for i in [1, 4, 8] {
         let mh = create_managed_host(&env).await;
 
         mh.instance_builer(&env)
@@ -1640,56 +1641,50 @@ async fn test_instance_search_based_on_labels(pool: sqlx::PgPool) {
             .await;
     }
 
-    // Test searching based on value.
-    let instance_matched_by_label = find_instances_by_label(
-        &env,
-        rpc::forge::Label {
-            key: "".to_string(),
-            value: Some("value_A_444".to_string()),
+    struct Case {
+        scenario: &'static str,
+        label: rpc::forge::Label,
+        expected_name: &'static str,
+    }
+
+    let cases = [
+        Case {
+            scenario: "value only",
+            label: rpc::forge::Label {
+                key: "".to_string(),
+                value: Some("value_A_444".to_string()),
+            },
+            expected_name: "instance_444",
         },
-    )
-    .await
-    .instances
-    .remove(0);
-
-    assert_eq!(
-        instance_matched_by_label.metadata.unwrap().name,
-        "instance_444"
-    );
-
-    // Test searching based on key.
-    let instance_matched_by_label = find_instances_by_label(
-        &env,
-        rpc::forge::Label {
-            key: "key_A_111".to_string(),
-            value: None,
+        Case {
+            scenario: "key only",
+            label: rpc::forge::Label {
+                key: "key_A_111".to_string(),
+                value: None,
+            },
+            expected_name: "instance_111",
         },
-    )
-    .await
-    .instances
-    .remove(0);
-
-    assert_eq!(
-        instance_matched_by_label.metadata.unwrap().name,
-        "instance_111"
-    );
-
-    // Test searching based on key and value.
-    let instance_matched_by_label = find_instances_by_label(
-        &env,
-        rpc::forge::Label {
-            key: "key_A_888".to_string(),
-            value: Some("value_A_888".to_string()),
+        Case {
+            scenario: "key and value",
+            label: rpc::forge::Label {
+                key: "key_A_888".to_string(),
+                value: Some("value_A_888".to_string()),
+            },
+            expected_name: "instance_888",
         },
-    )
-    .await
-    .instances
-    .remove(0);
+    ];
 
-    assert_eq!(
-        instance_matched_by_label.metadata.unwrap().name,
-        "instance_888"
-    );
+    for case in cases {
+        let instances = find_instances_by_label(&env, case.label).await.instances;
+
+        assert_eq!(instances.len(), 1, "{}", case.scenario);
+        assert_eq!(
+            instances[0].metadata.as_ref().unwrap().name,
+            case.expected_name,
+            "{}",
+            case.scenario
+        );
+    }
 }
 
 #[crate::sqlx_test]
