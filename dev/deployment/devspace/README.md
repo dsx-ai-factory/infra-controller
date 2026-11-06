@@ -318,8 +318,13 @@ missing or unsupported values fail. `devspace purge` preserves the existing kind
 cluster's IP family when recreating it.
 
 [`prepare-ubuntu-host-for-dev.sh`](prepare-ubuntu-host-for-dev.sh) installs native
-dependencies for `cargo test` and `cargo test --profile ci-tests`, including Kea,
-test certificates, and PostgreSQL. Test PostgreSQL permits at least 1,000
+dependencies, including distribution Kea headers, test certificates, and
+PostgreSQL. Run native workspace tests with `cargo test --workspace --exclude
+carbide-dhcp` (add `--profile ci-tests` for that profile). DHCP tests require the
+patched repository build image; distribution Kea is rejected by the DHCPv6 hook.
+See [Kea Runtime Compatibility](../../../docs/provisioning/dhcpv6-deployment.md#kea-runtime-compatibility)
+for the separate container test workflow and architecture limits.
+Test PostgreSQL permits at least 1,000
 connections, matching CI's parallel-test budget. Increasing an older container's
 limit restarts that container without deleting its data; do not prepare the host
 during tests. Both Kea AppArmor profiles retain permissions for other checkouts
