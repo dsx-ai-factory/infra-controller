@@ -397,7 +397,7 @@ Keep the following in mind when configuring health report records:
 
 - Probe IDs use health API names: for example, OOB GPU inventory alerts appear as `SkuValidation` to deduplicate with the in-band SKU alerts.
 
-### Redfish resource status OTLP log contract
+### Redfish Resource Status OTLP Log Contract
 
 When `[processors.resource_status]` and `[sinks.otlp]` are enabled, NICo projects status observations from its existing source collectors into OTLP logs. Entity discovery supplies System and Chassis observations, the manager collector supplies Manager observations, and the firmware collector supplies UpdateService/FirmwareInventory observations. There is no separate status polling task: each resource type follows its source collector's cadence and reuses the Redfish response that collector already fetched. A resource is emitted even when its `Status` property is absent so missing status is distinguishable from healthy status.
 
