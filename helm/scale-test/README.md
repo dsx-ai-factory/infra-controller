@@ -109,6 +109,35 @@ claim can delete the journal and result.json, depending on the volume's
 reclaim policy, so preserve required data first. The Job deadline must exceed
 `runner.wholeRunSeconds` plus the run's 90 s shutdown budget.
 
+The stage window is `runner.wholeRunSeconds - runner.finalizeSeconds`;
+readiness, writes and stages must fit. Ingestion finalize (min 1800 s)
+collects ten summaries and end reads. Defaults leave 4800 s + 1800 s;
+increase wholeRunSeconds and activeDeadlineSeconds for a longer window.
+Increasing finalizeSeconds alone shortens the stage window.
+
+`runner.resultMaxBytes`: 8 MiB default, 262144–16777216 bytes. Admission
+reports bytes needed and keeps every unresolved key. Default headroom is
+over 2× at 1,100 racks (18 hosts/rack, 2 DPUs/host), including UUID rack
+IDs. The ceiling bounds the file; ConfigMaps hold only a small status.
+
+`runner.bmc` sets port/concurrency/timeoutSeconds/tries (443/64/5/2). At
+1,100 racks only 59,400 host/DPU BMCs are dialled: 929 batches at 64
+workers, ~929 s at 1 s/reply or ~9,290 s for two 5 s tries each. Budget
+readinessSeconds for measured BMC and list latency, below
+finalizeSeconds. Raise concurrency only with measured site headroom.
+
+`runner.probeRequestTimeoutSeconds`: 5 s default (1–600). Caller
+deadlines, snapshot retention and freshness bound a 40-page DPU read.
+
+Service lists allow 200,000 objects / 4,000 s: over 2× 88,000 Services /
+176 pages at 10 s/page. The caller's readiness deadline may shorten
+this; size it from measured list and BMC latency.
+
+The 1.5 GiB journal cap is over 2× 40,700 writes using 30 attempts each.
+The 4 GiB default claim holds over 2× that cap plus the result and its
+atomic replacement. Check existing capacity and expansion support before
+upgrading; retained files also consume space.
+
 Install the runner into the MAT namespace: the release namespace must be the
 one that holds the MAT Pods and Services, because the runner reads them in its
 own namespace (not `inventory.namespace`) and keeps the site lock and the

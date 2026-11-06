@@ -92,6 +92,8 @@ type execution struct {
 
 	reasons      []string
 	detail       json.RawMessage // the test's findings, kept for result.json
+	stages       []result.StageResult
+	invariants   []result.InvariantResult
 	knownFailure string
 	timedOut     bool
 	abandoned    bool // the Run callback did not stop within the drain
@@ -245,10 +247,10 @@ func (e *execution) runTest(ctx RunCtx) (result.Outcome, error) {
 }
 
 // verdictOf is the run-level verdict: a lost lock or a hard cancel outranks the outcome; a soft stop is soft stopped.
-// The test's reasons and findings are kept whatever the verdict.
+// The test's reasons, findings, stages and invariants are kept whatever the verdict.
 func (e *execution) verdictOf(outcome result.Outcome, runErr error) result.Verdict {
 	e.reasons = append(e.reasons, outcome.Reasons...)
-	e.detail = outcome.Detail
+	e.detail, e.stages, e.invariants = outcome.Detail, outcome.Stages, outcome.Invariants
 	hard := e.timedOut || e.outside.Err() != nil || e.control.Cancelled()
 	if runErr != nil {
 		e.reason(runErr.Error())
@@ -478,7 +480,7 @@ func (e *execution) result(verdict result.Verdict) result.RunResult {
 		DryRun: cfg.DryRun, Outcome: result.OutcomeOf(verdict), Reasons: append([]string{}, e.reasons...),
 		Clock: result.RunClock{StartedAt: jsonx.Time{Time: e.bounds.Started}, Deadline: jsonxTime(e.bounds.Deadline),
 			EndedAt: jsonx.Time{Time: e.clock.Now()}, ClockSyncAssumption: result.ClockSyncAssumption},
-		Lock: e.lock, Stages: []result.StageResult{}, Invariants: []result.InvariantResult{},
+		Lock: e.lock, Stages: append([]result.StageResult{}, e.stages...), Invariants: append([]result.InvariantResult{}, e.invariants...),
 		Journal: e.journalCounts(), Result: e.resultRef(), Detail: e.detail,
 	}
 }
@@ -507,11 +509,14 @@ func (e *execution) claimResult(ctx context.Context) error {
 	return nil
 }
 
-// journalCounts is what F1 can report without a replay: none_written when there is no journal, else unknown (nil)
-// counts. The real counts arrive when ingestion wires the writer's accounting.
+// journalCounts is none_written when there is no journal, else the journal's own snapshot (see journal.Counts: attempts
+// are RPCs that went out or may have, so a dry run reports none), or unknown (nil) once a journal write has failed.
 func (e *execution) journalCounts() result.JournalSummary {
 	if e.journal == nil {
 		return result.NoneWritten()
+	}
+	if c := e.journal.Counts(); c.Known {
+		return result.JournalSummary{Ops: &c.Ops, Attempts: &c.Attempts, Unclear: &c.Unclear}
 	}
 	return result.JournalSummary{}
 }
