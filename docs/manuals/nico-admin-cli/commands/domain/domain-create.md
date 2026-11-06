@@ -18,6 +18,10 @@ nico-admin-cli domain create [--vpc-id] [--default-ttl]
 
 Create a Domain, optionally owned by a VPC.
 
+On success, JSON mode prints the created domain as pretty JSON. Other
+output modes print labelled fields: ID, NAME, DEFAULT TTL, VPC, CREATED,
+UPDATED, and DELETED.
+
 The inherited --extended and --sort-by options have no effect on this
 command.
 
