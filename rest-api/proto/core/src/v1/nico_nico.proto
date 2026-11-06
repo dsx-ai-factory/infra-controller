@@ -280,7 +280,13 @@ service Forge {
   rpc InvokeInstancePower(InstancePowerRequest) returns (InstancePowerResult);
 
   rpc ForgeAgentControl(ForgeAgentControlRequest) returns (ForgeAgentControlResponse);
-  // PRIVILEGED: Creates a new machine from nothing
+  // PRIVILEGED: Creates a new machine from nothing.
+  // Loopback group admission can return FailedPrecondition when the group
+  // changed or is busy. A lock-unavailable database error during loopback
+  // attachment, or a rejected selected-host row/history check, returns
+  // Unavailable. These rejections roll back the complete entity transaction;
+  // retry discovery with a fresh request after contention clears. These checks
+  // do not bound earlier foreign-key waits or later attached-DPU state writes.
   rpc DiscoverMachine(MachineDiscoveryInfo) returns (MachineDiscoveryResult);
   rpc RenewMachineCertificate(MachineCertificateRenewRequest) returns (MachineCertificateResult);
   rpc DiscoveryCompleted(MachineDiscoveryCompletedRequest) returns (MachineDiscoveryCompletedResponse);
@@ -455,7 +461,16 @@ service Forge {
   // Inspects local and remote pools without treating unknown capacity as zero.
   rpc AdminInspectResourcePools(InspectResourcePoolsRequest) returns (InspectResourcePoolsResponse);
 
-  // Add capacity to a resource pool
+  // Add capacity to a resource pool.
+  // Adding IPv6 loopback capacity commits the pool before DPU backfill.
+  // Backfill makes up to three fresh attempts per DPU. If the reported failure
+  // is lock contention, the call returns Unavailable. Exhausted capacity returns
+  // ResourceExhausted; exhausted version conflicts or a vanished pool return
+  // FailedPrecondition; other database failures return Internal. Earlier DPU
+  // updates and pool growth remain committed after any backfill failure. The
+  // first DPU that exhausts its attempts supplies its last error, unless another
+  // non-retryable error ends the pass. Inspect current capacity and missing
+  // loopbacks before retrying the same growth request.
   rpc AdminGrowResourcePool(GrowResourcePoolRequest) returns (GrowResourcePoolResponse);
 
   // Update the Metadata of a Machine
