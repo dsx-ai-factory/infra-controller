@@ -33,7 +33,7 @@ use libredfish::model::sensor::GPUSensors;
 use libredfish::model::service_root::{RedfishVendor, ServiceRoot};
 use libredfish::model::software_inventory::SoftwareInventory;
 use libredfish::model::storage::Drives;
-use libredfish::model::task::Task;
+use libredfish::model::task::{Task, TaskState};
 use libredfish::model::update_service::{ComponentType, TransferProtocolType, UpdateService};
 use libredfish::model::{ODataId, ODataLinks};
 use libredfish::standard::RedfishStandard;
@@ -57,6 +57,8 @@ struct RedfishSimState {
     no_component_integrities: bool,
     firmware_for_component_error: bool,
     get_task_trigger_evidence_returns_interrupted: bool,
+    /// Task IDs that `get_task` reports as `Running`, with their `PercentComplete`.
+    running_tasks: HashMap<String, Option<u32>>,
     machine_setup_bios_job_id: Option<String>,
     is_bios_setup: Option<bool>,
     default_lockdown: Option<EnabledDisabled>,
@@ -380,6 +382,15 @@ impl RedfishSim {
             .lock()
             .unwrap()
             .get_task_trigger_evidence_returns_interrupted = interrupted;
+    }
+
+    /// Report `task_id` as `Running` with `percent_complete`; other tasks keep their behavior.
+    pub fn set_running_task(&self, task_id: &str, percent_complete: Option<u32>) {
+        self.state
+            .lock()
+            .unwrap()
+            .running_tasks
+            .insert(task_id.to_string(), percent_complete);
     }
 
     pub fn set_machine_setup_bios_job_id(&self, job_id: Option<String>) {
@@ -1470,6 +1481,25 @@ impl Redfish for RedfishSimClient {
         id: &'a str,
     ) -> libredfish::RedfishFuture<'a, Result<libredfish::model::task::Task, RedfishError>> {
         Box::pin(async move {
+            let running_progress = self.state.lock().unwrap().running_tasks.get(id).copied();
+            if let Some(percent_complete) = running_progress {
+                return Ok(Task {
+                    odata: ODataLinks {
+                        odata_context: None,
+                        odata_id: format!("/redfish/v1/TaskService/Tasks/{id}"),
+                        odata_type: "#Task.v1_4_3.Task".to_string(),
+                        odata_etag: None,
+                        links: None,
+                    },
+                    id: id.to_string(),
+                    messages: Vec::new(),
+                    name: None,
+                    task_state: Some(TaskState::Running),
+                    task_status: None,
+                    task_monitor: None,
+                    percent_complete,
+                });
+            }
             if self
                 .state
                 .lock()
