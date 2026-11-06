@@ -111,12 +111,12 @@ func TestNewRefusesAnInfeasibleConfig(t *testing.T) {
 		ok    bool
 	}{
 		{DefaultOptions, 0, true},
-		{Options{day, 20 * time.Second}, 59, false}, // an ingestion delay at or over half the timeout
+		{Options{day, 20 * time.Second}, 11, false}, // under the cap but at or over half the timeout
 		{Options{0, 90 * time.Second}, 0, false},
 		{Options{day, 0}, 0, false},
 		{DefaultOptions, 44, true},
 		{DefaultOptions, 45, false},
-		{Options{day, math.MaxInt64}, 60, true},
+		{Options{day, math.MaxInt64}, 45, false}, // over the cap, refused whatever the timeout
 	} {
 		_, err := New(Config{URL: "http://store", IngestionDelaySeconds: c.delay}, metadata(t), c.o)
 		eq(t, err == nil, c.ok, c.o, c.delay, err)

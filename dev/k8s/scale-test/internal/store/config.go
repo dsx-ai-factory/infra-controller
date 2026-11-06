@@ -23,9 +23,10 @@ import (
 )
 
 const (
-	// MaxIngestionDelay is the longest ingestion delay: a store that hides
-	// samples longer cannot show a sweep end in time for a run to wait for it.
-	MaxIngestionDelay = 60 * time.Second
+	// MaxIngestionDelay is the longest ingestion delay store.New accepts: it
+	// stays under DefaultOptions.SummaryTimeout/2 (45 s), the bound New enforces
+	// so the final scrape is queryable within a summary.
+	MaxIngestionDelay = 44 * time.Second
 	// caFileCap holds a CA bundle of a few certificates.
 	caFileCap = 1 << 20
 	// tokenFileCap holds a bearer token, a service account JWT included.
@@ -96,6 +97,10 @@ func (c Config) transport() (http.Header, *http.Transport, error) {
 			return nil, nil, unsupported("Authorization header comes from bearerTokenFile")
 		case strings.ContainsFunc(value, func(r rune) bool { return r < ' ' && r != '\t' || r == 0x7f }):
 			return nil, nil, unsupported("header " + strings.ToLower(name) + " is not valid")
+		case headers[http.CanonicalHeaderKey(name)] != nil:
+			// Two names that differ only by case canonicalize to one header
+			// whose value would be whichever the map ranges over last.
+			return nil, nil, unsupported("header " + strings.ToLower(name) + " is given twice")
 		}
 		headers.Set(name, value)
 	}
