@@ -145,10 +145,16 @@ to query by device and required action. The RMS backend supports
 unsupported. Targets can be switch IDs or BMC MACs, including expected inventory
 before ingestion. SDN reset disrupts fabric traffic and restores SDN defaults
 without reinstalling NVOS. NVOS reset erases operating-system configuration and
-reboots the switch; completion requires SSH access with factory-default
-credentials. The optional `--domain-name` selector applies only to SDN reset;
-NVOS reset uses the RMS configured default NVL certificate domain and rejects
-that selector.
+reboots the switch. The optional `--domain-name` selector applies only to SDN
+reset; NVOS reset uses the RMS configured default NVL certificate domain and
+rejects that selector.
+
+For an ingested switch, after NVOS reset reports `COMPLETED`, an operator must
+log in over SSH using factory-default credentials and restore the NVOS account
+and password recorded in NICo for that switch before resuming managed operations.
+Direct reset does not update the credentials stored in NICo or automatically
+rerun credential rotation.
+
 Submission success means accepted and tracked; it does not mean the reset
 completed. Other valid targets can proceed when one target fails.
 `OUTCOME_UNKNOWN` means the reset may have started, including when RMS accepted

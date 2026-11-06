@@ -19,17 +19,21 @@ Dispatch a component reset directly, bypassing state-controller
 maintenance. The RMS backend supports sdn-factory-reset and
 nvos-factory-reset on switches. SDN reset disrupts fabric traffic and
 restores SDN defaults without reinstalling NVOS. NVOS reset erases
-operating-system configuration and reboots the switch; completion
-requires SSH access with factory-default credentials. NVOS reset uses
-the RMS configured default NVL certificate domain and rejects
---domain-name. Switches can be selected by ID or BMC MAC, including
-expected inventory before ingestion. Success means accepted and tracked,
-not completed. Per-device failures do not prevent other valid targets
-from being submitted. A submission error may mean rejection or an
-uncertain outcome; the reset may have started. Inspect the error and
-device state before retrying. Do not automatically resubmit. Status
-queries return the latest successfully recorded reset reference, which
-may belong to an earlier reset after a failed or ambiguous submission.
+operating-system configuration and reboots the switch. For an ingested
+switch, after NVOS reset reports COMPLETED, an operator must log in over
+SSH using factory-default credentials and restore the NVOS account and
+password recorded in NICo for that switch before resuming managed
+operations. Direct reset does not update the credentials stored in NICo
+or automatically rerun credential rotation. NVOS reset uses the RMS
+configured default NVL certificate domain and rejects --domain-name.
+Switches can be selected by ID or BMC MAC, including expected inventory
+before ingestion. Success means accepted and tracked, not completed.
+Per-device failures do not prevent other valid targets from being
+submitted. A submission error may mean rejection or an uncertain
+outcome; the reset may have started. Inspect the error and device state
+before retrying. Do not automatically resubmit. Status queries return
+the latest successfully recorded reset reference, which may belong to an
+earlier reset after a failed or ambiguous submission.
 
 ## OPTIONS
 
