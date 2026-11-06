@@ -401,7 +401,8 @@ Keep the following in mind when configuring health report records:
 
 When `[processors.resource_status]` and `[sinks.otlp]` are enabled, NICo projects status observations from its existing source collectors into OTLP logs. Entity discovery supplies System and Chassis observations, the manager collector supplies Manager observations, and the firmware collector supplies UpdateService/FirmwareInventory observations. There is no separate status polling task: each resource type follows its source collector's cadence and reuses the Redfish response that collector already fetched. A resource is emitted even when its `Status` property is absent so missing status is distinguishable from healthy status.
 
-Enable the source collectors whose status you need. The manager collector is enabled by default; firmware collection is opt-in:
+`[processors.resource_status]` is disabled by default. Enable it together with the source collectors whose status you need. The manager collector is enabled by default; firmware collection is
+opt-in:
 
 ```toml
 [collectors.firmware]
