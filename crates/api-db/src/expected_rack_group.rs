@@ -161,7 +161,7 @@ pub async fn update(txn: &mut PgConnection, group: &ExpectedRackGroup) -> Databa
     if let Some(existing) = find_by_rack_group_id(&mut *txn, &group.rack_group_id).await?
         && existing.racks != group.racks
     {
-        let query = "SELECT EXISTS (SELECT 1 FROM expected_nvlink_domains WHERE rack_group_id=$1)";
+        let query = "SELECT EXISTS (SELECT 1 FROM nvlink_domains WHERE rack_group_id=$1)";
         let used: bool = sqlx::query_scalar(query)
             .bind(&group.rack_group_id)
             .fetch_one(&mut *txn)

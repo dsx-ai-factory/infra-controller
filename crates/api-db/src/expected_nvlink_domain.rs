@@ -66,7 +66,7 @@ pub async fn create(txn: &mut PgConnection, domain: &ExpectedNvLinkDomain) -> Da
         ));
     }
 
-    let query = "INSERT INTO expected_nvlink_domains (id, rack_group_id, name) VALUES ($1, $2, $3)";
+    let query = "INSERT INTO nvlink_domains (id, rack_group_id, name) VALUES ($1, $2, $3)";
     sqlx::query(query)
         .bind(domain.id)
         .bind(&domain.rack_group_id)
@@ -75,7 +75,7 @@ pub async fn create(txn: &mut PgConnection, domain: &ExpectedNvLinkDomain) -> Da
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
     // Sorted insertion order prevents deadlocks between overlapping requests.
-    let query = "INSERT INTO expected_nvlink_domain_members (domain_id, bmc_mac_address) SELECT $1, mac FROM unnest($2::macaddr[]) AS mac ORDER BY mac";
+    let query = "INSERT INTO nvlink_domain_members (domain_id, bmc_mac_address) SELECT $1, mac FROM unnest($2::macaddr[]) AS mac ORDER BY mac";
     sqlx::query(query)
         .bind(domain.id)
         .bind(&domain.member_bmc_mac_addresses)
@@ -101,7 +101,7 @@ pub async fn find_ids(
     txn: impl DbReader<'_>,
     rack_group_id: Option<&RackGroupId>,
 ) -> DatabaseResult<Vec<Uuid>> {
-    let query = "SELECT id FROM expected_nvlink_domains WHERE ($1::varchar IS NULL OR rack_group_id=$1) ORDER BY id";
+    let query = "SELECT id FROM nvlink_domains WHERE domain_profile_id IS NULL AND ($1::varchar IS NULL OR rack_group_id=$1) ORDER BY id";
     sqlx::query_scalar(query)
         .bind(rack_group_id)
         .fetch_all(txn)
@@ -114,7 +114,7 @@ pub async fn find_by_ids(
     txn: impl DbReader<'_>,
     ids: &[Uuid],
 ) -> DatabaseResult<Vec<ExpectedNvLinkDomain>> {
-    let query = "SELECT d.id, d.rack_group_id, d.name, ARRAY(SELECT m.bmc_mac_address FROM expected_nvlink_domain_members m WHERE m.domain_id=d.id ORDER BY m.bmc_mac_address) AS member_bmc_mac_addresses FROM expected_nvlink_domains d WHERE d.id = ANY($1) ORDER BY d.id";
+    let query = "SELECT d.id, d.rack_group_id, d.name, ARRAY(SELECT m.bmc_mac_address FROM nvlink_domain_members m WHERE m.domain_id=d.id AND m.bmc_mac_address IS NOT NULL ORDER BY m.bmc_mac_address) AS member_bmc_mac_addresses FROM nvlink_domains d WHERE d.id = ANY($1) AND d.domain_profile_id IS NULL ORDER BY d.id";
     sqlx::query_as(query)
         .bind(ids)
         .fetch_all(txn)
@@ -124,7 +124,7 @@ pub async fn find_by_ids(
 
 /// Delete a declaration and its membership claims, without touching hardware or observed domains.
 pub async fn delete(txn: &mut PgConnection, id: Uuid) -> DatabaseResult<()> {
-    let query = "DELETE FROM expected_nvlink_domains WHERE id=$1";
+    let query = "DELETE FROM nvlink_domains WHERE id=$1 AND domain_profile_id IS NULL";
     let result = sqlx::query(query)
         .bind(id)
         .execute(txn)
