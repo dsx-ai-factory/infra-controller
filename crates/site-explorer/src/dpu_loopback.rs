@@ -1,7 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Share DPU loopback preparation and attachment between discovery and Site Explorer.
+//! Share DPU loopback preparation, admission, and attachment between discovery
+//! and Site Explorer.
 
 use std::net::IpAddr;
 use std::time::Duration;
@@ -15,6 +16,7 @@ use db::{ConditionalWrite, DatabaseError};
 use model::resource_pool::common::CommonPools;
 use model::resource_pool::{OwnerType, ResourcePoolError};
 use sqlx::{PgConnection, PgPool, PgTransaction};
+use tokio::sync::OwnedSemaphorePermit;
 use tokio_util::sync::CancellationToken;
 
 /// The allocation purpose identifying a DPU's IPv4 underlay loopback.
@@ -24,9 +26,44 @@ pub const DPU_IPV4_LOOPBACK_SLOT: &str = "loopback-ipv4";
 // configured and reused allocations that need no provider call.
 const PREPARATION_LOOKUP_TIMEOUT: Duration = Duration::from_secs(5);
 
+// Bound admission while a provider reservation is held, leaving time for
+// attachment. The transaction retains its own statement limits.
+const DPU_ADMISSION_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// `acquire_admin_admission` takes an admin-lock admission permit.
+/// Acquire before opening the transaction and hold the permit through commit
+/// or rollback, so waiting callers do not occupy database connections.
+/// A pending provider reservation limits the wait to five seconds and observes
+/// `cancel`, leaving the remaining reservation lifetime for SQL attachment.
+/// Cancellation returns `ResourcePoolBackendError::Cancelled`; expiration
+/// returns `ResourcePoolBackendError::DeadlineExceeded`. Without a provider
+/// reservation, the wait has no deadline and ignores `cancel`.
+pub async fn acquire_admin_admission(
+    has_provider_reservation: bool,
+    cancel: &CancellationToken,
+) -> Result<OwnedSemaphorePermit, ResourcePoolBackendError> {
+    if !has_provider_reservation {
+        return Ok(db::machine_interface::admin_lock_admission().await);
+    }
+
+    cancel
+        .run_until_cancelled(tokio::time::timeout(
+            DPU_ADMISSION_TIMEOUT,
+            db::machine_interface::admin_lock_admission(),
+        ))
+        .await
+        .ok_or(ResourcePoolBackendError::Cancelled {
+            operation: "DPU admin lock admission",
+        })?
+        .map_err(|_| ResourcePoolBackendError::DeadlineExceeded {
+            operation: "DPU admin lock admission",
+        })
+}
+
 /// `PreparedDpuLoopback` holds one DPU's identity and selected-backend preparation.
-/// Prepare before the entity transaction, check identity before creation writes,
-/// then attach after interface writes. Roll back on error before cancelling.
+/// Prepare and acquire admission before the entity transaction, check identity
+/// before creation writes, then attach after interface writes. Roll back on
+/// error before cancelling.
 pub struct PreparedDpuLoopback<'a> {
     machine_id: MachineId,
     identity: MachineCreationIdentity,

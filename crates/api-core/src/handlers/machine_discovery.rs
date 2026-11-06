@@ -19,10 +19,9 @@ use std::collections::HashMap;
 use std::net::IpAddr;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
-use std::time::Duration;
 
 use ::rpc::forge as rpc;
-use carbide_site_explorer::dpu_loopback::PreparedDpuLoopback;
+use carbide_site_explorer::dpu_loopback::{PreparedDpuLoopback, acquire_admin_admission};
 use carbide_utils::none_if_empty::NoneIfEmpty;
 use carbide_uuid::machine::{
     HostMachineId, MachineId, MachineIdSource, MachineIdSubtype, MachineInterfaceId,
@@ -46,10 +45,6 @@ use crate::handlers::utils::{convert_and_log_machine_id, enqueue_boot_interface_
 use crate::{CarbideError, attestation as attest};
 
 pub(super) mod scout_pci;
-
-// Bound admission while a provider reservation waits for attachment. Integrated
-// allocation and reused ownership retain their existing admission wait.
-const DPU_ADMISSION_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub(crate) async fn discover_machine(
     api: &Api,
@@ -259,20 +254,14 @@ pub(crate) async fn discover_machine(
     };
 
     let result = async {
+        let has_provider_reservation = dpu_loopback
+            .as_ref()
+            .is_some_and(PreparedDpuLoopback::has_provider_reservation);
         let admin_admission = match admin_admission {
             Some(permit) => permit,
-            None if !dpu_loopback.as_ref().is_some_and(PreparedDpuLoopback::has_provider_reservation) => {
-                db::machine_interface::admin_lock_admission().await
-            }
-            None => api.cancel_token.run_until_cancelled(tokio::time::timeout(
-                DPU_ADMISSION_TIMEOUT, db::machine_interface::admin_lock_admission(),
-            )).await
-                .ok_or(CarbideError::ResourcePoolCancelled {
-                    operation: "DPU admin lock admission",
-                })?
-                .map_err(|_| CarbideError::ResourcePoolDeadlineExceeded {
-                    operation: "DPU admin lock admission",
-                })?,
+            None => acquire_admin_admission(has_provider_reservation, &api.cancel_token)
+                .await
+                .map_err(CarbideError::from)?,
         };
         // Provider preparation releases admission. Read current host-link
         // ownership now because another writer may have detached it meanwhile.
