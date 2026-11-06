@@ -6192,6 +6192,10 @@ fn get_reboot_cycle(
     Ok(cycle.num_minutes() / wait_period.num_minutes().max(1))
 }
 
+fn host_power_cycle_due(cycle: i64, allow_power_cycle: bool, first_restart_in_state: bool) -> bool {
+    allow_power_cycle && !first_restart_in_state && cycle != 0 && cycle % 4 == 0
+}
+
 #[derive(Debug)]
 pub struct RebootStatus {
     increase_retry_count: bool, // the vague previous return value
@@ -6472,8 +6476,9 @@ async fn trigger_reboot_if_needed_with_policy(
 
     let current_time = Utc::now();
     let entered_state_at = target.state.version.timestamp();
+    let first_restart_in_state = last_reboot_requested.time + wait_period <= entered_state_at;
     let next_potential_reboot_time: DateTime<Utc> =
-        if last_reboot_requested.time + wait_period > entered_state_at {
+        if !first_restart_in_state {
             last_reboot_requested.time + wait_period
         } else {
             // Handles this case:
@@ -6515,7 +6520,11 @@ async fn trigger_reboot_if_needed_with_policy(
             };
 
             // Dont power down the host on the first cycle
-            let power_down_host = allow_power_cycle && cycle != 0 && cycle % 4 == 0;
+            let power_down_host = host_power_cycle_due(
+                cycle,
+                allow_power_cycle,
+                retry_count.is_none() && first_restart_in_state,
+            );
 
             let status = if power_down_host {
                 // PowerDown (or ACPowercycle for Lenovo)
@@ -16429,6 +16438,47 @@ mod tests {
             ],
             |(dpu_first_restart_delay, is_dpu)| {
                 reachability_params(dpu_first_restart_delay).first_restart_delay(is_dpu)
+            },
+        );
+    }
+
+    #[test]
+    fn first_restart_in_a_state_never_power_cycles_the_host() {
+        let entered_state_at =
+            chrono::DateTime::<Utc>::from_str("2024-01-30T11:26:18.261228950+00:00").unwrap();
+        let wait_period = Duration::minutes(5);
+        let first_restart_cycle = get_reboot_cycle(
+            entered_state_at + Duration::minutes(20),
+            entered_state_at,
+            wait_period,
+        )
+        .unwrap();
+        assert_eq!(first_restart_cycle, 4);
+        check_values(
+            [
+                Check {
+                    scenario: "a 20 minute first restart delay restarts instead of power cycling",
+                    input: (first_restart_cycle, true, true),
+                    expect: false,
+                },
+                Check {
+                    scenario: "a later restart on the fourth cycle power cycles",
+                    input: (first_restart_cycle, true, false),
+                    expect: true,
+                },
+                Check {
+                    scenario: "a later restart off the fourth cycle restarts",
+                    input: (5, true, false),
+                    expect: false,
+                },
+                Check {
+                    scenario: "power cycling stays off when not allowed",
+                    input: (8, false, false),
+                    expect: false,
+                },
+            ],
+            |(cycle, allow_power_cycle, first_restart_in_state)| {
+                host_power_cycle_due(cycle, allow_power_cycle, first_restart_in_state)
             },
         );
     }
