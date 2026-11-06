@@ -176,4 +176,3 @@ func (s *Server) getCertificate(ctx context.Context) (*tls.Certificate, error) {
 	}
 	return s.servingCertificate, nil
 }
-
