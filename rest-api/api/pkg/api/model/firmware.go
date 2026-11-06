@@ -53,6 +53,8 @@ type APIUpdateFirmwareRequest struct {
 	// rack-scoped components) are reported as not ready by their persisted
 	// status. Intended for operator-supervised maintenance.
 	OverrideReadinessCheck bool `json:"overrideReadinessCheck,omitempty"`
+	// TargetResolutionMode defaults to Strict; BestEffort records unaddressable targets as skipped.
+	TargetResolutionMode *TargetResolutionMode `json:"targetResolutionMode,omitempty"`
 	// OverrideVersionCheck requests that the component backend apply firmware
 	// without enforcing version-based skip or downgrade decisions.
 	OverrideVersionCheck bool `json:"overrideVersionCheck"`
@@ -61,6 +63,7 @@ type APIUpdateFirmwareRequest struct {
 // Validate validates the firmware update request
 func (r *APIUpdateFirmwareRequest) Validate() error {
 	err := validation.ValidateStruct(r,
+		validation.Field(&r.TargetResolutionMode),
 		validation.Field(&r.SiteID, validation.Required.Error("siteId is required")),
 		validation.Field(&r.RuleID, validationis.UUID.Error(validationErrorInvalidUUID)),
 		validation.Field(&r.AuthenticationData),
@@ -238,6 +241,8 @@ type APIBatchRackFirmwareUpdateRequest struct {
 	// OverrideReadinessCheck applies the readiness-gate bypass to every task
 	// spawned by this batch. See APIUpdateFirmwareRequest for semantics.
 	OverrideReadinessCheck bool `json:"overrideReadinessCheck,omitempty"`
+	// TargetResolutionMode defaults to Strict; BestEffort records unaddressable targets as skipped.
+	TargetResolutionMode *TargetResolutionMode `json:"targetResolutionMode,omitempty"`
 	// OverrideVersionCheck applies the firmware version-check override to every
 	// task spawned by this batch. See APIUpdateFirmwareRequest for semantics.
 	OverrideVersionCheck bool `json:"overrideVersionCheck"`
@@ -246,6 +251,7 @@ type APIBatchRackFirmwareUpdateRequest struct {
 // Validate checks required fields.
 func (r *APIBatchRackFirmwareUpdateRequest) Validate() error {
 	return validation.ValidateStruct(r,
+		validation.Field(&r.TargetResolutionMode),
 		validation.Field(&r.SiteID, validation.Required.Error("siteId is required")),
 		validation.Field(&r.RuleID, validationis.UUID.Error(validationErrorInvalidUUID)),
 		validation.Field(&r.AuthenticationData),
@@ -270,6 +276,8 @@ type APIBatchTrayFirmwareUpdateRequest struct {
 	// OverrideReadinessCheck applies the readiness-gate bypass to every task
 	// spawned by this batch. See APIUpdateFirmwareRequest for semantics.
 	OverrideReadinessCheck bool `json:"overrideReadinessCheck,omitempty"`
+	// TargetResolutionMode defaults to Strict; BestEffort records unaddressable targets as skipped.
+	TargetResolutionMode *TargetResolutionMode `json:"targetResolutionMode,omitempty"`
 	// OverrideVersionCheck applies the firmware version-check override to every
 	// task spawned by this batch. See APIUpdateFirmwareRequest for semantics.
 	OverrideVersionCheck bool `json:"overrideVersionCheck"`
@@ -278,6 +286,7 @@ type APIBatchTrayFirmwareUpdateRequest struct {
 // Validate checks required fields and filter constraints.
 func (r *APIBatchTrayFirmwareUpdateRequest) Validate() error {
 	err := validation.ValidateStruct(r,
+		validation.Field(&r.TargetResolutionMode),
 		validation.Field(&r.SiteID, validation.Required.Error("siteId is required")),
 		validation.Field(&r.RuleID, validationis.UUID.Error(validationErrorInvalidUUID)),
 		validation.Field(&r.AuthenticationData),

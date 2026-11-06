@@ -76,6 +76,8 @@ type WorkflowComponent struct {
 type ExecutionInfo struct {
 	TaskID     uuid.UUID
 	Components []WorkflowComponent
+	// TargetResolution preserves the admission result through workflow retries.
+	TargetResolution *taskcommon.TargetResolution
 
 	// RuleDefinition is the resolved operation rule, determined at task
 	// creation time and carried through to the workflow unchanged.
@@ -156,7 +158,9 @@ type TaskStatusUpdate struct {
 	QueueExpiresAt *time.Time
 	// Report, when non-empty, replaces the stored report document. An
 	// empty value leaves the stored report untouched.
-	Report json.RawMessage
+	// Omit an absent report from Temporal payloads: decoding JSON null into
+	// RawMessage produces non-empty bytes, which would clear the stored report.
+	Report json.RawMessage `json:",omitempty"`
 }
 
 // TaskReportUpdate replaces the stored report with the supplied snapshot

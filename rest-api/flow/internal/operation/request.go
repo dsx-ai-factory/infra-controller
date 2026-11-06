@@ -73,6 +73,8 @@ type Request struct {
 	Operation   Wrapper
 	TargetSpec  TargetSpec // Exactly one of racks, NVLink domains, or components
 	Description string
+	// TargetResolutionMode defaults to Strict. It does not override readiness or execution failures.
+	TargetResolutionMode taskcommon.TargetResolutionMode
 
 	// ConflictStrategy controls how the task behaves when a conflict is
 	// detected. Default (ConflictStrategyReject) rejects on conflict.
@@ -117,6 +119,10 @@ func (r *Request) HasIdempotencyKey() bool {
 func (r *Request) Validate() error {
 	if r == nil {
 		return fmt.Errorf("request is nil")
+	}
+
+	if r.TargetResolutionMode != "" && r.TargetResolutionMode != taskcommon.TargetResolutionStrict && r.TargetResolutionMode != taskcommon.TargetResolutionBestEffort {
+		return fmt.Errorf("unknown target resolution mode %q", r.TargetResolutionMode)
 	}
 
 	if !r.Operation.Type.IsValid() {

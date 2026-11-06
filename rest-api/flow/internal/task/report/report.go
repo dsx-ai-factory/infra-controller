@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"time"
 
+	taskcommon "github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/common"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/operationrules"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/devicetypes"
 )
@@ -50,6 +51,9 @@ const (
 
 // Report is the JSON document stored in task.report.
 type Report struct {
+	// TargetResolution reports skipped targets independently of per-step execution progress.
+	TargetResolution *taskcommon.TargetResolution `json:"target_resolution,omitempty"`
+
 	Version int           `json:"version"`
 	Stages  []StageRecord `json:"stages"`
 	// Error is set to the failure summary of the first stage that fails

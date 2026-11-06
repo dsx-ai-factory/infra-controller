@@ -5,6 +5,7 @@ package manager
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -25,6 +26,7 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/conflict"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/operationrules"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/operations"
+	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/report"
 	taskdef "github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/task"
 	identifier "github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/Identifier"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/devicetypes"
@@ -57,6 +59,63 @@ func (s *submitTaskInventory) GetComponentByID(
 }
 
 func TestManagerImpl_SubmitTask(t *testing.T) {
+	t.Run("preserves target snapshots through queued and pending recovery", func(t *testing.T) {
+		rackID := uuid.New()
+		selected := newTestRack(rackID, "rack-1")
+		linked := newTestComponent(uuid.New(), rackID, devicetypes.ComponentTypeCompute, "compute-1")
+		missing := newTestComponent(uuid.New(), rackID, devicetypes.ComponentTypeCompute, "")
+		missing.ComponentID = ""
+		selected.AddComponent(linked)
+		selected.AddComponent(missing)
+		store := &managerTaskStore{activeTasksByRack: map[uuid.UUID][]*taskdef.Task{rackID: {{ID: uuid.New(), RackID: rackID, Operation: testPowerControlOperation(t), Attributes: taskcommon.TaskAttributes{ComponentsByType: map[devicetypes.ComponentType][]uuid.UUID{devicetypes.ComponentTypeCompute: {linked.Info.ID}}}, Status: taskcommon.TaskStatusRunning}}}}
+		exec := &managerExecutor{executionID: "workflow-1"}
+		inv := &submitTaskInventory{rack: selected}
+		m := &ManagerImpl{inventoryStore: inv, taskStore: store, executor: exec, ruleResolver: operationrules.NewResolver(store), conflictResolver: conflict.NewResolver(store), maxWaitingPerRack: 5}
+		req := &operation.Request{Operation: testPowerControlOperation(t), TargetResolutionMode: taskcommon.TargetResolutionBestEffort, ConflictStrategy: operation.ConflictStrategyQueue, TargetSpec: operation.TargetSpec{Racks: []operation.RackTarget{{Identifier: identifier.Identifier{ID: rackID}}}}}
+		ids, err := m.SubmitTask(t.Context(), req)
+		require.NoError(t, err)
+		require.Len(t, ids, 1)
+		require.Zero(t, exec.executeCalls)
+		require.Len(t, store.createdTasks, 1)
+		// Persist/reload the JSON attributes so the proof covers the stored contract.
+		original := store.createdTasks[0]
+		raw, err := json.Marshal(original.Attributes)
+		require.NoError(t, err)
+		var attrs taskcommon.TaskAttributes
+		require.NoError(t, json.Unmarshal(raw, &attrs))
+		original.Attributes = attrs
+		rep, err := report.Unmarshal(original.Report)
+		require.NoError(t, err)
+		require.Equal(t, 1, rep.TargetResolution.Submitted)
+		require.Len(t, rep.TargetResolution.Skipped, 1)
+		selected.Components[1].ComponentID = "newly-linked"
+		selected.AddComponent(newTestComponent(uuid.New(), rackID, devicetypes.ComponentTypeCompute, "new-device"))
+		original.Status = taskcommon.TaskStatusPending
+		store.tasksByID = map[uuid.UUID]*taskdef.Task{original.ID: original}
+		require.NoError(t, m.promoteTask(t.Context(), original.ID))
+		require.Len(t, exec.lastRequest.Info.Components, 1)
+		require.Equal(t, "compute-1", exec.lastRequest.Info.Components[0].ComponentID)
+		require.Equal(t, attrs.TargetResolution, exec.lastRequest.Info.TargetResolution)
+		// Recover an admitted but unscheduled task using the same idempotency key.
+		// Newly linked/skipped inventory must not be re-planned on that retry.
+		original.ExecutionID = ""
+		original.IdempotencyKey = "pending-recovery"
+		store.taskByIdempotencyKey = map[string]*taskdef.Task{original.IdempotencyKey: original}
+		req.IdempotencyKey = original.IdempotencyKey
+		req.RequiredRackID = rackID
+		recovered, err := m.SubmitTask(t.Context(), req)
+		require.NoError(t, err)
+		require.Equal(t, []uuid.UUID{original.ID}, recovered)
+		require.Len(t, exec.lastRequest.Info.Components, 1)
+		require.Equal(t, attrs.TargetResolution, exec.lastRequest.Info.TargetResolution)
+		// A component disappearing cannot silently shrink the accepted set.
+		selected.Components = selected.Components[1:]
+		err = m.promoteTask(t.Context(), original.ID)
+		require.ErrorContains(t, err, "no longer present")
+		require.Equal(t, taskcommon.TaskStatusFailed, store.statusUpdates[len(store.statusUpdates)-1].Status)
+
+	})
+
 	t.Run("rejects a Compute component target with an NVSwitch-only rack rule", func(t *testing.T) {
 		rackID := uuid.New()
 		componentID := uuid.New()
@@ -1448,6 +1507,9 @@ func testIngestOperation(t *testing.T, ruleID *uuid.UUID) operation.Wrapper {
 }
 
 type managerTaskStore struct {
+	statusUpdateErr error
+
+	createdTasks                   []*taskdef.Task
 	activeTasksByRack              map[uuid.UUID][]*taskdef.Task
 	taskByIdempotencyKey           map[string]*taskdef.Task
 	listActiveCalls                int
@@ -1518,7 +1580,13 @@ func (s *managerTaskStore) RunInTransaction(
 	return s.transactionCommitErr
 }
 
-func (s *managerTaskStore) CreateTask(_ context.Context, _ *taskdef.Task) error {
+func (s *managerTaskStore) CreateTask(_ context.Context, task *taskdef.Task) error {
+	cloned := *task
+	s.createdTasks = append(s.createdTasks, &cloned)
+	if s.tasksByID == nil {
+		s.tasksByID = make(map[uuid.UUID]*taskdef.Task)
+	}
+	s.tasksByID[cloned.ID] = &cloned
 	s.createTaskCalls++
 	return nil
 }
@@ -1587,7 +1655,7 @@ func (s *managerTaskStore) UpdateTaskStatus(
 	s.statusUpdateContextErr = ctx.Err()
 	_, s.statusUpdateContextHasDeadline = ctx.Deadline()
 	s.statusUpdates = append(s.statusUpdates, update)
-	return nil
+	return s.statusUpdateErr
 }
 
 func (s *managerTaskStore) UpdateTaskReport(
@@ -1721,6 +1789,9 @@ var _ interface {
 } = (*managerTaskStore)(nil)
 
 type managerExecutor struct {
+	executeErr error
+	onExecute  func(*taskdef.ExecutionRequest)
+
 	executionID                    string
 	validateCalls                  int
 	validateErr                    error
@@ -1779,6 +1850,12 @@ func (e *managerExecutor) Execute(
 ) (*taskdef.ExecutionResponse, error) {
 	e.executeCalls++
 	e.lastRequest = req
+	if e.onExecute != nil {
+		e.onExecute(req)
+	}
+	if e.executeErr != nil {
+		return nil, e.executeErr
+	}
 	return &taskdef.ExecutionResponse{ExecutionID: e.executionID}, nil
 }
 

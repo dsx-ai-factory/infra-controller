@@ -88,12 +88,15 @@ type APIUpdatePowerStateRequest struct {
 	// rack-scoped components) are reported as not ready by their persisted
 	// status. Intended for operator-supervised maintenance.
 	OverrideReadinessCheck bool `json:"overrideReadinessCheck,omitempty"`
+	// TargetResolutionMode defaults to Strict; BestEffort records unaddressable targets as skipped.
+	TargetResolutionMode *TargetResolutionMode `json:"targetResolutionMode,omitempty"`
 }
 
 // Validate validates the power control request
 func (r *APIUpdatePowerStateRequest) Validate() error {
 	r.State = normalizePowerControlState(r.State)
 	return validation.ValidateStruct(r,
+		validation.Field(&r.TargetResolutionMode),
 		validation.Field(&r.SiteID, validation.Required.Error("siteId is required")),
 		validation.Field(&r.State,
 			validation.Required.Error(validationErrorValueRequired),
@@ -142,6 +145,8 @@ type APIBatchUpdateRackPowerStateRequest struct {
 	// OverrideReadinessCheck applies the readiness-gate bypass to every task
 	// spawned by this batch. See APIUpdatePowerStateRequest for semantics.
 	OverrideReadinessCheck bool `json:"overrideReadinessCheck,omitempty"`
+	// TargetResolutionMode defaults to Strict; BestEffort records unaddressable targets as skipped.
+	TargetResolutionMode *TargetResolutionMode `json:"targetResolutionMode,omitempty"`
 }
 
 // Validate checks required fields and power state validity.
@@ -151,6 +156,7 @@ func (r *APIBatchUpdateRackPowerStateRequest) Validate() error {
 		return fmt.Errorf("siteId is required")
 	}
 	return validation.ValidateStruct(r,
+		validation.Field(&r.TargetResolutionMode),
 		validation.Field(&r.State,
 			validation.Required.Error(validationErrorValueRequired),
 			validation.In(validPowerControlStatesAny...).Error(
@@ -172,6 +178,8 @@ type APIBatchUpdateTrayPowerStateRequest struct {
 	// OverrideReadinessCheck applies the readiness-gate bypass to every task
 	// spawned by this batch. See APIUpdatePowerStateRequest for semantics.
 	OverrideReadinessCheck bool `json:"overrideReadinessCheck,omitempty"`
+	// TargetResolutionMode defaults to Strict; BestEffort records unaddressable targets as skipped.
+	TargetResolutionMode *TargetResolutionMode `json:"targetResolutionMode,omitempty"`
 }
 
 // Validate checks required fields, power state validity, and filter constraints.
@@ -184,6 +192,7 @@ func (r *APIBatchUpdateTrayPowerStateRequest) Validate() error {
 		return err
 	}
 	return validation.ValidateStruct(r,
+		validation.Field(&r.TargetResolutionMode),
 		validation.Field(&r.State,
 			validation.Required.Error(validationErrorValueRequired),
 			validation.In(validPowerControlStatesAny...).Error(

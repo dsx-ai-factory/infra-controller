@@ -24,6 +24,7 @@ var _ MappedNullable = &NVLinkDomainFirmwareUpdateRequest{}
 
 // NVLinkDomainFirmwareUpdateRequest Request body for an NVLink Domain firmware update
 type NVLinkDomainFirmwareUpdateRequest struct {
+	TargetResolutionMode *TargetResolutionMode `json:"targetResolutionMode,omitempty"`
 	// ID of the Site
 	SiteId string `json:"siteId"`
 	// Target firmware input. NVLink Domain targets resolve to their member racks. For rack-scale RMS components, an omitted, null, empty, or whitespace-only value uses the owning rack profile's configured firmware object. Resolution or fetch failures are reported by the asynchronous task.
@@ -44,6 +45,8 @@ type _NVLinkDomainFirmwareUpdateRequest NVLinkDomainFirmwareUpdateRequest
 // will change when the set of required properties is changed
 func NewNVLinkDomainFirmwareUpdateRequest(siteId string) *NVLinkDomainFirmwareUpdateRequest {
 	this := NVLinkDomainFirmwareUpdateRequest{}
+	var targetResolutionMode TargetResolutionMode = TARGETRESOLUTIONMODE_STRICT
+	this.TargetResolutionMode = &targetResolutionMode
 	this.SiteId = siteId
 	var overrideVersionCheck bool = false
 	this.OverrideVersionCheck = &overrideVersionCheck
@@ -57,11 +60,45 @@ func NewNVLinkDomainFirmwareUpdateRequest(siteId string) *NVLinkDomainFirmwareUp
 // but it doesn't guarantee that properties required by API are set
 func NewNVLinkDomainFirmwareUpdateRequestWithDefaults() *NVLinkDomainFirmwareUpdateRequest {
 	this := NVLinkDomainFirmwareUpdateRequest{}
+	var targetResolutionMode TargetResolutionMode = TARGETRESOLUTIONMODE_STRICT
+	this.TargetResolutionMode = &targetResolutionMode
 	var overrideVersionCheck bool = false
 	this.OverrideVersionCheck = &overrideVersionCheck
 	var overrideReadinessCheck bool = false
 	this.OverrideReadinessCheck = &overrideReadinessCheck
 	return &this
+}
+
+// GetTargetResolutionMode returns the TargetResolutionMode field value if set, zero value otherwise.
+func (o *NVLinkDomainFirmwareUpdateRequest) GetTargetResolutionMode() TargetResolutionMode {
+	if o == nil || IsNil(o.TargetResolutionMode) {
+		var ret TargetResolutionMode
+		return ret
+	}
+	return *o.TargetResolutionMode
+}
+
+// GetTargetResolutionModeOk returns a tuple with the TargetResolutionMode field value if set, nil otherwise
+// and a boolean to check if the value has been set.
+func (o *NVLinkDomainFirmwareUpdateRequest) GetTargetResolutionModeOk() (*TargetResolutionMode, bool) {
+	if o == nil || IsNil(o.TargetResolutionMode) {
+		return nil, false
+	}
+	return o.TargetResolutionMode, true
+}
+
+// HasTargetResolutionMode returns a boolean if a field has been set.
+func (o *NVLinkDomainFirmwareUpdateRequest) HasTargetResolutionMode() bool {
+	if o != nil && !IsNil(o.TargetResolutionMode) {
+		return true
+	}
+
+	return false
+}
+
+// SetTargetResolutionMode gets a reference to the given TargetResolutionMode and assigns it to the TargetResolutionMode field.
+func (o *NVLinkDomainFirmwareUpdateRequest) SetTargetResolutionMode(v TargetResolutionMode) {
+	o.TargetResolutionMode = &v
 }
 
 // GetSiteId returns the SiteId field value
@@ -237,6 +274,9 @@ func (o NVLinkDomainFirmwareUpdateRequest) MarshalJSON() ([]byte, error) {
 
 func (o NVLinkDomainFirmwareUpdateRequest) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
+	if !IsNil(o.TargetResolutionMode) {
+		toSerialize["targetResolutionMode"] = o.TargetResolutionMode
+	}
 	toSerialize["siteId"] = o.SiteId
 	if o.Version.IsSet() {
 		toSerialize["version"] = o.Version.Get()

@@ -2079,7 +2079,20 @@ func ExecutePowerControlWorkflow(
 	overrideReadinessCheck bool,
 	workflowID string,
 	entityName string,
+	modes ...*cam.TargetResolutionMode,
 ) (*flowv1.SubmitTaskResponse, *cutil.APIError) {
+	var mode cam.TargetResolutionMode
+	if len(modes) > 0 && modes[0] != nil {
+		mode = *modes[0]
+		validationErr := mode.Validate()
+		if validationErr != nil {
+			return nil, cutil.NewAPIError(http.StatusBadRequest, validationErr.Error(), nil)
+		}
+	}
+	if mode == cam.TargetResolutionBestEffort {
+		workflowID += "-best-effort"
+	}
+
 	var fullMethod string
 	var flowRequest proto.Message
 	ruleUUID := GetFlowUUIDPtr(ruleID)
@@ -2092,6 +2105,7 @@ func ExecutePowerControlWorkflow(
 			Description:            fmt.Sprintf("API power on %s", entityName),
 			RuleId:                 ruleUUID,
 			OverrideReadinessCheck: overrideReadinessCheck,
+			TargetResolutionMode:   mode.ToProto(),
 		}
 	case cam.PowerControlStateOff:
 		fullMethod = flowv1.Flow_PowerOffRack_FullMethodName
@@ -2100,6 +2114,7 @@ func ExecutePowerControlWorkflow(
 			Description:            fmt.Sprintf("API power off %s", entityName),
 			RuleId:                 ruleUUID,
 			OverrideReadinessCheck: overrideReadinessCheck,
+			TargetResolutionMode:   mode.ToProto(),
 		}
 	case cam.PowerControlStateCycle:
 		fullMethod = flowv1.Flow_PowerResetRack_FullMethodName
@@ -2108,6 +2123,7 @@ func ExecutePowerControlWorkflow(
 			Description:            fmt.Sprintf("API power cycle %s", entityName),
 			RuleId:                 ruleUUID,
 			OverrideReadinessCheck: overrideReadinessCheck,
+			TargetResolutionMode:   mode.ToProto(),
 		}
 	case cam.PowerControlStateForceOff:
 		fullMethod = flowv1.Flow_PowerOffRack_FullMethodName
@@ -2117,6 +2133,7 @@ func ExecutePowerControlWorkflow(
 			Description:            fmt.Sprintf("API force power off %s", entityName),
 			RuleId:                 ruleUUID,
 			OverrideReadinessCheck: overrideReadinessCheck,
+			TargetResolutionMode:   mode.ToProto(),
 		}
 	case cam.PowerControlStateForceCycle:
 		fullMethod = flowv1.Flow_PowerResetRack_FullMethodName
@@ -2126,6 +2143,7 @@ func ExecutePowerControlWorkflow(
 			Description:            fmt.Sprintf("API force power cycle %s", entityName),
 			RuleId:                 ruleUUID,
 			OverrideReadinessCheck: overrideReadinessCheck,
+			TargetResolutionMode:   mode.ToProto(),
 		}
 	case cam.PowerControlStateACCycle:
 		fullMethod = flowv1.Flow_ACPowerCycleRack_FullMethodName
@@ -2134,6 +2152,7 @@ func ExecutePowerControlWorkflow(
 			Description:            fmt.Sprintf("API AC power cycle %s", entityName),
 			RuleId:                 ruleUUID,
 			OverrideReadinessCheck: overrideReadinessCheck,
+			TargetResolutionMode:   mode.ToProto(),
 		}
 	default:
 		return nil, cutil.NewAPIError(http.StatusBadRequest, fmt.Sprintf("Invalid power control state: %s", state), nil)
@@ -2168,12 +2187,26 @@ func ExecuteBringUpRackWorkflow(
 	overrideReadinessCheck bool,
 	workflowID string,
 	entityName string,
+	modes ...*cam.TargetResolutionMode,
 ) (*flowv1.SubmitTaskResponse, *cutil.APIError) {
+	var mode cam.TargetResolutionMode
+	if len(modes) > 0 && modes[0] != nil {
+		mode = *modes[0]
+		validationErr := mode.Validate()
+		if validationErr != nil {
+			return nil, cutil.NewAPIError(http.StatusBadRequest, validationErr.Error(), nil)
+		}
+	}
+	if mode == cam.TargetResolutionBestEffort {
+		workflowID += "-best-effort"
+	}
+
 	flowRequest := &flowv1.BringUpRackRequest{
 		TargetSpec:             targetSpec,
 		Description:            description,
 		RuleId:                 GetFlowUUIDPtr(ruleID),
 		OverrideReadinessCheck: overrideReadinessCheck,
+		TargetResolutionMode:   mode.ToProto(),
 	}
 
 	var flowResponse flowv1.SubmitTaskResponse
@@ -2216,7 +2249,20 @@ func ExecuteFirmwareUpdateWorkflow(
 	overrideVersionCheck bool,
 	workflowID string,
 	entityName string,
+	modes ...*cam.TargetResolutionMode,
 ) (*flowv1.SubmitTaskResponse, *cutil.APIError) {
+	var mode cam.TargetResolutionMode
+	if len(modes) > 0 && modes[0] != nil {
+		mode = *modes[0]
+		validationErr := mode.Validate()
+		if validationErr != nil {
+			return nil, cutil.NewAPIError(http.StatusBadRequest, validationErr.Error(), nil)
+		}
+	}
+	if mode == cam.TargetResolutionBestEffort {
+		workflowID += "-best-effort"
+	}
+
 	flowRequest := &flowv1.UpgradeFirmwareRequest{
 		TargetSpec:             targetSpec,
 		TargetVersion:          version,
@@ -2224,6 +2270,7 @@ func ExecuteFirmwareUpdateWorkflow(
 		Description:            fmt.Sprintf("API firmware update %s", entityName),
 		RuleId:                 GetFlowUUIDPtr(ruleID),
 		OverrideReadinessCheck: overrideReadinessCheck,
+		TargetResolutionMode:   mode.ToProto(),
 		OverrideVersionCheck:   overrideVersionCheck,
 		AuthenticationData:     authenticationData,
 	}
