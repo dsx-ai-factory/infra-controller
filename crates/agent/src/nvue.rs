@@ -527,7 +527,7 @@ pub fn build(conf: NvueConfig) -> eyre::Result<String> {
                 .collect(),
             HasIpv6RouterAdvertisement: router_advertisement.is_some(),
             HasAdminIpv6OverlayContainment: has_admin_ipv6_overlay_containment,
-            // Validated routed tenant RA uses the physical port, while
+            // Validated routed RA uses the physical port, while
             // validated admin L2 RA uses its already-rendered VLAN SVI.
             Ipv6RouterAdvertisementInterface: router_advertisement
                 .map(|_| {
@@ -699,9 +699,9 @@ pub fn build(conf: NvueConfig) -> eyre::Result<String> {
     }) {
         for port in &vpc.PortConfigs {
             tenant_host_routes_to_underlay.extend_from_slice(&port.IPs);
-            if port.IsL2Segment {
-                // A stretched segment installs its shared prefix on every SVI,
-                // but only this host's tenant /128 may be leaked to the underlay.
+            if port.IsL2Segment || (use_admin_network && port.IsPhy) {
+                // The admin PF and stretched segments retain their shared prefixes.
+                // Leak only the assigned host /128 to the underlay.
                 if let Some(host_route) = assigned_ipv6_host_route(
                     port.HostIPv6.as_deref(),
                     port.HostIPv6Route.as_deref(),
@@ -1489,12 +1489,13 @@ pub struct Ipv6PortConfig {
     /// derive it from the canonical segment prefix: the first address of a
     /// stateful `/127` linknet (RFC 6164), or the selected `/64` for SLAAC.
     /// Admin L2 uses its containing segment prefix on the VLAN VRR.
+    /// Routed admin uses the same prefix directly on the PF.
     pub gateway_cidr: String,
     /// SVI IP for L2 segments -- the DPU's gateway address on the VLAN.
     pub svi_ip: Option<String>,
     /// Validated FNN router-advertisement behavior. Routed tenant stateful RA
     /// requires a `/127`, tenant SLAAC requires a `/64`, and admin stateful RA
-    /// advertises the containing segment on its VLAN SVI.
+    /// advertises the containing segment on its VLAN SVI or routed PF.
     #[serde(default)]
     pub router_advertisement: Option<Ipv6RouterAdvertisementConfig>,
 }
@@ -1512,7 +1513,7 @@ pub enum Ipv6RouterAdvertisementMode {
 #[derive(Clone, Deserialize, Debug)]
 pub struct Ipv6RouterAdvertisementConfig {
     /// Routed tenant segment (`/127` for stateful or `/64` for SLAAC), or the
-    /// containing admin segment advertised by the stateful VLAN SVI.
+    /// containing admin segment advertised by the stateful VLAN SVI or routed PF.
     pub prefix: String,
     /// Explicit address-assignment mode for this prefix.
     pub mode: Ipv6RouterAdvertisementMode,

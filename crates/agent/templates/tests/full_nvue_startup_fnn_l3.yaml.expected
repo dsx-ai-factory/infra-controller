@@ -349,7 +349,7 @@
             192.168.0.12/32:
               address-family: ipv4-unicast
               via:
-                vlan10:
+                pf0hpf_if:
                   type: interface
             2.2.2.2/32:
               address-family: ipv4-unicast
