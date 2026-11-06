@@ -367,9 +367,9 @@ type ExpectedMachineCreateInput struct {
 	HostID                   *int32                     `json:"HostID"`
 	Labels                   map[string]string          `json:"Labels"`
 	IsDpfEnabled             *bool                      `json:"IsDpfEnabled"`
-	RetainBmcCredentials     *bool
-	HostLifecycleProfile     HostLifecycleProfile `json:"HostLifecycleProfile"`
-	CreatedBy                uuid.UUID            `json:"CreatedBy"`
+	RetainBmcCredentials     *bool                      `json:"RetainBmcCredentials"`
+	HostLifecycleProfile     HostLifecycleProfile       `json:"HostLifecycleProfile"`
+	CreatedBy                uuid.UUID                  `json:"CreatedBy"`
 }
 
 // ToExpectedMachine constructs the nonsecret record sent to Core or stored after confirmation.
@@ -395,8 +395,10 @@ func (input ExpectedMachineCreateInput) ToExpectedMachine() ExpectedMachine {
 		HostID:                   input.HostID,
 		Labels:                   input.Labels,
 		IsDpfEnabled:             input.IsDpfEnabled,
-		HostLifecycleProfile:     input.HostLifecycleProfile,
-		CreatedBy:                input.CreatedBy,
+		// Default omitted create inputs to false.
+		RetainBmcCredentials: cutil.GetPtr(input.RetainBmcCredentials != nil && *input.RetainBmcCredentials),
+		HostLifecycleProfile: input.HostLifecycleProfile,
+		CreatedBy:            input.CreatedBy,
 	}
 }
 
@@ -555,8 +557,6 @@ func (emsd ExpectedMachineSQLDAO) CreateMultiple(ctx context.Context, tx *db.Tx,
 	// NOTE: since Expected Machine can be created by NICo or Cloud API the caller MUST provide the ID.
 	for _, input := range inputs {
 		em := input.ToExpectedMachine()
-		// Default omitted create inputs to false.
-		em.RetainBmcCredentials = cutil.GetPtr(input.RetainBmcCredentials != nil && *input.RetainBmcCredentials)
 		expectedMachines = append(expectedMachines, em)
 		ids = append(ids, em.ID)
 	}
