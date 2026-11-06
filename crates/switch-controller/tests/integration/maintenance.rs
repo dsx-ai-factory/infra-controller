@@ -284,6 +284,19 @@ async fn reset_preserves_restart_intent_through_queue_and_controller_reload(pool
     ] {
         let operation = SwitchMaintenanceOperation::Reset { graceful };
         request_switch_maintenance_via_cm(&env, &switch_id, operation).await;
+        if !graceful {
+            // Persist a predecessor request directly, without using the new Rust serializer.
+            sqlx::query("UPDATE switches SET switch_maintenance_requested = $1 WHERE id = $2")
+                .bind(serde_json::json!({
+                    "requested_at": "2026-10-01T00:00:00Z",
+                    "initiator": "component-manager",
+                    "operation": { "operation": "reset" }
+                }))
+                .bind(switch_id)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
         let queued = load_switch(&env, &switch_id).await;
         assert_eq!(queued.controller_state.value, SwitchControllerState::Ready);
         let request = queued.switch_maintenance_requested.unwrap();
@@ -357,6 +370,21 @@ async fn reset_preserves_restart_intent_through_queue_and_controller_reload(pool
         assert!(completed.switch_maintenance_requested.is_none());
         let calls = env.rms_sim.submitted_batch_set_power_state_requests().await;
         assert_eq!(calls.last().unwrap().operation, expected as i32);
+        for _ in 0..2 {
+            env.run_switch_controller_iteration().await;
+        }
+        assert_eq!(
+            env.rms_sim
+                .submitted_batch_set_power_state_requests()
+                .await
+                .len(),
+            calls.len(),
+            "completed reset must not be dispatched again"
+        );
+        assert_eq!(
+            load_switch(&env, &switch_id).await.controller_state.value,
+            SwitchControllerState::Ready
+        );
     }
 }
 

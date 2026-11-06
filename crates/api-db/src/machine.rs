@@ -7909,13 +7909,26 @@ mod test {
                 super::CURRENT_STATE_MODEL_VERSION,
             )
             .await?;
-            super::set_machine_maintenance_requested(
-                txn.as_mut(),
-                machine_id,
-                initiator,
-                operation,
-            )
-            .await?;
+            if matches!(operation, Reset { graceful: false }) {
+                // Seed the predecessor JSON directly, independent of current serde behavior.
+                sqlx::query("UPDATE machines SET machine_maintenance_requested = $1 WHERE id = $2")
+                    .bind(serde_json::json!({
+                        "requested_at": "2026-10-01T00:00:00Z",
+                        "initiator": initiator,
+                        "operation": { "operation": "reset" }
+                    }))
+                    .bind(machine_id)
+                    .execute(txn.as_mut())
+                    .await?;
+            } else {
+                super::set_machine_maintenance_requested(
+                    txn.as_mut(),
+                    machine_id,
+                    initiator,
+                    operation,
+                )
+                .await?;
+            }
             let machine = super::find_one(txn.as_mut(), &machine_id, Default::default())
                 .await?
                 .unwrap();
@@ -8059,13 +8072,16 @@ mod test {
                 super::CURRENT_STATE_MODEL_VERSION,
             )
             .await?;
-            super::set_machine_maintenance_requested(
-                txn.as_mut(),
-                machine_id,
-                "component-manager",
-                Reset { graceful: false },
-            )
-            .await?;
+            // These requests were persisted before Reset carried a graceful flag.
+            sqlx::query("UPDATE machines SET machine_maintenance_requested = $1 WHERE id = $2")
+                .bind(serde_json::json!({
+                    "requested_at": "2026-10-01T00:00:00Z",
+                    "initiator": "component-manager",
+                    "operation": { "operation": "reset" }
+                }))
+                .bind(machine_id)
+                .execute(txn.as_mut())
+                .await?;
             let snapshot = super::find_one(txn.as_mut(), &machine_id, Default::default())
                 .await?
                 .unwrap();
@@ -8154,6 +8170,17 @@ mod test {
                 history_before + if applied { 1 } else { 0 },
                 "{case:?}"
             );
+            if matches!(case, Pending::Current) {
+                assert_eq!(
+                    super::clear_machine_maintenance_requested(txn.as_mut(), machine_id, &captured)
+                        .await?,
+                    crate::ConditionalWrite::Applied(())
+                );
+                let completed = super::find_one(txn.as_mut(), &machine_id, Default::default())
+                    .await?
+                    .unwrap();
+                assert!(completed.machine_maintenance_requested.is_none());
+            }
             txn.rollback().await?;
         }
         Ok(())

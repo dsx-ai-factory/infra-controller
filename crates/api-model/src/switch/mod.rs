@@ -81,7 +81,7 @@ pub enum SwitchMaintenanceOperation {
     },
     /// Restart the switch gracefully or forcibly.
     Reset {
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         graceful: bool,
     },
     /// Reinstall or rotate the switch NVOS mTLS certificate via Component Manager.
@@ -830,7 +830,7 @@ mod tests {
                     request: None,
                     configure_certificate: None,
                 } => Yields(
-                    r#"{"state":"maintenance","operation":{"operation":"reset","graceful":false}}"#.to_string(),
+                    r#"{"state":"maintenance","operation":{"operation":"reset"}}"#.to_string(),
                 ),
             }
 
@@ -1004,7 +1004,7 @@ mod tests {
             }
 
             "reset" {
-                SwitchMaintenanceOperation::Reset { graceful: false } => Yields(r#"{"operation":"reset","graceful":false}"#.to_string()),
+                SwitchMaintenanceOperation::Reset { graceful: false } => Yields(r#"{"operation":"reset"}"#.to_string()),
                 SwitchMaintenanceOperation::Reset { graceful: true } => Yields(r#"{"operation":"reset","graceful":true}"#.to_string()),
             }
 

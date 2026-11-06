@@ -2955,7 +2955,7 @@ pub enum MachineMaintenanceOperation {
     },
     /// Restart the host, gracefully when requested and forcibly otherwise.
     Reset {
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         graceful: bool,
     },
     /// Gracefully reboot the host without falling back to a forced restart.
@@ -4534,11 +4534,11 @@ mod tests {
         check_values(
             [
                 Check {
-                    scenario: "legacy reset defaults to forced restart",
+                    scenario: "legacy reset preserves its serialized shape",
                     input: serde_json::json!({"operation": "reset"}),
                     expect: (
                         MachineMaintenanceOperation::Reset { graceful: false },
-                        serde_json::json!({"operation": "reset", "graceful": false}),
+                        serde_json::json!({"operation": "reset"}),
                     ),
                 },
                 Check {
@@ -4546,7 +4546,7 @@ mod tests {
                     input: serde_json::json!({"operation": "reset", "graceful": false}),
                     expect: (
                         MachineMaintenanceOperation::Reset { graceful: false },
-                        serde_json::json!({"operation": "reset", "graceful": false}),
+                        serde_json::json!({"operation": "reset"}),
                     ),
                 },
                 Check {
