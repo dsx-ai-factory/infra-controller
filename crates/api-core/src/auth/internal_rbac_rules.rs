@@ -123,7 +123,7 @@ impl InternalRBACRules {
             "CreateNetworkSegment",
             vec![ForgeAdminCLI, Machineatron, SiteAgent],
         );
-        x.perm("AttachNetworkSegmentToVpc", vec![ForgeAdminCLI]);
+        x.perm("AttachNetworkSegmentToVpc", vec![ForgeAdminCLI, SiteAgent]);
         x.perm("AddNetworkSegmentPrefix", vec![ForgeAdminCLI]);
         x.perm(
             "DeleteNetworkSegment",
@@ -1382,6 +1382,34 @@ mod rbac_rule_tests {
                 InternalRBACRules::allowed_from_static("AddNetworkSegmentPrefix", &principals)
             },
         );
+    }
+
+    #[test]
+    fn network_segment_attachment_operation_permissions() {
+        let admin = Principal::ExternalUser(ExternalUserInfo::new(
+            None,
+            "nico-cli-client".to_string(),
+            None,
+        ));
+        let site_agent = Principal::SpiffeServiceIdentifier("elektra-site-agent".to_string());
+        let unrelated = Principal::SpiffeServiceIdentifier("nico-dns".to_string());
+        let anonymous = Principal::Anonymous;
+        for (principal, expected) in [
+            (admin, true),
+            (site_agent, true),
+            (unrelated, false),
+            (anonymous, false),
+        ] {
+            assert_eq!(
+                InternalRBACRules::allowed_from_static(
+                    "AttachNetworkSegmentToVpc",
+                    std::slice::from_ref(&principal),
+                ),
+                expected,
+                "{}",
+                principal.as_identifier(),
+            );
+        }
     }
 
     #[test]

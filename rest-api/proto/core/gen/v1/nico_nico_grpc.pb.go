@@ -686,6 +686,8 @@ type ForgeClient interface {
 	// together; a zone is created only for zone-boundary-aligned prefixes.
 	// It does not configure site routing, router advertisements or DHCP relays.
 	AddNetworkSegmentPrefix(ctx context.Context, in *AddNetworkSegmentPrefixRequest, opts ...grpc.CallOption) (*NetworkSegment, error)
+	// Attaches or reassigns a segment under the caller, allocation, and replay
+	// constraints documented by AttachNetworkSegmentToVpcRequest.
 	AttachNetworkSegmentToVpc(ctx context.Context, in *AttachNetworkSegmentToVpcRequest, opts ...grpc.CallOption) (*NetworkSegment, error)
 	DeleteNetworkSegment(ctx context.Context, in *NetworkSegmentDeletionRequest, opts ...grpc.CallOption) (*NetworkSegmentDeletionResult, error)
 	// TODO: This functionality should get integrated into NetworkSegmentSearchFilter
@@ -7520,6 +7522,8 @@ type ForgeServer interface {
 	// together; a zone is created only for zone-boundary-aligned prefixes.
 	// It does not configure site routing, router advertisements or DHCP relays.
 	AddNetworkSegmentPrefix(context.Context, *AddNetworkSegmentPrefixRequest) (*NetworkSegment, error)
+	// Attaches or reassigns a segment under the caller, allocation, and replay
+	// constraints documented by AttachNetworkSegmentToVpcRequest.
 	AttachNetworkSegmentToVpc(context.Context, *AttachNetworkSegmentToVpcRequest) (*NetworkSegment, error)
 	DeleteNetworkSegment(context.Context, *NetworkSegmentDeletionRequest) (*NetworkSegmentDeletionResult, error)
 	// TODO: This functionality should get integrated into NetworkSegmentSearchFilter
