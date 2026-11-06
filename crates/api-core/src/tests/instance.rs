@@ -503,6 +503,7 @@ async fn test_measurement_assigned_ready_to_waiting_for_measurements_to_ca_faile
         )),
         infiniband: None,
         network_security_group_id: None,
+        dhcp_option_set_id: None,
         dpu_extension_services: None,
         nvlink: None,
         spxconfig: None,
@@ -2630,6 +2631,7 @@ async fn test_instance_phone_home(_: PgPoolOptions, options: PgConnectOptions) {
         nvlink: None,
         spxconfig: None,
         network_security_group_id: None,
+        dhcp_option_set_id: None,
         dpu_extension_services: None,
         power_profile: None,
     };
@@ -2794,6 +2796,7 @@ async fn test_create_instance_duplicate_keyset_ids(_: PgPoolOptions, options: Pg
         nvlink: None,
         spxconfig: None,
         network_security_group_id: None,
+        dhcp_option_set_id: None,
         dpu_extension_services: None,
         power_profile: None,
     };
@@ -2852,6 +2855,7 @@ async fn test_create_instance_keyset_ids_max(_: PgPoolOptions, options: PgConnec
         nvlink: None,
         spxconfig: None,
         network_security_group_id: None,
+        dhcp_option_set_id: None,
         dpu_extension_services: None,
         power_profile: None,
     };
@@ -3009,6 +3013,7 @@ async fn test_allocate_network_vpc_prefix_id(_: PgPoolOptions, options: PgConnec
         nvlink: None,
         spxconfig: None,
         network_security_group_id: None,
+        dhcp_option_set_id: None,
         dpu_extension_services: None,
         power_profile: None,
     };
@@ -6611,6 +6616,7 @@ async fn test_batch_allocate_instances_rolls_back_earlier_service_vpc_allocation
                 network: Some(single_interface_network_config(host_segment)),
                 infiniband: None,
                 network_security_group_id: None,
+                dhcp_option_set_id: None,
                 dpu_extension_services: Some(rpc::forge::InstanceDpuExtensionServicesConfig {
                     service_configs: vec![rpc::forge::InstanceDpuExtensionServiceConfig {
                         service_id: service.service_id.clone(),
@@ -9497,6 +9503,7 @@ async fn test_instance_cannot_allocate_requested_ip_with_network_segment(
                     }),
                     infiniband: None,
                     network_security_group_id: None,
+                    dhcp_option_set_id: None,
                     dpu_extension_services: None,
                     nvlink: None,
                     spxconfig: None,
@@ -9855,6 +9862,7 @@ async fn test_allocate_and_update_network_config_instance(
                     infiniband: None,
                     nvlink: None,
                     network_security_group_id: None,
+                    dhcp_option_set_id: None,
                     dpu_extension_services: None,
                     spxconfig: None,
                     power_profile: None,
@@ -10074,6 +10082,7 @@ async fn test_allocate_and_update_network_config_instance_state_machine(
                     nvlink: None,
                     spxconfig: None,
                     network_security_group_id: None,
+                    dhcp_option_set_id: None,
                     dpu_extension_services: None,
                     power_profile: None,
                 }),
@@ -11201,6 +11210,7 @@ async fn test_fnn_vrf_loopback_release_uses_remaining_host_and_service_membershi
                 nvlink: None,
                 spxconfig: None,
                 network_security_group_id: None,
+                dhcp_option_set_id: None,
                 dpu_extension_services: None,
                 power_profile: None,
             }),
@@ -13048,6 +13058,7 @@ async fn test_dpf_topology_rejects_unselected_vf_on_create_and_update(
                     network: Some(network_with_unselected_vf),
                     infiniband: None,
                     network_security_group_id: None,
+                    dhcp_option_set_id: None,
                     dpu_extension_services: None,
                     nvlink: None,
                     spxconfig: None,
@@ -13136,6 +13147,7 @@ async fn test_instance_vf_inventory_rejects_unavailable_vf_on_create_and_update(
                     network: Some(network_with_unavailable_vf),
                     infiniband: None,
                     network_security_group_id: None,
+                    dhcp_option_set_id: None,
                     dpu_extension_services: None,
                     nvlink: None,
                     spxconfig: None,
@@ -13236,6 +13248,7 @@ async fn test_implicit_instance_vfs_follow_sparse_hbn_inventory_on_create_and_up
                 network: Some(implicit_network()),
                 infiniband: None,
                 network_security_group_id: None,
+                dhcp_option_set_id: None,
                 dpu_extension_services: None,
                 nvlink: None,
                 spxconfig: None,
@@ -13535,6 +13548,7 @@ async fn test_bf4_cx9_topology_free_public_instance_paths_use_astra_static_inven
                 network: Some(vf14_network()),
                 infiniband: None,
                 network_security_group_id: None,
+                dhcp_option_set_id: None,
                 dpu_extension_services: None,
                 nvlink: None,
                 spxconfig: None,
@@ -13682,6 +13696,7 @@ async fn test_bf4_astra_implicit_instance_vfs_use_intercept_topology_on_create_a
                 network: Some(implicit_network()),
                 infiniband: None,
                 network_security_group_id: None,
+                dhcp_option_set_id: None,
                 dpu_extension_services: None,
                 nvlink: None,
                 spxconfig: None,
@@ -13756,6 +13771,7 @@ async fn test_public_instance_endpoints_reject_out_of_range_wire_vfs(
             network: Some(network),
             infiniband: None,
             network_security_group_id: None,
+            dhcp_option_set_id: None,
             dpu_extension_services: None,
             nvlink: None,
             spxconfig: None,
@@ -14536,6 +14552,7 @@ async fn test_allocate_instance_with_extension_services(
         network: Some(single_interface_network_config(segment_id)),
         infiniband: None,
         network_security_group_id: None,
+        dhcp_option_set_id: None,
         nvlink: None,
         spxconfig: None,
         dpu_extension_services: Some(rpc::forge::InstanceDpuExtensionServicesConfig {
@@ -15560,6 +15577,7 @@ async fn test_allocate_instance_with_extension_services_rejected_on_dpf_host(
                 network: Some(single_interface_network_config(segment_id)),
                 infiniband: None,
                 network_security_group_id: None,
+                dhcp_option_set_id: None,
                 nvlink: None,
                 spxconfig: None,
                 dpu_extension_services: Some(rpc::forge::InstanceDpuExtensionServicesConfig {
@@ -15720,6 +15738,7 @@ async fn test_allocate_instance_with_duplicate_extension_services(
             machine_id: Some(mh.id),
             config: Some(rpc::InstanceConfig {
                 network_security_group_id: None,
+                dhcp_option_set_id: None,
                 tenant: Some(default_tenant_config()),
                 os: Some(default_os_config()),
                 network: Some(single_interface_network_config(segment_id)),
@@ -15815,6 +15834,7 @@ async fn test_update_instance_with_extension_services(
         network: Some(single_interface_network_config(segment_id)),
         infiniband: None,
         network_security_group_id: None,
+        dhcp_option_set_id: None,
         nvlink: None,
         spxconfig: None,
         dpu_extension_services: Some(rpc::forge::InstanceDpuExtensionServicesConfig {
@@ -15861,6 +15881,7 @@ async fn test_update_instance_with_extension_services(
                     network: Some(single_interface_network_config(segment_id)),
                     infiniband: None,
                     network_security_group_id: None,
+                    dhcp_option_set_id: None,
                     nvlink: None,
                     spxconfig: None,
                     dpu_extension_services: Some(rpc::forge::InstanceDpuExtensionServicesConfig {
@@ -15902,6 +15923,7 @@ async fn test_update_instance_with_extension_services(
         network: Some(single_interface_network_config(segment_id)),
         infiniband: None,
         network_security_group_id: None,
+        dhcp_option_set_id: None,
         nvlink: None,
         spxconfig: None,
         dpu_extension_services: Some(rpc::forge::InstanceDpuExtensionServicesConfig {
@@ -16026,6 +16048,7 @@ async fn test_update_instance_with_extension_services(
         network: Some(single_interface_network_config(segment_id)),
         infiniband: None,
         network_security_group_id: None,
+        dhcp_option_set_id: None,
         nvlink: None,
         spxconfig: None,
         dpu_extension_services: Some(rpc::forge::InstanceDpuExtensionServicesConfig {
@@ -16120,6 +16143,7 @@ async fn test_update_instance_with_extension_services(
                     network: Some(single_interface_network_config(segment_id)),
                     infiniband: None,
                     network_security_group_id: None,
+                    dhcp_option_set_id: None,
                     nvlink: None,
                     spxconfig: None,
                     dpu_extension_services: Some(rpc::forge::InstanceDpuExtensionServicesConfig {
@@ -16204,6 +16228,7 @@ async fn test_update_instance_with_extension_services(
         network: Some(single_interface_network_config(segment_id)),
         infiniband: None,
         network_security_group_id: None,
+        dhcp_option_set_id: None,
         nvlink: None,
         spxconfig: None,
         dpu_extension_services: Some(rpc::forge::InstanceDpuExtensionServicesConfig {
@@ -16248,6 +16273,7 @@ async fn test_update_instance_with_extension_services(
                     network: Some(single_interface_network_config(segment_id)),
                     infiniband: None,
                     network_security_group_id: None,
+                    dhcp_option_set_id: None,
                     nvlink: None,
                     spxconfig: None,
                     dpu_extension_services: Some(rpc::forge::InstanceDpuExtensionServicesConfig {
@@ -16322,6 +16348,7 @@ async fn test_update_instance_with_extension_services(
                     network: Some(single_interface_network_config(segment_id)),
                     infiniband: None,
                     network_security_group_id: None,
+                    dhcp_option_set_id: None,
                     nvlink: None,
                     spxconfig: None,
                     dpu_extension_services: Some(rpc::forge::InstanceDpuExtensionServicesConfig {
@@ -16397,6 +16424,7 @@ async fn test_attach_extension_service_rejected_on_dpf_host(
                 network: Some(single_interface_network_config(segment_id)),
                 infiniband: None,
                 network_security_group_id: None,
+                dhcp_option_set_id: None,
                 nvlink: None,
                 spxconfig: None,
                 dpu_extension_services: Some(rpc::forge::InstanceDpuExtensionServicesConfig {
@@ -17012,6 +17040,7 @@ async fn test_extension_services_status_observation(
         network: Some(single_interface_network_config(segment_id)),
         infiniband: None,
         network_security_group_id: None,
+        dhcp_option_set_id: None,
         nvlink: None,
         spxconfig: None,
         dpu_extension_services: Some(rpc::forge::InstanceDpuExtensionServicesConfig {
@@ -17138,6 +17167,7 @@ async fn test_allocate_instance_with_invalid_os_image(
             machine_id: Some(mh.id),
             config: Some(rpc::InstanceConfig {
                 network_security_group_id: None,
+                dhcp_option_set_id: None,
                 tenant: Some(default_tenant_config()),
                 os: Some(os_config),
                 network: Some(single_interface_network_config(segment_id)),
@@ -17202,6 +17232,7 @@ async fn test_allocate_instance_with_invalid_ib_partition(
             machine_id: Some(mh.id),
             config: Some(rpc::InstanceConfig {
                 network_security_group_id: None,
+                dhcp_option_set_id: None,
                 tenant: Some(default_tenant_config()),
                 os: Some(default_os_config()),
                 network: Some(single_interface_network_config(segment_id)),

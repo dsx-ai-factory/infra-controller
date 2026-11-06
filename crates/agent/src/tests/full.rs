@@ -2039,6 +2039,7 @@ async fn handle_netconf(AxumState(state): AxumState<Arc<Mutex<State>>>) -> impl 
             }),
             infiniband: None,
             network_security_group_id: None,
+            dhcp_option_set_id: None,
             dpu_extension_services: None,
             nvlink: None,
             spxconfig: None,

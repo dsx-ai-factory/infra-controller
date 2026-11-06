@@ -77,6 +77,7 @@ impl From<Vpc> for rpc::forge::Vpc {
                 tenant_keyset_id: src.config.tenant_keyset_id,
                 network_virtualization_type: Some(virt_type),
                 network_security_group_id: nsg_id,
+                dhcp_option_set_id: src.config.dhcp_option_set_id.map(|id| id.to_string()),
                 default_nvlink_logical_partition_id: src.config.default_nvlink_logical_partition_id,
                 vni: desired_vni,
                 routing_profile_type: src.config.routing_profile_type,
@@ -272,6 +273,14 @@ impl TryFrom<rpc::forge::VpcCreationRequest> for NewVpc {
                 .map_err(|e: NetworkSecurityGroupIdParseError| {
                     RpcDataConversionError::InvalidNetworkSecurityGroupId(e.value())
                 })?,
+            dhcp_option_set_id: value
+                .dhcp_option_set_id
+                .filter(|id| !id.is_empty())
+                .map(|id| {
+                    id.parse()
+                        .map_err(|_| RpcDataConversionError::InvalidUuid("DhcpOptionSetId", id))
+                })
+                .transpose()?,
             routing_profile_type: None,
             routing_profile_overrides: value
                 .routing_profile_overrides
@@ -327,6 +336,14 @@ impl TryFrom<rpc::forge::VpcUpdateRequest> for UpdateVpc {
                 .map_err(|e: NetworkSecurityGroupIdParseError| {
                     RpcDataConversionError::InvalidNetworkSecurityGroupId(e.value())
                 })?,
+            dhcp_option_set_id: value
+                .dhcp_option_set_id
+                .filter(|id| !id.is_empty())
+                .map(|id| {
+                    id.parse()
+                        .map_err(|_| RpcDataConversionError::InvalidUuid("DhcpOptionSetId", id))
+                })
+                .transpose()?,
             routing_profile_overrides: value
                 .routing_profile_overrides
                 .map(TryInto::try_into)
@@ -659,6 +676,7 @@ mod tests {
                 tenant_keyset_id: Some("keyset-1".to_string()),
                 network_virtualization_type: VpcVirtualizationType::Fnn,
                 network_security_group_id: None,
+                dhcp_option_set_id: None,
                 default_nvlink_logical_partition_id: None,
                 vni: Some(42),
                 routing_profile_type: Some("EXTERNAL".to_string()),
@@ -721,6 +739,7 @@ mod tests {
             if_version_match: None,
             metadata: None,
             network_security_group_id: None,
+            dhcp_option_set_id: None,
             default_nvlink_logical_partition_id: None,
             routing_profile_overrides: None,
             power_resource_group: power_resource_group.map(str::to_string),
