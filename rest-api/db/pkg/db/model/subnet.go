@@ -922,7 +922,7 @@ func subnetPrefixUsageFromInterfaces(ctx context.Context, cidr string, ifcCount 
 
 	ipamPrefix = ipamer.PrefixFrom(ctx, validatedCidr)
 	if ipamPrefix == nil {
-		return nil, fmt.Errorf("Prefix %q was not found in IPAM after loading IPs", validatedCidr)
+		return nil, fmt.Errorf("prefix %q was not found in IPAM after loading IPs", validatedCidr)
 	}
 
 	usage := ipamPrefix.Usage()
@@ -950,7 +950,7 @@ func (ssd SubnetSQLDAO) GetPrefixUsage(ctx context.Context, tx *db.Tx, subnets .
 	subnetIDs := make([]uuid.UUID, 0, len(subnets))
 	for _, sn := range subnets {
 		if sn == nil {
-			return nil, fmt.Errorf("Failed to calculate usage stats for Subnet: nil argument specified")
+			return nil, fmt.Errorf("failed to calculate usage stats for Subnet: nil argument specified")
 		}
 		cidr := sn.GetIPv4CIDR()
 		if cidr == nil {

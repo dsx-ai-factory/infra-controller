@@ -376,7 +376,7 @@ func testExpectedMachineBatchSerialAdmission(t *testing.T, test expectedMachineS
 	require.NoError(t, json.Unmarshal(loser.Body.Bytes(), &response))
 	require.Equal(t, "Failed to validate Expected Machine update data", response.Message)
 	require.Equal(t, map[string]map[string]string{
-		"0": {"chassisSerialNumber": "Expected Machine with Chassis Serial Number: " + submittedSerial + " already exists"},
+		"0": {"chassisSerialNumber": "the Expected Machine with Chassis Serial Number: " + submittedSerial + " already exists"},
 	}, response.Data)
 	stored, err := dao.Get(ctx, nil, original.ID, nil, false)
 	require.NoError(t, err)
@@ -522,7 +522,7 @@ func testExpectedMachineBatchCreateStoredIdentity(t *testing.T, test expectedMac
 		require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &response))
 		require.Equal(t, "Failed to validate Expected Machine update data", response.Message)
 		require.Equal(t, map[string]map[string]string{
-			"0": {"bmcMacAddress": "Expected Machine with BMC MAC Address: " + test.bmcMacAddress + " already exist"},
+			"0": {"bmcMacAddress": "the Expected Machine with BMC MAC Address: " + test.bmcMacAddress + " already exist"},
 		}, response.Data)
 		require.Empty(t, client.Calls, "a stored MAC duplicate must not reach Core")
 		count, err := dbSession.DB.NewSelect().Model((*cdbm.ExpectedMachine)(nil)).Count(ctx)
@@ -602,7 +602,7 @@ func testExpectedMachineBatchLegacySerial(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rejected.Body.Bytes(), &response))
 	require.Equal(t, "Failed to validate Expected Machine update data", response.Message)
 	require.Equal(t, map[string]map[string]string{
-		"0": {"chassisSerialNumber": "Expected Machine with Chassis Serial Number: legacy-duplicate already exists"},
+		"0": {"chassisSerialNumber": "the Expected Machine with Chassis Serial Number: legacy-duplicate already exists"},
 	}, response.Data)
 	for i, id := range ids {
 		stored, err := dao.Get(ctx, nil, id, nil, false)
