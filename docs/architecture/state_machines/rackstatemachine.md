@@ -261,15 +261,16 @@ the flag do not gain an automatic reboot.
 
 When an NVOS update triggers a reboot, its completion commits the transition to
 `PowerReset` before any reboot request is queued. `PowerReset` then atomically
-queues asynchronous graceful `Reboot` requests for every compute host in the rack,
-regardless of device scope. The rack waits, without queuing any request, while
-any host has an instance or pending maintenance or is not in a state that accepts
-maintenance requests. Saved target IDs let the batch resume after a controller
-restart.
+queues asynchronous graceful `Reboot` requests for the selected batch. Saved
+target IDs let the batch resume after a controller restart. Explicit power
+maintenance targets every compute host in the rack regardless of device scope.
+It waits without queuing requests while any target has an instance, pending
+maintenance, or a state that cannot accept maintenance.
 
-Before queuing a batch, any compute host with desired power `Off` causes rack
-maintenance to enter `Error` without queuing reboots or changing desired power.
-After correcting desired power, an operator must request maintenance again.
+For explicit power maintenance, any compute host with desired power `Off`
+causes rack maintenance to enter `Error` without queuing reboots or changing
+desired power. After correcting desired power, an operator must request
+maintenance again. Automatic ingestion instead excludes desired-off targets.
 
 The batch completes when every request is cleared and every host has a Scout
 reboot timestamp later than the persisted batch-state timestamp. Hosts do not
@@ -278,8 +279,10 @@ the reboot. The batch has no timeout; a host that never becomes eligible or neve
 reports a newer reboot can leave maintenance waiting indefinitely
 ([timeout follow-up](https://github.com/dsx-ai-factory/infra-controller/issues/8461)).
 An operator can terminate maintenance, which cancels only saved, rack-owned
-restart requests that no host has claimed. Membership changes start a fresh batch;
-conflicting maintenance requests move the rack to `Error`. After the batch
+restart requests that no host has claimed. For explicit power maintenance,
+membership changes start a fresh batch. Automatic ingestion retains its saved
+batch and waits if a saved target disappears. Conflicting maintenance requests
+move the rack to `Error`. After the batch
 completes, maintenance runs NMX-C configuration if selected, or completes. A
 persisted `PoweringOn` state remains a no-op that completes maintenance without
 another reboot.
@@ -479,10 +482,10 @@ A compute machine that fails its host firmware upgrade lands in the
    `host-fw-update` health-report alert merge). Rack-level requests (initiator
    prefixed with `rack-`) instead enter `WaitingForRackFirmwareUpgrade`.
 
-This guarantees the Rack can always drive a stuck compute out of
-`FailedFirmwareUpgrade` without waiting for the retry backoff, which is
-important during `R_Maintenance` where the Rack must converge all computes back
-to `M_Ready` before progressing to `R_Validation`.
+A fresh request allows the rack to retry an admitted compute host's failed
+firmware operation without waiting for retry backoff. Automatic ingestion tracks
+admitted firmware work separately from unrelated device failures; it does not
+require the full expected inventory to reach `M_Ready` before validation.
 
 ### Tray Replacement (External Event)
 
