@@ -540,6 +540,72 @@ pub async fn find_pool_overlap(
         .map_err(|error| DatabaseError::query(query, error))
 }
 
+/// `find_integer_pool_overlap` compares all stored values of two integer pools.
+/// Allocation state and assignment partition do not restrict membership.
+pub async fn find_integer_pool_overlap(
+    txn: &mut PgConnection,
+    first_pool: &str,
+    second_pool: &str,
+) -> Result<Option<i64>, DatabaseError> {
+    let query = "SELECT first_pool.value::bigint FROM resource_pool first_pool
+        JOIN resource_pool second_pool ON first_pool.value = second_pool.value
+        WHERE first_pool.name = $1 AND second_pool.name = $2
+        LIMIT 1";
+    sqlx::query_scalar(query)
+        .bind(first_pool)
+        .bind(second_pool)
+        .fetch_optional(txn)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))
+}
+
+/// `find_pool_overlap_with_ranges` returns one persisted integer value contained
+/// in the supplied inclusive intervals. It includes every assignment partition
+/// and allocation state, including inventory added by growth. The query compares
+/// compact intervals in PostgreSQL without returning the pool's inventory.
+pub async fn find_pool_overlap_with_ranges(
+    txn: &mut PgConnection,
+    pool_name: &str,
+    ranges: &[(i64, i64)],
+) -> Result<Option<i64>, DatabaseError> {
+    let mut ranges: Vec<_> = ranges
+        .iter()
+        .copied()
+        .filter(|(start, end)| start <= end)
+        .collect();
+    ranges.sort_unstable();
+    let mut starts = Vec::with_capacity(ranges.len());
+    let mut ends: Vec<i64> = Vec::with_capacity(ranges.len());
+    // width_bucket returns the 1-based index of the last lower bound (0 below
+    // all bounds). Merge overlaps so that index selects the matching upper end,
+    // even for nested intervals or duplicate starts, with one search per row.
+    for (start, end) in ranges {
+        if let Some(last_end) = ends.last_mut()
+            && start <= *last_end
+        {
+            *last_end = (*last_end).max(end);
+        } else {
+            starts.push(start);
+            ends.push(end);
+        }
+    }
+    // SQL may evaluate casts before filtering by name. Keep the name guards
+    // inside the casts so another pool's addresses cannot be parsed as integers.
+    let query = "SELECT value::bigint FROM resource_pool
+        WHERE name = $1 AND CASE WHEN name = $1 THEN value::bigint END
+            <= ($3::bigint[])[width_bucket(
+                CASE WHEN name = $1 THEN value::bigint END, $2::bigint[]
+            )]
+        LIMIT 1";
+    sqlx::query_scalar(query)
+        .bind(pool_name)
+        .bind(starts)
+        .bind(ends)
+        .fetch_optional(txn)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))
+}
+
 /// `ResourcePoolAllocationNotOwned` means `release` found no allocation for
 /// the expected owner. The value is missing, free, or allocated to another owner.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1654,6 +1720,69 @@ mod tests {
     use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 
     use super::*;
+
+    /// Compact lookup preserves gaps and inclusive endpoints even when intervals
+    /// arrive nested or unsorted, without parsing values from another pool type.
+    #[crate::sqlx_test]
+    async fn range_overlap_uses_normalized_intervals_and_ignores_other_pool_types(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let pool_handle = ResourcePool::<i32>::new("range-overlap".to_owned(), ValueType::Integer);
+        let unrelated = ResourcePool::<Ipv4Addr>::new("unrelated-ip".to_owned(), ValueType::Ipv4);
+        let mut txn = pool.begin().await?;
+        populate(&pool_handle, &mut txn, vec![7], true).await?;
+        populate(&unrelated, &mut txn, vec![Ipv4Addr::LOCALHOST], true).await?;
+        txn.commit().await?;
+
+        check_cases_async(
+            [
+                Case {
+                    scenario: "empty intervals",
+                    input: vec![],
+                    expect: Yields(None),
+                },
+                Case {
+                    scenario: "below first lower bound",
+                    input: vec![(8, 10)],
+                    expect: Yields(None),
+                },
+                Case {
+                    scenario: "sparse gap",
+                    input: vec![(0, 1), (9, 10)],
+                    expect: Yields(None),
+                },
+                Case {
+                    scenario: "inclusive point boundary",
+                    input: vec![(7, 7)],
+                    expect: Yields(Some(7)),
+                },
+                Case {
+                    scenario: "matching interval after an earlier bucket",
+                    input: vec![(0, 1), (7, 7)],
+                    expect: Yields(Some(7)),
+                },
+                Case {
+                    scenario: "unsorted overlaps and duplicate starts retain the largest upper end",
+                    input: vec![(8, 8), (4, 6), (4, i64::MAX), (6, 6)],
+                    expect: Yields(Some(7)),
+                },
+            ],
+            |ranges| {
+                let pool = &pool;
+                let pool_handle = &pool_handle;
+                async move {
+                    let mut connection = pool.acquire().await.expect("membership connection");
+                    let overlap =
+                        find_pool_overlap_with_ranges(&mut connection, pool_handle.name(), &ranges)
+                            .await
+                            .expect("membership query succeeds with unrelated noninteger values");
+                    Ok::<_, ()>(overlap)
+                }
+            },
+        )
+        .await;
+        Ok(())
+    }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 50)]
     async fn test_parallel() -> Result<(), eyre::Report> {
