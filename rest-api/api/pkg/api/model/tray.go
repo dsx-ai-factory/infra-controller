@@ -266,17 +266,24 @@ func componentTargetsFromIDs(ids []string, componentType *string) []*flowv1.Comp
 	return targets
 }
 
-// ToTargetSpec converts the filter to an Flow OperationTargetSpec.
-// Handles nil receiver gracefully (targets all trays).
-func (f *TrayFilter) ToTargetSpec() *flowv1.OperationTargetSpec {
-	if f == nil {
+// ToTargetSpec converts the filter to Flow operation targets. For nil, empty,
+// or type-only filters, callers must supply the matching inventory components.
+// No matches returns nil; callers must skip operation submission in that case.
+// Rack- and ID-scoped filters do not use resolvedComponents.
+func (f *TrayFilter) ToTargetSpec(resolvedComponents []*flowv1.Component) *flowv1.OperationTargetSpec {
+	if f == nil || (f.RackID == nil && f.RackName == nil && len(f.IDs) == 0) {
+		if len(resolvedComponents) == 0 {
+			return nil
+		}
+		targets := make([]*flowv1.ComponentTarget, 0, len(resolvedComponents))
+		for _, comp := range resolvedComponents {
+			targets = append(targets, &flowv1.ComponentTarget{
+				Identifier: &flowv1.ComponentTarget_Id{Id: comp.GetInfo().GetId()},
+			})
+		}
 		return &flowv1.OperationTargetSpec{
-			Targets: &flowv1.OperationTargetSpec_Racks{
-				Racks: &flowv1.RackTargets{
-					Targets: []*flowv1.RackTarget{{
-						ComponentTypes: ValidProtoComponentTypes,
-					}},
-				},
+			Targets: &flowv1.OperationTargetSpec_Components{
+				Components: &flowv1.ComponentTargets{Targets: targets},
 			},
 		}
 	}
