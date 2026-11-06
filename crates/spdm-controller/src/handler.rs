@@ -271,14 +271,22 @@ impl StateHandler for SpdmAttestationStateHandler {
                 last_redfish_failure_tstamp,
             } => {
                 // if last_redfish_failure_tstamp is set - we are retrying due to redfish error
-                // - if retry limit exceeded - move to failed
+                // - if retry limit exceeded - wait for cleanup before moving to failed
                 // - if we haven't waited a full minute yet, return waiting
                 // - otherwise let's do the retry, but DON'T acquire the lock as it
                 //   is already acquired
 
                 if let Some(last_failure_time) = last_redfish_failure_tstamp {
                     if *redfish_retry_count > 5 {
-                        // that's it, we give up, release the lock and move to Failed
+                        // An unsuccessful POST may have started collection without returning a task ID.
+                        if chrono::Utc::now() - *last_failure_time < self.cancellation_timeout {
+                            return Ok(StateHandlerOutcome::wait(
+                                "Redfish retries exhausted; waiting for the cancellation timeout before releasing the evidence collection lock"
+                                    .to_string(),
+                            ));
+                        }
+                        // This is a best-effort cutoff, not confirmation that collection stopped.
+                        tracing::warn!(%object_id, "SPDM evidence collection retries exhausted; releasing the evidence collection lock without BMC confirmation after the cancellation timeout");
                         let mut txn = ctx.services.db_pool.begin().await?;
                         db::attestation::spdm::release_evidence_collection_lock(
                             &mut txn, object_id,

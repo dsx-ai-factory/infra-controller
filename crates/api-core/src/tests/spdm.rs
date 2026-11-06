@@ -925,10 +925,13 @@ pub(in crate::tests) mod tests {
     async fn test_evidence_collection_is_serialized_per_device(
         pool: sqlx::PgPool,
     ) -> Result<(), eyre::Error> {
+        // A short custom timeout distinguishes cleanup from the one-minute retry delay.
+        let mut config = spdm_enabled_config();
+        config.spdm_state_controller.cancellation_timeout = chrono::Duration::seconds(30);
         let env = create_test_env_with_overrides(
             pool,
             TestEnvOverrides {
-                config: Some(spdm_enabled_config()),
+                config: Some(config),
                 ..Default::default()
             },
         )
@@ -1098,6 +1101,68 @@ pub(in crate::tests) mod tests {
                     .count(),
                 "the second job must start collection exactly once for {}",
                 device.device_id
+            );
+        }
+
+        // Model exhausted POST failures with no task ID while B still owns the claims.
+        // Keep the simulated BMC tasks running: expiry does not establish that they stopped.
+        for (scenario, time_since_failure, release_claim) in [
+            (
+                "cleanup grace remains",
+                chrono::Duration::seconds(15),
+                false,
+            ),
+            ("cleanup grace expired", chrono::Duration::seconds(45), true),
+        ] {
+            let retry_state = SpdmAttestationState::TriggerEvidenceCollection {
+                retry_count: 0,
+                redfish_retry_count: 6,
+                last_redfish_failure_tstamp: Some(Utc::now() - time_since_failure),
+            };
+            sqlx::query("UPDATE spdm_machine_devices_attestation SET state = $2 WHERE job_id = $1")
+                .bind(second_job_id)
+                .bind(sqlx::types::Json(&retry_state))
+                .execute(&env.pool)
+                .await?;
+
+            env.run_spdm_controller_iteration_no_requeue().await;
+            for device in &devices {
+                let snapshot = db::attestation::spdm::load_snapshot_for_machine_and_device_id(
+                    &mut txn,
+                    &machine_id,
+                    &device.device_id,
+                    &second_job_id,
+                )
+                .await?;
+                let expected_state = if release_claim {
+                    SpdmAttestationState::Failed(
+                        "Exceeded redfish retry limit while attempting to collect evidence"
+                            .to_string(),
+                    )
+                } else {
+                    retry_state.clone()
+                };
+                assert_eq!(snapshot.state, expected_state, "{scenario}");
+                assert_eq!(
+                    snapshot.evidence_collection_locked, !release_claim,
+                    "{scenario}"
+                );
+                if !release_claim {
+                    // The persisted reason proves the timeout branch ran rather than an error path.
+                    assert!(
+                        matches!(snapshot.state_outcome,
+                            Some(PersistentStateHandlerOutcome::Wait { ref reason, .. })
+                                if reason == "Redfish retries exhausted; waiting for the cancellation timeout before releasing the evidence collection lock"),
+                        "{scenario}: expected cleanup wait, got {:?}",
+                        snapshot.state_outcome
+                    );
+                }
+                assert!(snapshot.evidence.is_none(), "{scenario}");
+            }
+            assert_eq!(
+                initial_requests + 2 * devices.len(),
+                env.redfish_sim.evidence_collection_requests().len(),
+                "{scenario}: exhausted retries must not start another collection"
             );
         }
         Ok(())
