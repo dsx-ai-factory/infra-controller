@@ -46,12 +46,15 @@ are rejected. Use these semantics after all Core replicas have been upgraded.
 
 Unfinished device attestations remain in progress until the SPDM controller
 finishes BMC cleanup and records a terminal result. If a device holds an evidence
-collection claim, the controller stops the BMC task before releasing that claim;
-the cancellation timeout permits release without BMC confirmation. Changing or
-repeating a request cannot postpone the original cleanup deadline. The first
-unfinished request is recorded separately as `cancellation_cleanup_started_at`;
-automatic cleanup also preserves its `cleanup_started_at` in
-`WaitForTaskCancellation`. The earliest cleanup start controls the timeout.
+collection claim, the controller releases it when the BMC confirms the task
+stopped, returns HTTP 404 or 410 in `WaitForTaskCancellation`, or the cancellation
+timeout expires. A missing task is treated as stopped without an explicit terminal
+status; the timeout therefore does not guarantee that collection attempts cannot
+overlap. Changing or repeating a request cannot postpone the original cleanup
+deadline. The first unfinished request is recorded separately as
+`cancellation_cleanup_started_at`; automatic cleanup also preserves its
+`cleanup_started_at` in `WaitForTaskCancellation`. The earliest cleanup start
+controls the timeout.
 
 For terminal devices, status queries apply the latest target immediately without
 rerunning attestation or rewriting stored results, evidence, or completion times.
