@@ -689,13 +689,14 @@ devspace deploy -n nico-system --profile full
 
 ## Regression tests
 
-The Python regression tests live in [tests/](tests/). The existing
+The general deployment regression tests live in [tests/](tests/). The existing
 `test_bootstrap_prereqs.py` and `setup-rest-integration_test.sh` remain beside
 the deployment scripts because CI invokes those paths directly.
 
 The standalone [advisory workflow](../../../.github/workflows/devspace-tests.yml)
-runs the `tests/`, `vm-hosts/`, and `vfkit/tests/` suites for changes to DevSpace, the PXE metadata fixture, or
-the workflow and its boundary test. Same-repository PRs use `pull_request_target`
+runs the `tests/`, `vm-hosts/`, and `vfkit/tests/` suites. It runs for changes to
+DevSpace, the PXE metadata fixture, the PXE/mkosi and Scout boot inputs staged by
+these suites, or the workflow and its boundary test. Same-repository PRs use `pull_request_target`
 so the job guard comes from the base workflow, then test the PR head commit.
 Fork PRs run through maintainer-approved `pull-request/<number>` mirror pushes.
 It can also be started manually with `workflow_dispatch`; mirror and manual runs
@@ -706,12 +707,15 @@ required branch checks. Existing bootstrap and REST shell-test gates are unchang
 From the repository root, run:
 
 ```bash
-python3 -B -m unittest discover -s dev/deployment/devspace -p 'test_*.py'
+python3 -B dev/deployment/devspace/test_bootstrap_prereqs.py
+python3 -B -m unittest discover -s dev/deployment/devspace/tests -t dev/deployment/devspace -v
+python3 -B -m unittest discover -s dev/deployment/devspace/vm-hosts -p 'test_*.py'
+python3 -B -m unittest discover -s dev/deployment/devspace/vfkit/tests -t dev/deployment/devspace/vfkit -p 'test_*.py'
 bash dev/deployment/devspace/setup-rest-integration_test.sh
 ```
 
 These tests use local stubs instead of deploying or resetting a cluster. They
-require Bash, Python 3 with PyYAML, jq, and Helm. GNU coreutils `timeout`
+require Bash, Python 3 with PyYAML, jq, git, Helm, and GnuPG (`gpg`/`gpgv`). GNU coreutils `timeout`
 (`gtimeout` on macOS) is needed for the stalled-exec regression; that case is
 skipped if neither command is available.
 
