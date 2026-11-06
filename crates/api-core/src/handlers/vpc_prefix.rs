@@ -17,7 +17,6 @@
 
 use std::collections::HashMap;
 
-use ::db::resource_pool::ResourcePoolDatabaseError;
 use ::db::{ObjectColumnFilter, vpc_prefix as db};
 use ::rpc::forge as rpc;
 use ::rpc::forge::PrefixMatchType;
@@ -25,7 +24,6 @@ use carbide_network::virtualization::VpcVirtualizationType;
 use ipnetwork::IpNetwork;
 use model::network_prefix::NetworkPrefix;
 use model::network_segment::NetworkSegmentType;
-use model::resource_pool::{OwnerType, ResourcePoolError};
 use model::site_prefix::{
     SitePrefix, SitePrefixAuthority, SitePrefixLifecycleState, SitePrefixRoutingScope,
 };
@@ -191,39 +189,22 @@ pub(super) async fn validate_overlap_vni(
     txn: &mut PgConnection,
     vpc: &Vpc,
 ) -> CarbideResult<()> {
-    let owner_id = vpc.id.to_string();
-    let mut allocation = None;
-    for pool in [
-        &api.common_pools.ethernet.pool_vpc_vni,
-        &api.common_pools.ethernet.pool_external_vpc_vni,
-    ] {
-        let owned = ::db::resource_pool::find_owned_allocation(pool, txn, OwnerType::Vpc, &owner_id)
-            .await
-            .map_err(|error| {
-                let invalid_allocation = match &error {
-                    ResourcePoolDatabaseError::ResourcePool(ResourcePoolError::Parse { .. }) => true,
-                    ResourcePoolDatabaseError::Database(error) => {
-                        matches!(error.as_ref(), ::db::DatabaseError::FailedPrecondition(_))
-                    }
-                    _ => false,
-                };
-                if invalid_allocation {
-                    tracing::warn!(vpc_id = %vpc.id, %error, "invalid VNI allocation for prefix overlap");
-                    super::tenant_prefix_overlap::overlap_error()
-                } else {
-                    error.into()
-                }
-            })?;
-        if let Some(owned) = owned
-            && allocation.replace(owned).is_some()
-        {
-            return Err(super::tenant_prefix_overlap::overlap_error());
+    super::vpc::validate_overlap_allocation(api, txn, vpc).await.map_err(|error| {
+        if matches!(&error,
+            CarbideError::FailedPrecondition(_)
+            | CarbideError::ResourcePoolError(model::resource_pool::ResourcePoolError::Parse { .. })
+        ) || matches!(&error,
+            CarbideError::RemoteResourcePool(error) if matches!(error.as_ref(),
+                carbide_resource_pool::remote::RemoteResourcePoolError::InvalidRecord(_)
+                | carbide_resource_pool::remote::RemoteResourcePoolError::Value(_)
+            )
+        ) {
+            tracing::warn!(vpc_id = %vpc.id, %error, "invalid VNI allocation for prefix overlap");
+            super::tenant_prefix_overlap::overlap_error()
+        } else {
+            error
         }
-    }
-    if allocation.is_none() || allocation != vpc.status.vni {
-        return Err(super::tenant_prefix_overlap::overlap_error());
-    }
-    Ok(())
+    })
 }
 
 /// `adoptable_segment_prefixes` returns direct Tenant prefixes the `VpcPrefix`

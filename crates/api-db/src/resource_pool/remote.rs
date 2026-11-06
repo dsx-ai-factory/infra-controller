@@ -205,6 +205,35 @@ pub async fn latest_for_owner_slot(
         .map_err(|error| DatabaseError::query(query, error))
 }
 
+/// `active_for_owner_slot` locks every unfinished remote request for one purpose,
+/// including retained attachments and releases from older generations. Confirmed
+/// cleanup is excluded. Callers must not use only the latest generation to prove
+/// that no retained assignment can still affect the owner.
+pub async fn active_for_owner_slot(
+    txn: &mut PgConnection,
+    owner_type: OwnerType,
+    owner_id: &str,
+    slot: &str,
+) -> Result<Vec<ResourcePoolAllocation>, DatabaseError> {
+    let query = "SELECT allocation_id, pool_name, owner_type, owner_id, state,
+        created_at, updated_at, integrated_resource_id, value, value_type,
+        auto_assign, allocated_at, binding_id, remote_request, result
+        FROM resource_pool_allocations
+        WHERE binding_id IS NOT NULL AND owner_type = $1
+          AND public.digest(owner_id, 'sha256') = public.digest($2::text, 'sha256')
+          AND public.digest(remote_request->>'slot', 'sha256') = public.digest($3::text, 'sha256')
+          AND owner_id = $2 AND remote_request->>'slot' = $3
+          AND state IN ('pending', 'attached', 'cancel_requested', 'release_requested')
+        ORDER BY remote_request->'generation' FOR UPDATE";
+    sqlx::query_as(query)
+        .bind(owner_type.to_string())
+        .bind(owner_id)
+        .bind(slot)
+        .fetch_all(txn)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))
+}
+
 /// `attached_for_owner_slot` locks the remote assignment attached to an entity.
 /// More than one attached assignment is an error: choosing either would leave
 /// the other allocated. Pending and cleanup requests are not entity ownership.

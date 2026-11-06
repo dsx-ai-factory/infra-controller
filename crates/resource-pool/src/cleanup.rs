@@ -22,9 +22,12 @@ const CLEANUP_TIMEOUT: Duration = Duration::from_secs(30);
 const CLEANUP_INTERVAL: Duration = Duration::from_secs(5);
 
 /// `AllocationCleanup` identifies one attempt selected for cleanup, or its absence.
-/// Commit the cancellation before calling [`Self::wait`], then recheck
-/// [`Self::is_complete`] under the consumer's lock before removing creation IDs.
-/// A newer attempt may have started while cleanup ran.
+/// Capture cancellation with [`ResourcePoolRegistry::request_cancellation`] or
+/// release with [`crate::OwnedAllocation::cleanup`]. Commit the transaction that
+/// saves cancellation or release intent before calling [`Self::wait`].
+/// Controllers additionally recheck [`Self::is_complete`] under their creation
+/// lock before removing creation IDs; an older release handle uses `wait` alone.
+#[derive(Clone, Debug)]
 pub struct AllocationCleanup {
     owner_type: OwnerType,
     owner_id: String,
@@ -33,9 +36,25 @@ pub struct AllocationCleanup {
 }
 
 impl AllocationCleanup {
+    /// Keep the original request identity so release waits cannot select a newer attempt.
+    pub(crate) fn for_request(
+        owner_type: OwnerType,
+        owner_id: &str,
+        slot: &str,
+        request_id: Uuid,
+    ) -> Self {
+        Self {
+            owner_type,
+            owner_id: owner_id.to_owned(),
+            slot: slot.to_owned(),
+            request_id: Some(request_id),
+        }
+    }
+
     /// `wait` finishes cleanup of the captured attempt through its original backend.
-    /// Commit the transaction from [`ResourcePoolRegistry::request_cancellation`]
-    /// first. This method never selects a newer request for the same owner.
+    /// First commit the cancellation or release intent captured through
+    /// [`ResourcePoolRegistry::request_cancellation`] or [`crate::OwnedAllocation::cleanup`].
+    /// This method never selects a newer request for the same owner.
     /// A handle with no captured request returns immediately, as does a request
     /// already `Cancelled` or `Released`. A missing, `Pending`, or `Attached`
     /// captured request returns `NotCurrent`.

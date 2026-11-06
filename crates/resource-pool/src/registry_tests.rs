@@ -18,7 +18,6 @@
 use std::collections::HashMap;
 use std::net::Ipv4Addr;
 
-use db::DatabaseError;
 use db::resource_pool::binding::{self, BindingError};
 use db::resource_pool::populate;
 use db::work_lock_manager::{self, KeepaliveConfig};
@@ -730,8 +729,8 @@ async fn remote_resolution_retains_authority_across_alias_changes(
         assert_eq!(restarted.pools().count(), 1);
     }
 
-    // Lookup and Integrated adapter selection must not contact this provider
-    // or consult SQL; an aborted transaction makes a SQL fallback observable.
+    // Cached lookup must not contact the provider or consult SQL; an aborted
+    // transaction makes a SQL fallback observable.
     let mut txn = database.begin().await?;
     sqlx::query("SELECT 1 / 0")
         .execute(&mut *txn)
@@ -740,10 +739,13 @@ async fn remote_resolution_retains_authority_across_alias_changes(
     let Some(backend) = registry.get_or_load_backend(&mut txn, "vpc-vni").await? else {
         panic!("resolved remote pool must have a backend");
     };
-    assert!(matches!(
-        backend.require_integrated(),
-        Err(DatabaseError::FailedPrecondition(_))
-    ));
+    assert_eq!(
+        backend
+            .remote()
+            .expect("selected remote adapter")
+            .authority_id(),
+        "provider-a"
+    );
     txn.rollback().await?;
     assert_eq!(binding::all(&database).await?, vec![original]);
     tasks.shutdown().await;

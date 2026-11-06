@@ -9,7 +9,7 @@ mod tests;
 use std::str::FromStr;
 use std::time::Duration;
 
-use db::resource_pool::{binding, remote as storage};
+use db::resource_pool::{ResourcePoolDatabaseError, binding, remote as storage};
 use db::work_lock_manager::AcquireLockError;
 use db::{ConditionalWrite, DatabaseError};
 use model::resource_pool::allocation::{
@@ -54,13 +54,26 @@ where
     state: PreparedState<'a, T>,
 }
 
+/// Keep creation's manual requests distinct from routing's exact selection.
+enum Selection<T> {
+    Automatic,
+    Requested(T),
+    Exact(T),
+}
+
+impl<T> From<Option<T>> for Selection<T> {
+    fn from(requested: Option<T>) -> Self {
+        requested.map_or(Self::Automatic, Self::Requested)
+    }
+}
+
 /// `PreparedState` keeps SQL inputs or the saved request needed for provider work.
 enum PreparedState<'a, T> {
     Integrated {
         backend: &'a IntegratedResourcePoolBackend,
         owner_type: OwnerType,
         owner_id: String,
-        requested: Option<T>,
+        selection: Selection<T>,
     },
     Remote {
         backend: &'a RemoteResourcePool,
@@ -90,7 +103,7 @@ enum AllocationState<'a, T> {
         backend: &'a IntegratedResourcePoolBackend,
         owner_type: OwnerType,
         owner_id: String,
-        requested: Option<T>,
+        selection: Selection<T>,
     },
     Remote {
         request_id: Uuid,
@@ -110,8 +123,9 @@ where
     /// request before waiting for the provider. Integrated performs no I/O here.
     /// `None` selects an automatic value; `Some(value)` requests a manual value.
     /// `slot` distinguishes allocations within the owner, such as `vni`.
-    /// Finish cleanup of a superseded remote request before switching pools for
-    /// that owner and slot. Integrated preparation does not read remote history.
+    /// Attached assignments in another pool may remain retained. An attached
+    /// destination or unfinished cleanup blocks a new remote request. Integrated
+    /// preparation does not read remote history; callers check consumer admission.
     ///
     /// Remote database preparation and commit share five seconds, followed by
     /// a 30-second provider budget. Cancellation stops these waits. Attachment
@@ -127,6 +141,52 @@ where
         requested: Option<T>,
         cancel: &CancellationToken,
     ) -> Result<Allocation<'a, T>, ResourcePoolBackendError> {
+        self.prepare_selected_allocation(
+            database,
+            owner_type,
+            owner_id,
+            slot,
+            requested.into(),
+            cancel,
+        )
+        .await
+    }
+
+    /// `prepare_exact_allocation` reserves the supplied value from either
+    /// assignment partition, preserving its mode. Preparation, attachment, and
+    /// cancellation follow [`Self::prepare_allocation`]. It never adopts an
+    /// existing assignment, even when its owner is the same.
+    pub async fn prepare_exact_allocation(
+        &self,
+        database: &PgPool,
+        owner_type: OwnerType,
+        owner_id: &str,
+        slot: &str,
+        requested: T,
+        cancel: &CancellationToken,
+    ) -> Result<Allocation<'a, T>, ResourcePoolBackendError> {
+        self.prepare_selected_allocation(
+            database,
+            owner_type,
+            owner_id,
+            slot,
+            Selection::Exact(requested),
+            cancel,
+        )
+        .await
+    }
+
+    /// Apply the selected assignment mode while preserving the shared preparation
+    /// deadlines and cleanup, before the caller opens its entity transaction.
+    async fn prepare_selected_allocation(
+        &self,
+        database: &PgPool,
+        owner_type: OwnerType,
+        owner_id: &str,
+        slot: &str,
+        selection: Selection<T>,
+        cancel: &CancellationToken,
+    ) -> Result<Allocation<'a, T>, ResourcePoolBackendError> {
         if let ResourcePoolBackend::Integrated(backend) = self.backend {
             return Ok(Allocation {
                 pool: self.pool,
@@ -134,7 +194,7 @@ where
                     backend,
                     owner_type,
                     owner_id: owner_id.to_owned(),
-                    requested,
+                    selection,
                 },
             });
         }
@@ -150,12 +210,12 @@ where
                         .await
                         .map_err(|error| DatabaseError::query(query, error))?;
                     let prepared = self
-                        .prepare_request(
+                        .prepare_selected_request(
                             &mut txn,
                             owner_type,
                             owner_id,
                             slot,
-                            requested,
+                            selection,
                             CompletionAuthority::Foreground {
                                 attempt_id: Uuid::new_v4(),
                                 attach_before,
@@ -198,10 +258,10 @@ where
     /// A controller can replay its matching Pending request and original accepted
     /// definition. Changed inputs within the same controller desire return
     /// `RequestChanged`; unfinished cleanup returns `CleanupPending`. Another
-    /// desire or foreground request cannot replace an occupied slot.
-    /// Confirmed cancellation or release permits a new request and generation.
-    /// Before switching pools, finish cleanup of the old remote request;
-    /// Integrated preparation does not check that request's history.
+    /// desire or foreground request cannot replace an unfinished attempt. Attached
+    /// assignments in another pool may remain retained, but the destination cannot
+    /// already be attached. Cleanup in any generation must finish first.
+    /// Integrated preparation does not check remote history.
     /// The caller commits this transaction before resolving the prepared request.
     pub async fn prepare_request(
         &self,
@@ -212,6 +272,21 @@ where
         requested: Option<T>,
         authority: CompletionAuthority,
     ) -> Result<PreparedAllocationRequest<'a, T>, ResourcePoolBackendError> {
+        self.prepare_selected_request(txn, owner_type, owner_id, slot, requested.into(), authority)
+            .await
+    }
+
+    /// Save a remote request, or retain deferred SQL inputs, for this selection.
+    /// Retained assignments may coexist; unfinished cleanup still blocks a new request.
+    async fn prepare_selected_request(
+        &self,
+        txn: &mut PgTransaction<'_>,
+        owner_type: OwnerType,
+        owner_id: &str,
+        slot: &str,
+        selection: Selection<T>,
+        authority: CompletionAuthority,
+    ) -> Result<PreparedAllocationRequest<'a, T>, ResourcePoolBackendError> {
         let remote = match self.backend {
             ResourcePoolBackend::Integrated(backend) => {
                 return Ok(PreparedAllocationRequest {
@@ -220,7 +295,7 @@ where
                         backend,
                         owner_type,
                         owner_id: owner_id.to_owned(),
-                        requested,
+                        selection,
                     },
                 });
             }
@@ -241,13 +316,30 @@ where
             )
             .into());
         }
-        let selection = requested
-            .as_ref()
-            .map(|value| {
-                model_value(binding.value_domain, value).map(AllocationSelection::Requested)
-            })
-            .transpose()?
-            .unwrap_or(AllocationSelection::Automatic);
+        let selection = match selection {
+            Selection::Automatic => AllocationSelection::Automatic,
+            Selection::Requested(value) => {
+                AllocationSelection::Requested(model_value(binding.value_domain, &value)?)
+            }
+            Selection::Exact(value) => {
+                AllocationSelection::Exact(model_value(binding.value_domain, &value)?)
+            }
+        };
+        // Attachments in another pool may be retained. A destination attachment
+        // cannot be duplicated, and cleanup in any generation must finish first.
+        let active = storage::active_for_owner_slot(txn, owner_type, owner_id, slot).await?;
+        for allocation in &active {
+            match allocation.state {
+                StoredAllocationState::Attached if allocation.pool_name != self.pool.name() => {}
+                StoredAllocationState::Pending => {}
+                StoredAllocationState::CancelRequested | StoredAllocationState::ReleaseRequested => {
+                    return Err(ResourcePoolBackendError::CleanupPending);
+                }
+                _ => return Err(DatabaseError::FailedPrecondition(format!(
+                    "{owner_type} `{owner_id}` already has an allocation or unfinished request for slot `{slot}`",
+                )).into()),
+            }
+        }
         let previous =
             storage::latest_for_owner_slot(&mut **txn, owner_type, owner_id, slot).await?;
         let (generation, replay) = if let Some(previous) = previous {
@@ -262,8 +354,9 @@ where
                 )
                 .into());
             };
-            match previous.state {
-                StoredAllocationState::Cancelled | StoredAllocationState::Released => {
+            match (previous.state, previous.pool_name == binding.pool_name) {
+                (StoredAllocationState::Cancelled | StoredAllocationState::Released, _)
+                | (StoredAllocationState::Attached, false) => {
                     let generation = request.generation.checked_add(1).ok_or_else(|| {
                         DatabaseError::FailedPrecondition(
                             "resource pool allocation generation limit reached".to_owned(),
@@ -271,7 +364,7 @@ where
                     })?;
                     (generation, None)
                 }
-                StoredAllocationState::Pending
+                (StoredAllocationState::Pending, _)
                     if matches!(authority, CompletionAuthority::Controller { .. })
                         && request.completion_authority == authority =>
                 {
@@ -283,11 +376,14 @@ where
                     }
                     (request.generation, Some((previous.allocation_id, request)))
                 }
-                StoredAllocationState::CancelRequested
-                | StoredAllocationState::ReleaseRequested => {
+                (
+                    StoredAllocationState::CancelRequested
+                    | StoredAllocationState::ReleaseRequested,
+                    _,
+                ) => {
                     return Err(ResourcePoolBackendError::CleanupPending);
                 }
-                StoredAllocationState::Attached | StoredAllocationState::Pending => {
+                (StoredAllocationState::Attached | StoredAllocationState::Pending, _) => {
                     return Err(DatabaseError::FailedPrecondition(format!(
                         "{owner_type} `{owner_id}` already has an allocation or unfinished request for slot `{slot}`",
                     ))
@@ -297,6 +393,17 @@ where
         } else {
             (0, None)
         };
+
+        if active.iter().any(|allocation| {
+            allocation.state == StoredAllocationState::Pending
+                && replay
+                    .as_ref()
+                    .is_none_or(|(id, _)| *id != allocation.allocation_id)
+        }) {
+            return Err(DatabaseError::FailedPrecondition(format!(
+                "{owner_type} `{owner_id}` already has an allocation or unfinished request for slot `{slot}`",
+            )).into());
+        }
 
         let revision = replay
             .as_ref()
@@ -404,12 +511,12 @@ where
                 backend,
                 owner_type,
                 owner_id,
-                requested,
+                selection,
             } => AllocationState::Integrated {
                 backend,
                 owner_type,
                 owner_id,
-                requested,
+                selection,
             },
             PreparedState::Remote {
                 backend,
@@ -422,14 +529,25 @@ where
                         loop {
                             // Box the large coordinator future so the enclosing
                             // timeout and caller futures stay small.
-                            match Box::pin(backend.allocate(
-                                &request,
-                                &authority,
-                                &eligibility,
-                                cancel,
-                            ))
-                            .await
-                            {
+                            let result =
+                                if matches!(request.selection, AllocationSelection::Exact(_)) {
+                                    Box::pin(backend.allocate_exact(
+                                        &request,
+                                        &authority,
+                                        &eligibility,
+                                        cancel,
+                                    ))
+                                    .await
+                                } else {
+                                    Box::pin(backend.allocate(
+                                        &request,
+                                        &authority,
+                                        &eligibility,
+                                        cancel,
+                                    ))
+                                    .await
+                                };
+                            match result {
                                 Err(RemoteResourcePoolError::Acquire(
                                     AcquireLockError::WorkAlreadyLocked(_),
                                 )) => tokio::time::sleep(LEASE_RETRY_INTERVAL).await,
@@ -510,10 +628,19 @@ where
                 backend,
                 owner_type,
                 owner_id,
-                requested,
-            } => Ok(backend
-                .allocate(self.pool, txn, *owner_type, owner_id, requested.clone())
-                .await?),
+                selection,
+            } => match selection {
+                Selection::Automatic => Ok(backend
+                    .allocate(self.pool, txn, *owner_type, owner_id, None)
+                    .await?),
+                Selection::Requested(value) => Ok(backend
+                    .allocate(self.pool, txn, *owner_type, owner_id, Some(value.clone()))
+                    .await?),
+                Selection::Exact(value) => Ok(backend
+                    .allocate_exact(self.pool, txn, *owner_type, owner_id, value.clone())
+                    .await
+                    .map_err(ResourcePoolDatabaseError::from)?),
+            },
             AllocationState::Remote {
                 request_id,
                 authority,
