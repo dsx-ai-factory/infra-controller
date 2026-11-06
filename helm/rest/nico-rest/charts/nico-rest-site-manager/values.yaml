@@ -24,14 +24,18 @@ args:
   # (nico-rest-cert-manager.config.dnsNames). Deploying through the nico-rest
   # parent chart fails rendering when either of those settings would invalidate
   # the generated endpoint and this is left empty.
-  credsManagerUrl: ""
+  certManagerUrl: ""
   tlsCertPath: /etc/tls/tls.crt
   tlsKeyPath: /etc/tls/tls.key
   # -- CA bundle used to verify nico-rest-cert-manager, read from the
-  # credsManagerCa mount below. Point it elsewhere only if you also arrange for
+  # certManagerCa mount below. Point it elsewhere only if you also arrange for
   # a bundle to exist at that path.
-  credsManagerCaPath: /etc/credsmgr-ca/ca.crt
+  certManagerCaPath: /etc/credsmgr-ca/ca.crt
   debug: true
+  # credsManagerUrl and credsManagerCaPath are the deprecated former names of
+  # certManagerUrl and certManagerCaPath. A value set under a former name still
+  # applies and overrides the current name, since the current names carry
+  # defaults.
 
 # -- CA that signs nico-rest-cert-manager's HTTPS listener, which is what Site
 # Manager has to trust to verify it. This is deliberately not the issuer of
@@ -42,9 +46,11 @@ args:
 # the namespace this chart deploys into, and has to be the one
 # nico-rest-cert-manager.secrets.caSigningSecret names; the nico-rest parent
 # chart fails rendering when that is overridden and this is left at the default.
-credsManagerCa:
+certManagerCa:
   secretName: ca-signing-secret
   key: tls.crt
+# credsManagerCa is the deprecated former name of certManagerCa. Its secretName
+# and key still apply when set and override the ones above.
 
 resources:
   requests:

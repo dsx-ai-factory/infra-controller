@@ -38,7 +38,7 @@ secrets:
   # In production it is typically provisioned by Vault agent injection.
   # For local dev, it is created by make kind-reset-infra (setup-local.sh).
   # This CA signs the HTTPS listener, so nico-rest-site-manager has to trust it:
-  # overriding this means overriding nico-rest-site-manager.credsManagerCa
+  # overriding this means overriding nico-rest-site-manager.certManagerCa
   # .secretName to match, which the nico-rest parent chart enforces.
   caSigningSecret: ca-signing-secret
 

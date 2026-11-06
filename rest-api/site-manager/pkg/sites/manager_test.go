@@ -17,7 +17,7 @@ import (
 )
 
 // TestManager starts Site Manager over TLS with a serving certificate from a
-// Cert Manager stub. Then it creates and reads a Site through the routes.
+// REST Cert Manager stub. Then it creates and reads a Site through the routes.
 func TestManager(t *testing.T) {
 	s, err := TestManagerCreateSite()
 	require.NoError(t, err)
@@ -26,7 +26,7 @@ func TestManager(t *testing.T) {
 }
 
 // TestNewSiteManagerStopsRetryingWhenCanceled checks that a shutdown signal
-// ends the wait for a serving certificate from an unreachable Cert Manager.
+// ends the wait for a serving certificate from an unreachable REST Cert Manager.
 func TestNewSiteManagerStopsRetryingWhenCanceled(t *testing.T) {
 	caPath := filepath.Join(t.TempDir(), "ca.pem")
 	require.NoError(t, os.WriteFile(caPath, []byte(testCACert), 0600))
@@ -35,11 +35,11 @@ func TestNewSiteManagerStopsRetryingWhenCanceled(t *testing.T) {
 	cancel()
 
 	o := Options{
-		credsMgrURL:    "https://127.0.0.1:1",
-		credsMgrCAPath: caPath,
-		listenPort:     "0",
-		namespace:      "site-manager",
-		otpDuration:    time.Hour,
+		certManagerURL:    "https://127.0.0.1:1",
+		certManagerCAPath: caPath,
+		listenPort:        "0",
+		namespace:         "site-manager",
+		otpDuration:       time.Hour,
 	}
 	done := make(chan error, 1)
 	go func() {

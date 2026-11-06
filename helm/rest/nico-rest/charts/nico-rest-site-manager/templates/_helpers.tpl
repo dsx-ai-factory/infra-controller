@@ -28,15 +28,33 @@ app.kubernetes.io/component: site-manager
 Endpoint for nico-rest-cert-manager. Built from the release namespace rather
 than this chart's, because nico-rest-cert-manager has its own independent
 namespaceOverride and does not move when site-manager's is set. The hostname
-has to be a SAN on that service's certificate, so when cert-manager is the
-subchart being relocated, set args.credsManagerUrl explicitly.
+has to be a SAN on that service's certificate, so when nico-rest-cert-manager
+is the subchart being relocated, set args.certManagerUrl explicitly.
 */}}
-{{- define "nico-rest-site-manager.credsManagerUrl" -}}
-{{- if .Values.args.credsManagerUrl -}}
-{{- .Values.args.credsManagerUrl -}}
+{{- define "nico-rest-site-manager.certManagerUrl" -}}
+{{- $url := .Values.args.credsManagerUrl | default .Values.args.certManagerUrl -}}
+{{- if $url -}}
+{{- $url -}}
 {{- else -}}
 {{- printf "https://nico-rest-cert-manager.%s:8000" .Release.Namespace -}}
 {{- end -}}
+{{- end -}}
+
+{{/*
+REST Cert Manager trust settings. The deprecated former names
+args.credsManagerCaPath and credsManagerCa override the current ones when set,
+since the current names carry defaults.
+*/}}
+{{- define "nico-rest-site-manager.certManagerCaPath" -}}
+{{- .Values.args.credsManagerCaPath | default .Values.args.certManagerCaPath -}}
+{{- end -}}
+
+{{- define "nico-rest-site-manager.certManagerCaSecretName" -}}
+{{- (.Values.credsManagerCa | default dict).secretName | default .Values.certManagerCa.secretName -}}
+{{- end -}}
+
+{{- define "nico-rest-site-manager.certManagerCaKey" -}}
+{{- (.Values.credsManagerCa | default dict).key | default .Values.certManagerCa.key -}}
 {{- end -}}
 
 {{- define "nico-rest-site-manager.image" -}}

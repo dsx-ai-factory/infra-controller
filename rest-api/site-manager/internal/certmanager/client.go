@@ -21,51 +21,51 @@ import (
 )
 
 const (
-	// requestTimeout limits each request to Cert Manager, including reading
+	// requestTimeout limits each request to REST Cert Manager, including reading
 	// the response body.
 	requestTimeout = 20 * time.Second
-	// spanName is the span name of every Cert Manager request.
+	// spanName is the span name of every REST Cert Manager request.
 	spanName = "cert-manager-client"
 )
 
-// CertificateRequest is the body of Cert Manager's POST /v1/pki/cloud-cert.
-// Cert Manager builds the certificate's DNS name from Name and App. TTL is the
-// validity in hours.
+// CertificateRequest is the body of REST Cert Manager's POST /v1/pki/cloud-cert.
+// REST Cert Manager builds the certificate's DNS name from Name and App. TTL is
+// the validity in hours.
 type CertificateRequest struct {
 	Name string `json:"name,omitempty"`
 	App  string `json:"app,omitempty"`
 	TTL  int    `json:"ttl,omitempty"`
 }
 
-// Certificate is Cert Manager's reply to a CertificateRequest. It holds the
+// Certificate is REST Cert Manager's reply to a CertificateRequest. It holds the
 // PEM private key and the PEM certificate issued for it.
 type Certificate struct {
 	Key         string `json:"key,omitempty"`
 	Certificate string `json:"certificate,omitempty"`
 }
 
-// Client sends requests to Cert Manager at a base URL.
+// Client sends requests to REST Cert Manager at a base URL.
 type Client struct {
 	url        string
 	httpClient *http.Client
 }
 
-// NewClient returns a client for Cert Manager at url. The CA bundle at caPath
+// NewClient returns a client for REST Cert Manager at url. The CA bundle at caPath
 // is the only trust anchor. So an unreadable or empty bundle fails here
 // instead of falling back to an unverified connection.
 func NewClient(url, caPath string) (*Client, error) {
 	if caPath == "" {
-		return nil, fmt.Errorf("a CA bundle path is required to verify the Cert Manager endpoint")
+		return nil, fmt.Errorf("a CA bundle path is required to verify the REST Cert Manager endpoint")
 	}
 
 	caPEM, err := os.ReadFile(caPath)
 	if err != nil {
-		return nil, errors.Wrapf(err, "read Cert Manager CA bundle %q", caPath)
+		return nil, errors.Wrapf(err, "read REST Cert Manager CA bundle %q", caPath)
 	}
 
 	pool := x509.NewCertPool()
 	if !pool.AppendCertsFromPEM(caPEM) {
-		return nil, fmt.Errorf("the Cert Manager CA bundle %q contains no certificates", caPath)
+		return nil, fmt.Errorf("the REST Cert Manager CA bundle %q contains no certificates", caPath)
 	}
 
 	return &Client{
@@ -84,7 +84,7 @@ func NewClient(url, caPath string) (*Client, error) {
 	}, nil
 }
 
-// IssueCertificate asks Cert Manager to issue a certificate for name and app,
+// IssueCertificate asks REST Cert Manager to issue a certificate for name and app,
 // valid for ttl hours.
 func (c *Client) IssueCertificate(ctx context.Context, name, app string, ttl int) (*Certificate, error) {
 	body := &CertificateRequest{
@@ -119,7 +119,7 @@ func (c *Client) IssueCertificate(ctx context.Context, name, app string, ttl int
 	return certificate, nil
 }
 
-// GetCA returns Cert Manager's CA certificate file in PEM, as served.
+// GetCA returns REST Cert Manager's CA certificate file in PEM, as served.
 func (c *Client) GetCA(ctx context.Context) (string, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.url+"/v1/pki/ca/pem", nil)
 	if err != nil {

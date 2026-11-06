@@ -37,15 +37,25 @@ func NewCommand() *cli.Command {
 				Usage: "Ingress host name for self signed certs",
 			},
 			&cli.StringFlag{
-				Name:  "creds-manager-url",
+				Name:  "cert-manager-url",
 				Value: "https://localhost:8000",
-				Usage: "creds manager service endpoint used by backend",
+				Usage: "REST Cert Manager endpoint that issues Site certificates",
+			},
+			&cli.StringFlag{
+				Name:  "cert-manager-ca-path",
+				Value: "/etc/credsmgr-ca/ca.crt",
+				Usage: "CA that signed REST Cert Manager's listener. The endpoint's " +
+					"host name must appear in its --dns-name SANs",
+			},
+			// Former names of --cert-manager-url and --cert-manager-ca-path,
+			// accepted so existing invocations keep working.
+			&cli.StringFlag{
+				Name:  "creds-manager-url",
+				Usage: "Deprecated, use --cert-manager-url",
 			},
 			&cli.StringFlag{
 				Name:  "creds-manager-ca-path",
-				Value: "/etc/credsmgr-ca/ca.crt",
-				Usage: "CA that signed the creds manager endpoint's listener. That " +
-					"endpoint's host name must appear in its --dns-name SANs",
+				Usage: "Deprecated, use --cert-manager-ca-path",
 			},
 			&cli.StringFlag{
 				Name:  "tls-key-path",
@@ -100,16 +110,7 @@ func NewCommand() *cli.Command {
 				log.Warn().Int("otp_duration_hours", otpHrs).Msg("OTP duration overridden")
 			}
 
-			o := Options{
-				credsMgrURL:    c.String("creds-manager-url"),
-				credsMgrCAPath: c.String("creds-manager-ca-path"),
-				ingressHost:    c.String("ingress-host"),
-				listenPort:     c.String("listen-port"),
-				tlsKeyPath:     c.String("tls-key-path"),
-				tlsCertPath:    c.String("tls-cert-path"),
-				namespace:      c.String("namespace"),
-				otpDuration:    time.Duration(otpHrs) * time.Hour,
-			}
+			o := newOptions(c)
 			log.Info().Msg("configuring Site Manager server")
 			crdClient, err := newCRDClient()
 			if err != nil {
@@ -131,4 +132,32 @@ func NewCommand() *cli.Command {
 			return nil
 		},
 	}
+}
+
+// newOptions builds the Site Manager options from the parsed flags.
+func newOptions(c *cli.Context) Options {
+	return Options{
+		certManagerURL:    renamedString(c, "cert-manager-url", "creds-manager-url"),
+		certManagerCAPath: renamedString(c, "cert-manager-ca-path", "creds-manager-ca-path"),
+		ingressHost:       c.String("ingress-host"),
+		listenPort:        c.String("listen-port"),
+		tlsKeyPath:        c.String("tls-key-path"),
+		tlsCertPath:       c.String("tls-cert-path"),
+		namespace:         c.String("namespace"),
+		otpDuration:       time.Duration(c.Int("otp-duration")) * time.Hour,
+	}
+}
+
+// renamedString returns the value of the flag name. A value given through its
+// former name oldName is used only when name itself is not set.
+func renamedString(c *cli.Context, name, oldName string) string {
+	if !c.IsSet(oldName) {
+		return c.String(name)
+	}
+	if c.IsSet(name) {
+		log.Warn().Msgf("--%s is deprecated and ignored because --%s is set", oldName, name)
+		return c.String(name)
+	}
+	log.Warn().Msgf("--%s is deprecated, use --%s", oldName, name)
+	return c.String(oldName)
 }

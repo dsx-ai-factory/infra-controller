@@ -46,8 +46,8 @@ spec:
                 - ALL
           args:
             - --listen-port={{ .Values.args.listenPort }}
-            - --creds-manager-url={{ include "nico-rest-site-manager.credsManagerUrl" . }}
-            - --creds-manager-ca-path={{ .Values.args.credsManagerCaPath }}
+            - --cert-manager-url={{ include "nico-rest-site-manager.certManagerUrl" . }}
+            - --cert-manager-ca-path={{ include "nico-rest-site-manager.certManagerCaPath" . }}
             - --tls-cert-path={{ .Values.args.tlsCertPath }}
             - --tls-key-path={{ .Values.args.tlsKeyPath }}
             - --namespace={{ include "nico-rest-site-manager.namespace" . }}
@@ -97,9 +97,9 @@ spec:
         # same Secret and Site Manager has no business reading it.
         - name: credsmgr-ca
           secret:
-            secretName: {{ .Values.credsManagerCa.secretName }}
+            secretName: {{ include "nico-rest-site-manager.certManagerCaSecretName" . }}
             items:
-              - key: {{ .Values.credsManagerCa.key }}
+              - key: {{ include "nico-rest-site-manager.certManagerCaKey" . }}
                 path: ca.crt
         # Site Manager skips its own cert issuance while `args.tlsCertPath` and
         # `args.tlsKeyPath` are set. Clearing either one sends it back to

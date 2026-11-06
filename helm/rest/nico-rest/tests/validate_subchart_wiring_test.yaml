@@ -22,7 +22,7 @@ tests:
   - it: accepts a signing Secret override once Site Manager trusts it
     set:
       nico-rest-cert-manager.secrets.caSigningSecret: site-ca
-      nico-rest-site-manager.credsManagerCa.secretName: site-ca
+      nico-rest-site-manager.certManagerCa.secretName: site-ca
     asserts:
       - hasDocuments:
           count: 0
@@ -39,7 +39,7 @@ tests:
     set:
       nico-rest-cert-manager.config.caCertFile: /vault/secrets/vault-root-ca-certificate/certificate
       nico-rest-cert-manager.config.caKeyFile: /vault/secrets/vault-root-ca-private-key/privatekey
-      nico-rest-site-manager.args.credsManagerCaPath: /vault/secrets/vault-root-ca-certificate/certificate
+      nico-rest-site-manager.args.certManagerCaPath: /vault/secrets/vault-root-ca-certificate/certificate
     asserts:
       - hasDocuments:
           count: 0
@@ -54,7 +54,7 @@ tests:
   - it: leaves a deliberately separate trust Secret alone
     set:
       nico-rest-cert-manager.secrets.caSigningSecret: site-ca
-      nico-rest-site-manager.credsManagerCa.secretName: site-ca-bundle
+      nico-rest-site-manager.certManagerCa.secretName: site-ca-bundle
     asserts:
       - hasDocuments:
           count: 0
@@ -69,7 +69,7 @@ tests:
   - it: rejects SANs that omit the host site-manager dials
     set:
       nico-rest-cert-manager.config.dnsNames:
-        - credsmgr.override.example.com
+        - cert-manager.override.example.com
     asserts:
       - failedTemplate:
           errorPattern: 'covers neither "nico-rest-cert-manager.nico-rest".*nor "\*.nico-rest"'
@@ -103,8 +103,8 @@ tests:
     set:
       nico-rest-cert-manager.namespaceOverride: nico-rest-staging
       nico-rest-cert-manager.config.dnsNames:
-        - credsmgr.override.example.com
-      nico-rest-site-manager.args.credsManagerUrl: https://credsmgr.override.example.com:8000
+        - cert-manager.override.example.com
+      nico-rest-site-manager.args.certManagerUrl: https://cert-manager.override.example.com:8000
     asserts:
       - hasDocuments:
           count: 0
@@ -145,6 +145,31 @@ tests:
       nico-rest-site-manager.namespaceOverride: nico-rest-sm
       nico-rest-api.config.siteManager.svcEndpoint: https://nico-rest-site-manager.nico-rest-sm:8100/v1/site
       nico-rest-workflow.config.siteManager.svcEndpoint: https://nico-rest-site-manager.nico-rest-sm:8100/v1/site
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: accepts a trusted signing Secret set under the former credsManagerCa name
+    set:
+      nico-rest-cert-manager.secrets.caSigningSecret: site-ca
+      nico-rest-site-manager.credsManagerCa.secretName: site-ca
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: accepts a trusted Vault bundle set under the former args.credsManagerCaPath name
+    set:
+      nico-rest-cert-manager.config.caCertFile: /vault/secrets/vault-root-ca-certificate/certificate
+      nico-rest-cert-manager.config.caKeyFile: /vault/secrets/vault-root-ca-private-key/privatekey
+      nico-rest-site-manager.args.credsManagerCaPath: /vault/secrets/vault-root-ca-certificate/certificate
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: accepts an explicit endpoint set under the former args.credsManagerUrl name
+    set:
+      nico-rest-cert-manager.namespaceOverride: nico-rest-staging
+      nico-rest-site-manager.args.credsManagerUrl: https://nico-rest-cert-manager.nico-rest-staging:8000
     asserts:
       - hasDocuments:
           count: 0
