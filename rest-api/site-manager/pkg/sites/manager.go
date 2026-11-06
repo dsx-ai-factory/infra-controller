@@ -33,16 +33,16 @@ const (
 
 // Options are args passed to the site manager at boot
 type Options struct {
-	credsMgrURL string
-	// credsMgrCAPath is the CA bundle used to verify credsMgrURL. It is the
-	// ca.crt of the same CA that signs the cert-manager's listener, so the
+	certManagerURL string
+	// certManagerCAPath is the CA bundle used to verify certManagerURL. It is the
+	// ca.crt of the same CA that signs REST Cert Manager's listener, so the
 	// certificate chain and the hostname both have to check out.
-	credsMgrCAPath string
-	ingressHost    string
-	listenPort     string
-	tlsKeyPath     string
-	tlsCertPath    string
-	namespace      string
+	certManagerCAPath string
+	ingressHost       string
+	listenPort        string
+	tlsKeyPath        string
+	tlsCertPath       string
+	namespace         string
 	// otpDuration is how long a Site's OTP stays valid.
 	otpDuration time.Duration
 }
@@ -58,7 +58,7 @@ type SiteManager struct {
 // NewSiteManager creates an instance of SiteManager that stores Sites
 // through crdClient.
 func NewSiteManager(ctx context.Context, o Options, crdClient crdclient.Interface) (*SiteManager, error) {
-	certManager, err := certmanager.NewClient(o.credsMgrURL, o.credsMgrCAPath)
+	certManager, err := certmanager.NewClient(o.certManagerURL, o.certManagerCAPath)
 	if err != nil {
 		return nil, errors.Wrap(err, "certmanager.NewClient")
 	}
@@ -118,7 +118,7 @@ func (s *SiteManager) tlsSetup(ctx context.Context) error {
 		return nil
 	}
 
-	log.Info().Msg("getting a TLS certificate from Cert Manager")
+	log.Info().Msg("getting a TLS certificate from REST Cert Manager")
 
 	var (
 		resp *certmanager.Certificate
@@ -130,7 +130,7 @@ func (s *SiteManager) tlsSetup(ctx context.Context) error {
 		if err == nil {
 			break
 		}
-		log.Info().Err(err).Msg("failed to get a TLS certificate from Cert Manager, retrying in 10s")
+		log.Info().Err(err).Msg("failed to get a TLS certificate from REST Cert Manager, retrying in 10s")
 		// A shutdown signal cancels ctx, which ends the retries.
 		select {
 		case <-ctx.Done():

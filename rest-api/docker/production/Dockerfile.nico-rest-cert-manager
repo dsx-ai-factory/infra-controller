@@ -40,22 +40,27 @@ RUN --mount=type=bind,from=gomodcache,target=/go-mod-download \
 COPY common/ ./common/
 COPY cert-manager/ ./cert-manager/
 
-# Build the credentials manager
+# Build REST Cert Manager
 WORKDIR /workspace/cert-manager
 RUN VERSION=${VERSION} && \
     BUILD_TIME=$(date +"%Y-%m-%d %H:%M:%S") && \
     go build \
         -ldflags "-extldflags '-static' -w -s -X=github.com/NVIDIA/infra-controller/rest-api/cert-manager/pkg/core.Version=${VERSION}" \
-        -o /app/credsmgr \
-        ./cmd/credsmgr
+        -o /app/cert-manager \
+        ./cmd/cert-manager
+
+# credsmgr is the binary's former name. The link keeps deployments that
+# override the container command with /app/credsmgr starting.
+RUN ln -s cert-manager /app/credsmgr
 
 # Final stage
 FROM nvcr.io/nvidia/distroless/go:v4.1.8@sha256:676c150ccfb5987f58bbee9accfa506d5519d4acf4252f799d311476a0a7f1b5 AS final
 
 WORKDIR /app
 
-# Copy binary from builder
-COPY --from=builder --chown=nvs:nvs /app/credsmgr /app/credsmgr
+# Copy the binary and its former name from builder. Copying the directory
+# keeps the link a link instead of a second copy of the binary.
+COPY --from=builder --chown=nvs:nvs /app/ /app/
 
 # Switch to non-root user
 USER nvs
@@ -64,4 +69,4 @@ USER nvs
 EXPOSE 8080
 
 # Run the application
-ENTRYPOINT ["/app/credsmgr"]
+ENTRYPOINT ["/app/cert-manager"]

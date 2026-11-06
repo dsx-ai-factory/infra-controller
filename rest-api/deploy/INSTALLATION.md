@@ -247,7 +247,7 @@ kubectl apply -k deploy/kustomize/base/keycloak -n nico-rest
 
 ### What it is
 
-`nico-rest-cert-manager` is the internal PKI microservice (also referred as `credsmgr`). It uses native Go PKI to vend mTLS certificates for components over HTTPS, primarily for dynamic/external entities e.g. Site Agents. When the `site-manager` receives a new site registration, it calls `nico-rest-cert-manager` service to issue the client certificates `site-agent` will use to authenticate. It exposes two ports:
+`nico-rest-cert-manager` is the internal PKI microservice (formerly `credsmgr`). It uses native Go PKI to vend mTLS certificates for components over HTTPS, primarily for dynamic/external entities e.g. Site Agents. When the `site-manager` receives a new site registration, it calls `nico-rest-cert-manager` service to issue the client certificates `site-agent` will use to authenticate. It exposes two ports:
 
 - **8000** (HTTPS) — certificate issuance API
 - **8001** (HTTP) — health and liveness endpoint
@@ -258,7 +258,7 @@ kubectl apply -k deploy/kustomize/base/keycloak -n nico-rest
 |---|---|
 | `base/cert-manager/deployment.yaml` | Deployment `nico-rest-cert-manager` — mounts `ca-signing-secret` |
 | `base/cert-manager/service.yaml` | ClusterIP Service — ports 8000 (https) and 8001 (http) |
-| `base/cert-manager/rbac.yaml` | ServiceAccount only — `credsmgr` never calls the Kubernetes API, so it carries no Role and disables token automount |
+| `base/cert-manager/rbac.yaml` | ServiceAccount only — REST Cert Manager never calls the Kubernetes API, so it carries no Role and disables token automount |
 
 ### CLI flags (set in `deployment.yaml`)
 
@@ -275,7 +275,7 @@ kubectl apply -k deploy/kustomize/base/keycloak -n nico-rest
 
 `--dns-name` is repeatable, and the first value supplied replaces the built-in
 default (`credsmgr.csm` and `localhost`, the latter matching site-manager's own
-default `--creds-manager-url`) rather than adding to it. Every hostname a client
+default `--cert-manager-url`) rather than adding to it. Every hostname a client
 dials over port 8000 has to be listed, because TLS hostname verification
 consults only the certificate's SANs. The manifests pass
 `nico-rest-cert-manager`, `nico-rest-cert-manager.nico-rest`,
@@ -526,13 +526,17 @@ status:
 | Flag | Value | Description |
 |---|---|---|
 | `--listen-port` | `8100` | HTTPS listen port |
-| `--creds-manager-url` | `https://nico-rest-cert-manager.nico-rest:8000` | URL to nico-rest-cert-manager; the hostname must be one of that service's `--dns-name` SANs |
-| `--creds-manager-ca-path` | `/etc/credsmgr-ca/ca.crt` | CA bundle verifying nico-rest-cert-manager (`tls.crt` from `ca-signing-secret`) |
+| `--cert-manager-url` | `https://nico-rest-cert-manager.nico-rest:8000` | URL to nico-rest-cert-manager; the hostname must be one of that service's `--dns-name` SANs |
+| `--cert-manager-ca-path` | `/etc/credsmgr-ca/ca.crt` | CA bundle verifying nico-rest-cert-manager (`tls.crt` from `ca-signing-secret`) |
 | `--tls-cert-path` | `/etc/tls/tls.crt` | TLS cert path (from `site-manager-tls` secret) |
 | `--tls-key-path` | `/etc/tls/tls.key` | TLS key path (from `site-manager-tls` secret) |
 | `--namespace` | `nico-rest` | Kubernetes namespace to watch for Site CRs |
 
-Connections to nico-rest-cert-manager are verified, so `--creds-manager-ca-path`
+`--creds-manager-url` and `--creds-manager-ca-path` are the deprecated former
+names of `--cert-manager-url` and `--cert-manager-ca-path`. Site Manager still
+accepts them and logs a warning, but the current name wins when both are given.
+
+Connections to nico-rest-cert-manager are verified, so `--cert-manager-ca-path`
 must point at a readable PEM bundle containing the CA that signed that service's
 listener. Site Manager exits at startup if the file is missing or holds no
 certificates, rather than falling back to an unverified connection.

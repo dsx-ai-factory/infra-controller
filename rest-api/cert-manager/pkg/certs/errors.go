@@ -59,7 +59,7 @@ func (e Error) Error() string {
 	if e == ErrorNone {
 		return ""
 	}
-	return fmt.Sprintf("CredsManager error, internal code %d", e)
+	return fmt.Sprintf("REST Cert Manager error, internal code %d", e)
 }
 
 // String returns the error in string form

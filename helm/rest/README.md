@@ -14,7 +14,7 @@ Helm charts for deploying the NICo REST API platform services.
 | Sub-Chart | Description |
 |-----------|-------------|
 | `nico-rest-common` | Common secrets and certificates (created by Helm) |
-| `nico-rest-cert-manager` | NICo credential manager service (credsmgr) |
+| `nico-rest-cert-manager` | Certificate issuer (TLS on port 8000) |
 | `nico-rest-api` | REST API server (port 8388) |
 | `nico-rest-workflow` | Temporal workers (cloud-worker + site-worker) |
 | `nico-rest-site-manager` | Site lifecycle manager (TLS on port 8100) |

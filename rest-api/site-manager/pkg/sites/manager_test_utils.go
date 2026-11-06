@@ -249,12 +249,12 @@ func TestManagerCreateSite() (*Suite, error) {
 
 	fcrd := fakecrdclient.NewSimpleClientset()
 	o := Options{
-		credsMgrURL:    fmt.Sprintf("https://%s", ts.l.Addr().String()),
-		credsMgrCAPath: ts.caPath,
-		ingressHost:    "test-host",
-		listenPort:     "0",
-		namespace:      "site-manager",
-		otpDuration:    defOTPDuration * time.Hour,
+		certManagerURL:    fmt.Sprintf("https://%s", ts.l.Addr().String()),
+		certManagerCAPath: ts.caPath,
+		ingressHost:       "test-host",
+		listenPort:        "0",
+		namespace:         "site-manager",
+		otpDuration:       defOTPDuration * time.Hour,
 	}
 
 	runCtx, cancel := context.WithCancel(context.Background())
