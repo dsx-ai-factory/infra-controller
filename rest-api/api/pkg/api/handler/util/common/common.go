@@ -748,14 +748,6 @@ func GetAllAllocationConstraintsForInstanceType(ctx context.Context, tx *cdb.Tx,
 	return acs, tot, nil
 }
 
-// RollbackTx is called deferred in functions that create a transaction
-// if transaction was committed, this will do nothing
-func RollbackTx(ctx context.Context, tx *cdb.Tx, committed *bool) {
-	if committed != nil && !*committed {
-		tx.Rollback()
-	}
-}
-
 // HandleTxError translates an error returned by cdb.WithTx / cdb.WithTxResult
 // into an Echo API response. The lookups happen in this order:
 //  1. If the error wraps a *cutil.APIError (the closure chose its own
