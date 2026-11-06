@@ -481,6 +481,9 @@ mod tests {
     use carbide_redfish::libredfish::{RedfishAuth, RedfishClientPool};
     use carbide_secrets::test_support::credentials::TestCredentialManager;
     use carbide_test_support::value_scenarios;
+    use libredfish::JobState;
+    use libredfish::model::{BootProgress, BootProgressTypes};
+    use model::machine::{BiosConfigState, MachineLastRebootRequested};
     use model::machine_boot_interface::MachineBootInterface;
     use model::test_support::machine_snapshot::managed_host_state_snapshot;
     use state_controller::db_write_batch::DbWriteBatch;
@@ -498,6 +501,7 @@ mod tests {
             scout_reporting_timeout: chrono::Duration::zero(),
             waiting_for_measurements_timeout: chrono::Duration::zero(),
             uefi_boot_wait: chrono::Duration::zero(),
+            dpu_first_restart_delay: None,
         }
     }
 
@@ -538,41 +542,7 @@ mod tests {
 
         // Explicit-target stages do not need prediction data. A short-timeout
         // unreachable pool makes an accidental lookup fail promptly.
-        let db_pool = sqlx::postgres::PgPoolOptions::new()
-            .acquire_timeout(Duration::from_millis(50))
-            .connect_lazy("postgres://unused:unused@127.0.0.1:1/unused")
-            .unwrap();
-        let mut services = MachineStateHandlerServices {
-            db_pool: db_pool.clone(),
-            db_reader: db_pool.into(),
-            redfish_client_pool: redfish_sim.clone(),
-            bmc_credential_ops: redfish_sim.clone(),
-            ipmi_tool: carbide_ipmi::test_support(),
-            site_config: Arc::new(MachineStateHandlerSiteConfig::test_default()),
-            component_manager: None,
-            credential_manager: Arc::new(TestCredentialManager::default()),
-            per_object_metrics_registry: PerObjectMetricsRegistry::new(
-                Vec::new(),
-                Duration::from_secs(60),
-            ),
-            per_object_info: None,
-            bmc_rotation_gate: carbide_credential_rotation::RotationGate::new_for_family(
-                db::credential_rotation::CredentialRotationType::Bmc,
-            ),
-            host_uefi_rotation_gate: carbide_credential_rotation::RotationGate::new_for_family(
-                db::credential_rotation::CredentialRotationType::HostUefi,
-            ),
-            dpu_uefi_rotation_gate: carbide_credential_rotation::RotationGate::new_for_family(
-                db::credential_rotation::CredentialRotationType::DpuUefi,
-            ),
-            dpu_bmc_service_rotation_gate:
-                carbide_credential_rotation::RotationGate::new_for_family(
-                    db::credential_rotation::CredentialRotationType::DpuBmcService,
-                ),
-            nic_lockdown_rotation_gate: carbide_credential_rotation::RotationGate::new_for_family(
-                db::credential_rotation::CredentialRotationType::LockdownIkm,
-            ),
-        };
+        let mut services = test_services(redfish_sim.clone());
         let mut metrics = MachineMetrics::default();
         let mut pending_db_writes = DbWriteBatch::new();
         let mut ctx = StateHandlerContext {
@@ -676,6 +646,194 @@ mod tests {
                 "boot-config target drifted at Redfish call {call_index}",
             );
         }
+    }
+
+    fn test_services(redfish_sim: Arc<RedfishSim>) -> MachineStateHandlerServices {
+        let db_pool = sqlx::postgres::PgPoolOptions::new()
+            .acquire_timeout(Duration::from_millis(50))
+            .connect_lazy("postgres://unused:unused@127.0.0.1:1/unused")
+            .unwrap();
+        MachineStateHandlerServices {
+            db_pool: db_pool.clone(),
+            db_reader: db_pool.into(),
+            redfish_client_pool: redfish_sim.clone(),
+            bmc_credential_ops: redfish_sim,
+            ipmi_tool: carbide_ipmi::test_support(),
+            site_config: Arc::new(MachineStateHandlerSiteConfig::test_default()),
+            component_manager: None,
+            credential_manager: Arc::new(TestCredentialManager::default()),
+            per_object_metrics_registry: PerObjectMetricsRegistry::new(
+                Vec::new(),
+                Duration::from_secs(60),
+            ),
+            per_object_info: None,
+            bmc_rotation_gate: carbide_credential_rotation::RotationGate::new_for_family(
+                db::credential_rotation::CredentialRotationType::Bmc,
+            ),
+            host_uefi_rotation_gate: carbide_credential_rotation::RotationGate::new_for_family(
+                db::credential_rotation::CredentialRotationType::HostUefi,
+            ),
+            dpu_uefi_rotation_gate: carbide_credential_rotation::RotationGate::new_for_family(
+                db::credential_rotation::CredentialRotationType::DpuUefi,
+            ),
+            dpu_bmc_service_rotation_gate:
+                carbide_credential_rotation::RotationGate::new_for_family(
+                    db::credential_rotation::CredentialRotationType::DpuBmcService,
+                ),
+            nic_lockdown_rotation_gate: carbide_credential_rotation::RotationGate::new_for_family(
+                db::credential_rotation::CredentialRotationType::LockdownIkm,
+            ),
+        }
+    }
+
+    #[tokio::test]
+    async fn polling_bios_setup_finishes_only_after_the_host_has_booted_since_the_reboot() {
+        let redfish_sim = Arc::new(RedfishSim::default());
+        let redfish_client = redfish_sim
+            .create_client("bios-apply-settle", None, RedfishAuth::Anonymous, None)
+            .await
+            .unwrap();
+        let mut services = test_services(redfish_sim.clone());
+        let mut metrics = MachineMetrics::default();
+        let mut pending_db_writes = DbWriteBatch::new();
+        let mut ctx = StateHandlerContext {
+            services: &mut services,
+            metrics: &mut metrics,
+            pending_db_writes: &mut pending_db_writes,
+        };
+        let mut mh_snapshot = managed_host_state_snapshot();
+        mh_snapshot.host_snapshot.status.last_reboot_requested = Some(MachineLastRebootRequested {
+            time: chrono::Utc::now(),
+            ..MachineLastRebootRequested::default()
+        });
+        let explicit_target = BootInterfaceTarget::Pair(MachineBootInterface {
+            mac_address: "10:00:00:00:00:01".parse().unwrap(),
+            interface_id: "NIC.Slot.5-1".to_string(),
+        });
+        let boot_progress = |last_state| BootProgress {
+            last_state: Some(last_state),
+            last_state_time: None,
+            oem_last_state: None,
+        };
+
+        let mut outcomes = Vec::new();
+        for reported in [
+            Some(boot_progress(
+                BootProgressTypes::MemoryInitializationStarted,
+            )),
+            Some(boot_progress(BootProgressTypes::None)),
+            Some(boot_progress(BootProgressTypes::OSBootStarted)),
+            None,
+        ] {
+            redfish_sim.set_boot_progress(reported);
+            outcomes.push(
+                match run_host_boot_config_stage(
+                    &mut ctx,
+                    &reachability_params(),
+                    redfish_client.as_ref(),
+                    &mh_snapshot,
+                    Some(&explicit_target),
+                    HostBootConfigStage::PollingBiosSetup { retry_count: 0 },
+                )
+                .await
+                .unwrap()
+                {
+                    HostBootConfigOutcome::Wait(_) => "wait",
+                    HostBootConfigOutcome::Continue(HostBootConfigStage::SetBootOrder {
+                        ..
+                    }) => "set boot order",
+                    outcome => panic!("unexpected outcome {outcome:?}"),
+                },
+            );
+        }
+        assert_eq!(
+            outcomes,
+            vec!["wait", "wait", "set boot order", "set boot order"]
+        );
+    }
+
+    #[tokio::test]
+    async fn polling_bios_setup_waits_for_the_host_to_boot_after_a_bios_job() {
+        let redfish_sim = Arc::new(RedfishSim::default());
+        let redfish_client = redfish_sim
+            .create_client("bios-job-settle", None, RedfishAuth::Anonymous, None)
+            .await
+            .unwrap();
+        redfish_sim.set_machine_setup_bios_job_id(Some("bios-job".to_string()));
+        let mut services = test_services(redfish_sim.clone());
+        let mut metrics = MachineMetrics::default();
+        let mut pending_db_writes = DbWriteBatch::new();
+        let mut ctx = StateHandlerContext {
+            services: &mut services,
+            metrics: &mut metrics,
+            pending_db_writes: &mut pending_db_writes,
+        };
+        let mut mh_snapshot = managed_host_state_snapshot();
+        mh_snapshot.host_snapshot.status.last_reboot_requested = Some(MachineLastRebootRequested {
+            time: chrono::Utc::now(),
+            ..MachineLastRebootRequested::default()
+        });
+        let explicit_target = BootInterfaceTarget::Pair(MachineBootInterface {
+            mac_address: "10:00:00:00:00:01".parse().unwrap(),
+            interface_id: "NIC.Slot.5-1".to_string(),
+        });
+        let reachability_params = reachability_params();
+        macro_rules! run_stage {
+            ($stage:expr) => {
+                run_host_boot_config_stage(
+                    &mut ctx,
+                    &reachability_params,
+                    redfish_client.as_ref(),
+                    &mh_snapshot,
+                    Some(&explicit_target),
+                    $stage,
+                )
+                .await
+                .unwrap()
+            };
+        }
+
+        let HostBootConfigOutcome::Continue(HostBootConfigStage::WaitingForBiosJob {
+            bios_config_info,
+        }) = run_stage!(HostBootConfigStage::ConfigureBios { retry_count: 0 })
+        else {
+            panic!("a BMC that returns a BIOS job must wait for it");
+        };
+        assert_eq!(
+            bios_config_info.bios_config_state,
+            BiosConfigState::WaitForBiosJobScheduled
+        );
+
+        redfish_sim.set_job_state_sequence(vec![JobState::Completed]);
+        assert!(matches!(
+            run_stage!(HostBootConfigStage::WaitingForBiosJob {
+                bios_config_info: BiosConfigInfo {
+                    bios_config_state: BiosConfigState::WaitForBiosJobCompletion,
+                    ..bios_config_info
+                },
+            }),
+            HostBootConfigOutcome::Continue(HostBootConfigStage::PollingBiosSetup { .. }),
+        ));
+
+        redfish_sim.set_boot_progress(Some(BootProgress {
+            last_state: Some(BootProgressTypes::MemoryInitializationStarted),
+            last_state_time: None,
+            oem_last_state: None,
+        }));
+        assert!(matches!(
+            run_stage!(HostBootConfigStage::PollingBiosSetup { retry_count: 0 }),
+            HostBootConfigOutcome::Wait(_),
+        ));
+
+        redfish_sim.set_boot_progress(Some(BootProgress {
+            last_state: Some(BootProgressTypes::OSRunning),
+            last_state_time: None,
+            oem_last_state: None,
+        }));
+        assert!(matches!(
+            run_stage!(HostBootConfigStage::PollingBiosSetup { retry_count: 0 }),
+            HostBootConfigOutcome::Continue(HostBootConfigStage::SetBootOrder { .. }),
+        ));
     }
 
     #[test]
