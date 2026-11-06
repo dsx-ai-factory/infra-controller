@@ -26,6 +26,7 @@ use model::network_segment::{
     NetworkSegment, NetworkSegmentControllerState, NetworkSegmentSearchConfig, NetworkSegmentType,
     NewNetworkSegment,
 };
+use model::site_prefix::SitePrefixLifecycleState;
 use model::vpc::VpcVirtualizationTypeCapabilities;
 use sqlx::{PgConnection, PgTransaction};
 use tonic::{Request, Response, Status};
@@ -162,6 +163,31 @@ pub(crate) async fn create(
 
     let mut txn = api.txn_begin().await?;
     db::tenant_prefix_overlap::lock_checks(txn.as_mut()).await?;
+
+    if new_network_segment.segment_type == NetworkSegmentType::Tenant
+        && !api.runtime_config.site_fabric_prefixes.is_empty()
+    {
+        // A rolling config change can retire a root still present in this
+        // replica's allowlist. Lock its persisted coverage through insertion.
+        db::site_prefix::lock_operator_managed_site_prefix_attachments(&mut txn).await?;
+        for prefix in &new_network_segment.prefixes {
+            let roots = db::site_prefix::find_legacy_operator_managed_for_vpc_prefix_attachment(
+                &mut txn,
+                prefix.prefix,
+            )
+            .await?;
+            if !roots
+                .iter()
+                .any(|root| root.status.lifecycle_state == SitePrefixLifecycleState::Ready)
+            {
+                return Err(CarbideError::FailedPrecondition(format!(
+                    "the network prefix {} has no ready containing operator-managed SitePrefix",
+                    prefix.prefix
+                ))
+                .into());
+            }
+        }
+    }
 
     let allocate_svi_ip = if let Some(vpc_id) = new_network_segment.vpc_id {
         let vpcs = db::vpc::find_by(

@@ -365,15 +365,22 @@ pub(crate) async fn create(
     if let Some(ref site_prefix) = selected_site_prefix {
         validate_site_prefix_attachment(site_prefix, vpc, new_prefix.config.prefix)?;
         new_prefix.site_prefix_id = Some(site_prefix.id);
-    } else if let Some(ref site_prefixes) = api.eth_data.site_fabric_prefixes {
-        // Preserve the mixed-version configured-root path. Production startup
-        // reconciles configured roots into SitePrefix rows; this fallback keeps
-        // feature-off sites and older writers behaviorally compatible while
-        // the nullable expand phase is deployed.
+    } else {
         let prefix = new_prefix.config.prefix;
-        if !site_prefixes.contains(prefix) {
+        if let Some(ref site_prefixes) = api.eth_data.site_fabric_prefixes
+            && !site_prefixes.contains(prefix)
+        {
             return Err(CarbideError::InvalidArgument(format!(
                 "the VPC prefix {prefix} is not contained within the site fabric prefixes"
+            ))
+            .into());
+        }
+        // A replica can still have the old config after another replica
+        // retires its roots. Do not reopen that space as rootless, but preserve
+        // the preceding tenant-parent hint and configured-range validation.
+        if !api.runtime_config.site_fabric_prefixes.is_empty() {
+            return Err(CarbideError::FailedPrecondition(format!(
+                "the VPC prefix {prefix} has no containing operator-managed SitePrefix"
             ))
             .into());
         }

@@ -249,7 +249,7 @@ async fn dpu_isolation_includes_retained_tenant_roots_without_reactivating_opera
     }
     let retired_operator = persist_configured_site_prefix(&env, "198.51.100.0/24").await;
     let mut txn = env.pool.begin().await.unwrap();
-    db::site_prefix::reconcile_configured(&mut txn, &[])
+    db::site_prefix::reconcile_configured(&mut txn, &env.config.site_fabric_prefixes)
         .await
         .unwrap();
     txn.commit().await.unwrap();
@@ -1431,6 +1431,24 @@ async fn site_prefix_update_retirement_and_history_enforce_ownership(pool: sqlx:
     assert_eq!(error.code(), Code::InvalidArgument);
 }
 
+async fn assert_operator_retirement_waits(env: &TestEnv, id: SitePrefixId) {
+    readiness::controller(env)
+        .run_single_iteration_ext(false)
+        .await;
+    let retained = db::site_prefix::find_by_ids(&env.pool, &[id])
+        .await
+        .unwrap();
+    assert_eq!(retained.len(), 1);
+    assert_eq!(
+        retained[0].status.lifecycle_state,
+        SitePrefixLifecycleState::Deleting
+    );
+    assert!(matches!(
+        readiness::stored_outcome(env, id).await,
+        model::controller_outcome::PersistentStateHandlerOutcome::Wait { .. }
+    ));
+}
+
 /// Verifies the Version RPC retains a retired operator root through child soft
 /// deletion, so operator-visible isolation lasts until the address space drains.
 #[crate::sqlx_test]
@@ -1475,27 +1493,45 @@ async fn runtime_config_retains_removed_operator_root_until_child_hard_delete(
     .bind(retiring_root_id)
     .execute(&mut *txn)
     .await?;
-    // A draining child still owns address space even after its soft deletion.
-    sqlx::query("UPDATE network_vpc_prefixes SET deleted = now() WHERE id = $1")
-        .bind(child_id)
-        .execute(&mut *txn)
-        .await?;
     txn.commit().await?;
 
-    // Re-read through Version so the assertion proves committed query wiring.
-    let mut null_routes = runtime_config_null_routes(&env).await;
-    null_routes.sort();
-    assert_eq!(
-        null_routes,
-        vec![configured_root.to_string(), retiring_root.to_string()],
-        "soft-deleted children must retain the retiring root"
-    );
+    for (scenario, parent_id, soft_deleted) in [
+        ("live exact child", Some(retiring_root_id), false),
+        ("soft-deleted exact child", Some(retiring_root_id), true),
+        ("soft-deleted predecessor without lineage", None, true),
+    ] {
+        sqlx::query(
+            "UPDATE network_vpc_prefixes SET site_prefix_id = $2, \
+             deleted = CASE WHEN $3 THEN now() ELSE NULL END WHERE id = $1",
+        )
+        .bind(child_id)
+        .bind(parent_id)
+        .bind(soft_deleted)
+        .execute(&env.pool)
+        .await?;
+        assert_operator_retirement_waits(&env, retiring_root_id).await;
+        let mut null_routes = runtime_config_null_routes(&env).await;
+        null_routes.sort();
+        assert_eq!(
+            null_routes,
+            vec![configured_root.to_string(), retiring_root.to_string()],
+            "{scenario} must retain the retiring root"
+        );
+    }
 
     // Only physical removal of the last child permits the route to disappear.
     sqlx::query("DELETE FROM network_vpc_prefixes WHERE id = $1")
         .bind(child_id)
         .execute(&env.pool)
         .await?;
+    readiness::controller(&env)
+        .run_single_iteration_ext(false)
+        .await;
+    assert!(
+        db::site_prefix::find_by_ids(&env.pool, &[retiring_root_id])
+            .await?
+            .is_empty()
+    );
     assert_eq!(
         runtime_config_null_routes(&env).await,
         vec![configured_root.to_string()],
@@ -1515,6 +1551,7 @@ async fn runtime_config_retains_removed_operator_root_until_direct_segment_hard_
     // retirement, so the public segment creation path remains representative.
     let configured_root: IpNetwork = "10.0.0.0/8".parse()?;
     let retiring_root: IpNetwork = "172.16.0.0/12".parse()?;
+    let nested_root: IpNetwork = "172.16.1.0/24".parse()?;
     let mut config = get_config();
     config.site_fabric_prefixes = vec![configured_root];
     config.site_fabric_null_routes = None;
@@ -1534,6 +1571,10 @@ async fn runtime_config_retains_removed_operator_root_until_direct_segment_hard_
     // Reconstruct the operator root before creating the tenant resource
     // through the same public path used before its configuration retirement.
     let mut txn = env.pool.begin().await?;
+    db::site_prefix::reconcile_configured(&mut txn, &[configured_root, retiring_root, nested_root])
+        .await?;
+    // Direct admission needs live coverage, not a unique parent. A more specific
+    // retiring root must not prevent using the broader Ready root.
     db::site_prefix::reconcile_configured(&mut txn, &[configured_root, retiring_root]).await?;
     txn.commit().await?;
     let vpc_id = env
@@ -1578,11 +1619,31 @@ async fn runtime_config_retains_removed_operator_root_until_direct_segment_hard_
     // configuration, then verify the direct prefix retains its blackhole.
     let mut txn = env.pool.begin().await?;
     db::site_prefix::reconcile_configured(&mut txn, &[configured_root]).await?;
+    let retiring_root_id: SitePrefixId =
+        sqlx::query_scalar("SELECT id FROM site_prefixes WHERE prefix = $1")
+            .bind(retiring_root)
+            .fetch_one(&mut *txn)
+            .await?;
     txn.commit().await?;
+    assert_operator_retirement_waits(&env, retiring_root_id).await;
     assert_eq!(
         runtime_config_null_routes(&env).await,
         vec![configured_root.to_string(), retiring_root.to_string()]
     );
+
+    // The retained Deleting root must not admit another direct segment through
+    // the predecessor configuration after its last Ready coverage is retired.
+    let error = NetworkSegmentHelper::new_with_tenant_prefix("172.16.2.0/24", "172.16.2.1", vpc_id)
+        .create_with_api(&env.api)
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), Code::FailedPrecondition);
+    let segment_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM network_segments WHERE vpc_id = $1")
+            .bind(vpc_id)
+            .fetch_one(&env.pool)
+            .await?;
+    assert_eq!(segment_count, 1, "only the existing segment must persist");
 
     // Soft deletion must not withdraw isolation while the segment's direct
     // NetworkPrefix remains present during controller draining.
@@ -1591,6 +1652,7 @@ async fn runtime_config_retains_removed_operator_root_until_direct_segment_hard_
             id: Some(segment_id),
         }))
         .await?;
+    assert_operator_retirement_waits(&env, retiring_root_id).await;
     assert_eq!(
         runtime_config_null_routes(&env).await,
         vec![configured_root.to_string(), retiring_root.to_string()]
@@ -1611,6 +1673,14 @@ async fn runtime_config_retains_removed_operator_root_until_direct_segment_hard_
             .await?
             .into_inner()
             .network_segments
+            .is_empty()
+    );
+    readiness::controller(&env)
+        .run_single_iteration_ext(false)
+        .await;
+    assert!(
+        db::site_prefix::find_by_ids(&env.pool, &[retiring_root_id])
+            .await?
             .is_empty()
     );
     assert_eq!(
@@ -1739,6 +1809,10 @@ async fn dpu_response_uses_explicit_fnn_null_route_override(
         TestEnvOverrides::with_config(config).with_fnn_config(None),
     )
     .await;
+
+    // Persist coverage for the fixture segment independently of the runtime
+    // roots and explicit null routes whose rendering this test distinguishes.
+    persist_configured_site_prefix(&env, "192.0.4.0/24").await;
 
     create_fixture_tenant(&env, "tenant-null-route").await?;
     env.api
