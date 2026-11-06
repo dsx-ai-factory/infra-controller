@@ -53,8 +53,8 @@ whatever is stored now
 
 `--force`
 
-Required to switch the any fallback to mode none, which stops attesting
-every class without a profile of its own
+Required to switch the 'any' fallback to mode none, which stops
+attesting every class without a profile of its own
 
 `--extended`
 
@@ -76,7 +76,7 @@ Sort output by specified field
 
 `-h, --help`
 
-Print help (see a summary with -h)
+Print help (see a summary with '-h')
 
 `<HARDWARE_CLASS>`
 
