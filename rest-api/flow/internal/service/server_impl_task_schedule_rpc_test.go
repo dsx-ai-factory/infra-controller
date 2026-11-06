@@ -24,11 +24,14 @@ import (
 // the embedded interface instead of silently succeeding.
 type scheduleRPCStore struct {
 	taskschedule.Store
-	row         *dbmodel.TaskSchedule
-	getErr      error
-	reads       int
-	writes      int
-	requestedID uuid.UUID
+	row           *dbmodel.TaskSchedule
+	getErr        error
+	deleteErr     error
+	transactions  int
+	inTransaction bool
+	reads         int
+	writes        int
+	requestedID   uuid.UUID
 }
 
 func (s *scheduleRPCStore) Get(_ context.Context, id uuid.UUID) (*dbmodel.TaskSchedule, error) {
@@ -49,6 +52,39 @@ func (s *scheduleRPCStore) SetEnabled(_ context.Context, id uuid.UUID, enabled b
 	s.requestedID = id
 	s.row.Enabled = enabled
 	return s.row, nil
+}
+
+func (s *scheduleRPCStore) RunInTransaction(ctx context.Context, fn func(context.Context) error) error {
+	s.transactions++
+	s.inTransaction = true
+	defer func() { s.inTransaction = false }()
+	return fn(ctx)
+}
+
+func (s *scheduleRPCStore) LockForTrigger(ctx context.Context, id uuid.UUID) (*dbmodel.TaskSchedule, error) {
+	if !s.inTransaction {
+		return nil, errors.New("lock outside transaction")
+	}
+	return s.Get(ctx, id)
+}
+
+func (s *scheduleRPCStore) Resume(_ context.Context, id uuid.UUID, nextRunAt *time.Time) (*dbmodel.TaskSchedule, error) {
+	if !s.inTransaction {
+		return nil, errors.New("resume outside transaction")
+	}
+	s.writes++
+	s.requestedID = id
+	s.row.Enabled = true
+	if nextRunAt != nil {
+		s.row.NextRunAt = nextRunAt
+	}
+	return s.row, nil
+}
+
+func (s *scheduleRPCStore) Delete(_ context.Context, id uuid.UUID) error {
+	s.writes++
+	s.requestedID = id
+	return s.deleteErr
 }
 
 func TestFlowServerImpl_GetTaskSchedule(t *testing.T) {
@@ -100,28 +136,36 @@ func TestFlowServerImpl_UpdateTaskSchedule(t *testing.T) {
 		name       string
 		id         string
 		mask       *fieldmaskpb.FieldMask
+		schedule   *pb.ScheduleConfig
+		storeErr   error
+		wantReads  int
 		wantCode   codes.Code
 		wantWrites int
 	}{
 		{name: "malformed ID", id: "not-a-uuid", wantCode: codes.InvalidArgument},
 		{name: "missing update mask", id: id.String(), wantCode: codes.InvalidArgument},
-		{name: "rename schedule", id: id.String(), mask: &fieldmaskpb.FieldMask{Paths: []string{"schedule.name"}}, wantCode: codes.OK, wantWrites: 1},
+		{name: "missing schedule", id: id.String(), mask: &fieldmaskpb.FieldMask{Paths: []string{"schedule.name"}}, wantCode: codes.InvalidArgument},
+		{name: "empty masked name", id: id.String(), schedule: &pb.ScheduleConfig{}, mask: &fieldmaskpb.FieldMask{Paths: []string{"schedule.name"}}, wantCode: codes.InvalidArgument},
+		{name: "unsupported mask", id: id.String(), schedule: &pb.ScheduleConfig{Name: "renamed"}, mask: &fieldmaskpb.FieldMask{Paths: []string{"schedule.description"}}, wantCode: codes.InvalidArgument},
+		{name: "missing spec under row lock", id: id.String(), schedule: &pb.ScheduleConfig{}, mask: &fieldmaskpb.FieldMask{Paths: []string{"schedule.spec"}}, wantCode: codes.InvalidArgument, wantReads: 1},
+		{name: "lock error is preserved", id: id.String(), schedule: &pb.ScheduleConfig{}, mask: &fieldmaskpb.FieldMask{Paths: []string{"schedule.spec"}}, storeErr: errors.New("database unavailable"), wantCode: codes.Unknown, wantReads: 1},
+		{name: "rename schedule", schedule: &pb.ScheduleConfig{Name: "renamed"}, id: id.String(), mask: &fieldmaskpb.FieldMask{Paths: []string{"schedule.name"}}, wantCode: codes.OK, wantWrites: 1},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			store := &scheduleRPCStore{row: &dbmodel.TaskSchedule{ID: id, Name: "old", Enabled: true}}
+			store := &scheduleRPCStore{row: &dbmodel.TaskSchedule{ID: id, Name: "old", Enabled: true}, getErr: tt.storeErr}
 			client := flowRPCClient(t, &FlowServerImpl{taskScheduleStore: store})
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 
 			response, err := client.UpdateTaskSchedule(ctx, &pb.UpdateTaskScheduleRequest{
 				Id:         &pb.UUID{Id: tt.id},
-				Schedule:   &pb.ScheduleConfig{Name: "renamed"},
+				Schedule:   tt.schedule,
 				UpdateMask: tt.mask,
 			})
 
 			require.Equal(t, tt.wantCode, status.Code(err))
-			require.Zero(t, store.reads)
+			require.Equal(t, tt.wantReads, store.reads)
 			require.Equal(t, tt.wantWrites, store.writes)
 			require.True(t, store.row.Enabled)
 			if tt.wantCode != codes.OK {
@@ -182,6 +226,92 @@ func TestFlowServerImpl_PauseTaskSchedule(t *testing.T) {
 			require.False(t, store.row.Enabled)
 			require.False(t, response.GetEnabled())
 			require.Equal(t, id.String(), response.GetId().GetId())
+		})
+	}
+}
+
+func TestFlowServerImpl_ResumeTaskSchedule(t *testing.T) {
+	id := uuid.New()
+	next := time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name       string
+		id         *pb.UUID
+		enabled    bool
+		nextRunAt  *time.Time
+		storeErr   error
+		wantCode   codes.Code
+		wantReads  int
+		wantWrites int
+	}{
+		{name: "missing ID", wantCode: codes.InvalidArgument},
+		{name: "malformed ID", id: &pb.UUID{Id: "not-a-uuid"}, wantCode: codes.InvalidArgument},
+		{name: "zero ID", id: &pb.UUID{Id: uuid.Nil.String()}, wantCode: codes.InvalidArgument},
+		{name: "fired one-time schedule", id: &pb.UUID{Id: id.String()}, wantCode: codes.FailedPrecondition, wantReads: 1},
+		{name: "resume before first firing", id: &pb.UUID{Id: id.String()}, nextRunAt: &next, wantCode: codes.OK, wantReads: 1, wantWrites: 1},
+		{name: "already enabled is idempotent", id: &pb.UUID{Id: id.String()}, enabled: true, nextRunAt: &next, wantCode: codes.OK, wantReads: 1},
+		{name: "lock error is preserved", id: &pb.UUID{Id: id.String()}, storeErr: errors.New("database unavailable"), wantCode: codes.Unknown, wantReads: 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := &scheduleRPCStore{row: &dbmodel.TaskSchedule{ID: id, SpecType: dbmodel.SpecTypeOneTime, Enabled: tt.enabled, NextRunAt: tt.nextRunAt}, getErr: tt.storeErr}
+			client := flowRPCClient(t, &FlowServerImpl{taskScheduleStore: store})
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			response, err := client.ResumeTaskSchedule(ctx, &pb.ResumeTaskScheduleRequest{Id: tt.id})
+			require.Equal(t, tt.wantCode, status.Code(err))
+			require.Equal(t, tt.wantReads, store.reads)
+			require.Equal(t, tt.wantReads, store.transactions)
+			require.Equal(t, tt.wantWrites, store.writes)
+			require.Equal(t, tt.nextRunAt, store.row.NextRunAt)
+			if tt.wantReads > 0 {
+				require.Equal(t, id, store.requestedID)
+			}
+			if tt.wantCode != codes.OK {
+				require.Nil(t, response)
+				require.Equal(t, tt.enabled, store.row.Enabled)
+				return
+			}
+			require.True(t, store.row.Enabled)
+			require.True(t, response.GetEnabled())
+			require.Equal(t, id.String(), response.GetId().GetId())
+			require.Equal(t, next, response.GetNextRunAt().AsTime())
+		})
+	}
+}
+
+func TestFlowServerImpl_DeleteTaskSchedule(t *testing.T) {
+	id := uuid.New()
+	tests := []struct {
+		name       string
+		id         *pb.UUID
+		storeErr   error
+		wantCode   codes.Code
+		wantWrites int
+	}{
+		{name: "missing ID", wantCode: codes.InvalidArgument},
+		{name: "malformed ID", id: &pb.UUID{Id: "not-a-uuid"}, wantCode: codes.InvalidArgument},
+		{name: "zero ID", id: &pb.UUID{Id: uuid.Nil.String()}, wantCode: codes.InvalidArgument},
+		{name: "delete existing schedule", id: &pb.UUID{Id: id.String()}, wantCode: codes.OK, wantWrites: 1},
+		{name: "store error is preserved", id: &pb.UUID{Id: id.String()}, storeErr: errors.New("database unavailable"), wantCode: codes.Unknown, wantWrites: 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := &scheduleRPCStore{deleteErr: tt.storeErr}
+			client := flowRPCClient(t, &FlowServerImpl{taskScheduleStore: store})
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			response, err := client.DeleteTaskSchedule(ctx, &pb.DeleteTaskScheduleRequest{Id: tt.id})
+			require.Equal(t, tt.wantCode, status.Code(err))
+			require.Zero(t, store.reads)
+			require.Equal(t, tt.wantWrites, store.writes)
+			if tt.wantWrites > 0 {
+				require.Equal(t, id, store.requestedID)
+			}
+			if tt.wantCode != codes.OK {
+				require.Nil(t, response)
+				return
+			}
+			require.NotNil(t, response)
 		})
 	}
 }
