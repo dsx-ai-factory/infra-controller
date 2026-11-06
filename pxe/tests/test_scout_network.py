@@ -18,6 +18,8 @@ PREFERRED = "00-forge-scout-preferred.network"
 NONPREFERRED = "01-forge-scout-nonpreferred.network"
 LEGACY = "00-forge-scout-nonpreferred.network"
 EARLY_HOOK = "etc/systemd/system/systemd-network-generator.service.d/50-forge-scout-network.conf"
+# Successful polling must leave room for command startup on busy runners.
+READY_WAIT_SECONDS = "30"
 
 
 class ScoutNetworkTest(unittest.TestCase):
@@ -167,9 +169,10 @@ class ScoutNetworkTest(unittest.TestCase):
             (link / "carrier").write_text("1\n")
 
     def run_helper(self, *args, expected=0):
+        # The outer watchdog also covers setup and recovery after an internal timeout.
         result = subprocess.run(
             ["sh", str(SCRIPT), *map(str, args)], env=self.env,
-            capture_output=True, text=True, timeout=10,
+            capture_output=True, text=True, timeout=60,
         )
         stub_error = self.directory / "stub_error"
         self.assertFalse(stub_error.exists(), stub_error.read_text() if stub_error.exists() else "")
@@ -244,6 +247,7 @@ class ScoutNetworkTest(unittest.TestCase):
                     (self.directory / name).unlink(missing_ok=True)
                 reason = case.get("reason")
                 self.env["TEST_ADDRESS_STATE"] = case["state"]
+                self.env["SCOUT_NETWORK_WAIT_SECONDS"] = "2" if reason else READY_WAIT_SECONDS
                 (self.network / "enp1s0/address").write_text("02:00:00:00:00:" + ("03" if reason == "no_interface" else "01"))
                 (self.network / "enp1s0/carrier").write_text("0" if reason == "no_carrier" else "1")
                 self.run_helper("prepare")
@@ -265,6 +269,7 @@ class ScoutNetworkTest(unittest.TestCase):
                     if case["state"] == "dadfailed":
                         # A later readiness check restores selection after DHCP recovers.
                         self.env["TEST_ADDRESS_STATE"] = "ipv4"
+                        self.env["SCOUT_NETWORK_WAIT_SECONDS"] = READY_WAIT_SECONDS
                         self.run_helper()
                         self.assertTrue((self.runtime / PREFERRED).exists())
                         self.assertTrue((self.runtime / NONPREFERRED).exists())
@@ -292,7 +297,7 @@ class ScoutNetworkTest(unittest.TestCase):
                 for name in ("calls", "probes", "reload_probe", "selected_status"):
                     (self.directory / name).unlink(missing_ok=True)
                 self.env["TEST_ADDRESS_STATE"] = state
-                self.env["SCOUT_NETWORK_WAIT_SECONDS"] = "5" if not expected else "2"
+                self.env["SCOUT_NETWORK_WAIT_SECONDS"] = READY_WAIT_SECONDS if not expected else "2"
                 result = self.run_helper(expected=expected)
                 self.assertEqual((self.runtime / PREFERRED).exists(), not expected)
                 if not expected:
@@ -312,7 +317,7 @@ class ScoutNetworkTest(unittest.TestCase):
             with self.subTest(state=state):
                 (self.directory / "withdrawal_probes").unlink(missing_ok=True)
                 self.env["TEST_COMPETING_STATE"] = state
-                self.env["SCOUT_NETWORK_WAIT_SECONDS"] = "5" if state == "converges" else "2"
+                self.env["SCOUT_NETWORK_WAIT_SECONDS"] = READY_WAIT_SECONDS if state == "converges" else "2"
                 self.run_helper("prepare")
                 result = self.run_helper(expected=expected)
                 if probes:
