@@ -43,7 +43,9 @@ use model::vpc::{
 use rpc::forge::forge_server::Forge;
 
 use crate::api::Api;
-use crate::cfg::file::RouteTargetConfig;
+use crate::cfg::file::{
+    AdminFnnConfig, FnnConfig, FnnRoutingProfileConfig, PrefixRouteTargetConfig, RouteTargetConfig,
+};
 use crate::test_support::builder::TestApiBuilder;
 use crate::test_support::metadata;
 use crate::test_support::network_segment::FIXTURE_TENANT_ORG_ID;
@@ -461,13 +463,14 @@ async fn vpc_creation_rolls_back_allocation_on_entity_write_failure(
     Ok(())
 }
 
-/// Verifies a post-insert effective-profile failure rolls back both VPC
-/// persistence and the exact VNI allocation selected by the request.
+/// Verifies a symbolic target made unencodable by the selected VNI rolls back
+/// VPC persistence and the exact VNI allocation in API and configured creation.
+/// This keeps startup from retaining a VPC that cannot produce DPU configuration.
 #[crate::sqlx_test]
 async fn vpc_creation_rolls_back_unencodable_symbolic_route_target(
     pool: sqlx::PgPool,
 ) -> Result<(), eyre::Report> {
-    // Configure a symbolic four-byte-ASN target that fails only with a high VNI.
+    // Configure one nested symbolic target that depends on the VPC's allocated VNI.
     let mut overrides = TestEnvOverrides::default().with_fnn_config(None);
     overrides
         .fnn_config
@@ -476,11 +479,17 @@ async fn vpc_creation_rolls_back_unencodable_symbolic_route_target(
         .routing_profiles
         .get_mut("INTERNAL")
         .expect("internal fixture profile")
-        .route_target_imports = Some(vec![RouteTargetConfig {
-        asn: 429_000_000, // Four-byte ASN restricts the resolved local administrator.
-        vni: None,        // Keep the configured target unresolved until creation allocates a VNI.
-        vni_self: true,   // The requested high VNI must fail the four-byte-ASN encoding limit.
-    }]);
+        .route_targets_on_exports_by_prefix =
+        Some(vec![crate::cfg::file::PrefixRouteTargetConfig {
+            prefix: "0.0.0.0/0".parse().expect("default route"),
+            match_type: carbide_network::virtualization::ExportPrefixMatchType::Exact,
+            max_prefix_length: None,
+            route_targets: vec![RouteTargetConfig {
+                asn: 429_000_000, // Four-byte ASN restricts the resolved local administrator.
+                vni: None, // Keep the configured target unresolved until creation allocates a VNI.
+                vni_self: true, // Defer the local administrator to the allocated VPC VNI.
+            }],
+        }]);
     let env = create_test_env_with_overrides(pool, overrides).await;
     let requested_vni = 65_536;
 
@@ -497,38 +506,91 @@ async fn vpc_creation_rolls_back_unencodable_symbolic_route_target(
         .await?;
     grow_explicit_vni(&env, VPC_VNI, requested_vni).await?;
     let allocations_before = vpc_vni_pool_state(&env).await?;
-    let vpc_id = VpcId::new();
+    check_cases_async(
+        [
+            // An explicitly requested API VNI remains invalid caller input.
+            Case {
+                scenario: "API creation",
+                input: ("unencodable-create-api", false),
+                expect: FailsWith(tonic::Code::InvalidArgument),
+            },
+            // Startup must roll back the same allocation without committing unusable server state.
+            Case {
+                scenario: "configured creation",
+                input: ("unencodable-create-configured", true),
+                expect: FailsWith(tonic::Code::FailedPrecondition),
+            },
+        ],
+        |(vpc_name, configured)| {
+            let env = &env;
+            let allocations_before = &allocations_before;
+            async move {
+                // Both paths allocate and insert before resolving the selected profile.
+                let creation = if configured {
+                    db_init::create_initial_vpcs(
+                        &env.api,
+                        &HashMap::from([(
+                            vpc_name.to_string(),
+                            VpcDefinition {
+                                organization_id: Some("unencodable-create".to_string()),
+                                network_virtualization_type: VpcVirtualizationType::Fnn,
+                                routing_profile_type: Some("INTERNAL".to_string()),
+                                routing_profile_overrides: None,
+                                vni: Some(requested_vni as i32), // Resolve the symbol against this allocation.
+                            },
+                        )]),
+                    )
+                    .await
+                    .map_err(tonic::Status::from)
+                } else {
+                    env.api
+                        .create_vpc(
+                            VpcCreationRequest::builder("unencodable-create")
+                                .metadata(rpc::Metadata {
+                                    name: vpc_name.to_string(),
+                                    ..Default::default()
+                                })
+                                .network_virtualization_type(
+                                    rpc::forge::VpcVirtualizationType::Fnn as i32,
+                                )
+                                .routing_profile_type("INTERNAL".to_string())
+                                .vni(requested_vni)
+                                .tonic_request(),
+                        )
+                        .await
+                        .map(drop)
+                };
 
-    // Creation reaches response conversion only after allocating and inserting the VPC.
-    let error = env
-        .api
-        .create_vpc(
-            VpcCreationRequest::builder("unencodable-create")
-                .id(vpc_id)
-                .metadata(rpc::Metadata {
-                    name: "unencodable-create".to_string(),
-                    ..Default::default()
-                })
-                .network_virtualization_type(rpc::forge::VpcVirtualizationType::Fnn as i32)
-                .routing_profile_type("INTERNAL".to_string())
-                .vni(requested_vni)
-                .tonic_request(),
-        )
-        .await
-        .expect_err("resolved route target must reject the high VNI");
-
-    // The late failure must leave neither the VPC row nor an allocated pool value.
-    assert_eq!(error.code(), tonic::Code::InvalidArgument);
-    assert!(error.message().contains("cannot both exceed 65535"));
-    let found = env
-        .api
-        .find_vpcs_by_ids(tonic::Request::new(rpc::forge::VpcsByIdsRequest {
-            vpc_ids: vec![vpc_id],
-        }))
-        .await?
-        .into_inner();
-    assert!(found.vpcs.is_empty());
-    assert_eq!(vpc_vni_pool_state(&env).await?, allocations_before);
+                // Prove encoding caused the rejection and neither persistent write survived.
+                assert!(
+                    creation
+                        .as_ref()
+                        .expect_err("resolved route target must reject the high VNI")
+                        .message()
+                        .contains("cannot both exceed 65535")
+                );
+                let found = env
+                    .api
+                    .find_vpc_ids(tonic::Request::new(rpc::forge::VpcSearchFilter {
+                        name: Some(vpc_name.to_string()),
+                        tenant_org_id: None,
+                        label: None,
+                    }))
+                    .await
+                    .expect("find rejected VPC by name")
+                    .into_inner();
+                assert!(found.vpc_ids.is_empty());
+                assert_eq!(
+                    vpc_vni_pool_state(env)
+                        .await
+                        .expect("committed VNI ownership"),
+                    *allocations_before
+                );
+                creation.map_err(|error| error.code())
+            }
+        },
+    )
+    .await;
     Ok(())
 }
 
@@ -3709,18 +3771,23 @@ async fn update_vpc_rolls_back_unencodable_symbolic_route_target(
     let vpc_id = before.id.expect("created VPC ID");
     let allocations_before = vpc_vni_pool_state(&env).await?;
 
-    // Apply a symbolic four-byte-ASN target that becomes invalid only after VNI substitution.
+    // Apply a nested symbolic target that becomes invalid only after VNI substitution.
     let error = env
         .api
         .update_vpc(
             VpcUpdateRequest::builder()
                 .set_id(Some(vpc_id))
                 .routing_profile_overrides(rpc::forge::VpcRoutingProfileOverrides {
-                    route_target_imports: Some(rpc::common::RouteTargets {
-                        values: vec![rpc::common::RouteTarget {
-                            asn: 429_000_000, // Four-byte ASN rejects the active high VNI.
-                            vni: None,        // Preserve symbolic form through request conversion.
-                            vni_self: true,   // Resolve against the already allocated high VNI.
+                    route_targets_on_exports_by_prefix: Some(rpc::forge::PrefixRouteTargets {
+                        values: vec![rpc::forge::PrefixRouteTarget {
+                            prefix: "0.0.0.0/0".into(),
+                            match_type: rpc::forge::ExportPrefixMatchType::Exact as i32,
+                            max_prefix_length: None,
+                            route_targets: vec![rpc::common::RouteTarget {
+                                asn: 429_000_000, // Four-byte ASN rejects the active high VNI.
+                                vni: None, // Preserve symbolic form through request conversion.
+                                vni_self: true, // Resolve against the already allocated high VNI.
+                            }],
                         }],
                     }),
                     ..Default::default()
@@ -3730,7 +3797,7 @@ async fn update_vpc_rolls_back_unencodable_symbolic_route_target(
         .await
         .expect_err("effective profile must reject the unencodable target");
 
-    // The failed response conversion must roll back the preceding database update.
+    // The failed target validation must roll back the preceding database update.
     assert_eq!(error.code(), tonic::Code::InvalidArgument);
     assert!(error.message().contains("cannot both exceed 65535"));
     assert_eq!(find_test_vpc(&env, vpc_id).await?, before);
@@ -3739,7 +3806,7 @@ async fn update_vpc_rolls_back_unencodable_symbolic_route_target(
 }
 
 /// Verifies unrelated updates remain available for a retained incompatible
-/// profile and an explicit empty route-target list can repair that profile.
+/// profile and an explicit empty list of conditional export rules can repair that profile.
 #[crate::sqlx_test]
 async fn update_vpc_can_manage_and_repair_retained_incompatible_profile(
     pool: sqlx::PgPool,
@@ -3753,7 +3820,29 @@ async fn update_vpc_can_manage_and_repair_retained_incompatible_profile(
     let created =
         create_routing_profile_vpc(&env, "retained-update-repair", Some(active_vni)).await?;
     let vpc_id = created.id.expect("created VPC ID");
-    let api = api_with_incompatible_internal_route_target(&env).await?;
+    let mut api = api_with_incompatible_internal_route_target(&env).await?;
+    // Replace runtime imports with a nested symbolic target while retaining the allocated high VNI.
+    let mut config = api.runtime_config.as_ref().clone();
+    let profile = config
+        .fnn
+        .as_mut()
+        .expect("FNN configuration")
+        .routing_profiles
+        .get_mut("INTERNAL")
+        .expect("internal profile");
+    profile.route_target_imports = None;
+    profile.route_targets_on_exports_by_prefix =
+        Some(vec![crate::cfg::file::PrefixRouteTargetConfig {
+            prefix: "0.0.0.0/0".parse().expect("default route"),
+            match_type: carbide_network::virtualization::ExportPrefixMatchType::Exact,
+            max_prefix_length: None,
+            route_targets: vec![RouteTargetConfig {
+                asn: 429_000_000, // Four-byte ASNs require a 16-bit local administrator.
+                vni: None,        // Keep the literal unset for symbolic resolution.
+                vni_self: true,   // Resolve to active_vni (65536), exceeding the RT limit.
+            }],
+        }]);
+    api.runtime_config = Arc::new(config);
 
     // Apply an unrelated metadata update while the retained profile is incompatible.
     let updated = api
@@ -3786,14 +3875,28 @@ async fn update_vpc_can_manage_and_repair_retained_incompatible_profile(
             .is_none()
     );
 
-    // Mask the inherited bad import target while preserving the complete metadata message.
+    // Read through the same API to prove the metadata update persisted and retained reads remain available.
+    let retained = api
+        .find_vpcs_by_ids(tonic::Request::new(rpc::forge::VpcsByIdsRequest {
+            vpc_ids: vec![vpc_id],
+        }))
+        .await?
+        .into_inner()
+        .vpcs
+        .pop()
+        .expect("retained VPC");
+    assert_eq!(retained, updated);
+
+    // Clear inherited conditional export rules while preserving the complete metadata message.
     let repaired = api
         .update_vpc(
             VpcUpdateRequest::builder()
                 .set_id(Some(vpc_id))
                 .metadata(updated.metadata.clone().expect("updated VPC metadata"))
                 .routing_profile_overrides(rpc::forge::VpcRoutingProfileOverrides {
-                    route_target_imports: Some(rpc::common::RouteTargets { values: vec![] }),
+                    route_targets_on_exports_by_prefix: Some(rpc::forge::PrefixRouteTargets {
+                        values: vec![],
+                    }),
                     ..Default::default()
                 })
                 .tonic_request(),
@@ -3840,7 +3943,7 @@ async fn update_vpc_can_manage_and_repair_retained_incompatible_profile(
         forge_vpc_config(&persisted)
             .routing_profile_overrides
             .as_ref()
-            .and_then(|overrides| overrides.route_target_imports.as_ref())
+            .and_then(|overrides| overrides.route_targets_on_exports_by_prefix.as_ref())
             .is_some_and(|targets| targets.values.is_empty())
     );
     Ok(())
@@ -3902,7 +4005,20 @@ async fn vpc_routing_profile_overrides_can_be_updated(
         .into_inner()
         .tenant
         .expect("created tenant");
+    let conditional_export = rpc::forge::PrefixRouteTarget {
+        prefix: "0.0.0.0/0".to_string(), // Select only the default route in this override.
+        match_type: rpc::forge::ExportPrefixMatchType::Exact as i32,
+        max_prefix_length: None,
+        route_targets: vec![rpc::common::RouteTarget {
+            asn: 64512,
+            vni: Some(50000),
+            vni_self: false,
+        }],
+    };
     let routing_profile_overrides = rpc::forge::VpcRoutingProfileOverrides {
+        route_targets_on_exports_by_prefix: Some(rpc::forge::PrefixRouteTargets {
+            values: vec![conditional_export.clone()],
+        }),
         route_target_imports: Some(rpc::common::RouteTargets { values: vec![] }),
         leak_default_route_from_underlay: Some(false),
         allowed_anycast_prefixes: Some(rpc::forge::PrefixFilterPolicyEntries {
@@ -3913,6 +4029,7 @@ async fn vpc_routing_profile_overrides_can_be_updated(
         ..Default::default()
     };
     let expected_effective_profile = rpc::forge::VpcEffectiveRoutingProfile {
+        route_targets_on_exports_by_prefix: vec![conditional_export],
         route_target_imports: vec![],
         leak_default_route_from_underlay: false,
         allowed_anycast_prefixes: vec![rpc::forge::PrefixFilterPolicyEntry {
@@ -4004,7 +4121,7 @@ async fn vpc_routing_profile_overrides_can_be_updated(
         Some(&expected_effective_profile)
     );
 
-    // Pair symbolic import and export replacements with the VNI-resolved profile,
+    // Pair symbolic import, unconditional export, and conditional export replacements with the VNI-resolved profile,
     // retaining the named base's inherited properties in the complete fixture.
     let updated_id = updated.id.expect("updated VPC ID");
     let allocated_vni = updated
@@ -4013,6 +4130,18 @@ async fn vpc_routing_profile_overrides_can_be_updated(
         .and_then(|status| status.vni)
         .expect("FNN VPC should have an allocated VNI");
     let updated_routing_profile_overrides = rpc::forge::VpcRoutingProfileOverrides {
+        route_targets_on_exports_by_prefix: Some(rpc::forge::PrefixRouteTargets {
+            values: vec![rpc::forge::PrefixRouteTarget {
+                prefix: "::/0".to_string(),
+                match_type: rpc::forge::ExportPrefixMatchType::Exact as i32,
+                max_prefix_length: None,
+                route_targets: vec![rpc::common::RouteTarget {
+                    asn: 429_000_002,
+                    vni: None, // Preserve this nested symbol across update and find.
+                    vni_self: true,
+                }],
+            }],
+        }),
         route_target_imports: Some(rpc::common::RouteTargets {
             values: vec![rpc::common::RouteTarget {
                 asn: 429_000_001,
@@ -4031,6 +4160,16 @@ async fn vpc_routing_profile_overrides_can_be_updated(
         ..Default::default()
     };
     let updated_effective_profile = rpc::forge::VpcEffectiveRoutingProfile {
+        route_targets_on_exports_by_prefix: vec![rpc::forge::PrefixRouteTarget {
+            prefix: "::/0".to_string(),
+            match_type: rpc::forge::ExportPrefixMatchType::Exact as i32,
+            max_prefix_length: None,
+            route_targets: vec![rpc::common::RouteTarget {
+                asn: 429_000_002,
+                vni: Some(allocated_vni),
+                vni_self: false,
+            }],
+        }],
         route_target_imports: vec![rpc::common::RouteTarget {
             asn: 429_000_001,
             vni: Some(allocated_vni),
@@ -5495,6 +5634,191 @@ async fn vpc_deletion_is_idempotent(pool: sqlx::PgPool) -> Result<(), eyre::Repo
     assert_eq!(err.message(), format!("vpc not found: {vpc_id}"));
 
     Ok(())
+}
+
+/// Verifies an enabled admin profile that cannot encode its configured VNI rejects
+/// creation and reconciliation without changing VPCs or admin attachments.
+/// Rejecting unchanged-VNI reconciliation also prevents incompatible policy activation.
+#[crate::sqlx_test]
+async fn admin_vpc_rejects_unencodable_startup_profile_without_changes(pool: sqlx::PgPool) {
+    // Use the standard API to construct predecessors independently of the incompatible profile below.
+    let env = create_test_env(pool).await;
+    let incompatible_vni = 65_536;
+    let mut config = env.config.as_ref().clone();
+
+    // Configure one nested symbolic target and retain empty defaults for the other FNN fields.
+    config.fnn = Some(FnnConfig {
+        admin_vpc: Some(AdminFnnConfig {
+            enabled: true,                   // Activate validation before admin VPC writes.
+            vpc_vni: Some(incompatible_vni), // Match the VNI submitted to reconciliation.
+            routing_profile: FnnRoutingProfileConfig {
+                route_targets_on_exports_by_prefix: Some(vec![PrefixRouteTargetConfig {
+                    prefix: "0.0.0.0/0".parse().expect("default route"),
+                    match_type: carbide_network::virtualization::ExportPrefixMatchType::Exact,
+                    max_prefix_length: None,
+                    route_targets: vec![RouteTargetConfig {
+                        asn: 65_536, // Exercise the four-byte ASN encoding.
+                        vni: None,
+                        vni_self: true, // Resolve against the VNI reconciliation would store.
+                    }],
+                }]),
+                ..Default::default()
+            },
+        }),
+        common_internal_route_target: None,
+        additional_route_target_imports: vec![],
+        routing_profiles: HashMap::new(),
+        use_vpc_vrf_loopback: false,
+    });
+    let api = TestApiBuilder::new(
+        env.pool.clone(),
+        env.common_pools.clone(),
+        env.api.work_lock_manager_handle.clone(),
+    )
+    .with_runtime_config(Arc::new(config))
+    .build();
+
+    // Read stable persisted fields through public Find APIs, excluding elapsed SLA values.
+    let find_admin_state = || async {
+        // Fetch VPC records to observe their requested VNI, active VNI, version, and timestamps.
+        let vpc_ids = env
+            .api
+            .find_vpc_ids(tonic::Request::new(rpc::forge::VpcSearchFilter {
+                name: Some("admin".to_string()),
+                tenant_org_id: None,
+                label: None,
+            }))
+            .await?
+            .into_inner()
+            .vpc_ids;
+        let mut vpcs = if vpc_ids.is_empty() {
+            vec![]
+        } else {
+            env.api
+                .find_vpcs_by_ids(tonic::Request::new(rpc::forge::VpcsByIdsRequest {
+                    vpc_ids,
+                }))
+                .await?
+                .into_inner()
+                .vpcs
+        };
+        vpcs.sort_by_key(|vpc| vpc.id);
+
+        // Retain admin attachment, stretch flags, and version to detect partial reconciliation.
+        let segment_ids = env
+            .api
+            .find_network_segment_ids(tonic::Request::new(
+                rpc::forge::NetworkSegmentSearchFilter::default(),
+            ))
+            .await?
+            .into_inner()
+            .network_segments_ids;
+        let segments = env
+            .api
+            .find_network_segments_by_ids(tonic::Request::new(
+                rpc::forge::NetworkSegmentsByIdsRequest {
+                    network_segments_ids: segment_ids,
+                    include_history: false,
+                    include_num_free_ips: false,
+                },
+            ))
+            .await?
+            .into_inner()
+            .network_segments
+            .into_iter()
+            .filter(|segment| {
+                segment.config.as_ref().is_some_and(|config| {
+                    config.segment_type == rpc::forge::NetworkSegmentType::Admin as i32
+                })
+            })
+            .map(|segment| {
+                let status = segment.status.expect("admin segment status");
+                (
+                    segment.id.expect("admin segment ID"),
+                    (
+                        segment.config.expect("admin segment config"),
+                        status.flags,
+                        status.lifecycle.expect("admin segment lifecycle").version,
+                    ),
+                )
+            })
+            .collect::<HashMap<_, _>>();
+        Ok::<_, tonic::Status>((vpcs, segments))
+    };
+
+    check_cases_async(
+        [
+            // Fresh startup must reject before creating the VPC or attaching admin segments.
+            Case {
+                scenario: "fresh admin creation",
+                input: None,
+                expect: FailsWith(tonic::Code::FailedPrecondition),
+            },
+            // A VNI change must preserve the lower persisted VNI when new encoding fails.
+            Case {
+                scenario: "admin VNI change",
+                input: Some(10_000),
+                expect: FailsWith(tonic::Code::FailedPrecondition),
+            },
+            // An unchanged VNI still requires validation when startup activates new policy.
+            Case {
+                scenario: "unchanged admin VNI",
+                input: Some(incompatible_vni),
+                expect: FailsWith(tonic::Code::FailedPrecondition),
+            },
+        ],
+        |initial_vni| {
+            let env = &env;
+            let api = &api;
+            let find_admin_state = &find_admin_state;
+            async move {
+                // Construct the persisted predecessor through startup's existing reconciliation path.
+                if let Some(vni) = initial_vni {
+                    db_init::create_admin_vpc(&env.api, Some(vni))
+                        .await
+                        .expect("persist predecessor admin VNI");
+                }
+                let (vpcs_before, segments_before) =
+                    find_admin_state().await.expect("persisted admin state");
+
+                // Confirm the predecessor VNI persisted and attachment checks cover actual admin segments.
+                assert_eq!(vpcs_before.len(), usize::from(initial_vni.is_some()));
+                assert!(!segments_before.is_empty());
+                if let Some(vni) = initial_vni {
+                    assert_eq!(forge_vpc_config(&vpcs_before[0]).vni, Some(vni));
+                    assert_eq!(
+                        vpcs_before[0]
+                            .status
+                            .as_ref()
+                            .expect("admin VPC status")
+                            .vni,
+                        Some(vni)
+                    );
+                }
+
+                // Reconcile the same high VNI with the enabled symbolic policy.
+                let reconciliation = db_init::create_admin_vpc(api, Some(incompatible_vni))
+                    .await
+                    .map_err(tonic::Status::from);
+
+                // Prove encoding caused rejection and every observed persisted field survived.
+                assert!(
+                    reconciliation
+                        .as_ref()
+                        .expect_err("incompatible admin policy must reject startup")
+                        .message()
+                        .contains("cannot both exceed 65535")
+                );
+                let (vpcs_after, segments_after) = find_admin_state()
+                    .await
+                    .expect("admin state after rejection");
+                assert_eq!(vpcs_after, vpcs_before);
+                assert_eq!(segments_after, segments_before);
+                reconciliation.map_err(|error| error.code())
+            }
+        },
+    )
+    .await;
 }
 
 #[crate::sqlx_test]

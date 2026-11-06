@@ -2360,6 +2360,43 @@ message PrefixFilterPolicyEntries {
   repeated PrefixFilterPolicyEntry values = 1;
 }
 
+// Prefix containment semantics for additional type-5 export route targets.
+// Zero defaults to GE independently of the prefix-search API's match enum.
+enum ExportPrefixMatchType {
+  // The configured prefix and all contained more-specific prefixes.
+  EXPORT_PREFIX_MATCH_TYPE_GE = 0;
+  // Contained prefixes through max_prefix_length (family width when omitted).
+  EXPORT_PREFIX_MATCH_TYPE_LE = 1;
+  // Only the configured prefix.
+  EXPORT_PREFIX_MATCH_TYPE_EXACT = 2;
+}
+
+// Adds targets to routes already eligible for type-5 export from this VPC.
+// Every matching entry contributes its targets. Order and duplicates do not change
+// routing behavior.
+// Each effective profile accepts at most 256 prefix/route-target pairs across both
+// address families. Repeated configured pairs also count.
+// This does not originate routes, authorize host announcements, or configure imports.
+message PrefixRouteTarget {
+  option (carbide.codegen.v1.message_derive) = "serde::Serialize";
+  // Required IPv4 or IPv6 CIDR prefix; host bits are cleared during conversion.
+  string prefix = 1;
+  // Omission defaults to GE; unknown enum values are rejected.
+  ExportPrefixMatchType match_type = 2;
+  // Valid only with LE, from the configured prefix length through 32 or 128.
+  // Omission means the address-family width; explicit zero remains distinguishable.
+  optional uint32 max_prefix_length = 3;
+  // Required nonempty targets using the existing literal/symbolic RT contract.
+  // Stored definitions preserve vni_self; effective and DPU profiles resolve it.
+  repeated common.RouteTarget route_targets = 4;
+}
+
+// Presence-aware conditional export list: omission inherits; empty clears.
+message PrefixRouteTargets {
+  option (carbide.codegen.v1.message_derive) = "serde::Serialize";
+  repeated PrefixRouteTarget values = 1;
+}
+
 // Routing-profile properties set directly on a VPC. Present properties
 // override its named routing profile; omitted properties inherit from it.
 // Route targets retain symbolic `vni_self` values in this stored definition.
@@ -2374,6 +2411,8 @@ message VpcRoutingProfileOverrides {
   optional bool tenant_leak_communities_accepted = 5;
   optional PrefixFilterPolicyEntries accepted_leaks_from_underlay = 6;
   optional PrefixFilterPolicyEntries allowed_anycast_prefixes = 7;
+  // Present lists replace inherited rules, including an empty list to clear them.
+  optional PrefixRouteTargets route_targets_on_exports_by_prefix = 8;
 }
 
 // The fully resolved routing profile applied to an FNN VPC. Unlike
@@ -2390,6 +2429,8 @@ message VpcEffectiveRoutingProfile {
   repeated PrefixFilterPolicyEntry allowed_anycast_prefixes = 7;
   bool internal = 8;
   uint32 access_tier = 9;
+  // Concrete conditional export targets, accumulated across all matching rules.
+  repeated PrefixRouteTarget route_targets_on_exports_by_prefix = 10;
 }
 
 message VpcConfig {
@@ -11025,6 +11066,8 @@ message RoutingProfile {
   // IP prefixes that tenant hosts are allowed to announce to the DPU as
   // anycast routes. Accepts IPv4 and IPv6 CIDR prefixes.
   repeated PrefixFilterPolicyEntry allowed_anycast_prefixes = 7;
+  // Concrete additional targets on eligible type-5 exports; all matching rules apply.
+  repeated PrefixRouteTarget route_targets_on_exports_by_prefix = 8;
 }
 
 // ============================================================================
@@ -13781,6 +13824,8 @@ message NamedRoutingProfileConfig {
   optional uint32 access_tier = 9;
   // Profile opt-in to tenant prefix reuse; alone does not establish eligibility.
   bool tenant_prefix_overlap_eligible = 10;
+  // Unresolved conditional exports; omission remains distinct from an empty list.
+  PrefixRouteTargets route_targets_on_exports_by_prefix = 11;
 }
 
 message NamedRoutingProfileList {
