@@ -1162,11 +1162,22 @@ client-certificate authentication is not used.
 
 | Field | Type | Default | Description |
 | ------- | ------ | --------- | ------------- |
-| `admin_vpc` | `Option<AdminFnnConfig>` | — | FNN configuration for the admin network VPC. |
+| `admin_vpc` | `Option<AdminFnnConfig>` | — | FNN configuration for the admin network VPC (see [AdminFnnConfig](#adminfnnconfig)). |
 | `common_internal_route_target` | `Option<RouteTargetConfig>` | — | Literal double-tag for internal tenant routes. `vni_self` is rejected because this value has no single VPC owner. |
 | `additional_route_target_imports` | `Vec<RouteTargetConfig>` | `[]` | Literal route targets imported on DPU VRFs. `vni_self` is rejected because these values have no single VPC owner. |
 | `routing_profiles` | `HashMap<String, FnnRoutingProfileConfig>` | `{}` | Named per-VPC routing profiles (see [FnnRoutingProfileConfig](#fnnroutingprofileconfig)). |
 | `use_vpc_vrf_loopback` | `bool` | `false` | Whether IPs are allocated for VPC loopbacks. When false, the VPC loopback pool is unused and no VPC/VRF loopback IP is sent to the DPU. |
+
+### `AdminFnnConfig`
+
+| Field | Type | Default | Description |
+| ------- | ------ | --------- | ------------- |
+| `enabled` | `bool` | required | Enable FNN for the admin VPC. |
+| `l3_only` | `bool` | `false` | When `enabled = true`, route the host-facing PF without the admin L2VNI, bridge attachment, VLAN SVI, or VRR. Retain host IP allocations, subnet masks, configured gateway prefixes, and per-host EVPN routes. |
+| `vpc_vni` | `Option<u32>` | — | Admin L3VNI; required when `enabled = true`. |
+| `routing_profile` | `FnnRoutingProfileConfig` | effective profile defaults | Inline admin routing profile. |
+
+Set `fnn.admin_vpc.l3_only = true` only after deploying DPU agents that support routed admin DHCP, static host routes, and IPv6 router advertisements. Changes require restarting Core and take effect as agents reconcile their configuration. The setting has no effect when admin FNN is disabled. It does not change admin address allocation to `/31` or `/127`. Hosts retain their existing on-link prefixes, so communication to remote hosts or services inside those prefixes is unsupported in this mode; required provisioning services must be reachable through the gateway. Existing segment VNI and SVI address allocations are retained for switching back to L2 mode.
 
 ### `FnnRoutingProfileConfig`
 

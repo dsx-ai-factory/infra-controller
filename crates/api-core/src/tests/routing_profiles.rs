@@ -321,6 +321,7 @@ async fn routing_profiles_absent_or_empty_config(pool: sqlx::PgPool) {
             // The inline admin profile is not a named inventory entry.
             admin_vpc: Some(AdminFnnConfig {
                 enabled: true,
+                l3_only: false,
                 vpc_vni: Some(9000),
                 routing_profile: FnnRoutingProfileConfig::default(),
             }),

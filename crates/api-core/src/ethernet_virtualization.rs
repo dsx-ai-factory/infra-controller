@@ -55,6 +55,7 @@ pub(crate) struct EthVirtData {
 
 pub(crate) struct AdminNetworkOptions<'a> {
     pub(crate) fnn_enabled: bool,
+    pub(crate) l3_only: bool,
     pub(crate) common_pools: &'a CommonPools,
     pub(crate) booturl: &'a Option<String>,
     pub(crate) use_vpc_vrf_loopback: bool,
@@ -410,6 +411,7 @@ pub(crate) async fn admin_network(
 ) -> Result<(rpc::FlatInterfaceConfig, MachineInterfaceId), tonic::Status> {
     let AdminNetworkOptions {
         fnn_enabled: fnn_enabled_on_admin,
+        l3_only,
         common_pools,
         booturl,
         use_vpc_vrf_loopback,
@@ -666,7 +668,7 @@ pub(crate) async fn admin_network(
         booturl: booturl.clone(),
         svi_ip,
         tenant_vrf_loopback_ip: tenant_vrf_loopback_for_legacy_ipv4_field(tenant_vrf_loopback_ip),
-        is_l2_segment: true,
+        is_l2_segment: !(fnn_enabled_on_admin && l3_only),
         vpc_peer_prefixes: vec![],
         vpc_peer_vnis: vec![],
         network_security_group: None,

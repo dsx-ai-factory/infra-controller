@@ -219,6 +219,7 @@ async fn create_admin_ipv6_test_env(pool: sqlx::PgPool) -> api_fixtures::TestEnv
     .with_fnn_config(None);
     overrides.fnn_config.as_mut().unwrap().admin_vpc = Some(AdminFnnConfig {
         enabled: true,
+        l3_only: false,
         vpc_vni: Some(10000),
         routing_profile: FnnRoutingProfileConfig::default(),
     });
@@ -1371,6 +1372,7 @@ async fn test_managed_host_network_config(pool: sqlx::PgPool) {
 
 /// Verifies complete FNN dual-stack projection, non-FNN IPv4-only gating, and a degraded
 /// V6-host/no-SVI response, because canonical, compatibility, and valid IPv4 must agree.
+/// Enabling L3-only admin must change only attachment mode so allocated addresses stay stable.
 #[crate::sqlx_test]
 #[allow(deprecated)]
 async fn test_managed_host_network_config_projects_dual_stack_admin_addresses(pool: sqlx::PgPool) {
@@ -1487,6 +1489,48 @@ async fn test_managed_host_network_config_projects_dual_stack_admin_addresses(po
         ]
     );
 
+    // Enable routed admin in a second API using the same database and persisted host.
+    let mut routed_config = env.api.runtime_config.as_ref().clone();
+    routed_config
+        .fnn
+        .as_mut()
+        .expect("FNN configuration")
+        .admin_vpc
+        .as_mut()
+        .expect("admin FNN configuration")
+        .l3_only = true;
+    let routed_api = crate::test_support::builder::TestApiBuilder::new(
+        env.pool.clone(),
+        env.common_pools.clone(),
+        env.api.work_lock_manager_handle.clone(),
+    )
+    .with_runtime_config(std::sync::Arc::new(routed_config))
+    .build();
+
+    // Fetch the same host through the public RPC with L3-only admin enabled.
+    let routed_response = routed_api
+        .get_managed_host_network_config(tonic::Request::new(ManagedHostNetworkConfigRequest {
+            dpu_machine_id: Some(dpu_machine_id),
+        }))
+        .await
+        .expect("routed admin configuration")
+        .into_inner();
+    // Compare every admin response field except the attachment choice.
+    assert!(admin_interface.is_l2_segment);
+    let mut expected_routed_interface = admin_interface.clone();
+    expected_routed_interface.is_l2_segment = false;
+    assert_eq!(
+        routed_response.admin_interface,
+        Some(expected_routed_interface)
+    );
+
+    // Reload the host interface after the routed configuration response.
+    let retained_interface = db::machine_interface::find_one(&env.pool, persisted_interface.id)
+        .await
+        .expect("persisted admin interface");
+    // The same interface must retain its allocated addresses.
+    assert_eq!(retained_interface.addresses, persisted_interface.addresses);
+
     // The same allocated segment must remain IPv4-only when admin FNN is disabled, even though
     // the database contains a complete IPv6 prefix/address pair.
     let mut txn = env.db_txn().await;
@@ -1498,6 +1542,7 @@ async fn test_managed_host_network_config_projects_dual_stack_admin_addresses(po
         &dpu_machine_id,
         crate::ethernet_virtualization::AdminNetworkOptions {
             fnn_enabled: false,
+            l3_only: false,
             common_pools: &env.common_pools,
             booturl: &booturl,
             use_vpc_vrf_loopback: false,
@@ -1538,6 +1583,7 @@ async fn test_managed_host_network_config_projects_dual_stack_admin_addresses(po
         &dpu_machine_id,
         crate::ethernet_virtualization::AdminNetworkOptions {
             fnn_enabled: true,
+            l3_only: false,
             common_pools: &env.common_pools,
             booturl: &booturl,
             use_vpc_vrf_loopback: false,
@@ -1765,6 +1811,7 @@ async fn test_managed_host_network_config_supports_ipv6_only_admin(pool: sqlx::P
         &dpu_machine_id,
         crate::ethernet_virtualization::AdminNetworkOptions {
             fnn_enabled: false,
+            l3_only: false,
             common_pools: &env.common_pools,
             booturl: &None,
             use_vpc_vrf_loopback: false,
@@ -4905,6 +4952,7 @@ async fn test_managed_host_network_config_omits_admin_fnn_vrf_loopback_by_defaul
     let mut overrides = TestEnvOverrides::default().with_fnn_config(None);
     overrides.fnn_config.as_mut().unwrap().admin_vpc = Some(AdminFnnConfig {
         enabled: true,
+        l3_only: false,
         vpc_vni: Some(10000),
         routing_profile: FnnRoutingProfileConfig {
             leak_default_route_from_underlay: Some(true),
@@ -4978,7 +5026,7 @@ async fn test_managed_host_network_config_omits_admin_fnn_vrf_loopback_by_defaul
 }
 
 /// Verifies disabled admin FNN policy is omitted because no admin VPC exists
-/// to resolve its symbolic route targets.
+/// to resolve its symbolic route targets. L3-only opt-in must also remain inactive.
 #[crate::sqlx_test]
 #[allow(deprecated)]
 async fn test_managed_host_network_config_omits_disabled_admin_fnn_routing_profile(
@@ -4988,6 +5036,7 @@ async fn test_managed_host_network_config_omits_disabled_admin_fnn_routing_profi
     let mut overrides = TestEnvOverrides::default().with_fnn_config(None);
     overrides.fnn_config.as_mut().unwrap().admin_vpc = Some(AdminFnnConfig {
         enabled: false, // Prevents creation of the required admin VPC.
+        l3_only: true,  // Must remain inactive while admin FNN is disabled.
         vpc_vni: None,
         routing_profile: FnnRoutingProfileConfig {
             leak_default_route_from_underlay: Some(true),
@@ -5017,6 +5066,9 @@ async fn test_managed_host_network_config_omits_disabled_admin_fnn_routing_profi
     assert_eq!(admin_interface.vpc_vni, 0);
     assert!(admin_interface.vpc_routing_profile.is_none());
     assert!(response.routing_profile.is_none());
+
+    // L3-only opt-in cannot change the attachment while admin FNN is disabled.
+    assert!(admin_interface.is_l2_segment);
 }
 
 #[crate::sqlx_test]
@@ -5076,6 +5128,7 @@ async fn test_managed_host_network_config_multi_dpu_fnn_ipv6_loopbacks(pool: sql
     let mut overrides = TestEnvOverrides::default().with_fnn_config(None);
     overrides.fnn_config.as_mut().unwrap().admin_vpc = Some(AdminFnnConfig {
         enabled: true,
+        l3_only: false,
         vpc_vni: Some(10000),
         routing_profile: FnnRoutingProfileConfig::default(),
     });

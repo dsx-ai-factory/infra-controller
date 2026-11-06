@@ -628,6 +628,7 @@ async fn get_managed_host_network_config_inner(
     let mut network_virtualization_type = VpcVirtualizationType::EthernetVirtualizer;
 
     let mut use_fnn_over_admin_nw = false;
+    let mut admin_l3_only = false;
 
     // If FNN config is enabled, we should use it in admin network.
     if let Some(fnn) = &api.runtime_config.fnn
@@ -635,6 +636,7 @@ async fn get_managed_host_network_config_inner(
         && admin.enabled
     {
         use_fnn_over_admin_nw = true;
+        admin_l3_only = admin.l3_only;
         network_virtualization_type = VpcVirtualizationType::Fnn;
     }
     let use_vpc_vrf_loopback = api
@@ -673,6 +675,7 @@ async fn get_managed_host_network_config_inner(
         &dpu_machine_id,
         ethernet_virtualization::AdminNetworkOptions {
             fnn_enabled: use_fnn_over_admin_nw,
+            l3_only: admin_l3_only,
             common_pools: &api.common_pools,
             booturl: &booturl_override,
             use_vpc_vrf_loopback,
