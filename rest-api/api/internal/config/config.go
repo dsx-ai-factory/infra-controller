@@ -53,6 +53,9 @@ const (
 	ConfigAPIPort = "api.port"
 	// ConfigAPIRouteVersion specifies the version of the API
 	ConfigAPIRouteVersion = "api.route.version"
+	// ConfigExpectedMachineBatchRecoveryEnabled enables durable reservations
+	// for new Expected Machine create batches.
+	ConfigExpectedMachineBatchRecoveryEnabled = "api.expectedMachineBatchRecovery.enabled"
 
 	// ConfigLogLevel specifies the log level
 	ConfigLogLevel = "log.level"
@@ -234,18 +237,13 @@ func NewConfig() *Config {
 	}
 
 	c := Config{
-		v: newViper(),
+		v: newAPIConfigViper(),
 	}
 
 	// Set defaults
 	c.v.SetDefault(ConfigLogLevel, "info")
 	c.v.SetDefault(ConfigEnvDev, false)
 	c.v.SetDefault(ConfigEnvDisconnected, false)
-
-	// Set API name
-	c.v.SetDefault(ConfigAPIName, "nico")
-	c.v.SetDefault(ConfigAPIPort, 8388)
-	c.v.SetDefault(ConfigAPIRouteVersion, "v1")
 
 	// Set config file
 	// Check environment variable. If not set, use default
@@ -286,7 +284,6 @@ func NewConfig() *Config {
 	c.v.SetDefault(ConfigDPSEnabled, false)
 	c.v.SetDefault(ConfigDPSRequestTimeout, 15*time.Second)
 
-	c.v.AutomaticEnv()
 	c.v.SetConfigFile(c.GetPathToConfig())
 
 	log.Warn().Str("config.file", c.GetPathToConfig()).Msg("loading config")
@@ -866,6 +863,12 @@ func (c *Config) GetAPIRouteVersion() string {
 	return c.v.GetString(ConfigAPIRouteVersion)
 }
 
+// GetExpectedMachineBatchRecoveryEnabled reports whether new create batches
+// use durable reservations. It defaults to false.
+func (c *Config) GetExpectedMachineBatchRecoveryEnabled() bool {
+	return c.v.GetBool(ConfigExpectedMachineBatchRecoveryEnabled)
+}
+
 // GetLogLevel returns the log level
 func (c *Config) GetLogLevel() string {
 	return c.v.GetString(ConfigLogLevel)
@@ -1377,6 +1380,16 @@ func (c *Config) GetRateLimiterExpiresIn() int {
 // SetRateLimiterExpiresIn sets the expiration time in seconds
 func (c *Config) SetRateLimiterExpiresIn(value int) {
 	c.v.Set(ConfigRateLimiterExpiresIn, value)
+}
+
+func newAPIConfigViper() *viper.Viper {
+	v := newViper()
+	v.SetDefault(ConfigAPIName, "nico")
+	v.SetDefault(ConfigAPIPort, 8388)
+	v.SetDefault(ConfigAPIRouteVersion, "v1")
+	v.SetDefault(ConfigExpectedMachineBatchRecoveryEnabled, false)
+	v.AutomaticEnv()
+	return v
 }
 
 func newViper() *viper.Viper {

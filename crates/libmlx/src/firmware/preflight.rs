@@ -541,11 +541,10 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     mod process {
-        use std::os::unix::fs::PermissionsExt;
-
         use tempfile::TempDir;
 
         use super::*;
+        use crate::runner::write_fixture_executables;
 
         struct PreparedFixture {
             _directory: TempDir,
@@ -582,33 +581,19 @@ mod tests {
             let directory = tempfile::tempdir().unwrap();
             let program = directory.path().join("mlxfwmanager");
             let invocations = directory.path().join("invocations");
-            // Isolate the writable executable descriptor from concurrent test
-            // spawns, which could otherwise inherit it and cause ETXTBSY.
-            let status = tokio::time::timeout(
-                Duration::from_secs(10),
-                tokio::process::Command::new("/bin/sh")
-                    .args([
-                        "-c",
-                        "umask 077; printf '%s' \"$2\" > \"$1\"",
-                        "fixture-writer",
-                    ])
-                    .arg(&program)
-                    .arg(
-                        r#"#!/bin/sh
+            write_fixture_executables(
+                directory.path(),
+                &[(
+                    "mlxfwmanager",
+                    r#"#!/bin/sh
 set -eu
 cd -- "${0%/*}"
 printf '%s\n' "$@" >> invocations
 printf '%s' '<Devices><Device pciName="ab:01.0" type="BlueField3" partNumber="part" psid="PSID"><Versions><FW current="32.42.1000"/></Versions></Device></Devices>'
 "#,
-                    )
-                    .kill_on_drop(true)
-                    .status(),
+                )],
             )
-            .await
-            .expect("fixture writer finishes within its watchdog")
-            .unwrap();
-            assert!(status.success());
-            std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+            .await;
 
             enum InputFault {
                 None,

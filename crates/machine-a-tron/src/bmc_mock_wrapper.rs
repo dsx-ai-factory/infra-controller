@@ -107,6 +107,8 @@ pub(super) struct BmcDhcpRecovery {
     renewal_interval: Option<Duration>,
     renewal: Option<BmcDhcpRenewal>,
     operation: BmcDhcpOperation,
+    #[cfg(test)]
+    retry_delay: Option<Duration>,
 }
 
 /// The runtime drives I/O even when the actor pauses or waits for another API call.
@@ -141,12 +143,26 @@ impl Default for BmcDhcpRecovery {
             renewal_interval: None,
             renewal: None,
             operation: BmcDhcpOperation::Reset,
+            #[cfg(test)]
+            retry_delay: None,
         }
     }
 }
 
+impl MachineATronContext {
+    pub(super) fn bmc_dhcp_recovery(&self, renewal_interval: Duration) -> BmcDhcpRecovery {
+        let recovery = BmcDhcpRecovery::with_renewal(renewal_interval);
+        #[cfg(test)]
+        let recovery = BmcDhcpRecovery {
+            retry_delay: self.bmc_dhcp_retry_delay,
+            ..recovery
+        };
+        recovery
+    }
+}
+
 impl BmcDhcpRecovery {
-    pub(super) fn with_renewal(interval: Duration) -> Self {
+    fn with_renewal(interval: Duration) -> Self {
         Self {
             renewal_interval: (!interval.is_zero()).then_some(interval),
             ..Self::default()
@@ -202,9 +218,9 @@ impl BmcDhcpRecovery {
     }
 
     /// One bounded attempt. Suppression, timeout and transport failures keep recovery
-    /// pending with the shared RFC 2131 backoff (4s to 64s, plus/minus 1s jitter).
-    /// The actor owns retries
-    /// after the HTTP caller leaves; each API/UDP request is limited to ten seconds.
+    /// pending with the shared RFC 2131 backoff (4s to 64s, plus/minus 1s jitter),
+    /// unless a test replaces the scheduled delay. The actor owns retries after
+    /// the HTTP caller leaves; each API/UDP request is limited to ten seconds.
     pub(super) async fn advance(
         &mut self,
         registry: &BmcMockRegistry,
@@ -317,6 +333,8 @@ impl BmcDhcpRecovery {
                 self.retry = Some(retry);
                 for action in actions {
                     if let Action::Schedule { delay } = action {
+                        #[cfg(test)]
+                        let delay = self.retry_delay.unwrap_or(delay);
                         self.deadline = Some(Instant::now() + delay);
                         tracing::debug!(?result, ?delay, "BMC DHCP recovery will retry");
                     }
@@ -755,7 +773,9 @@ mod recovery_tests {
         .await
         .unwrap();
         let client = DhcpClient::UdpRelay(client);
+        let (unanswered_tx, unanswered_rx) = oneshot::channel();
         let server_task = tokio::spawn(async move {
+            let mut unanswered_tx = Some(unanswered_tx);
             let mut buffer = [0; 4096];
             for reply in [
                 Some((MessageType::Offer, old_ip)),
@@ -769,7 +789,10 @@ mod recovery_tests {
             ] {
                 let (length, source) = server.recv_from(&mut buffer).await.unwrap();
                 let request = Message::decode(&mut Decoder::new(&buffer[..length])).unwrap();
-                let Some((kind, ip)) = reply else { continue };
+                let Some((kind, ip)) = reply else {
+                    unanswered_tx.take().unwrap().send(()).unwrap();
+                    continue;
+                };
                 let mut response = Message::default();
                 response
                     .set_opcode(Opcode::BootReply)
@@ -811,14 +834,40 @@ mod recovery_tests {
         assert_eq!(registry.owners.lock().unwrap()[&old_ip.to_string()], owner);
         assert!(renewal.next_attempt_in() > Duration::from_secs(800));
 
-        for (failure, bounds) in [("server rejection", 2..=5), ("no response", 6..=9)] {
+        for (failure, bounds, unanswered_rx) in [
+            ("server rejection", 2..=5, None),
+            ("no response", 6..=9, Some(unanswered_rx)),
+        ] {
             renewal.deadline = Some(Instant::now());
             assert!(
-                complete_attempt(&mut renewal, &registry, &client, request)
+                renewal
+                    .advance(&registry, &client, request())
                     .await
-                    .is_none(),
-                "{failure}"
+                    .is_none()
             );
+            let expires_at = renewal.renewal.as_ref().unwrap().expires_at;
+            let attempt = complete_attempt(&mut renewal, &registry, &client, request);
+            let result = if let Some(unanswered_rx) = unanswered_rx {
+                let (result, ()) = tokio::join!(attempt, async {
+                    tokio::time::timeout(Duration::from_secs(10), unanswered_rx)
+                        .await
+                        .expect("renewal request did not reach the UDP server")
+                        .unwrap();
+                    // The real socket received the request. Advance beyond the
+                    // five-second reply timeout while retaining the renewal deadline.
+                    tokio::time::pause();
+                    tokio::time::advance(Duration::from_secs(6)).await;
+                });
+                assert!(
+                    Instant::now() < expires_at,
+                    "unanswered request reached the renewal expiry instead of the reply timeout"
+                );
+                tokio::time::resume();
+                result
+            } else {
+                attempt.await
+            };
+            assert!(result.is_none(), "{failure}");
             assert_eq!(renewal.mounted_ip, Some(old_ip), "{failure}");
             assert!(
                 bounds.contains(&renewal.next_attempt_in().as_secs()),
@@ -992,6 +1041,13 @@ mod recovery_tests {
             if queued_ack {
                 release.take().unwrap().send(()).unwrap();
                 ack_sent.take().unwrap().await.unwrap();
+                tokio::time::timeout(Duration::from_secs(1), async {
+                    while !recovery.renewal.as_ref().unwrap().task.is_finished() {
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .expect("renewal did not complete after the server ACK");
                 // No actor poll (as during pause): a ready reply cannot publish a route.
                 assert_eq!(recovery.mounted_ip, Some(old_ip));
                 assert!(!registry.read().await.contains_key(&stale_ip.to_string()));

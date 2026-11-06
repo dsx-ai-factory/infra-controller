@@ -65,7 +65,7 @@ use carbide_secrets::credentials::{
 use carbide_secrets::test_support::credentials::TestCredentialManager;
 use carbide_secrets::{ChainedCredentialReader, CredentialSnapshot, UsernamePassword};
 use carbide_site_explorer::SiteExplorer;
-use carbide_site_explorer::config::{SiteExplorerConfig, SiteExplorerExploreMode};
+use carbide_site_explorer::config::SiteExplorerConfig;
 use carbide_site_explorer::test_support::MockEndpointExplorer;
 use carbide_spdm_controller::context::SpdmStateHandlerServices;
 use carbide_spdm_controller::handler::SpdmAttestationStateHandler;
@@ -559,11 +559,35 @@ impl TestEnv {
         ID: MachineIdSubtypeTrait,
         db::DatabaseError: From<<ID as TryFrom<MachineId>>::Error>,
     {
+        self.run_machine_state_controller_iteration_until_state_condition_with_requeue(
+            host_machine_id,
+            max_iterations,
+            true,
+            state_check,
+        )
+        .await
+    }
+
+    /// Disabling requeue lets fixtures observe intermediate states before the
+    /// controller handles the next transition.
+    pub(in crate::tests) async fn run_machine_state_controller_iteration_until_state_condition_with_requeue<
+        ID,
+    >(
+        &self,
+        host_machine_id: &ID,
+        max_iterations: u32,
+        allow_requeue: bool,
+        state_check: impl Fn(&Machine<ID>) -> bool,
+    ) -> ManagedHostState
+    where
+        ID: MachineIdSubtypeTrait,
+        db::DatabaseError: From<<ID as TryFrom<MachineId>>::Error>,
+    {
         for _ in 0..max_iterations {
             self.machine_state_controller
                 .lock()
                 .await
-                .run_single_iteration()
+                .run_single_iteration_ext(allow_requeue)
                 .boxed()
                 .await;
 
@@ -1429,7 +1453,7 @@ async fn create_test_env_with_overrides_inner(
     let eth_virt_data = EthVirtData {
         asn: 65535,
         dhcp_servers: vec![FIXTURE_DHCP_RELAY_ADDRESS.parse().unwrap()],
-        deny_prefixes: vec![],
+        deny_prefixes: config.deny_prefixes.clone(),
         site_fabric_prefixes,
     };
 
@@ -1872,13 +1896,13 @@ async fn create_test_env_with_overrides_inner(
             rotate_switch_nvos_credentials: Arc::new(false.into()),
             dpu_policy: None,
             deprecated_force_dpu_nic_mode: None,
-            // Tests use MockEndpointExplorer. So this doesn't affect anything.
-            explore_mode: SiteExplorerExploreMode::NvRedfish,
+            deprecated_explore_mode: None,
             explore_drive_firmware: false,
         },
         test_meter.meter(),
         api.endpoint_exploration_service.clone(),
         api.bmc_client.clone(),
+        api.resource_pool_registry.clone(),
         common_pools.clone(),
         api.work_lock_manager_handle.clone(),
         site_explorer_rack_profiles,
@@ -2684,6 +2708,7 @@ pub(in crate::tests) async fn forge_agent_control(
     env.api
         .forge_agent_control(Request::new(rpc::forge::ForgeAgentControlRequest {
             machine_id: Some(machine_id.into()),
+            nic_firmware_site_cache_supported: false,
         }))
         .await
         .unwrap()

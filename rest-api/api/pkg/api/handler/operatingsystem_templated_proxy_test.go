@@ -331,6 +331,77 @@ func TestOperatingSystemHandler_TemplatedIPXE_Proxy(t *testing.T) {
 		_, gerr := osDAO.GetByID(f.ctx, nil, parsedID, nil)
 		assert.ErrorIs(t, gerr, cdb.ErrDoesNotExist, "OS should be soft-deleted once every site is cleaned up")
 	})
+
+	t.Run("metadata update resends a failed artifact change", func(t *testing.T) {
+		// A failed proxy call leaves the new definition saved; the next PATCH must resend it.
+		osDAO := cdbm.NewOperatingSystemDAO(f.dbSession)
+		os, err := osDAO.Create(f.ctx, nil, cdbm.OperatingSystemCreateInput{
+			Name:           "artifact-retry-os",
+			Org:            f.tnOrg,
+			TenantID:       &f.tn.ID,
+			OsType:         cdbm.OperatingSystemTypeTemplatedIPXE,
+			IpxeTemplateId: cutil.GetPtr(f.tmpl.ID.String()),
+			IpxeOSHash:     cutil.GetPtr("previous-definition-hash"),
+			IpxeTemplateArtifacts: []cdbm.OperatingSystemIpxeArtifact{
+				{Name: "kernel", URL: "http://example.com/original-kernel", CacheStrategy: cdbm.OperatingSystemIpxeArtifactCacheStrategyCacheAsNeeded},
+			},
+			Status:    cdbm.OperatingSystemStatusReady,
+			CreatedBy: f.tnu.ID,
+		})
+		require.NoError(t, err)
+		common.TestBuildOperatingSystemSiteAssociation(t, f.dbSession, os.ID, f.site.ID, cutil.GetPtr(os.ID.String()), cdbm.OperatingSystemSiteAssociationStatusSynced, f.tnu)
+
+		for _, step := range []struct {
+			name              string
+			request           model.APIOperatingSystemUpdateRequest
+			proxyError        error
+			associationStatus string
+			osStatus          string
+		}{
+			{
+				name: "artifact update fails after saving the definition",
+				request: model.APIOperatingSystemUpdateRequest{
+					IpxeTemplateArtifacts: &model.APIOperatingSystemIpxeArtifacts{
+						{Name: "kernel", URL: "http://example.com/replacement-kernel", CacheStrategy: cdbm.OperatingSystemIpxeArtifactCacheStrategyCacheAsNeeded},
+					},
+				},
+				proxyError:        errors.New("proxy workflow temporarily unavailable"),
+				associationStatus: cdbm.OperatingSystemSiteAssociationStatusError,
+				osStatus:          cdbm.OperatingSystemStatusError,
+			},
+			{
+				name:              "metadata update resends the saved artifact definition",
+				request:           model.APIOperatingSystemUpdateRequest{Description: cutil.GetPtr("updated description")},
+				associationStatus: cdbm.OperatingSystemSiteAssociationStatusSynced,
+				osStatus:          cdbm.OperatingSystemStatusReady,
+			},
+		} {
+			psc := newProxySiteClient(t, updateOperatingSystemMethod, nil, step.proxyError)
+			f.bindProxyClient(psc)
+			body, err := json.Marshal(step.request)
+			require.NoError(t, err, step.name)
+			ec, rec := f.newEchoContext(http.MethodPatch, string(body), map[string]string{"orgName": f.tnOrg, "id": os.ID.String()})
+			h := UpdateOperatingSystemHandler{dbSession: f.dbSession, tc: f.tc, scp: f.scp, cfg: f.cfg}
+			require.NoError(t, h.Handle(ec), step.name)
+			require.Equal(t, http.StatusOK, rec.Code, "%s: %s", step.name, rec.Body.String())
+			psc.client.AssertExpectations(t)
+			psc.workflow.AssertExpectations(t)
+
+			var forwarded corev1.UpdateOperatingSystemRequest
+			require.NoError(t, protojson.Unmarshal(psc.captured.RequestJSON, &forwarded))
+			require.NotNil(t, forwarded.IpxeTemplateArtifacts)
+			require.Len(t, forwarded.IpxeTemplateArtifacts.Items, 1)
+			require.Equal(t, "http://example.com/replacement-kernel", forwarded.IpxeTemplateArtifacts.Items[0].Url, step.name)
+			assert.Equal(t, step.request.Description, forwarded.Description, step.name)
+			assert.Nil(t, forwarded.IpxeTemplateDefinitionHash, step.name)
+			persisted, err := osDAO.GetByID(f.ctx, nil, os.ID, nil)
+			require.NoError(t, err)
+			require.Len(t, persisted.IpxeTemplateArtifacts, 1)
+			require.Equal(t, "http://example.com/replacement-kernel", persisted.IpxeTemplateArtifacts[0].URL, step.name)
+			require.Equal(t, step.associationStatus, f.osAssociationStatus(t, os.ID), step.name)
+			require.Equal(t, step.osStatus, persisted.Status, step.name)
+		}
+	})
 }
 
 func TestOperatingSystemHandler_TemplatedIPXE_ProviderCreateOmitsTenantOrganizationID(t *testing.T) {

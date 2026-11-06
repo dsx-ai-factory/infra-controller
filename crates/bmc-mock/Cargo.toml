@@ -26,6 +26,7 @@ repository.workspace = true
 # bmc-mock should be usable independently of NICo.
 # Do not add new carbide-* dependencies, including dev-dependencies.
 [dependencies]
+bmc-platform = { path = "../bmc-platform" }
 axum = { workspace = true }
 axum-extra = { features = ["typed-header"], workspace = true }
 axum-server = { features = ["tls-rustls"], workspace = true }

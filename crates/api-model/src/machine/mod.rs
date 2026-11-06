@@ -159,6 +159,11 @@ pub struct ManagedHostStateSnapshot {
     /// Health overrides inherited from the rack this host belongs to (if any).
     /// Populated at read time; not stored on the machines table.
     pub rack_health_overrides: Option<HealthReportSources>,
+    /// Which parts of `hardware_info` the host and DPU snapshots hold.
+    /// Populated at read time by the loader. Compact snapshots from
+    /// `load_compact_by_host_ids` load no topology at all, so their
+    /// `hardware_info` is always `None` and this field doesn't describe them.
+    pub hardware_info_scope: HardwareInfoScope,
 }
 
 impl<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> for ManagedHostStateSnapshot {
@@ -233,6 +238,9 @@ impl<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> for ManagedHostStateSnapshot {
             // This will need to be modified by callers, as its value depends on a
             // HardwareHealthReportsConfig being specified.
             aggregate_health: health_report::HealthReport::empty("".to_string()),
+            // Every snapshot query loads full hardware unless a `WithoutComponents`
+            // load overwrites this.
+            hardware_info_scope: HardwareInfoScope::Full,
         };
 
         result.sort_dpu_snapshots()?;
@@ -1975,6 +1983,23 @@ impl ManagedHostState {
         }
     }
 
+    /// Whether this state can hand control to a pending maintenance request.
+    /// Ready and Failed hosts can do so, as can boot configuration before writes
+    /// begin or after recovery has restored lockdown and parked in Failed.
+    /// Instance ownership and competing requests must be checked separately.
+    pub fn accepts_maintenance_request(&self) -> bool {
+        matches!(
+            self,
+            Self::Ready
+                | Self::Failed { .. }
+                | Self::BootConfiguring {
+                    boot_config_state: ReadyBootConfigState::Prepare
+                        | ReadyBootConfigState::Failed { .. },
+                    ..
+                }
+        )
+    }
+
     /// Starts `Maintenance` with the requested operation and saves the full
     /// request so completion can check whether it is still pending.
     pub fn maintenance_for_request(request: MachineMaintenanceRequest) -> Self {
@@ -2441,6 +2466,9 @@ pub enum DpuInitState {
     /// idempotent power-on phase begins.
     WaitingForPlatformPowerOff,
     WaitingForPlatformConfiguration,
+    /// Waits for network and agent health observations newer than the UEFI
+    /// password-change restart request before accepting network readiness.
+    WaitingForUefiRestart,
     PollingBiosSetup,
     WaitingForNetworkConfig,
     WaitingForNetworkInstall, // Deprecated now, not used
@@ -2930,6 +2958,8 @@ pub enum MachineMaintenanceOperation {
     },
     /// Reset the host (restart / AC power cycle).
     Reset,
+    /// Gracefully reboot the host without falling back to a forced restart.
+    Reboot,
     /// Reset the identified Redfish chassis through the host BMC.
     ChassisReset { chassis_id: String },
 }
@@ -3779,6 +3809,18 @@ impl Display for MachineValidationFilter {
     }
 }
 
+/// Which parts of each machine's `status.hardware_info` a snapshot load decodes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HardwareInfoScope {
+    /// All discovered hardware, including the component lists.
+    Full,
+    /// Everything except the component lists a SKU is built from: CPUs, memory,
+    /// block devices, NVMe devices, GPUs, InfiniBand interfaces and the TPM
+    /// description. Those aren't loaded: the lists are empty when decoded, and
+    /// `tpm_description` is `None`.
+    WithoutComponents,
+}
+
 pub struct LoadSnapshotOptions {
     /// Whether to also load the Machines history
     pub include_history: bool,
@@ -4485,6 +4527,31 @@ mod tests {
                     }),
             }
         );
+    }
+
+    #[test]
+    fn maintenance_reboot_preserves_legacy_reset_serialization() {
+        for (encoded, operation) in [
+            (
+                serde_json::json!({"operation": "reset"}),
+                MachineMaintenanceOperation::Reset,
+            ),
+            (
+                serde_json::json!({"operation": "reboot"}),
+                MachineMaintenanceOperation::Reboot,
+            ),
+        ] {
+            let wire = serde_json::json!({"state": "maintenance", "operation": encoded});
+            let state: ManagedHostState = serde_json::from_value(wire.clone()).unwrap();
+            assert_eq!(
+                state,
+                ManagedHostState::Maintenance {
+                    operation,
+                    request: None
+                }
+            );
+            assert_eq!(serde_json::to_value(state).unwrap(), wire);
+        }
     }
 
     #[test]

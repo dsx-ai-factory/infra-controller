@@ -25,6 +25,7 @@ const _ = grpc.SupportPackageIsVersion9
 const (
 	Forge_Version_FullMethodName                                            = "/forge.Forge/Version"
 	Forge_GetRmsVersion_FullMethodName                                      = "/forge.Forge/GetRmsVersion"
+	Forge_GetRmsJobStatus_FullMethodName                                    = "/forge.Forge/GetRmsJobStatus"
 	Forge_StreamConsoleLogs_FullMethodName                                  = "/forge.Forge/StreamConsoleLogs"
 	Forge_CreateDomain_FullMethodName                                       = "/forge.Forge/CreateDomain"
 	Forge_UpdateDomain_FullMethodName                                       = "/forge.Forge/UpdateDomain"
@@ -66,6 +67,7 @@ const (
 	Forge_FindNetworkSegmentIds_FullMethodName                              = "/forge.Forge/FindNetworkSegmentIds"
 	Forge_FindNetworkSegmentsByIds_FullMethodName                           = "/forge.Forge/FindNetworkSegmentsByIds"
 	Forge_CreateNetworkSegment_FullMethodName                               = "/forge.Forge/CreateNetworkSegment"
+	Forge_AddNetworkSegmentPrefix_FullMethodName                            = "/forge.Forge/AddNetworkSegmentPrefix"
 	Forge_AttachNetworkSegmentToVpc_FullMethodName                          = "/forge.Forge/AttachNetworkSegmentToVpc"
 	Forge_DeleteNetworkSegment_FullMethodName                               = "/forge.Forge/DeleteNetworkSegment"
 	Forge_NetworkSegmentsForVpc_FullMethodName                              = "/forge.Forge/NetworkSegmentsForVpc"
@@ -140,6 +142,7 @@ const (
 	Forge_FindIpAddress_FullMethodName                                      = "/forge.Forge/FindIpAddress"
 	Forge_FindMachineIds_FullMethodName                                     = "/forge.Forge/FindMachineIds"
 	Forge_FindMachinesByIds_FullMethodName                                  = "/forge.Forge/FindMachinesByIds"
+	Forge_FindMachineStatesByIds_FullMethodName                             = "/forge.Forge/FindMachineStatesByIds"
 	Forge_FindHostStatesByIds_FullMethodName                                = "/forge.Forge/FindHostStatesByIds"
 	Forge_FindMachineStateHistories_FullMethodName                          = "/forge.Forge/FindMachineStateHistories"
 	Forge_FindMachineHealthHistories_FullMethodName                         = "/forge.Forge/FindMachineHealthHistories"
@@ -183,6 +186,7 @@ const (
 	Forge_ClearSiteExplorationError_FullMethodName                          = "/forge.Forge/ClearSiteExplorationError"
 	Forge_IsBmcInManagedHost_FullMethodName                                 = "/forge.Forge/IsBmcInManagedHost"
 	Forge_BmcCredentialStatus_FullMethodName                                = "/forge.Forge/BmcCredentialStatus"
+	Forge_FindBmcDriverSelection_FullMethodName                             = "/forge.Forge/FindBmcDriverSelection"
 	Forge_Explore_FullMethodName                                            = "/forge.Forge/Explore"
 	Forge_ReExploreEndpoint_FullMethodName                                  = "/forge.Forge/ReExploreEndpoint"
 	Forge_RefreshEndpointReport_FullMethodName                              = "/forge.Forge/RefreshEndpointReport"
@@ -556,6 +560,8 @@ const (
 	Forge_ReleaseDPUServiceSyncHold_FullMethodName                          = "/forge.Forge/ReleaseDPUServiceSyncHold"
 	Forge_ComponentPowerControl_FullMethodName                              = "/forge.Forge/ComponentPowerControl"
 	Forge_GetComponentPowerDetails_FullMethodName                           = "/forge.Forge/GetComponentPowerDetails"
+	Forge_ComponentReset_FullMethodName                                     = "/forge.Forge/ComponentReset"
+	Forge_GetComponentResetStatus_FullMethodName                            = "/forge.Forge/GetComponentResetStatus"
 	Forge_ComponentConfigureSwitchCertificate_FullMethodName                = "/forge.Forge/ComponentConfigureSwitchCertificate"
 	Forge_GetComponentInventory_FullMethodName                              = "/forge.Forge/GetComponentInventory"
 	Forge_UpdateComponentFirmware_FullMethodName                            = "/forge.Forge/UpdateComponentFirmware"
@@ -592,6 +598,8 @@ type ForgeClient interface {
 	// the RBAC middleware rejects unknown RPC names with HTTP 403 before gRPC
 	// dispatch, so Unimplemented is never reached on those servers.
 	GetRmsVersion(ctx context.Context, in *GetRmsVersionRequest, opts ...grpc.CallOption) (*GetRmsVersionResponse, error)
+	// Admin-only inspection of backend jobs; normal component callers query by device.
+	GetRmsJobStatus(ctx context.Context, in *GetRmsJobStatusRequest, opts ...grpc.CallOption) (*GetRmsJobStatusResponse, error)
 	// Stream recent and live machine console output.
 	StreamConsoleLogs(ctx context.Context, in *StreamConsoleLogsRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[ConsoleLogLine], error)
 	// Domain
@@ -662,6 +670,20 @@ type ForgeClient interface {
 	FindNetworkSegmentIds(ctx context.Context, in *NetworkSegmentSearchFilter, opts ...grpc.CallOption) (*NetworkSegmentIdList, error)
 	FindNetworkSegmentsByIds(ctx context.Context, in *NetworkSegmentsByIdsRequest, opts ...grpc.CallOption) (*NetworkSegmentList, error)
 	CreateNetworkSegment(ctx context.Context, in *NetworkSegmentCreationRequest, opts ...grpc.CallOption) (*NetworkSegment, error)
+	// Admin-only: append the missing family to a live, Ready, unattached Underlay
+	// segment with one prefix. Matching any stored same-family prefix and settings
+	// returns the current segment without a write; different same-family settings
+	// fail with FAILED_PRECONDITION. Existing prefixes, IDs, addresses, policy and
+	// lifecycle are unchanged; the stored initial network_def is not modified.
+	// Existing SLAAC inference policy also applies to the added prefix.
+	// Invalid input, overlap with any NetworkPrefix or VPC-scoped VpcPrefix, and
+	// reused relay selectors return INVALID_ARGUMENT. A global VpcPrefix parent
+	// may overlap an unattached Underlay, as with initial network creation.
+	// Unknown segment IDs return NOT_FOUND; unsupported targets return
+	// FAILED_PRECONDITION. Success commits the prefix, version and reverse zone
+	// together; a zone is created only for zone-boundary-aligned prefixes.
+	// It does not configure site routing, router advertisements or DHCP relays.
+	AddNetworkSegmentPrefix(ctx context.Context, in *AddNetworkSegmentPrefixRequest, opts ...grpc.CallOption) (*NetworkSegment, error)
 	AttachNetworkSegmentToVpc(ctx context.Context, in *AttachNetworkSegmentToVpcRequest, opts ...grpc.CallOption) (*NetworkSegment, error)
 	DeleteNetworkSegment(ctx context.Context, in *NetworkSegmentDeletionRequest, opts ...grpc.CallOption) (*NetworkSegmentDeletionResult, error)
 	// TODO: This functionality should get integrated into NetworkSegmentSearchFilter
@@ -806,6 +828,9 @@ type ForgeClient interface {
 	FindIpAddress(ctx context.Context, in *FindIpAddressRequest, opts ...grpc.CallOption) (*FindIpAddressResponse, error)
 	FindMachineIds(ctx context.Context, in *MachineSearchConfig, opts ...grpc.CallOption) (*MachineIdList, error)
 	FindMachinesByIds(ctx context.Context, in *MachinesByIdsRequest, opts ...grpc.CallOption) (*MachineList, error)
+	// Current host and DPU lifecycle states without full machine records.
+	// Query or state-decoding errors fail the entire request with INTERNAL.
+	FindMachineStatesByIds(ctx context.Context, in *MachineStatesByIdsRequest, opts ...grpc.CallOption) (*MachineStateList, error)
 	// Compact per-host state for monitoring: allocatability, update eligibility
 	// and the explored firmware report, read from one database snapshot.
 	FindHostStatesByIds(ctx context.Context, in *HostStatesByIdsRequest, opts ...grpc.CallOption) (*HostStateList, error)
@@ -862,6 +887,9 @@ type ForgeClient interface {
 	IsBmcInManagedHost(ctx context.Context, in *BmcEndpointRequest, opts ...grpc.CallOption) (*IsBmcInManagedHostResponse, error)
 	// BmcCredentialStatus returns true if site explorer has the credentials to login to this BMC
 	BmcCredentialStatus(ctx context.Context, in *BmcEndpointRequest, opts ...grpc.CallOption) (*BmcCredentialStatusResponse, error)
+	// Returns the drivers this API server's rules select for a BMC from its
+	// latest exploration report, and the identity they were selected from
+	FindBmcDriverSelection(ctx context.Context, in *BmcEndpointRequest, opts ...grpc.CallOption) (*BmcDriverSelection, error)
 	// Explore an individual BMC and show the report
 	// The results of this exploration call will not be persisted in the database
 	Explore(ctx context.Context, in *BmcEndpointRequest, opts ...grpc.CallOption) (*EndpointExplorationReport, error)
@@ -1384,7 +1412,8 @@ type ForgeClient interface {
 	// Remove a SKU assignemnt from a machine.  Must be in the Ready or SkuVerifyFailed states.
 	// The machine will move to the WaitingForSkuAssignment state.
 	RemoveSkuAssociation(ctx context.Context, in *RemoveSkuRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
-	// Removes an unused SKU
+	// Removes an unused SKU. If the initial lookup finds no match, a request
+	// containing exactly one nonempty SKU ID returns `NOT_FOUND`.
 	DeleteSku(ctx context.Context, in *SkuIdList, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	GetAllSkuIds(ctx context.Context, in *emptypb.Empty, opts ...grpc.CallOption) (*SkuIdList, error)
 	FindSkusByIds(ctx context.Context, in *SkusByIdsRequest, opts ...grpc.CallOption) (*SkuList, error)
@@ -1654,6 +1683,18 @@ type ForgeClient interface {
 	// read budgets, whose expiry reports ReadFailed. This method never registers
 	// devices, writes policy, or submits power operations.
 	GetComponentPowerDetails(ctx context.Context, in *GetComponentPowerDetailsRequest, opts ...grpc.CallOption) (*GetComponentPowerDetailsResponse, error)
+	// Dispatch a reset directly, without scheduling state-controller maintenance.
+	// Valid devices proceed even when other targets cannot be resolved or accepted.
+	// Only SDN factory reset is implemented; it disrupts fabric traffic and restores
+	// SDN defaults without reinstalling NVOS. SUCCESS means accepted and tracked,
+	// not completed. A submission error may follow dispatch: do not automatically resubmit.
+	ComponentReset(ctx context.Context, in *ComponentResetRequest, opts ...grpc.CallOption) (*ComponentResetResponse, error)
+	// Observe the latest successfully recorded accepted reset for each device/action.
+	// A failed or unknown submission attempt may leave an earlier reference in place.
+	// References survive NICo restarts, but RMS job state may be lost on restart.
+	// Missing/unobservable jobs never imply completion. Terminal observations are
+	// not persisted.
+	GetComponentResetStatus(ctx context.Context, in *GetComponentResetStatusRequest, opts ...grpc.CallOption) (*GetComponentResetStatusResponse, error)
 	ComponentConfigureSwitchCertificate(ctx context.Context, in *ComponentConfigureSwitchCertificateRequest, opts ...grpc.CallOption) (*ComponentConfigureSwitchCertificateResponse, error)
 	GetComponentInventory(ctx context.Context, in *GetComponentInventoryRequest, opts ...grpc.CallOption) (*GetComponentInventoryResponse, error)
 	UpdateComponentFirmware(ctx context.Context, in *UpdateComponentFirmwareRequest, opts ...grpc.CallOption) (*UpdateComponentFirmwareResponse, error)
@@ -1735,6 +1776,16 @@ func (c *forgeClient) GetRmsVersion(ctx context.Context, in *GetRmsVersionReques
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(GetRmsVersionResponse)
 	err := c.cc.Invoke(ctx, Forge_GetRmsVersion_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *forgeClient) GetRmsJobStatus(ctx context.Context, in *GetRmsJobStatusRequest, opts ...grpc.CallOption) (*GetRmsJobStatusResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetRmsJobStatusResponse)
+	err := c.cc.Invoke(ctx, Forge_GetRmsJobStatus_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -2158,6 +2209,16 @@ func (c *forgeClient) CreateNetworkSegment(ctx context.Context, in *NetworkSegme
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(NetworkSegment)
 	err := c.cc.Invoke(ctx, Forge_CreateNetworkSegment_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *forgeClient) AddNetworkSegmentPrefix(ctx context.Context, in *AddNetworkSegmentPrefixRequest, opts ...grpc.CallOption) (*NetworkSegment, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(NetworkSegment)
+	err := c.cc.Invoke(ctx, Forge_AddNetworkSegmentPrefix_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -2907,6 +2968,16 @@ func (c *forgeClient) FindMachinesByIds(ctx context.Context, in *MachinesByIdsRe
 	return out, nil
 }
 
+func (c *forgeClient) FindMachineStatesByIds(ctx context.Context, in *MachineStatesByIdsRequest, opts ...grpc.CallOption) (*MachineStateList, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(MachineStateList)
+	err := c.cc.Invoke(ctx, Forge_FindMachineStatesByIds_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *forgeClient) FindHostStatesByIds(ctx context.Context, in *HostStatesByIdsRequest, opts ...grpc.CallOption) (*HostStateList, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(HostStateList)
@@ -3331,6 +3402,16 @@ func (c *forgeClient) BmcCredentialStatus(ctx context.Context, in *BmcEndpointRe
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(BmcCredentialStatusResponse)
 	err := c.cc.Invoke(ctx, Forge_BmcCredentialStatus_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *forgeClient) FindBmcDriverSelection(ctx context.Context, in *BmcEndpointRequest, opts ...grpc.CallOption) (*BmcDriverSelection, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(BmcDriverSelection)
+	err := c.cc.Invoke(ctx, Forge_FindBmcDriverSelection_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -7070,6 +7151,26 @@ func (c *forgeClient) GetComponentPowerDetails(ctx context.Context, in *GetCompo
 	return out, nil
 }
 
+func (c *forgeClient) ComponentReset(ctx context.Context, in *ComponentResetRequest, opts ...grpc.CallOption) (*ComponentResetResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ComponentResetResponse)
+	err := c.cc.Invoke(ctx, Forge_ComponentReset_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *forgeClient) GetComponentResetStatus(ctx context.Context, in *GetComponentResetStatusRequest, opts ...grpc.CallOption) (*GetComponentResetStatusResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetComponentResetStatusResponse)
+	err := c.cc.Invoke(ctx, Forge_GetComponentResetStatus_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *forgeClient) ComponentConfigureSwitchCertificate(ctx context.Context, in *ComponentConfigureSwitchCertificateRequest, opts ...grpc.CallOption) (*ComponentConfigureSwitchCertificateResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(ComponentConfigureSwitchCertificateResponse)
@@ -7302,6 +7403,8 @@ type ForgeServer interface {
 	// the RBAC middleware rejects unknown RPC names with HTTP 403 before gRPC
 	// dispatch, so Unimplemented is never reached on those servers.
 	GetRmsVersion(context.Context, *GetRmsVersionRequest) (*GetRmsVersionResponse, error)
+	// Admin-only inspection of backend jobs; normal component callers query by device.
+	GetRmsJobStatus(context.Context, *GetRmsJobStatusRequest) (*GetRmsJobStatusResponse, error)
 	// Stream recent and live machine console output.
 	StreamConsoleLogs(*StreamConsoleLogsRequest, grpc.ServerStreamingServer[ConsoleLogLine]) error
 	// Domain
@@ -7372,6 +7475,20 @@ type ForgeServer interface {
 	FindNetworkSegmentIds(context.Context, *NetworkSegmentSearchFilter) (*NetworkSegmentIdList, error)
 	FindNetworkSegmentsByIds(context.Context, *NetworkSegmentsByIdsRequest) (*NetworkSegmentList, error)
 	CreateNetworkSegment(context.Context, *NetworkSegmentCreationRequest) (*NetworkSegment, error)
+	// Admin-only: append the missing family to a live, Ready, unattached Underlay
+	// segment with one prefix. Matching any stored same-family prefix and settings
+	// returns the current segment without a write; different same-family settings
+	// fail with FAILED_PRECONDITION. Existing prefixes, IDs, addresses, policy and
+	// lifecycle are unchanged; the stored initial network_def is not modified.
+	// Existing SLAAC inference policy also applies to the added prefix.
+	// Invalid input, overlap with any NetworkPrefix or VPC-scoped VpcPrefix, and
+	// reused relay selectors return INVALID_ARGUMENT. A global VpcPrefix parent
+	// may overlap an unattached Underlay, as with initial network creation.
+	// Unknown segment IDs return NOT_FOUND; unsupported targets return
+	// FAILED_PRECONDITION. Success commits the prefix, version and reverse zone
+	// together; a zone is created only for zone-boundary-aligned prefixes.
+	// It does not configure site routing, router advertisements or DHCP relays.
+	AddNetworkSegmentPrefix(context.Context, *AddNetworkSegmentPrefixRequest) (*NetworkSegment, error)
 	AttachNetworkSegmentToVpc(context.Context, *AttachNetworkSegmentToVpcRequest) (*NetworkSegment, error)
 	DeleteNetworkSegment(context.Context, *NetworkSegmentDeletionRequest) (*NetworkSegmentDeletionResult, error)
 	// TODO: This functionality should get integrated into NetworkSegmentSearchFilter
@@ -7516,6 +7633,9 @@ type ForgeServer interface {
 	FindIpAddress(context.Context, *FindIpAddressRequest) (*FindIpAddressResponse, error)
 	FindMachineIds(context.Context, *MachineSearchConfig) (*MachineIdList, error)
 	FindMachinesByIds(context.Context, *MachinesByIdsRequest) (*MachineList, error)
+	// Current host and DPU lifecycle states without full machine records.
+	// Query or state-decoding errors fail the entire request with INTERNAL.
+	FindMachineStatesByIds(context.Context, *MachineStatesByIdsRequest) (*MachineStateList, error)
 	// Compact per-host state for monitoring: allocatability, update eligibility
 	// and the explored firmware report, read from one database snapshot.
 	FindHostStatesByIds(context.Context, *HostStatesByIdsRequest) (*HostStateList, error)
@@ -7572,6 +7692,9 @@ type ForgeServer interface {
 	IsBmcInManagedHost(context.Context, *BmcEndpointRequest) (*IsBmcInManagedHostResponse, error)
 	// BmcCredentialStatus returns true if site explorer has the credentials to login to this BMC
 	BmcCredentialStatus(context.Context, *BmcEndpointRequest) (*BmcCredentialStatusResponse, error)
+	// Returns the drivers this API server's rules select for a BMC from its
+	// latest exploration report, and the identity they were selected from
+	FindBmcDriverSelection(context.Context, *BmcEndpointRequest) (*BmcDriverSelection, error)
 	// Explore an individual BMC and show the report
 	// The results of this exploration call will not be persisted in the database
 	Explore(context.Context, *BmcEndpointRequest) (*EndpointExplorationReport, error)
@@ -8094,7 +8217,8 @@ type ForgeServer interface {
 	// Remove a SKU assignemnt from a machine.  Must be in the Ready or SkuVerifyFailed states.
 	// The machine will move to the WaitingForSkuAssignment state.
 	RemoveSkuAssociation(context.Context, *RemoveSkuRequest) (*emptypb.Empty, error)
-	// Removes an unused SKU
+	// Removes an unused SKU. If the initial lookup finds no match, a request
+	// containing exactly one nonempty SKU ID returns `NOT_FOUND`.
 	DeleteSku(context.Context, *SkuIdList) (*emptypb.Empty, error)
 	GetAllSkuIds(context.Context, *emptypb.Empty) (*SkuIdList, error)
 	FindSkusByIds(context.Context, *SkusByIdsRequest) (*SkuList, error)
@@ -8364,6 +8488,18 @@ type ForgeServer interface {
 	// read budgets, whose expiry reports ReadFailed. This method never registers
 	// devices, writes policy, or submits power operations.
 	GetComponentPowerDetails(context.Context, *GetComponentPowerDetailsRequest) (*GetComponentPowerDetailsResponse, error)
+	// Dispatch a reset directly, without scheduling state-controller maintenance.
+	// Valid devices proceed even when other targets cannot be resolved or accepted.
+	// Only SDN factory reset is implemented; it disrupts fabric traffic and restores
+	// SDN defaults without reinstalling NVOS. SUCCESS means accepted and tracked,
+	// not completed. A submission error may follow dispatch: do not automatically resubmit.
+	ComponentReset(context.Context, *ComponentResetRequest) (*ComponentResetResponse, error)
+	// Observe the latest successfully recorded accepted reset for each device/action.
+	// A failed or unknown submission attempt may leave an earlier reference in place.
+	// References survive NICo restarts, but RMS job state may be lost on restart.
+	// Missing/unobservable jobs never imply completion. Terminal observations are
+	// not persisted.
+	GetComponentResetStatus(context.Context, *GetComponentResetStatusRequest) (*GetComponentResetStatusResponse, error)
 	ComponentConfigureSwitchCertificate(context.Context, *ComponentConfigureSwitchCertificateRequest) (*ComponentConfigureSwitchCertificateResponse, error)
 	GetComponentInventory(context.Context, *GetComponentInventoryRequest) (*GetComponentInventoryResponse, error)
 	UpdateComponentFirmware(context.Context, *UpdateComponentFirmwareRequest) (*UpdateComponentFirmwareResponse, error)
@@ -8435,6 +8571,9 @@ func (UnimplementedForgeServer) Version(context.Context, *VersionRequest) (*Buil
 }
 func (UnimplementedForgeServer) GetRmsVersion(context.Context, *GetRmsVersionRequest) (*GetRmsVersionResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetRmsVersion not implemented")
+}
+func (UnimplementedForgeServer) GetRmsJobStatus(context.Context, *GetRmsJobStatusRequest) (*GetRmsJobStatusResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetRmsJobStatus not implemented")
 }
 func (UnimplementedForgeServer) StreamConsoleLogs(*StreamConsoleLogsRequest, grpc.ServerStreamingServer[ConsoleLogLine]) error {
 	return status.Error(codes.Unimplemented, "method StreamConsoleLogs not implemented")
@@ -8558,6 +8697,9 @@ func (UnimplementedForgeServer) FindNetworkSegmentsByIds(context.Context, *Netwo
 }
 func (UnimplementedForgeServer) CreateNetworkSegment(context.Context, *NetworkSegmentCreationRequest) (*NetworkSegment, error) {
 	return nil, status.Error(codes.Unimplemented, "method CreateNetworkSegment not implemented")
+}
+func (UnimplementedForgeServer) AddNetworkSegmentPrefix(context.Context, *AddNetworkSegmentPrefixRequest) (*NetworkSegment, error) {
+	return nil, status.Error(codes.Unimplemented, "method AddNetworkSegmentPrefix not implemented")
 }
 func (UnimplementedForgeServer) AttachNetworkSegmentToVpc(context.Context, *AttachNetworkSegmentToVpcRequest) (*NetworkSegment, error) {
 	return nil, status.Error(codes.Unimplemented, "method AttachNetworkSegmentToVpc not implemented")
@@ -8781,6 +8923,9 @@ func (UnimplementedForgeServer) FindMachineIds(context.Context, *MachineSearchCo
 func (UnimplementedForgeServer) FindMachinesByIds(context.Context, *MachinesByIdsRequest) (*MachineList, error) {
 	return nil, status.Error(codes.Unimplemented, "method FindMachinesByIds not implemented")
 }
+func (UnimplementedForgeServer) FindMachineStatesByIds(context.Context, *MachineStatesByIdsRequest) (*MachineStateList, error) {
+	return nil, status.Error(codes.Unimplemented, "method FindMachineStatesByIds not implemented")
+}
 func (UnimplementedForgeServer) FindHostStatesByIds(context.Context, *HostStatesByIdsRequest) (*HostStateList, error) {
 	return nil, status.Error(codes.Unimplemented, "method FindHostStatesByIds not implemented")
 }
@@ -8909,6 +9054,9 @@ func (UnimplementedForgeServer) IsBmcInManagedHost(context.Context, *BmcEndpoint
 }
 func (UnimplementedForgeServer) BmcCredentialStatus(context.Context, *BmcEndpointRequest) (*BmcCredentialStatusResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method BmcCredentialStatus not implemented")
+}
+func (UnimplementedForgeServer) FindBmcDriverSelection(context.Context, *BmcEndpointRequest) (*BmcDriverSelection, error) {
+	return nil, status.Error(codes.Unimplemented, "method FindBmcDriverSelection not implemented")
 }
 func (UnimplementedForgeServer) Explore(context.Context, *BmcEndpointRequest) (*EndpointExplorationReport, error) {
 	return nil, status.Error(codes.Unimplemented, "method Explore not implemented")
@@ -10029,6 +10177,12 @@ func (UnimplementedForgeServer) ComponentPowerControl(context.Context, *Componen
 func (UnimplementedForgeServer) GetComponentPowerDetails(context.Context, *GetComponentPowerDetailsRequest) (*GetComponentPowerDetailsResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetComponentPowerDetails not implemented")
 }
+func (UnimplementedForgeServer) ComponentReset(context.Context, *ComponentResetRequest) (*ComponentResetResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ComponentReset not implemented")
+}
+func (UnimplementedForgeServer) GetComponentResetStatus(context.Context, *GetComponentResetStatusRequest) (*GetComponentResetStatusResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetComponentResetStatus not implemented")
+}
 func (UnimplementedForgeServer) ComponentConfigureSwitchCertificate(context.Context, *ComponentConfigureSwitchCertificateRequest) (*ComponentConfigureSwitchCertificateResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ComponentConfigureSwitchCertificate not implemented")
 }
@@ -10147,6 +10301,24 @@ func _Forge_GetRmsVersion_Handler(srv interface{}, ctx context.Context, dec func
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(ForgeServer).GetRmsVersion(ctx, req.(*GetRmsVersionRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Forge_GetRmsJobStatus_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetRmsJobStatusRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ForgeServer).GetRmsJobStatus(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Forge_GetRmsJobStatus_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ForgeServer).GetRmsJobStatus(ctx, req.(*GetRmsJobStatusRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -10878,6 +11050,24 @@ func _Forge_CreateNetworkSegment_Handler(srv interface{}, ctx context.Context, d
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(ForgeServer).CreateNetworkSegment(ctx, req.(*NetworkSegmentCreationRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Forge_AddNetworkSegmentPrefix_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(AddNetworkSegmentPrefixRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ForgeServer).AddNetworkSegmentPrefix(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Forge_AddNetworkSegmentPrefix_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ForgeServer).AddNetworkSegmentPrefix(ctx, req.(*AddNetworkSegmentPrefixRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -12214,6 +12404,24 @@ func _Forge_FindMachinesByIds_Handler(srv interface{}, ctx context.Context, dec 
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Forge_FindMachineStatesByIds_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(MachineStatesByIdsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ForgeServer).FindMachineStatesByIds(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Forge_FindMachineStatesByIds_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ForgeServer).FindMachineStatesByIds(ctx, req.(*MachineStatesByIdsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _Forge_FindHostStatesByIds_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(HostStatesByIdsRequest)
 	if err := dec(in); err != nil {
@@ -12984,6 +13192,24 @@ func _Forge_BmcCredentialStatus_Handler(srv interface{}, ctx context.Context, de
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(ForgeServer).BmcCredentialStatus(ctx, req.(*BmcEndpointRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Forge_FindBmcDriverSelection_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(BmcEndpointRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ForgeServer).FindBmcDriverSelection(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Forge_FindBmcDriverSelection_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ForgeServer).FindBmcDriverSelection(ctx, req.(*BmcEndpointRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -19691,6 +19917,42 @@ func _Forge_GetComponentPowerDetails_Handler(srv interface{}, ctx context.Contex
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Forge_ComponentReset_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ComponentResetRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ForgeServer).ComponentReset(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Forge_ComponentReset_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ForgeServer).ComponentReset(ctx, req.(*ComponentResetRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Forge_GetComponentResetStatus_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetComponentResetStatusRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ForgeServer).GetComponentResetStatus(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Forge_GetComponentResetStatus_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ForgeServer).GetComponentResetStatus(ctx, req.(*GetComponentResetStatusRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _Forge_ComponentConfigureSwitchCertificate_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(ComponentConfigureSwitchCertificateRequest)
 	if err := dec(in); err != nil {
@@ -20103,6 +20365,10 @@ var Forge_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _Forge_GetRmsVersion_Handler,
 		},
 		{
+			MethodName: "GetRmsJobStatus",
+			Handler:    _Forge_GetRmsJobStatus_Handler,
+		},
+		{
 			MethodName: "CreateDomain",
 			Handler:    _Forge_CreateDomain_Handler,
 		},
@@ -20261,6 +20527,10 @@ var Forge_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "CreateNetworkSegment",
 			Handler:    _Forge_CreateNetworkSegment_Handler,
+		},
+		{
+			MethodName: "AddNetworkSegmentPrefix",
+			Handler:    _Forge_AddNetworkSegmentPrefix_Handler,
 		},
 		{
 			MethodName: "AttachNetworkSegmentToVpc",
@@ -20559,6 +20829,10 @@ var Forge_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _Forge_FindMachinesByIds_Handler,
 		},
 		{
+			MethodName: "FindMachineStatesByIds",
+			Handler:    _Forge_FindMachineStatesByIds_Handler,
+		},
+		{
 			MethodName: "FindHostStatesByIds",
 			Handler:    _Forge_FindHostStatesByIds_Handler,
 		},
@@ -20729,6 +21003,10 @@ var Forge_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "BmcCredentialStatus",
 			Handler:    _Forge_BmcCredentialStatus_Handler,
+		},
+		{
+			MethodName: "FindBmcDriverSelection",
+			Handler:    _Forge_FindBmcDriverSelection_Handler,
 		},
 		{
 			MethodName: "Explore",
@@ -22217,6 +22495,14 @@ var Forge_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "GetComponentPowerDetails",
 			Handler:    _Forge_GetComponentPowerDetails_Handler,
+		},
+		{
+			MethodName: "ComponentReset",
+			Handler:    _Forge_ComponentReset_Handler,
+		},
+		{
+			MethodName: "GetComponentResetStatus",
+			Handler:    _Forge_GetComponentResetStatus_Handler,
 		},
 		{
 			MethodName: "ComponentConfigureSwitchCertificate",

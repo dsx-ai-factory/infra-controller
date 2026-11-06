@@ -61,7 +61,10 @@ env:
 jobs:
   changes:
     name: Detect Core CI Gate
-    runs-on: linux-amd64-cpu4
+    # Hosted ubuntu-slim, because every other job waits on this one and the
+    # cpu4 pool can queue for minutes.
+    runs-on: ubuntu-slim
+    timeout-minutes: 10
     permissions:
       contents: read
       pull-requests: read
@@ -258,6 +261,14 @@ jobs:
       - name: Test Scout firmware supervisor packaging
         run: python3 -B pxe/tests/test_firmware_supervisor_packaging.py
 
+      - name: Test Scout APT repository packaging
+        run: |
+          if ! command -v dpkg-scanpackages >/dev/null; then
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends dpkg-dev
+          fi
+          python3 -B pxe/tests/test_apt_repository_packaging.py
+
       - name: Detect build-container-x86_64 changes
         id: build-container-changes
         uses: dorny/paths-filter@v3
@@ -293,6 +304,12 @@ jobs:
               - '.github/workflows/ci.yaml'
               - 'dev/k8s/machine-a-tron-controller/**'
               - 'dev/k8s/scale-test/**'
+              # The scale-test runner imports the generated Forge stubs from the
+              # rest-api module via a local replace, so a change to its module
+              # files or those stubs must run the runner gate (test-scale-test).
+              - 'rest-api/go.mod'
+              - 'rest-api/go.sum'
+              - 'rest-api/proto/core/**'
             machine_lifecycle:
               - 'tests/machine-lifecycle/**'
               - '.github/workflows/ci.yaml'
@@ -1150,6 +1167,37 @@ jobs:
       timeout_minutes: 60
     secrets: inherit
 
+  # The scale-test acceptance image holds the current suite binaries that the
+  # runner chart runs as `helm test` Jobs. source_files_changed gates it: that
+  # flag is broad (it also covers the Rust crates), so the image may rebuild on
+  # changes it does not read, but it never misses a dev/k8s/scale-test or
+  # workflow change, and `core-ci-pass` still fails the merge when it fails.
+  build-scale-test-acceptance:
+    if: >-
+      ${{
+        !cancelled()
+        && github.event_name != 'schedule'
+        && needs.prepare.result == 'success'
+        && needs.prepare.outputs.source_files_changed == 'true'
+      }}
+    needs:
+      - prepare
+    uses: ./.github/workflows/docker-build.yml
+    with:
+      dockerfile_path: dev/k8s/scale-test/Dockerfile
+      context_path: .
+      image_name: ${{ needs.prepare.outputs.image_registry }}/scale-test-acceptance
+      image_tag: ${{ needs.prepare.outputs.version }}
+      additional_tags: ${{ needs.prepare.outputs.image_registry }}/scale-test-acceptance:${{ needs.prepare.outputs.major_minor_version }}-latest
+      platforms: linux/amd64
+      runner: linux-amd64-cpu4
+      push: ${{ needs.prepare.outputs.publish_images == 'true' }}
+      load: false
+      scan: true
+      tag_latest: false
+      timeout_minutes: 30
+    secrets: inherit
+
   # Like the release-container builds above, deliberately not gated on
   # `check-rest-core-proto-sync`: the tests do not read anything it produces,
   # and `core-ci-pass` still fails the merge when the protos are out of sync.
@@ -1176,11 +1224,26 @@ jobs:
         uses: actions/setup-go@v7
         with:
           go-version-file: dev/k8s/machine-a-tron-controller/go.mod
-          cache: true
-          cache-dependency-path: dev/k8s/machine-a-tron-controller/go.sum
+          cache: false
+
+      # setup-go's own cache saves on every ref, so this job restores and saves
+      # through go-cache-restore and go-cache-save instead.
+      - name: Restore Go caches
+        id: go-cache
+        uses: ./.github/actions/go-cache-restore
+        with:
+          scope: mat-k8s-controller
+          dependency-path: dev/k8s/machine-a-tron-controller/go.sum
 
       - name: Run the mat-k8s-controller unit tests
         run: make -C dev/k8s/machine-a-tron-controller test
+
+      - name: Save Go caches
+        if: ${{ !cancelled() }}
+        uses: ./.github/actions/go-cache-save
+        with:
+          key: ${{ steps.go-cache.outputs.key }}
+          cache-hit: ${{ steps.go-cache.outputs.cache-hit }}
 
   # The scale-test runner is a standalone Go module. Its unit gates run here,
   # and `core-ci-pass` fails the merge when they fail. The cross-language
@@ -1270,7 +1333,7 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: .sccache
-          key: sccache-test-release-x86_64-${{ hashFiles('Cargo.lock') }}
+          key: sccache-test-release-x86_64-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
           restore-keys: |
             sccache-test-release-x86_64-
 
@@ -1283,6 +1346,9 @@ jobs:
           set -euo pipefail
           mkdir -p "${{ github.workspace }}/.sccache"
           docker pull "${BUILD_CONTAINER}"
+          # SCCACHE_IDLE_TIMEOUT=0 keeps the server that compiled alive through
+          # the test run. Otherwise it exits after 600s idle and the stats
+          # printed afterwards come from a fresh server and read all zeros.
           docker run --rm \
             --ulimit nofile=65536:65536 \
             -v "${{ github.workspace }}:/carbide" \
@@ -1295,6 +1361,7 @@ jobs:
             -e NICO_TEST_MAX_PG_CONNECTIONS=900 \
             -e SCCACHE_DIR=/sccache \
             -e SCCACHE_CACHE_SIZE=5G \
+            -e SCCACHE_IDLE_TIMEOUT=0 \
             -e RUSTC_WRAPPER=sccache \
             -e CI_COMMIT_SHORT_SHA="${CI_COMMIT_SHORT_SHA}" \
             -e VERSION="${VERSION}" \
@@ -1326,9 +1393,10 @@ jobs:
 
       # Worth saving even when the tests failed: the entry holds the dependency
       # compilation, which is no less valid after a red run and is most of the
-      # eight minutes spent before the first test starts. Cargo.lock keys it, so
-      # a run that changes no dependencies hits the primary key and skips the
-      # upload rather than rewriting an equivalent entry.
+      # eight minutes spent before the first test starts. Cargo.lock and
+      # rust-toolchain.toml key it, so a run that changes neither hits the
+      # primary key and skips the upload rather than rewriting an equivalent
+      # entry.
       #
       # Only main saves. A pull request whose Cargo.lock differs from main's
       # matches the restore-keys prefix rather than the exact key, so cache-hit
@@ -2063,8 +2131,14 @@ jobs:
         uses: actions/setup-go@v7
         with:
           go-version: "1.27.3"
-          cache: true
-          cache-dependency-path: rest-api/go.sum
+          cache: false
+
+      - name: Restore Go caches
+        id: go-cache
+        uses: ./.github/actions/go-cache-restore
+        with:
+          scope: rest-core-proto-sync
+          dependency-path: rest-api/go.sum
 
       - name: Download REST dependencies
         uses: ./.github/actions/go-mod-download
@@ -2076,6 +2150,13 @@ jobs:
         run: >-
           bash scripts/check-repo-clean.sh "REST Core protobuf sync"
           "make sync-protobuf (from the repository root)"
+
+      - name: Save Go caches
+        if: ${{ !cancelled() }}
+        uses: ./.github/actions/go-cache-save
+        with:
+          key: ${{ steps.go-cache.outputs.key }}
+          cache-hit: ${{ steps.go-cache.outputs.cache-hit }}
 
   lint-police:
     needs:
@@ -2182,7 +2263,7 @@ jobs:
       - name: Set up uv
         uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
         with:
-          version: "0.11.32"
+          version: "0.13.6"
           enable-cache: false
 
       - name: Install locked dependencies
@@ -2317,6 +2398,26 @@ jobs:
           lint: 'true'
           template: 'true'
 
+      # helm/scale-test is standalone (outside the umbrella dependency tree), so
+      # the validation above does not reach it. Lint and template it on its own
+      # with a valid dummy image; its helper rejects a missing repository or
+      # digest/tag, so these inputs are required here.
+      - name: Set up Helm for the scale-test chart
+        uses: azure/setup-helm@v4.3.0
+      - name: Validate the scale-test chart
+        env:
+          IMAGE_REPO: registry.invalid/scale-test-acceptance
+          IMAGE_DIGEST: sha256:0000000000000000000000000000000000000000000000000000000000000000
+        run: |
+          set -euo pipefail
+          helm lint helm/scale-test --set "image.repository=${IMAGE_REPO}" --set "image.digest=${IMAGE_DIGEST}"
+          # --set passes integer budgets as int64, which Helm-unittest's YAML
+          # set path does not exercise; prove the chart accepts them.
+          helm template scale-test helm/scale-test --namespace scale-test \
+            --set "image.repository=${IMAGE_REPO}" --set "image.digest=${IMAGE_DIGEST}" \
+            --set testBudget.activeDeadlineSeconds=1200 \
+            --set testBudget.testTimeoutSeconds=900 >/dev/null
+
       - name: Validate IPv6 Prometheus scrape configuration
         run: |
           set -euo pipefail
@@ -2368,6 +2469,7 @@ jobs:
             helm/charts/nico-dns
             helm/charts/nico-dsx-exchange-consumer
             helm/nico-flow
+            helm/scale-test
             helm/charts/nico-hardware-health
             helm/charts/nico-machine-a-tron
             helm/charts/nico-machine-a-tron/charts/mat-k8s-controller
@@ -2456,6 +2558,9 @@ jobs:
 
       - name: Test REST postgres StatefulSet recreation
         run: bash helm-prereqs/tests/setup-rest-postgres-statefulset-recreate_test.sh
+
+      - name: Test site-agent Core connection verification
+        run: bash helm-prereqs/tests/setup-site-agent-connection_test.sh
 
       - name: Test Temporal/Keycloak HA Postgres resolution
         run: bash helm-prereqs/tests/preflight-ha-postgres-resolution_test.sh
@@ -2855,6 +2960,7 @@ jobs:
       - build-machine-a-tron
       - build-mat-k8s-controller
       - build-site-health-probe
+      - build-scale-test-acceptance
       - test-mat-k8s-controller
       - test-scale-test
       - test-release-container-services
@@ -2908,6 +3014,7 @@ jobs:
           BUILD_RELEASE_ARTIFACTS_ARM_HOST_IMAGE_REF: ${{ needs.build-release-artifacts-arm-host.outputs.image_ref }}
           BUILD_MAT_K8S_CONTROLLER_IMAGE_REF: ${{ needs.build-mat-k8s-controller.outputs.image_ref }}
           BUILD_SITE_HEALTH_PROBE_IMAGE_REF: ${{ needs.build-site-health-probe.outputs.image_ref }}
+          BUILD_SCALE_TEST_ACCEPTANCE_IMAGE_REF: ${{ needs.build-scale-test-acceptance.outputs.image_ref }}
         run: |
           echo "## Build Jobs Summary" >> "$GITHUB_STEP_SUMMARY"
           echo >> "$GITHUB_STEP_SUMMARY"
@@ -2945,6 +3052,7 @@ jobs:
           IMAGES["build-release-artifacts-arm-host"]="${BUILD_RELEASE_ARTIFACTS_ARM_HOST_IMAGE_REF}"
           IMAGES["build-mat-k8s-controller"]="${BUILD_MAT_K8S_CONTROLLER_IMAGE_REF}"
           IMAGES["build-site-health-probe"]="${BUILD_SITE_HEALTH_PROBE_IMAGE_REF}"
+          IMAGES["build-scale-test-acceptance"]="${BUILD_SCALE_TEST_ACCEPTANCE_IMAGE_REF}"
 
           for job in "${!IMAGES[@]}"; do
             image="${IMAGES[$job]}"
@@ -3041,6 +3149,7 @@ jobs:
       - build-machine-a-tron
       - build-mat-k8s-controller
       - build-site-health-probe
+      - build-scale-test-acceptance
       - test-release-container-services
       - build-boot-artifacts-x86
       - build-boot-artifacts-bfb
@@ -3100,7 +3209,10 @@ jobs:
   # Update `.github/ci/check_ci_gate.py` when a job gains an allowed skip.
   core-ci-pass:
     name: core-ci-pass
-    runs-on: linux-amd64-cpu4
+    # Hosted ubuntu-slim, because a superseded run keeps its concurrency slot
+    # until this always() job finishes and the cpu4 pool can queue for minutes.
+    runs-on: ubuntu-slim
+    timeout-minutes: 10
     if: always()
     needs:
       # Detection and preparation
@@ -3122,6 +3234,7 @@ jobs:
       - build-machine-a-tron
       - build-mat-k8s-controller
       - build-site-health-probe
+      - build-scale-test-acceptance
       - test-mat-k8s-controller
       - test-scale-test
       - test-release-container-services

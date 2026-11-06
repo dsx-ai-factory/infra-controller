@@ -155,6 +155,7 @@ impl StateControllerIO for MachineStateControllerIO {
                 DpuInitState::WaitingForNetworkInstall => "waitingfornetworkinstall",
                 DpuInitState::WaitingForNetworkConfig => "waitingfornetworkconfig",
                 DpuInitState::WaitingForPlatformConfiguration => "waitingforplatformconfiguration",
+                DpuInitState::WaitingForUefiRestart => "waitingforuefirestart",
                 DpuInitState::PollingBiosSetup => "pollingbiossetup",
                 // The observed-Off wait remains part of the existing
                 // operator-facing power-cycle metric.
@@ -370,6 +371,7 @@ impl StateControllerIO for MachineStateControllerIO {
                     MachineMaintenanceOperation::PowerOn => "power_on",
                     MachineMaintenanceOperation::PowerOff { .. } => "power_off",
                     MachineMaintenanceOperation::Reset => "reset",
+                    MachineMaintenanceOperation::Reboot => "reboot",
                     MachineMaintenanceOperation::ChassisReset { .. } => "chassis_reset",
                 };
                 ("maintenance", op)

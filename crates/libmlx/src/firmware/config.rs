@@ -28,6 +28,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use carbide_libmlx_model::device::identity::MlxDeviceSelector;
+use carbide_libmlx_model::firmware::FirmwareDeliveryMode;
 pub use carbide_libmlx_model::firmware::FirmwareSpec;
 use rpc::protos::mlx_device::{
     FirmwareArtifactDigests as FirmwareArtifactDigestsPb,
@@ -99,6 +100,9 @@ impl From<FirmwareArtifactDigests> for FirmwareArtifactDigestsPb {
 pub struct FirmwareUpdateContext {
     /// Whole-workflow phase ID containing 1-256 printable nonspace ASCII bytes.
     pub phase_id: String,
+    /// Frozen download route. Omitted Direct preserves existing journal fingerprints.
+    #[serde(default, skip_serializing_if = "FirmwareDeliveryMode::is_direct")]
+    pub delivery_mode: FirmwareDeliveryMode,
     /// Expected image and optional configuration bytes, checked before mutation.
     pub expected_digests: FirmwareArtifactDigests,
     /// Optional reported base MAC or GUID checked against the live device before
@@ -803,6 +807,7 @@ mod tests {
             let mut profile = profile.clone();
             profile.flash_spec.device_conf_url = source.map(str::to_owned);
             let context = FirmwareUpdateContext {
+                delivery_mode: Default::default(),
                 phase_id: "dispatch-1".into(),
                 expected_digests: FirmwareArtifactDigests {
                     image_sha256: [0; 32],
@@ -828,6 +833,7 @@ mod tests {
         )
         .unwrap();
         let context = FirmwareUpdateContext {
+            delivery_mode: Default::default(),
             phase_id: "dispatch-1".into(),
             expected_digests: FirmwareArtifactDigests {
                 image_sha256: [0; 32],
@@ -862,6 +868,7 @@ mod tests {
         )
         .unwrap();
         let context = FirmwareUpdateContext {
+            delivery_mode: Default::default(),
             phase_id: "dispatch-1".into(),
             expected_digests: FirmwareArtifactDigests {
                 image_sha256: [0; 32],

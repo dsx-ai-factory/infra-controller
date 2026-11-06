@@ -188,7 +188,7 @@ func TestReadBootstrapConfigUsesOneProjectedSecretRevision(t *testing.T) {
 func TestNewBootstrapConfig(t *testing.T) {
 	const (
 		siteID   = "d2f4b0c6-6f1e-4a0e-9f5a-0b6a6f4c1e77"
-		credsURL = "https://sitemgr.nico-system.svc/v1/sitecreds"
+		credsURL = "https://nico-rest-site-manager.nico-system.svc/v1/sitecreds"
 	)
 	// A real Site Manager CA runs past a thousand characters, so the body has to
 	// outrun the logged prefix for the assertions below to mean anything.
@@ -629,7 +629,7 @@ func TestBoostrapAPI_CheckRegistration(t *testing.T) {
 				for name, contents := range map[string]string{
 					bootstraptypes.TagUUID:     siteID,
 					bootstraptypes.TagOTP:      otp,
-					bootstraptypes.TagCredsURL: "https://sitemgr.nico-system.svc/v1/sitecreds",
+					bootstraptypes.TagCredsURL: "https://nico-rest-site-manager.nico-system.svc/v1/sitecreds",
 					bootstraptypes.TagCACert:   "-----BEGIN CERTIFICATE-----\nc2l0ZS1jYQ\n-----END CERTIFICATE-----",
 				} {
 					require.NoError(t, os.WriteFile(dir+name, []byte(contents), 0600))

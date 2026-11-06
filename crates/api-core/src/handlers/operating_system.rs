@@ -301,12 +301,8 @@ pub(crate) async fn create_operating_system(
         ipxe_definition_hash,
     };
 
-    let row = db::operating_system::create(&mut txn, &input)
-        .await
-        .map_err(|e| Status::internal(e.to_string()))?;
-    txn.commit()
-        .await
-        .map_err(|e| Status::internal(e.to_string()))?;
+    let row = db::operating_system::create(&mut txn, &input).await?;
+    txn.commit().await?;
 
     let def: rpc::OperatingSystem =
         model::operating_system_definition::OperatingSystem::from(&row).into();
@@ -325,7 +321,7 @@ pub(crate) async fn get_operating_system(
             if e.is_not_found() {
                 Status::not_found(format!("operating system {id} not found"))
             } else {
-                Status::internal(e.to_string())
+                e.into()
             }
         })?;
 
@@ -352,7 +348,7 @@ pub(crate) async fn update_operating_system(
             if e.is_not_found() {
                 Status::not_found(format!("operating system {id} not found"))
             } else {
-                Status::internal(e.to_string())
+                e.into()
             }
         })?;
 
@@ -382,22 +378,19 @@ pub(crate) async fn update_operating_system(
         .as_ref()
         .map(|w| w.items.as_slice());
 
+    let stored_params = params_from_json(existing.ipxe_parameters.as_ref().map(|j| &j.0));
+    let stored_artifacts = artifacts_from_json(existing.ipxe_artifacts.as_ref().map(|j| &j.0));
+    let effective_params = req_params.unwrap_or(&stored_params);
+    let effective_artifacts = req_artifacts.unwrap_or(&stored_artifacts);
+
     let ipxe_definition_hash =
         if let Some(provided_hash) = req.ipxe_template_definition_hash.as_deref() {
             Some(provided_hash.to_owned())
         } else if let Some(tmpl) = effective_template {
-            let effective_params: Vec<rpc::IpxeTemplateParameter> = match req_params {
-                Some(p) => p.to_vec(),
-                None => params_from_json(existing.ipxe_parameters.as_ref().map(|j| &j.0)),
-            };
-            let effective_artifacts: Vec<rpc::IpxeTemplateArtifact> = match req_artifacts {
-                Some(a) => a.to_vec(),
-                None => artifacts_from_json(existing.ipxe_artifacts.as_ref().map(|j| &j.0)),
-            };
             Some(validate_template_requirements(
                 tmpl,
-                &effective_params,
-                &effective_artifacts,
+                effective_params,
+                effective_artifacts,
             )?)
         } else {
             None
@@ -415,33 +408,37 @@ pub(crate) async fn update_operating_system(
         None => None,
     };
 
-    let mut effective_artifacts_for_json = match req_artifacts {
-        Some(a) => {
-            // cached_url can only be set via UpdateOperatingSystemCachableIpxeTemplateArtifacts;
-            // strip it from regular update requests.
-            let mut v = a.to_vec();
-            for art in &mut v {
-                art.cached_url = None;
-            }
-            v
-        }
-        None => artifacts_from_json(existing.ipxe_artifacts.as_ref().map(|j| &j.0)),
-    };
-
-    if hash_changed {
-        for a in &mut effective_artifacts_for_json {
-            a.cached_url = None;
-        }
+    // Only UpdateOperatingSystemCachableIpxeTemplateArtifacts can supply cached_url.
+    let mut artifact_definitions = effective_artifacts.to_vec();
+    for artifact in &mut artifact_definitions {
+        artifact.cached_url = None;
+    }
+    let mut stored_definitions = stored_artifacts.clone();
+    for artifact in &mut stored_definitions {
+        artifact.cached_url = None;
     }
 
-    let ipxe_artifacts = if hash_changed || req_artifacts.is_some() {
-        Some(artifacts_to_json(&effective_artifacts_for_json))
+    // The hash excludes cache_strategy and callers may supply their own hash.
+    // Compare the actual definition before reusing the site's cached URLs.
+    let definition_changed = effective_template != existing.ipxe_template_id.as_deref()
+        || effective_params != stored_params
+        || artifact_definitions != stored_definitions;
+    let update_artifacts = hash_changed || definition_changed || req_artifacts.is_some();
+    // Repairing an old hash does not invalidate a cache for an unchanged definition.
+    let artifacts_to_store = if definition_changed {
+        artifact_definitions
+    } else {
+        stored_artifacts
+    };
+
+    let ipxe_artifacts = if update_artifacts {
+        Some(artifacts_to_json(&artifacts_to_store))
     } else {
         None
     };
 
-    let status = if hash_changed || req_artifacts.is_some() {
-        let needs_provisioning = effective_artifacts_for_json.iter().any(|a| {
+    let status = if update_artifacts {
+        let needs_provisioning = artifacts_to_store.iter().any(|a| {
             a.cache_strategy == rpc::IpxeTemplateArtifactCacheStrategy::CachedOnly as i32
                 && a.cached_url.as_deref().unwrap_or("").is_empty()
         });
@@ -470,12 +467,8 @@ pub(crate) async fn update_operating_system(
         status,
     };
 
-    let row = db::operating_system::update(&mut txn, &existing, &input)
-        .await
-        .map_err(|e| Status::internal(e.to_string()))?;
-    txn.commit()
-        .await
-        .map_err(|e| Status::internal(e.to_string()))?;
+    let row = db::operating_system::update(&mut txn, &existing, &input).await?;
+    txn.commit().await?;
 
     let def: rpc::OperatingSystem =
         model::operating_system_definition::OperatingSystem::from(&row).into();
@@ -500,12 +493,10 @@ pub(crate) async fn delete_operating_system(
             if e.is_not_found() {
                 Status::not_found(format!("operating system {id} not found"))
             } else {
-                Status::internal(e.to_string())
+                e.into()
             }
         })?;
-    txn.commit()
-        .await
-        .map_err(|e| Status::internal(e.to_string()))?;
+    txn.commit().await?;
 
     Ok(Response::new(rpc::DeleteOperatingSystemResponse {}))
 }
@@ -520,8 +511,7 @@ pub(crate) async fn find_operating_system_ids(
         &mut api.db_reader(),
         filter.tenant_organization_id.as_deref(),
     )
-    .await
-    .map_err(|e| Status::internal(e.to_string()))?;
+    .await?;
 
     let ids = ids.into_iter().map(OperatingSystemId::from).collect();
 
@@ -545,7 +535,7 @@ pub(crate) async fn get_operating_system_cachable_ipxe_script_artifacts(
             if e.is_not_found() {
                 Status::not_found(format!("operating system {id} not found"))
             } else {
-                Status::internal(e.to_string())
+                e.into()
             }
         })?;
 
@@ -571,7 +561,7 @@ pub(crate) async fn update_operating_system_cachable_ipxe_script_artifacts(
             if e.is_not_found() {
                 Status::not_found(format!("operating system {id} not found"))
             } else {
-                Status::internal(e.to_string())
+                e.into()
             }
         })?;
 
@@ -644,12 +634,8 @@ pub(crate) async fn update_operating_system_cachable_ipxe_script_artifacts(
         status: new_status,
     };
 
-    let row = db::operating_system::update(&mut txn, &existing, &input)
-        .await
-        .map_err(|e| Status::internal(e.to_string()))?;
-    txn.commit()
-        .await
-        .map_err(|e| Status::internal(e.to_string()))?;
+    let row = db::operating_system::update(&mut txn, &existing, &input).await?;
+    txn.commit().await?;
 
     let artifacts = artifacts_from_json(row.ipxe_artifacts.as_ref().map(|j| &j.0));
     Ok(Response::new(rpc::IpxeTemplateArtifactList { artifacts }))
@@ -663,9 +649,7 @@ pub(crate) async fn find_operating_systems_by_ids(
 
     let ids: Vec<Uuid> = req.ids.iter().copied().map(Uuid::from).collect();
 
-    let rows = db::operating_system::get_many(&mut api.db_reader(), &ids)
-        .await
-        .map_err(|e| Status::internal(e.to_string()))?;
+    let rows = db::operating_system::get_many(&mut api.db_reader(), &ids).await?;
 
     let operating_systems: Vec<rpc::OperatingSystem> = rows
         .iter()

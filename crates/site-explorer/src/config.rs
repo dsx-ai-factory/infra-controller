@@ -228,19 +228,16 @@ pub struct SiteExplorerConfig {
     #[serde(default, rename = "force_dpu_nic_mode", skip_serializing)]
     pub deprecated_force_dpu_nic_mode: Option<bool>,
 
-    /// Controls which Redfish client implementation is used
-    /// for hardware discovery (LibRedfish, NvRedfish, or
-    /// CompareResult for side-by-side validation).
-    #[serde(default = "SiteExplorerConfig::default_explore_mode")]
-    pub explore_mode: SiteExplorerExploreMode,
-    /// Whether nv-redfish exploration reads drive firmware versions from each
-    /// host's Redfish Storage subsystems and reports each enabled drive with
-    /// a usable model and version as a
-    /// `Drive_<Model>_<DriveId>` firmware inventory entry, which host firmware
-    /// configuration can select. Adds one request per Storage subsystem and
-    /// per drive to every exploration. Takes effect only when `explore_mode`
-    /// is `nv-redfish`: `libredfish` ignores it, and `compare-result` reads
-    /// the drives but returns the libredfish report, which omits them.
+    /// Deprecated compatibility key. This setting is ignored; exploration
+    /// always uses nv-redfish.
+    #[doc(hidden)]
+    #[serde(default, rename = "explore_mode", skip_serializing)]
+    pub deprecated_explore_mode: Option<String>,
+    /// Whether exploration reads drive firmware versions from each host's
+    /// Redfish Storage subsystems and reports each enabled drive with a
+    /// usable model and version as a `Drive_<Model>_<DriveId>` firmware
+    /// inventory entry, which host firmware configuration can select. Adds
+    /// one request per Storage subsystem and per drive to every exploration.
     #[serde(default)]
     pub explore_drive_firmware: bool,
 }
@@ -291,7 +288,7 @@ impl Default for SiteExplorerConfig {
             rotate_switch_nvos_credentials: Self::default_rotate_switch_nvos_credentials(),
             dpu_policy: None,
             deprecated_force_dpu_nic_mode: None,
-            explore_mode: Self::default_explore_mode(),
+            deprecated_explore_mode: None,
             explore_drive_firmware: false,
         }
     }
@@ -326,7 +323,7 @@ impl PartialEq for SiteExplorerConfig {
             switches_created_per_run,
             dpu_policy,
             deprecated_force_dpu_nic_mode,
-            explore_mode,
+            deprecated_explore_mode,
             explore_drive_firmware,
         } = self;
 
@@ -364,7 +361,7 @@ impl PartialEq for SiteExplorerConfig {
             && *switches_created_per_run == other.switches_created_per_run
             && *dpu_policy == other.dpu_policy
             && *deprecated_force_dpu_nic_mode == other.deprecated_force_dpu_nic_mode
-            && *explore_mode == other.explore_mode
+            && *deprecated_explore_mode == other.deprecated_explore_mode
             && *explore_drive_firmware == other.explore_drive_firmware
     }
 }
@@ -444,29 +441,10 @@ impl SiteExplorerConfig {
     pub const fn default_switches_created_per_run() -> u64 {
         9
     }
-
-    pub const fn default_explore_mode() -> SiteExplorerExploreMode {
-        SiteExplorerExploreMode::NvRedfish
-    }
 }
 
 pub fn bmc_proxy(s: Option<HostPortPair>) -> Arc<ArcSwap<Option<HostPortPair>>> {
     Arc::new(ArcSwap::new(Arc::new(s)))
-}
-
-/// Selects the Redfish client backend used by SiteExplorer
-/// for BMC discovery.
-#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
-pub enum SiteExplorerExploreMode {
-    /// Use the libredfish Rust client.
-    #[serde(rename = "libredfish")]
-    LibRedfish,
-    /// Use the NVIDIA-specific Redfish client.
-    #[serde(rename = "nv-redfish")]
-    NvRedfish,
-    /// Run both clients and compare results for validation.
-    #[serde(rename = "compare-result")]
-    CompareResult,
 }
 
 pub fn deserialize_bmc_proxy<'de, D>(

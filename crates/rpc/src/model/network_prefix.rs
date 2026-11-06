@@ -83,6 +83,7 @@ impl From<NetworkPrefix> for rpc::forge::NetworkPrefix {
             svi_ip: src.svi_ip.map(|x| x.to_string()),
             free_ip_count_v2,
             free_ip_count_saturated,
+            dhcpv6_link_address: src.dhcpv6_link_address.map(|address| address.to_string()),
         }
     }
 }

@@ -31,7 +31,7 @@ use rpc::forge::machine_cleanup_info::CleanupStepResult;
 use rpc::forge::{
     ConfigSetting, ExpectedInterface, ExpectedMachine, ExpectedPowerShelf, ExpectedRack,
     ExpectedRackGroup, ExpectedRackGroupRequest, ExpectedRackRequest, ExpectedSwitch,
-    MachinesByIdsRequest, SetDynamicConfigRequest,
+    SetDynamicConfigRequest,
 };
 use rpc::protos::forge_api_client::ForgeApiClient;
 
@@ -326,24 +326,6 @@ impl ApiClient {
         Ok(out)
     }
 
-    pub async fn get_machines(
-        &self,
-        machine_ids: Vec<MachineId>,
-    ) -> ClientApiResult<Vec<rpc::Machine>> {
-        let request = MachinesByIdsRequest {
-            machine_ids,
-            include_history: false,
-        };
-        let out = self
-            .0
-            .find_machines_by_ids(request)
-            .await
-            .map_err(ClientApiError::InvocationError)?;
-
-        Ok(out.machines)
-    }
-
-    /// Records simulated DPU network and health status.
     pub async fn record_dpu_network_status(
         &self,
         DpuNetworkStatusArgs {

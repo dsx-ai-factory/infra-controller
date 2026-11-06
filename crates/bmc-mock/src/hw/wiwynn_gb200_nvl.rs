@@ -33,6 +33,15 @@ pub(crate) struct WiwynnGB200Nvl<'a> {
 }
 
 impl WiwynnGB200Nvl<'_> {
+    pub(crate) fn service_root_config(&self) -> redfish::service_root::Config {
+        redfish::service_root::Config {
+            vendor: redfish::oem::BmcVendor::Wiwynn,
+            product: Some("GB200 NVL"),
+            redfish_version: "1.17.0",
+            advertises_computer_systems: true,
+        }
+    }
+
     fn sensor_layout() -> redfish::sensor::Layout {
         redfish::sensor::Layout {
             temperature: 40,
@@ -111,7 +120,7 @@ impl WiwynnGB200Nvl<'_> {
         let hgx_baseboard_id = "HGX_Baseboard_0";
 
         redfish::computer_system::Config {
-            systems: vec![
+            systems: Some(vec![
                 redfish::computer_system::SingleSystemConfig {
                     id: system_id.into(),
                     manufacturer: Some("WIWYNN".into()),
@@ -169,7 +178,7 @@ impl WiwynnGB200Nvl<'_> {
                     serial_console: None,
                     secure_boot_available: false,
                 },
-            ],
+            ]),
         }
     }
 

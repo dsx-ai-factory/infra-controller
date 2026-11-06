@@ -51,7 +51,7 @@ use model::machine::network::{
     DpuFabricInterfaceStatusObservation, MachineNetworkStatusObservation, ManagedHostNetworkConfig,
     ManagedHostQuarantineState,
 };
-use model::machine::nic_firmware::NicFirmwarePurpose;
+use model::machine::nic_firmware::{NicFirmwareOperation, NicFirmwarePurpose};
 use model::machine::nvlink::MachineNvLinkStatusObservation;
 use model::machine::spx::MachineSpxStatusObservation;
 use model::machine::spx_multiplane::{MachineSpxMultiplane, MachineSpxMultiplaneStatus};
@@ -77,6 +77,9 @@ use sqlx::{FromRow, PgConnection, PgTransaction, Pool, Postgres, Row};
 use super::{DatabaseError, ObjectFilter, Transaction, queries};
 use crate::db_read::DbReader;
 use crate::{ConditionalWrite, ControllerStateNotCurrent, DatabaseResult};
+
+mod creation_identity;
+pub use creation_identity::MachineCreationIdentity;
 
 #[derive(Serialize)]
 struct ReprovisionRequestRestart {
@@ -348,6 +351,34 @@ pub async fn lock_by_id_for_update(
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
     Ok(())
+}
+
+/// `try_lock_group_for_update` tries a host and its DPUs in machine-row order.
+/// Some network writers already hold the host, so waiting here while holding
+/// a DPU could deadlock with their group version update.
+///
+/// Returns false if a member is missing or busy. Both outcomes retain any
+/// acquired locks; on false, roll back the whole transaction before retrying.
+/// Finish interface writes first and retain successful locks through commit.
+pub async fn try_lock_group_for_update(
+    txn: &mut PgConnection,
+    machine_id: &MachineId,
+) -> Result<bool, DatabaseError> {
+    let query = "SELECT id FROM machine_group_member_ids($1)";
+    let machine_ids: Vec<MachineId> = sqlx::query_scalar(query)
+        .bind(machine_id)
+        .fetch_all(&mut *txn)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))?;
+    if machine_ids.is_empty() {
+        return Ok(false);
+    }
+    for member_id in MachineRowLockOrderIter::new(machine_ids) {
+        if !try_lock_by_id_for_update(txn, &member_id).await? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 /// Locks a machine without waiting for another writer. Returns false when the
@@ -796,16 +827,52 @@ pub async fn find_by_mac_address(
     Ok(machine)
 }
 
+/// Returns the machine IDs owning the requested non-BMC interface MACs.
+///
+/// Unowned interfaces and missing MACs are omitted. Predictions are not consulted.
+/// As with [`find_by_mac_address`], the owner chosen for a MAC associated with
+/// multiple machines is unspecified.
+pub async fn find_machine_ids_by_mac_addresses(
+    db: impl DbReader<'_>,
+    mac_addresses: &[MacAddress],
+) -> DatabaseResult<HashMap<MacAddress, MachineId>> {
+    if mac_addresses.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let query = r#"
+        SELECT mi.mac_address, m.id
+        FROM machine_interfaces mi
+        JOIN machines m ON m.id = mi.machine_id
+        WHERE mi.mac_address = ANY($1) AND mi.interface_type != 'Bmc'
+    "#;
+    let rows: Vec<(MacAddress, MachineId)> = sqlx::query_as(query)
+        .bind(mac_addresses)
+        .fetch_all(db)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))?;
+    Ok(rows.into_iter().collect())
+}
+
 /// Finds the machine with this address in either loopback field.
 /// Both fields are serialized from typed IP addresses, so their stored text
 /// matches `IpAddr::to_string()`.
+/// Attached remote IPv4 ownership also identifies the machine while its
+/// configuration field needs repair. Pending provider reservations do not.
 pub async fn find_by_loopback_ip(
     txn: impl DbReader<'_>,
     loopback_ip: IpAddr,
 ) -> Result<Option<AnyMachine>, DatabaseError> {
     lazy_static! {
         static ref query: String = format!(
-            "{} WHERE m.network_config->>'loopback_ip' = $1 OR m.network_config->>'loopback_ip_v6' = $1",
+            "{} WHERE m.network_config->>'loopback_ip' = $1 OR m.network_config->>'loopback_ip_v6' = $1
+                OR m.id IN (
+                    SELECT owner_id FROM resource_pool_allocations
+                    WHERE pool_name = 'lo-ip' AND owner_type = 'machine'
+                      AND binding_id IS NOT NULL AND state = 'attached'
+                      AND result->>'status' = 'allocated'
+                      AND result->'result'->'value'->>'kind' = 'ip_address'
+                      AND result->'result'->'value'->>'value' = $1
+                )",
             JSON_MACHINE_SNAPSHOT_QUERY.deref()
         );
     }
@@ -1132,28 +1199,112 @@ pub async fn lookup_host_state_by_dpu_machine_id(
     Ok(host.map(|(_, state)| state.0))
 }
 
-pub async fn lookup_host_machine_ids_by_dpu_ids(
-    conn: impl DbReader<'_>,
-    dpu_machine_ids: &[DpuMachineId],
-) -> Result<HashMap<DpuMachineId, HostMachineId>, DatabaseError> {
-    let query = r#"SELECT mi.attached_dpu_machine_id, mi.machine_id
-        FROM machine_interfaces mi
-        WHERE mi.attached_dpu_machine_id != mi.machine_id
-        AND mi.interface_type != 'Bmc'
-        AND mi.attached_dpu_machine_id = ANY($1)"#;
+/// DPU-to-host attachments found for one requested set of DPUs.
+///
+/// Loading permits partial results and DPUs from different hosts. Call
+/// [`Self::common_host_machine_id`] to require one host for the complete set.
+#[derive(Debug)]
+pub struct DpuHostAssociations {
+    host_ids_by_dpu_id: HashMap<DpuMachineId, HostMachineId>,
+    missing_dpu_machine_id: Option<DpuMachineId>,
+}
 
-    let dpu_id_host_id_pairs: Vec<(DpuMachineId, HostMachineId)> = sqlx::query_as(query)
-        .bind(
-            dpu_machine_ids
-                .iter()
-                .map(|i| i.to_string())
-                .collect::<Vec<_>>(),
-        )
+/// A requested DPU set cannot be interpreted as one existing managed host.
+#[derive(Debug, PartialEq, Eq, thiserror::Error)]
+pub enum DpuHostAssociationError {
+    /// Some requested DPUs have host attachments, but this one does not.
+    #[error("DPU {dpu_machine_id} is not attached to a host while other requested DPUs are")]
+    Incomplete {
+        /// First requested DPU without a host attachment.
+        dpu_machine_id: DpuMachineId,
+    },
+    /// All requested DPUs have attachments, but to more than one host.
+    #[error("requested DPUs are attached to different hosts")]
+    MultipleHosts,
+}
+
+impl DpuHostAssociations {
+    /// Loads non-BMC host attachments for the requested DPUs.
+    ///
+    /// A DPU's own interfaces are excluded. Missing DPUs are allowed, and
+    /// duplicate requested IDs do not change the result.
+    pub async fn load(
+        conn: impl DbReader<'_>,
+        dpu_machine_ids: &[DpuMachineId],
+    ) -> DatabaseResult<Self> {
+        let query = r#"SELECT mi.attached_dpu_machine_id, mi.machine_id
+            FROM machine_interfaces mi
+            WHERE mi.attached_dpu_machine_id != mi.machine_id
+            AND mi.interface_type != 'Bmc'
+            AND mi.attached_dpu_machine_id = ANY($1)"#;
+
+        let pairs: Vec<(DpuMachineId, HostMachineId)> = sqlx::query_as(query)
+            .bind(
+                dpu_machine_ids
+                    .iter()
+                    .map(|id| id.to_string())
+                    .collect::<Vec<_>>(),
+            )
+            .fetch_all(conn)
+            .await
+            .map_err(|error| DatabaseError::query(query, error))?;
+        let host_ids_by_dpu_id: HashMap<_, _> = pairs.into_iter().collect();
+        let missing_dpu_machine_id = dpu_machine_ids
+            .iter()
+            .find(|id| !host_ids_by_dpu_id.contains_key(id))
+            .copied();
+        Ok(Self {
+            host_ids_by_dpu_id,
+            missing_dpu_machine_id,
+        })
+    }
+
+    /// Returns the host attached to a requested DPU, if one was found.
+    pub fn host_machine_id(&self, dpu_machine_id: &DpuMachineId) -> Option<HostMachineId> {
+        self.host_ids_by_dpu_id.get(dpu_machine_id).copied()
+    }
+
+    /// Returns one host ID per attached DPU; IDs may repeat and have no defined order.
+    pub fn host_machine_ids(&self) -> impl Iterator<Item = HostMachineId> + '_ {
+        self.host_ids_by_dpu_id.values().copied()
+    }
+
+    /// Returns `None` when no requested DPU has a host attachment, including an empty request.
+    /// Returns a host only when every requested DPU is attached to that same host.
+    ///
+    /// Partial attachment takes precedence over conflicting hosts when both occur.
+    pub fn common_host_machine_id(&self) -> Result<Option<HostMachineId>, DpuHostAssociationError> {
+        match self.missing_dpu_machine_id {
+            Some(dpu_machine_id) if !self.host_ids_by_dpu_id.is_empty() => {
+                Err(DpuHostAssociationError::Incomplete { dpu_machine_id })
+            }
+            _ => self
+                .host_machine_ids()
+                .try_fold(None, |common_host_id, host_id| match common_host_id {
+                    Some(common_host_id) if common_host_id != host_id => {
+                        Err(DpuHostAssociationError::MultipleHosts)
+                    }
+                    _ => Ok(Some(host_id)),
+                }),
+        }
+    }
+}
+
+/// `find_states_by_ids` reads each machine's own controller state without loading
+/// the full machine snapshot. Results contain one row per existing requested
+/// machine, sorted by ID.
+/// Missing IDs are omitted; a query or state-decoding error fails the whole read.
+pub async fn find_states_by_ids(
+    conn: impl DbReader<'_>,
+    machine_ids: &[MachineId],
+) -> DatabaseResult<Vec<(MachineId, ManagedHostState)>> {
+    let query = "SELECT id, controller_state FROM machines WHERE id = ANY($1) ORDER BY id";
+    let rows: Vec<(MachineId, sqlx::types::Json<ManagedHostState>)> = sqlx::query_as(query)
+        .bind(machine_ids)
         .fetch_all(conn)
         .await
-        .map_err(|e| DatabaseError::query(query, e))?;
-
-    Ok(dpu_id_host_id_pairs.into_iter().collect())
+        .map_err(|error| DatabaseError::query(query, error))?;
+    Ok(rows.into_iter().map(|(id, state)| (id, state.0)).collect())
 }
 
 /// Return the [`ManagedHostState`] for a machine given its id without returning the whole snapshot.
@@ -1173,6 +1324,32 @@ pub async fn lookup_managed_host_state(
     };
 
     Ok(Some(json.0))
+}
+
+/// `find_host_nic_firmware_operations` reads only frozen operations from current
+/// stable or predicted host controller states, paired with each owning host ID.
+/// DPU copies and historical states are excluded. Callers validate operations
+/// and decide which phases retain artifacts; a malformed matching operation
+/// fails the entire read without returning a partial retention set.
+pub async fn find_host_nic_firmware_operations(
+    conn: impl DbReader<'_>,
+) -> DatabaseResult<Vec<(HostMachineId, NicFirmwareOperation)>> {
+    let query = r#"
+        SELECT id, controller_state->'operation' FROM machines
+        WHERE (id LIKE $1 OR id LIKE $2)
+          AND controller_state->>'state' = 'nicfirmwareupdating'
+    "#;
+    let operations: Vec<(HostMachineId, sqlx::types::Json<NicFirmwareOperation>)> =
+        sqlx::query_as(query)
+            .bind(format!("{}%", MachineType::Host.id_prefix()))
+            .bind(format!("{}%", MachineType::PredictedHost.id_prefix()))
+            .fetch_all(conn)
+            .await
+            .map_err(|error| DatabaseError::query(query, error))?;
+    Ok(operations
+        .into_iter()
+        .map(|(host_machine_id, operation)| (host_machine_id, operation.0))
+        .collect())
 }
 
 /// Returns the `use_admin_network` flag from the host that owns the
@@ -1968,7 +2145,7 @@ pub async fn try_update_network_config(
     expected_version: ConfigVersion,
     new_state: &ManagedHostNetworkConfig,
 ) -> Result<ConditionalWrite<(), MachineNetworkConfigNotCurrent>, DatabaseError> {
-    try_update_network_config_inner(txn, machine_id, expected_version, new_state, false).await
+    try_update_network_config_inner(txn, machine_id, expected_version, new_state, false, None).await
 }
 
 async fn try_update_network_config_unless_force_deleting(
@@ -1977,7 +2154,30 @@ async fn try_update_network_config_unless_force_deleting(
     expected_version: ConfigVersion,
     new_state: &ManagedHostNetworkConfig,
 ) -> Result<ConditionalWrite<(), MachineNetworkConfigNotCurrent>, DatabaseError> {
-    try_update_network_config_inner(txn, machine_id, expected_version, new_state, true).await
+    try_update_network_config_inner(txn, machine_id, expected_version, new_state, true, None).await
+}
+
+/// `try_update_network_config_for_created` writes network configuration only
+/// to the same machine row and version. ForceDeletion, replacement rows,
+/// missing rows, and changed versions return `NotApplied`.
+/// The caller attaches allocations separately in the same transaction and
+/// rolls back both changes if this write does not apply.
+pub async fn try_update_network_config_for_created(
+    txn: &mut PgConnection,
+    machine_id: &MachineId,
+    created: DateTime<Utc>,
+    expected_version: ConfigVersion,
+    new_state: &ManagedHostNetworkConfig,
+) -> Result<ConditionalWrite<(), MachineNetworkConfigNotCurrent>, DatabaseError> {
+    try_update_network_config_inner(
+        txn,
+        machine_id,
+        expected_version,
+        new_state,
+        true,
+        Some(created),
+    )
+    .await
 }
 
 async fn is_force_deleting_or_deleted(
@@ -2000,6 +2200,7 @@ async fn try_update_network_config_inner(
     expected_version: ConfigVersion,
     new_state: &ManagedHostNetworkConfig,
     reject_force_deletion: bool,
+    expected_created: Option<DateTime<Utc>>,
 ) -> Result<ConditionalWrite<(), MachineNetworkConfigNotCurrent>, DatabaseError> {
     let next_version = expected_version.increment();
 
@@ -2009,6 +2210,7 @@ async fn try_update_network_config_inner(
     let target_query = "UPDATE machines SET network_config_version=$1, network_config=$2::json
             WHERE id=$3 AND network_config_version=$4
               AND (NOT $5 OR controller_state != $6::jsonb)
+              AND ($7::timestamptz IS NULL OR created = $7)
             RETURNING id";
     let target_result: Result<MachineId, _> = sqlx::query_as(target_query)
         .bind(next_version)
@@ -2017,6 +2219,7 @@ async fn try_update_network_config_inner(
         .bind(expected_version)
         .bind(reject_force_deletion)
         .bind(sqlx::types::Json(&ManagedHostState::ForceDeletion))
+        .bind(expected_created)
         .fetch_one(&mut *txn)
         .await;
 
@@ -2785,9 +2988,8 @@ where
     for<'db> &'db mut DB: DbReader<'db>,
 {
     let host_ids =
-        lookup_host_machine_ids_by_dpu_ids(&mut *conn, std::slice::from_ref(dpu_machine_id))
-            .await?;
-    let Some(host_machine_id) = host_ids.get(dpu_machine_id) else {
+        DpuHostAssociations::load(&mut *conn, std::slice::from_ref(dpu_machine_id)).await?;
+    let Some(host_machine_id) = host_ids.host_machine_id(dpu_machine_id) else {
         return Ok(None);
     };
 
@@ -3474,69 +3676,6 @@ pub async fn find_dpu_infos(txn: &mut PgConnection) -> Result<Vec<DpuInfo>, Data
         .collect()
 }
 
-/// Allocate a value from the loopback IP resource pool.
-///
-/// Reuses the DPU's existing reservation before allocating a new value, so a
-/// surviving pool ownership record and a missing `network_config.loopback_ip`
-/// field cannot give one DPU two `lo-ip` values. A duplicate reservation for
-/// the same owner is reported as inconsistent state rather than picking one.
-///
-/// If the pool exists but is empty or has en error, return that.
-pub async fn allocate_loopback_ip(
-    common_pools: &CommonPools,
-    txn: &mut PgConnection,
-    owner_id: &str,
-) -> Result<IpAddr, DatabaseError> {
-    let pool = &common_pools.ethernet.pool_loopback_ip;
-
-    if let Some(value) = crate::resource_pool::find_owned_allocation(
-        pool,
-        txn,
-        resource_pool::OwnerType::Machine,
-        owner_id,
-    )
-    .await?
-    {
-        return Ok(value);
-    }
-
-    match crate::resource_pool::allocate(
-        pool,
-        txn,
-        resource_pool::OwnerType::Machine,
-        owner_id,
-        None,
-    )
-    .await
-    {
-        Ok(val) => Ok(val),
-        Err(
-            error @ crate::resource_pool::ResourcePoolDatabaseError::ResourcePool(
-                ResourcePoolError::Empty,
-            ),
-        ) => {
-            crate::resource_pool::emit_allocation_failure(
-                pool.value_type,
-                owner_id,
-                false,
-                "lo-ip",
-                &error,
-            );
-            Err(DatabaseError::ResourceExhausted("pool lo-ip".to_string()))
-        }
-        Err(err) => {
-            crate::resource_pool::emit_allocation_failure(
-                pool.value_type,
-                owner_id,
-                false,
-                "lo-ip",
-                &err,
-            );
-            Err(err.into())
-        }
-    }
-}
-
 /// Allocates one IPv6 underlay loopback when `lo-ip-v6` is configured.
 /// `None` preserves IPv4-only sites where the optional pool is absent;
 /// exhaustion remains an error so a configured site cannot silently leave a
@@ -3738,6 +3877,81 @@ pub async fn set_machine_maintenance_requested(
         .await
         .map_err(|e| DatabaseError::new("set_machine_maintenance_requested", e))?;
     Ok(())
+}
+
+/// Claims maintenance on an unallocated machine at a maintenance admission boundary.
+///
+/// The caller must use a transaction. The machine row lock serializes with instance
+/// allocation; eligibility is rechecked after acquiring it. Returns `false` when
+/// the machine is missing or ineligible, without replacing an existing request.
+pub async fn try_set_machine_maintenance_requested(
+    txn: &mut PgConnection,
+    machine_id: impl MachineIdSubtypeTrait,
+    initiator: &str,
+    operation: MachineMaintenanceOperation,
+) -> DatabaseResult<bool> {
+    let lock_query = "SELECT controller_state FROM machines WHERE id = $1 FOR UPDATE";
+    let state: Option<sqlx::types::Json<ManagedHostState>> = sqlx::query_scalar(lock_query)
+        .bind(machine_id)
+        .fetch_optional(&mut *txn)
+        .await
+        .map_err(|error| DatabaseError::query(lock_query, error))?;
+    let Some(state) = state.filter(|state| state.accepts_maintenance_request()) else {
+        return Ok(false);
+    };
+    // A separate statement observes an allocation committed while the lock was awaited.
+    let request = model::machine::MachineMaintenanceRequest {
+        requested_at: Utc::now(),
+        initiator: initiator.to_string(),
+        operation,
+    };
+    let query = r#"UPDATE machines SET machine_maintenance_requested = $1
+        WHERE id = $2 AND machine_maintenance_requested IS NULL
+          AND NOT EXISTS (SELECT 1 FROM instances WHERE machine_id = $2)
+        RETURNING id"#;
+    let claimed = sqlx::query_as::<_, MachineId>(query)
+        .bind(sqlx::types::Json(&request))
+        .bind(machine_id)
+        .fetch_optional(txn)
+        .await
+        .map_err(|error| DatabaseError::new("try_set_machine_maintenance_requested", error))?
+        .is_some();
+    if claimed {
+        tracing::info!(
+            machine_id = %machine_id.as_machine_id(),
+            initiator,
+            operation = ?request.operation,
+            previous_state = ?state.0,
+            "Queueing machine maintenance request"
+        );
+    }
+    Ok(claimed)
+}
+
+/// Cancels only an unstarted Reboot or legacy Reset owned by the rack initiator.
+/// Requests already claimed by a machine controller or owned by others are preserved.
+pub async fn clear_unclaimed_machine_restart_request(
+    txn: &mut PgConnection,
+    machine_id: &HostMachineId,
+    initiator: &str,
+) -> DatabaseResult<bool> {
+    // The conditional update serializes with the transition into Maintenance.
+    // A pending request can still be cancelled if another workflow changed the
+    // admission state before the machine controller claimed it.
+    let query = r#"UPDATE machines SET machine_maintenance_requested = NULL
+        WHERE id = $1 AND controller_state->>'state' <> 'maintenance'
+          AND machine_maintenance_requested->>'initiator' = $2
+          AND machine_maintenance_requested->'operation' IN ($3, $4)
+        RETURNING id"#;
+    Ok(sqlx::query_as::<_, MachineId>(query)
+        .bind(machine_id)
+        .bind(initiator)
+        .bind(sqlx::types::Json(MachineMaintenanceOperation::Reset))
+        .bind(sqlx::types::Json(MachineMaintenanceOperation::Reboot))
+        .fetch_optional(txn)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))?
+        .is_some())
 }
 
 pub async fn set_decommission_requested(
@@ -4549,6 +4763,262 @@ mod test {
 
     fn machine_id(seed: u8, ty: MachineType) -> MachineId {
         MachineId::new(MachineIdSource::ProductBoardChassisSerial, [seed; 32], ty)
+    }
+
+    #[crate::sqlx_test]
+    async fn find_machine_ids_by_mac_addresses_preserves_sources(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use mac_address::MacAddress;
+        use model::network_segment::NetworkSegmentType;
+        use model::predicted_machine_interface::NewPredictedMachineInterface;
+
+        let first_host = machine_id(40, MachineType::Host);
+        let second_host = machine_id(41, MachineType::Host);
+        let dpu = machine_id(42, MachineType::Dpu);
+        let [
+            live,
+            ambiguous,
+            bmc,
+            unowned,
+            dpu_mac,
+            predicted,
+            unrequested,
+            unknown,
+        ] = [1, 2, 3, 4, 5, 6, 7, 8].map(|suffix| MacAddress::new([0x02, 0, 0, 0, 0x32, suffix]));
+        let mut txn = pool.begin().await?;
+        for id in [first_host, second_host, dpu] {
+            super::create(
+                txn.as_mut(),
+                None,
+                &id,
+                ManagedHostState::Ready,
+                None,
+                model::machine::CURRENT_STATE_MODEL_VERSION,
+            )
+            .await?;
+        }
+        let segments: Vec<NetworkSegmentId> = sqlx::query_scalar(
+            "INSERT INTO network_segments (name, version) \
+             VALUES ('mac-owners-a', 'V1-T0'), ('mac-owners-b', 'V1-T0') RETURNING id",
+        )
+        .fetch_all(txn.as_mut())
+        .await?;
+        for (owner, segment, mac, interface_type) in [
+            (Some(first_host), segments[0], live, InterfaceType::Data),
+            (Some(first_host), segments[1], live, InterfaceType::Data),
+            (
+                Some(first_host),
+                segments[0],
+                ambiguous,
+                InterfaceType::Data,
+            ),
+            (
+                Some(second_host),
+                segments[1],
+                ambiguous,
+                InterfaceType::Data,
+            ),
+            (Some(second_host), segments[0], bmc, InterfaceType::Bmc),
+            (None, segments[0], unowned, InterfaceType::Data),
+            (Some(dpu), segments[0], dpu_mac, InterfaceType::Data),
+            (
+                Some(first_host),
+                segments[0],
+                unrequested,
+                InterfaceType::Data,
+            ),
+        ] {
+            sqlx::query(
+                "INSERT INTO machine_interfaces \
+                    (machine_id, association_type, segment_id, mac_address, \
+                     primary_interface, hostname, interface_type) \
+                 VALUES ($1, $2::association_type, $3, $4, false, 'mac-owners', $5)",
+            )
+            .bind(owner)
+            .bind(if owner.is_some() { "Machine" } else { "None" })
+            .bind(segment)
+            .bind(mac)
+            .bind(interface_type)
+            .execute(txn.as_mut())
+            .await?;
+        }
+        for (mac_address, owner) in [
+            (live, second_host),
+            (bmc, first_host),
+            (unowned, second_host),
+            (predicted, first_host),
+            (unrequested, second_host),
+        ] {
+            crate::predicted_machine_interface::create(
+                NewPredictedMachineInterface {
+                    machine_id: &owner,
+                    mac_address,
+                    expected_network_segment_type: NetworkSegmentType::HostInband,
+                    boot_interface_id: None,
+                    primary_interface: false,
+                },
+                txn.as_mut(),
+            )
+            .await?;
+        }
+
+        for (scenario, requested, expected_live, expected_predicted) in [
+            ("empty request", vec![], vec![], vec![]),
+            ("missing MAC", vec![unknown], vec![], vec![]),
+            (
+                "duplicate requested MAC with independent owners",
+                vec![live, live],
+                vec![(live, first_host)],
+                vec![(live, second_host)],
+            ),
+            (
+                "mixed sources exclude BMC and unowned real interfaces",
+                vec![live, bmc, unowned, dpu_mac, predicted, unknown],
+                vec![(live, first_host), (dpu_mac, dpu)],
+                vec![
+                    (live, second_host),
+                    (bmc, first_host),
+                    (unowned, second_host),
+                    (predicted, first_host),
+                ],
+            ),
+        ] {
+            assert_eq!(
+                super::find_machine_ids_by_mac_addresses(txn.as_mut(), &requested).await?,
+                expected_live.into_iter().collect(),
+                "{scenario}: real interfaces"
+            );
+            assert_eq!(
+                crate::predicted_machine_interface::find_machine_ids_by_mac_addresses(
+                    txn.as_mut(),
+                    &requested,
+                )
+                .await?,
+                expected_predicted.into_iter().collect(),
+                "{scenario}: predictions"
+            );
+        }
+        let owners = super::find_machine_ids_by_mac_addresses(txn.as_mut(), &[ambiguous]).await?;
+        assert_eq!(owners.len(), 1);
+        assert!([first_host, second_host].contains(&owners[&ambiguous]));
+        txn.rollback().await?;
+        Ok(())
+    }
+
+    #[crate::sqlx_test]
+    async fn dpu_host_associations_load_and_validate(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use super::{DpuHostAssociationError, DpuHostAssociations};
+
+        let [first_host, second_host] = [1, 2]
+            .map(|seed| HostMachineId::try_from(machine_id(seed, MachineType::Host)).unwrap());
+        let [first_dpu, second_dpu, third_dpu, unattached_dpu] = [3, 4, 5, 6]
+            .map(|seed| DpuMachineId::try_from(machine_id(seed, MachineType::Dpu)).unwrap());
+        let mut txn = pool.begin().await?;
+        for id in [
+            first_host.into(),
+            second_host.into(),
+            first_dpu.into(),
+            second_dpu.into(),
+            third_dpu.into(),
+            unattached_dpu.into(),
+        ] {
+            super::create(
+                txn.as_mut(),
+                None,
+                &id,
+                ManagedHostState::Ready,
+                None,
+                model::machine::CURRENT_STATE_MODEL_VERSION,
+            )
+            .await?;
+        }
+        let segment_id: NetworkSegmentId = sqlx::query_scalar(
+            "INSERT INTO network_segments (name, version)
+             VALUES ('dpu-host-associations', 'V1-T0') RETURNING id",
+        )
+        .fetch_one(txn.as_mut())
+        .await?;
+        for (index, (dpu_id, owner_id, interface_type)) in [
+            (first_dpu, MachineId::from(first_host), InterfaceType::Data),
+            (second_dpu, first_host.into(), InterfaceType::Data),
+            (third_dpu, second_host.into(), InterfaceType::Data),
+            // Multiple interface rows still represent one attachment for this DPU.
+            (first_dpu, first_host.into(), InterfaceType::Data),
+            // Neither a DPU's own OOB row nor a BMC row is a host attachment.
+            (unattached_dpu, unattached_dpu.into(), InterfaceType::Data),
+            (unattached_dpu, second_host.into(), InterfaceType::Bmc),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            sqlx::query(
+                "INSERT INTO machine_interfaces
+                    (machine_id, attached_dpu_machine_id, association_type, segment_id,
+                     mac_address, primary_interface, hostname, interface_type)
+                 VALUES ($1, $2, 'Machine', $3, $4::macaddr, false, 'dpu-host-associations', $5)",
+            )
+            .bind(owner_id)
+            .bind(dpu_id)
+            .bind(segment_id)
+            .bind(format!("02:00:00:00:31:{index:02x}"))
+            .bind(interface_type)
+            .execute(txn.as_mut())
+            .await?;
+        }
+
+        for (scenario, requested, expected) in [
+            ("empty request", vec![], Ok(None)),
+            ("no host attachments", vec![unattached_dpu], Ok(None)),
+            ("one DPU", vec![first_dpu], Ok(Some(first_host))),
+            (
+                "complete shared host with duplicate requested IDs",
+                vec![second_dpu, first_dpu, first_dpu],
+                Ok(Some(first_host)),
+            ),
+            (
+                "partial attachment",
+                vec![first_dpu, unattached_dpu],
+                Err(DpuHostAssociationError::Incomplete {
+                    dpu_machine_id: unattached_dpu,
+                }),
+            ),
+            (
+                "different hosts",
+                vec![first_dpu, third_dpu],
+                Err(DpuHostAssociationError::MultipleHosts),
+            ),
+            (
+                "partial attachment takes precedence over different hosts",
+                vec![first_dpu, third_dpu, unattached_dpu],
+                Err(DpuHostAssociationError::Incomplete {
+                    dpu_machine_id: unattached_dpu,
+                }),
+            ),
+        ] {
+            let associations = DpuHostAssociations::load(txn.as_mut(), &requested).await?;
+            assert_eq!(
+                associations.common_host_machine_id(),
+                expected,
+                "{scenario}"
+            );
+        }
+
+        let associations =
+            DpuHostAssociations::load(txn.as_mut(), &[first_dpu, second_dpu, third_dpu]).await?;
+        assert_eq!(associations.host_machine_id(&first_dpu), Some(first_host));
+        assert_eq!(associations.host_machine_id(&third_dpu), Some(second_host));
+        assert_eq!(associations.host_machine_id(&unattached_dpu), None);
+        let mut host_ids = associations.host_machine_ids().collect::<Vec<_>>();
+        host_ids.sort_unstable();
+        let mut expected_host_ids = vec![first_host, first_host, second_host];
+        expected_host_ids.sort_unstable();
+        assert_eq!(host_ids, expected_host_ids);
+
+        txn.rollback().await?;
+        Ok(())
     }
 
     // Raw stored JSON and independent expectations verify which health report is
@@ -7344,6 +7814,311 @@ mod test {
     }
 
     #[crate::sqlx_test]
+    async fn rack_reset_claim_serializes_with_allocation(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let machine_id: HostMachineId =
+            "fm100htes3rn1npvbtm5qd57dkilaag7ljugl1llmm7rfuq1ov50i0rpl30".parse()?;
+        let mut setup = pool.begin().await?;
+        super::create(
+            setup.as_mut(),
+            None,
+            &machine_id.into(),
+            ManagedHostState::Ready,
+            None,
+            super::CURRENT_STATE_MODEL_VERSION,
+        )
+        .await?;
+        setup.commit().await?;
+
+        let mut allocation = pool.begin().await?;
+        let blocker: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(allocation.as_mut())
+            .await?;
+        sqlx::query("SELECT id FROM machines WHERE id = $1 FOR UPDATE")
+            .bind(machine_id)
+            .execute(allocation.as_mut())
+            .await?;
+        sqlx::query("INSERT INTO instances (machine_id) VALUES ($1)")
+            .bind(machine_id)
+            .execute(allocation.as_mut())
+            .await?;
+        let claim = async {
+            let mut txn = pool.begin().await?;
+            let claimed = super::try_set_machine_maintenance_requested(
+                txn.as_mut(),
+                machine_id,
+                "rack-test",
+                super::MachineMaintenanceOperation::Reset,
+            )
+            .await?;
+            txn.commit().await?;
+            Ok::<_, Box<dyn std::error::Error>>(claimed)
+        };
+        let commit_allocation = async {
+            crate::test_support::postgres::wait_for_blocked_query(&pool, blocker, "FOR UPDATE")
+                .await;
+            allocation.commit().await?;
+            Ok::<_, Box<dyn std::error::Error>>(())
+        };
+        let (claimed, ()) = tokio::time::timeout(std::time::Duration::from_secs(40), async {
+            tokio::try_join!(claim, commit_allocation)
+        })
+        .await??;
+        assert!(
+            !claimed,
+            "a committed instance must block Reset even while the host is Ready"
+        );
+        let pending: Option<serde_json::Value> =
+            sqlx::query_scalar("SELECT machine_maintenance_requested FROM machines WHERE id = $1")
+                .bind(machine_id)
+                .fetch_one(&pool)
+                .await?;
+        assert!(pending.is_none());
+        Ok(())
+    }
+
+    #[crate::sqlx_test]
+    async fn rack_reset_admission_and_cancellation_use_machine_boundaries(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use chrono::Utc;
+        use config_version::ConfigVersion;
+        use model::machine::{
+            FailureCause, FailureDetails, FailureSource, HostReprovisionState, MachineState,
+            ReadyBootConfigState,
+        };
+        use model::machine_boot_interface::MachineBootInterfaceTarget;
+
+        let machine_id: HostMachineId =
+            "fm100htes3rn1npvbtm5qd57dkilaag7ljugl1llmm7rfuq1ov50i0rpl30".parse()?;
+        let boot = |boot_config_state| ManagedHostState::BootConfiguring {
+            desired_version: ConfigVersion::initial(),
+            desired_boot_interface: MachineBootInterfaceTarget::MacOnly(
+                "02:00:00:00:00:01".parse().unwrap(),
+            ),
+            post_lock_verification_retry_count: 0,
+            boot_config_state,
+        };
+        for (name, state, eligible) in [
+            (
+                "failed host",
+                ManagedHostState::Failed {
+                    details: FailureDetails {
+                        cause: FailureCause::UnhandledState {
+                            err: "test failure".into(),
+                        },
+                        failed_at: Utc::now(),
+                        source: FailureSource::StateMachine,
+                    },
+                    machine_id: machine_id.into(),
+                    retry_count: 0,
+                },
+                true,
+            ),
+            (
+                "boot preparation",
+                boot(ReadyBootConfigState::Prepare),
+                true,
+            ),
+            (
+                "boot failure after recovery",
+                boot(ReadyBootConfigState::Failed {
+                    failure: "test failure".into(),
+                }),
+                true,
+            ),
+            (
+                "boot writes in progress",
+                boot(ReadyBootConfigState::CheckHostConfig),
+                false,
+            ),
+            (
+                "initialization in progress",
+                ManagedHostState::HostInit {
+                    machine_state: MachineState::EnableIpmiOverLan,
+                },
+                false,
+            ),
+            (
+                "firmware maintenance in progress",
+                ManagedHostState::HostReprovision {
+                    reprovision_state: HostReprovisionState::WaitingForRackFirmwareUpgrade,
+                    retry_count: 0,
+                },
+                false,
+            ),
+        ] {
+            let mut txn = pool.begin().await?;
+            super::create(
+                txn.as_mut(),
+                None,
+                &machine_id.into(),
+                state.clone(),
+                None,
+                super::CURRENT_STATE_MODEL_VERSION,
+            )
+            .await?;
+            assert_eq!(
+                super::try_set_machine_maintenance_requested(
+                    txn.as_mut(),
+                    machine_id,
+                    "rack-test",
+                    super::MachineMaintenanceOperation::Reboot
+                )
+                .await?,
+                eligible,
+                "{name}"
+            );
+            let stored = super::find_one(txn.as_mut(), &machine_id, Default::default())
+                .await?
+                .unwrap();
+            assert_eq!(stored.state.value, state, "{name}");
+            assert_eq!(
+                stored.machine_maintenance_requested.is_some(),
+                eligible,
+                "{name}"
+            );
+            if eligible {
+                assert!(
+                    super::clear_unclaimed_machine_restart_request(
+                        txn.as_mut(),
+                        &machine_id,
+                        "rack-test"
+                    )
+                    .await?,
+                    "{name}"
+                );
+                let cancelled = super::find_one(txn.as_mut(), &machine_id, Default::default())
+                    .await?
+                    .unwrap();
+                assert!(cancelled.machine_maintenance_requested.is_none(), "{name}");
+                assert_eq!(cancelled.state.value, stored.state.value, "{name}");
+                assert_eq!(cancelled.state.version, stored.state.version, "{name}");
+            }
+            txn.rollback().await?;
+        }
+        Ok(())
+    }
+
+    #[crate::sqlx_test]
+    async fn rack_reset_cancels_unclaimed_request_after_another_workflow_starts(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let machine_id: HostMachineId =
+            "fm100htes3rn1npvbtm5qd57dkilaag7ljugl1llmm7rfuq1ov50i0rpl30".parse()?;
+        let mut txn = pool.begin().await?;
+        super::create(
+            txn.as_mut(),
+            None,
+            &machine_id.into(),
+            ManagedHostState::Ready,
+            None,
+            super::CURRENT_STATE_MODEL_VERSION,
+        )
+        .await?;
+        assert!(
+            super::try_set_machine_maintenance_requested(
+                txn.as_mut(),
+                machine_id,
+                "rack-test",
+                super::MachineMaintenanceOperation::Reset
+            )
+            .await?
+        );
+        // A controller snapshot from before admission can already be advancing
+        // another workflow. It has not claimed this Reset by entering Maintenance.
+        let active = ManagedHostState::HostReprovision {
+            reprovision_state: model::machine::HostReprovisionState::WaitingForRackFirmwareUpgrade,
+            retry_count: 0,
+        };
+        super::update_state(txn.as_mut(), &machine_id, &active).await?;
+        assert!(
+            super::clear_unclaimed_machine_restart_request(txn.as_mut(), &machine_id, "rack-test")
+                .await?
+        );
+        let stored = super::find_one(txn.as_mut(), &machine_id, Default::default())
+            .await?
+            .unwrap();
+        assert_eq!(stored.state.value, active);
+        assert!(stored.machine_maintenance_requested.is_none());
+        txn.rollback().await?;
+        Ok(())
+    }
+
+    #[crate::sqlx_test]
+    async fn rack_reset_cancellation_preserves_claimed_and_foreign_requests(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use super::MachineMaintenanceOperation::{PowerOn, Reboot, Reset};
+        let machine_id: HostMachineId =
+            "fm100htes3rn1npvbtm5qd57dkilaag7ljugl1llmm7rfuq1ov50i0rpl30".parse()?;
+        for (initiator, operation, started, should_clear) in [
+            ("rack-test", Reboot, false, true),
+            ("operator", Reboot, false, false),
+            ("rack-test", Reboot, true, false),
+            ("rack-test", Reset, false, true),
+            ("operator", Reset, false, false),
+            ("rack-test", PowerOn, false, false),
+            ("rack-test", Reset, true, false),
+        ] {
+            let mut txn = pool.begin().await?;
+            super::create(
+                txn.as_mut(),
+                None,
+                &machine_id.into(),
+                ManagedHostState::Ready,
+                None,
+                super::CURRENT_STATE_MODEL_VERSION,
+            )
+            .await?;
+            super::set_machine_maintenance_requested(
+                txn.as_mut(),
+                machine_id,
+                initiator,
+                operation,
+            )
+            .await?;
+            let machine = super::find_one(txn.as_mut(), &machine_id, Default::default())
+                .await?
+                .unwrap();
+            let request = machine.machine_maintenance_requested.unwrap();
+            let claimed_state = ManagedHostState::maintenance_for_request(request.clone());
+            if started {
+                assert_eq!(
+                    super::try_update_controller_state(
+                        txn.as_mut(),
+                        &machine_id,
+                        machine.state.version,
+                        machine.state.version.increment(),
+                        &claimed_state
+                    )
+                    .await?,
+                    crate::ConditionalWrite::Applied(())
+                );
+            }
+            assert_eq!(
+                super::clear_unclaimed_machine_restart_request(
+                    txn.as_mut(),
+                    &machine_id,
+                    "rack-test"
+                )
+                .await?,
+                should_clear
+            );
+            let after = super::find_one(txn.as_mut(), &machine_id, Default::default())
+                .await?
+                .unwrap();
+            assert_eq!(
+                after.machine_maintenance_requested,
+                (!should_clear).then_some(request)
+            );
+            txn.rollback().await?;
+        }
+        Ok(())
+    }
+
+    #[crate::sqlx_test]
     async fn reboot_verification_waits_for_a_concurrent_request(
         pool: sqlx::PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
@@ -8211,65 +8986,6 @@ mod test {
         let stats = crate::resource_pool::stats(&pool, LOOPBACK_IP_V6).await?;
         assert_eq!(stats.used, 1);
         assert_eq!(stats.free, 0);
-        Ok(())
-    }
-
-    /// A surviving `lo-ip` pool reservation must satisfy the next allocation for
-    /// the same DPU. Otherwise a cleared `network_config.loopback_ip` field lets
-    /// one DPU consume a second IPv4 loopback, matching the IPv6 reuse contract.
-    #[crate::sqlx_test]
-    async fn ipv4_loopback_reservation_is_reused_and_leaves_one_owned_entry(
-        pool: sqlx::PgPool,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        let common_pools = common_pools(&pool, None).await?;
-        let dpu_id =
-            MachineId::from_str("fm100dskla0ihp0pn4tv7v1js2k2mo37sl0jjr8141okqg8pjpdpfihaa80")?;
-
-        let mut txn = pool.begin().await?;
-        let allocated =
-            super::allocate_loopback_ip(&common_pools, txn.as_mut(), &dpu_id.to_string()).await?;
-        let reused =
-            super::allocate_loopback_ip(&common_pools, txn.as_mut(), &dpu_id.to_string()).await?;
-        assert_eq!(allocated, reused);
-
-        let stats = crate::resource_pool::stats(txn.as_mut(), LOOPBACK_IP).await?;
-        assert_eq!(stats.used, 1);
-        txn.rollback().await?;
-        Ok(())
-    }
-
-    /// Two `lo-ip` rows owned by one DPU is corrupted state: allocation must
-    /// surface it as inconsistent rather than silently hand back one value and
-    /// leave the DPU still owning a second.
-    #[crate::sqlx_test]
-    async fn ipv4_loopback_rejects_multiple_reservations_for_one_dpu(
-        pool: sqlx::PgPool,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        let common_pools = common_pools(&pool, None).await?;
-        let dpu_id =
-            MachineId::from_str("fm100dskla0ihp0pn4tv7v1js2k2mo37sl0jjr8141okqg8pjpdpfihaa80")?;
-        let owner_id = dpu_id.to_string();
-
-        let mut txn = pool.begin().await?;
-        // Seed two reservations for the same owner so the ownership lookup sees
-        // more than one owned value.
-        for _ in 0..2 {
-            crate::resource_pool::allocate(
-                &common_pools.ethernet.pool_loopback_ip,
-                txn.as_mut(),
-                model::resource_pool::OwnerType::Machine,
-                &owner_id,
-                None,
-            )
-            .await?;
-        }
-
-        let error = super::allocate_loopback_ip(&common_pools, txn.as_mut(), &owner_id)
-            .await
-            .expect_err("two lo-ip values owned by one DPU must be rejected as inconsistent state");
-        assert!(matches!(error, crate::DatabaseError::FailedPrecondition(_)));
-
-        txn.rollback().await?;
         Ok(())
     }
 

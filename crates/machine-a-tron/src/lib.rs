@@ -15,7 +15,6 @@
  * limitations under the License.
  */
 pub mod api_client;
-pub mod api_throttler;
 mod bmc_mock_wrapper;
 mod config;
 mod console_output;

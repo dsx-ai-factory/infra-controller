@@ -4643,7 +4643,7 @@ paths:
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '409':
-          description: An Expected Machine with a conflicting identity already exists, or another complete Expected Inventory mutation is in progress for the same Site. Lock conflicts are rejected before data is mutated and can be retried.
+          description: An Expected Machine with a conflicting identity already exists, or an Expected Inventory mutation requiring exclusive access is in progress for the same Site. Lock conflicts are rejected before data is mutated and can be retried. Exclusive access is required for complete inventory replacements or deletions, batch Expected Machine creation, and batch Expected Machine updates that set chassis serial numbers. An earlier unconfirmed batch creation also blocks a create using its reserved MAC address or chassis serial number at this Site. Wait for batch reconciliation before retrying that identity.
           $ref: '#/components/responses/ConflictError'
         '422':
           description: The supplied `skuId` does not identify a SKU at this Expected Machine's Site. REST checks your access to the Site before looking up the SKU.
@@ -4779,7 +4779,7 @@ paths:
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '409':
-          description: Another Expected Inventory mutation is already in progress for the same Site. This complete Expected Machine replacement is rejected before data is mutated and can be retried.
+          description: Another Expected Inventory mutation or Expected Machine inventory reconciliation is in progress, or an earlier Expected Machine batch creation is awaiting confirmation at this Site. This complete replacement is rejected before mutation because it would also replace pending machines. Retry after the conflicting operation or batch reconciliation finishes.
           $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Machine
@@ -4808,7 +4808,7 @@ paths:
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '409':
-          description: Another Expected Inventory mutation is already in progress for the same Site. This complete Expected Machine deletion is rejected before data is mutated and can be retried.
+          description: Another Expected Inventory mutation or Expected Machine inventory reconciliation is in progress, or an earlier Expected Machine batch creation is awaiting confirmation at this Site. This complete deletion is rejected before mutation because it would also delete pending machines. Retry after the conflicting operation or batch reconciliation finishes.
           $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Machine
@@ -5058,7 +5058,7 @@ paths:
         '404':
           $ref: '#/components/responses/NotFoundError'
         '409':
-          description: Another complete Expected Inventory mutation is already in progress for the same Site. This Expected Machine update is rejected before data is mutated and can be retried.
+          description: An Expected Inventory mutation requiring exclusive access is already in progress for the same Site. This Expected Machine update is rejected before data is mutated and can be retried. Exclusive access is required for complete inventory replacements or deletions, batch Expected Machine creation, and batch Expected Machine updates that set chassis serial numbers. An earlier unconfirmed batch creation also blocks updates to its reserved machine IDs or chassis serial numbers. Wait for batch reconciliation before retrying those identities.
           $ref: '#/components/responses/ConflictError'
         '422':
           description: The supplied `skuId` does not identify a SKU at this Expected Machine's Site. REST checks your access to the Site before looking up the SKU.
@@ -5104,7 +5104,7 @@ paths:
         '404':
           $ref: '#/components/responses/NotFoundError'
         '409':
-          description: Another complete Expected Inventory mutation is already in progress for the same Site. This Expected Machine deletion is rejected before data is mutated and can be retried.
+          description: An Expected Inventory mutation requiring exclusive access is already in progress for the same Site. This Expected Machine deletion is rejected before data is mutated and can be retried. Exclusive access is required for complete inventory replacements or deletions, batch Expected Machine creation, and batch Expected Machine updates that set chassis serial numbers. An earlier unconfirmed batch creation also blocks deletion of its reserved machine IDs. Wait for batch reconciliation before retrying those IDs.
           $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Machine
@@ -5127,6 +5127,12 @@ paths:
         Alternatively, Tenant Admins with `TargetedInstanceCreation` capability can also create Expected Machines if they have an account with the Site's Infrastructure Provider.
 
         Maximum batch size: 100 Expected Machines per request.
+
+        A successful response confirms that Core created every requested machine and REST saved the corresponding records. HTTP 500 can mean the batch was rejected or that REST could not confirm or save its creation. The status alone does not establish whether creation succeeded or may still finish.
+
+        When durable batch recovery is enabled on the server, REST reserves the requested machine IDs, MAC addresses, and chassis serial numbers until it can confirm creation or establish failure. Durable batch recovery is disabled by default. Creates, updates, and deletes using those identities return HTTP 409 while confirmation is pending. The reservation also blocks replacement or deletion of all Expected Machines at the Site.
+
+        Check Expected Machine inventory before retrying an unconfirmed request. A missing machine is not proof that creation failed. If the server cannot establish the result, a batch with durable recovery keeps its reservation without automatic expiration.
       requestBody:
         content:
           application/json:
@@ -5177,8 +5183,11 @@ paths:
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '409':
-          description: Another complete Expected Inventory mutation is already in progress for the same Site. This batch Expected Machine creation is rejected before data is mutated and can be retried.
+          description: A conflicting Expected Inventory mutation or Expected Machine inventory reconciliation is in progress, or an earlier batch creation is awaiting confirmation for a submitted MAC address or chassis serial number at this Site. This batch is rejected before dispatch to Core. Retry after the conflicting operation or batch reconciliation finishes; a conflict does not establish whether the earlier batch was created.
           $ref: '#/components/responses/ConflictError'
+        '500':
+          description: The batch was rejected, or REST could not schedule, confirm, or save its creation. Core may already have created the machines or may still finish. With durable recovery enabled, an unconfirmed batch retains its identity reservations, so retrying can return HTTP 409. Check inventory before retrying; a missing record is not proof that creation failed.
+          $ref: '#/components/responses/GenericHttpError'
       tags:
         - Expected Machine
     patch:
@@ -5247,7 +5256,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/NICoAPIError'
         '409':
-          description: One or more target Expected Machines changed before they could be locked, or another complete Expected Inventory mutation is in progress for the same Site. The batch can be retried.
+          description: One or more target Expected Machines changed before they could be locked, or a conflicting Expected Inventory mutation is in progress for the same Site. Batches that set chassis serial numbers require exclusive access and can conflict with other Expected Inventory mutations or Expected Machine inventory reconciliation. Batches that omit `chassisSerialNumber` or set it to null use shared access and can conflict with complete inventory replacements or deletions and Expected Machine batches that set serial numbers. The batch can be retried. An earlier unconfirmed batch creation also blocks a batch update targeting its reserved machine IDs or chassis serial numbers. Wait for batch reconciliation before retrying those identities.
           $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Machine
@@ -5299,7 +5308,7 @@ paths:
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '409':
-          description: An Expected Power Shelf with a conflicting identity already exists, or another complete Expected Inventory mutation is in progress for the same Site. Lock conflicts are rejected before data is mutated and can be retried.
+          description: An Expected Power Shelf with a conflicting identity already exists, or an Expected Inventory mutation requiring exclusive access is in progress for the same Site. Lock conflicts are rejected before data is mutated and can be retried. Exclusive access is required for complete inventory replacements or deletions, batch Expected Machine creation, and batch Expected Machine updates that set chassis serial numbers.
           $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Power Shelf
@@ -5415,7 +5424,7 @@ paths:
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '409':
-          description: Another Expected Inventory mutation is already in progress for the same Site. This complete Expected Power Shelf replacement is rejected before data is mutated and can be retried.
+          description: Another Expected Inventory mutation or Expected Machine inventory reconciliation is already in progress for the same Site. This complete Expected Power Shelf replacement is rejected before data is mutated and can be retried.
           $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Power Shelf
@@ -5444,7 +5453,7 @@ paths:
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '409':
-          description: Another Expected Inventory mutation is already in progress for the same Site. This complete Expected Power Shelf deletion is rejected before data is mutated and can be retried.
+          description: Another Expected Inventory mutation or Expected Machine inventory reconciliation is already in progress for the same Site. This complete Expected Power Shelf deletion is rejected before data is mutated and can be retried.
           $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Power Shelf
@@ -5540,7 +5549,7 @@ paths:
         '404':
           $ref: '#/components/responses/NotFoundError'
         '409':
-          description: Another complete Expected Inventory mutation is already in progress for the same Site. This Expected Power Shelf update is rejected before data is mutated and can be retried.
+          description: An Expected Inventory mutation requiring exclusive access is already in progress for the same Site. This Expected Power Shelf update is rejected before data is mutated and can be retried. Exclusive access is required for complete inventory replacements or deletions, batch Expected Machine creation, and batch Expected Machine updates that set chassis serial numbers.
           $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Power Shelf
@@ -5566,7 +5575,7 @@ paths:
         '404':
           $ref: '#/components/responses/NotFoundError'
         '409':
-          description: Another complete Expected Inventory mutation is already in progress for the same Site. This Expected Power Shelf deletion is rejected before data is mutated and can be retried.
+          description: An Expected Inventory mutation requiring exclusive access is already in progress for the same Site. This Expected Power Shelf deletion is rejected before data is mutated and can be retried. Exclusive access is required for complete inventory replacements or deletions, batch Expected Machine creation, and batch Expected Machine updates that set chassis serial numbers.
           $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Power Shelf
@@ -5625,7 +5634,7 @@ paths:
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '409':
-          description: An Expected Rack with a conflicting identity already exists, or another complete Expected Inventory mutation is in progress for the same Site. Lock conflicts are rejected before data is mutated and can be retried.
+          description: An Expected Rack with a conflicting identity already exists, or an Expected Inventory mutation requiring exclusive access is in progress for the same Site. Lock conflicts are rejected before data is mutated and can be retried. Exclusive access is required for complete inventory replacements or deletions, batch Expected Machine creation, and batch Expected Machine updates that set chassis serial numbers.
           $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Rack
@@ -5762,7 +5771,7 @@ paths:
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '409':
-          description: Another Expected Inventory mutation is already in progress for the same Site. This complete Expected Rack replacement is rejected before data is mutated and can be retried.
+          description: Another Expected Inventory mutation or Expected Machine inventory reconciliation is already in progress for the same Site. This complete Expected Rack replacement is rejected before data is mutated and can be retried.
           $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Rack
@@ -5806,7 +5815,7 @@ paths:
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '409':
-          description: Another Expected Inventory mutation is already in progress for the same Site. This complete Expected Rack replacement is rejected before data is mutated and can be retried.
+          description: Another Expected Inventory mutation or Expected Machine inventory reconciliation is already in progress for the same Site. This complete Expected Rack replacement is rejected before data is mutated and can be retried.
           $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Rack
@@ -5837,7 +5846,7 @@ paths:
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '409':
-          description: Another Expected Inventory mutation is already in progress for the same Site. This complete Expected Rack deletion is rejected before data is mutated and can be retried.
+          description: Another Expected Inventory mutation or Expected Machine inventory reconciliation is already in progress for the same Site. This complete Expected Rack deletion is rejected before data is mutated and can be retried.
           $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Rack
@@ -5936,7 +5945,7 @@ paths:
         '404':
           $ref: '#/components/responses/NotFoundError'
         '409':
-          description: Another complete Expected Inventory mutation is already in progress for the same Site. This Expected Rack update is rejected before data is mutated and can be retried.
+          description: An Expected Inventory mutation requiring exclusive access is already in progress for the same Site. This Expected Rack update is rejected before data is mutated and can be retried. Exclusive access is required for complete inventory replacements or deletions, batch Expected Machine creation, and batch Expected Machine updates that set chassis serial numbers.
           $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Rack
@@ -5961,7 +5970,7 @@ paths:
         '404':
           $ref: '#/components/responses/NotFoundError'
         '409':
-          description: Another complete Expected Inventory mutation is already in progress for the same Site. This Expected Rack deletion is rejected before data is mutated and can be retried.
+          description: An Expected Inventory mutation requiring exclusive access is already in progress for the same Site. This Expected Rack deletion is rejected before data is mutated and can be retried. Exclusive access is required for complete inventory replacements or deletions, batch Expected Machine creation, and batch Expected Machine updates that set chassis serial numbers.
           $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Rack
@@ -6023,7 +6032,7 @@ paths:
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '409':
-          description: An Expected Rack Group with a conflicting identity already exists, or another complete Expected Inventory mutation is in progress for the same Site. Lock conflicts are rejected before data is mutated and can be retried.
+          description: An Expected Rack Group with a conflicting identity already exists, or an Expected Inventory mutation requiring exclusive access is in progress for the same Site. Lock conflicts are rejected before data is mutated and can be retried. Exclusive access is required for complete inventory replacements or deletions, batch Expected Machine creation, and batch Expected Machine updates that set chassis serial numbers.
           $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Rack Group
@@ -6173,7 +6182,7 @@ paths:
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '409':
-          description: Another Expected Inventory mutation is already in progress for the same Site. This complete Expected Rack Group replacement is rejected before data is mutated and can be retried.
+          description: Another Expected Inventory mutation or Expected Machine inventory reconciliation is already in progress for the same Site. This complete Expected Rack Group replacement is rejected before data is mutated and can be retried.
           $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Rack Group
@@ -6217,7 +6226,7 @@ paths:
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '409':
-          description: Another Expected Inventory mutation is already in progress for the same Site. This complete Expected Rack Group replacement is rejected before data is mutated and can be retried.
+          description: Another Expected Inventory mutation or Expected Machine inventory reconciliation is already in progress for the same Site. This complete Expected Rack Group replacement is rejected before data is mutated and can be retried.
           $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Rack Group
@@ -6248,7 +6257,7 @@ paths:
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '409':
-          description: Another Expected Inventory mutation is already in progress for the same Site. This complete Expected Rack Group deletion is rejected before data is mutated and can be retried.
+          description: Another Expected Inventory mutation or Expected Machine inventory reconciliation is already in progress for the same Site. This complete Expected Rack Group deletion is rejected before data is mutated and can be retried.
           $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Rack Group
@@ -6351,7 +6360,7 @@ paths:
         '404':
           $ref: '#/components/responses/NotFoundError'
         '409':
-          description: Another complete Expected Inventory mutation is already in progress for the same Site. This Expected Rack Group update is rejected before data is mutated and can be retried.
+          description: An Expected Inventory mutation requiring exclusive access is already in progress for the same Site. This Expected Rack Group update is rejected before data is mutated and can be retried. Exclusive access is required for complete inventory replacements or deletions, batch Expected Machine creation, and batch Expected Machine updates that set chassis serial numbers.
           $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Rack Group
@@ -6376,7 +6385,7 @@ paths:
         '404':
           $ref: '#/components/responses/NotFoundError'
         '409':
-          description: Another complete Expected Inventory mutation is already in progress for the same Site. This Expected Rack Group deletion is rejected before data is mutated and can be retried.
+          description: An Expected Inventory mutation requiring exclusive access is already in progress for the same Site. This Expected Rack Group deletion is rejected before data is mutated and can be retried. Exclusive access is required for complete inventory replacements or deletions, batch Expected Machine creation, and batch Expected Machine updates that set chassis serial numbers.
           $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Rack Group
@@ -6434,7 +6443,7 @@ paths:
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '409':
-          description: An Expected Switch with a conflicting BMC or NVOS identity already exists, or another complete Expected Inventory mutation is in progress for the same Site. Lock conflicts are rejected before data is mutated and can be retried.
+          description: An Expected Switch with a conflicting BMC or NVOS identity already exists, or an Expected Inventory mutation requiring exclusive access is in progress for the same Site. Lock conflicts are rejected before data is mutated and can be retried. Exclusive access is required for complete inventory replacements or deletions, batch Expected Machine creation, and batch Expected Machine updates that set chassis serial numbers.
           $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Switch
@@ -6550,7 +6559,7 @@ paths:
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '409':
-          description: Another Expected Inventory mutation is already in progress for the same Site. This complete Expected Switch replacement is rejected before data is mutated and can be retried.
+          description: Another Expected Inventory mutation or Expected Machine inventory reconciliation is already in progress for the same Site. This complete Expected Switch replacement is rejected before data is mutated and can be retried.
           $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Switch
@@ -6579,7 +6588,7 @@ paths:
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '409':
-          description: Another Expected Inventory mutation is already in progress for the same Site. This complete Expected Switch deletion is rejected before data is mutated and can be retried.
+          description: Another Expected Inventory mutation or Expected Machine inventory reconciliation is already in progress for the same Site. This complete Expected Switch deletion is rejected before data is mutated and can be retried.
           $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Switch
@@ -6681,7 +6690,7 @@ paths:
         '404':
           $ref: '#/components/responses/NotFoundError'
         '409':
-          description: An Expected Switch with a conflicting NVOS identity already exists, or another complete Expected Inventory mutation is in progress for the same Site. Lock conflicts are rejected before data is mutated and can be retried.
+          description: An Expected Switch with a conflicting NVOS identity already exists, or an Expected Inventory mutation requiring exclusive access is in progress for the same Site. Lock conflicts are rejected before data is mutated and can be retried. Exclusive access is required for complete inventory replacements or deletions, batch Expected Machine creation, and batch Expected Machine updates that set chassis serial numbers.
           $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Switch
@@ -6707,7 +6716,7 @@ paths:
         '404':
           $ref: '#/components/responses/NotFoundError'
         '409':
-          description: Another complete Expected Inventory mutation is already in progress for the same Site. This Expected Switch deletion is rejected before data is mutated and can be retried.
+          description: An Expected Inventory mutation requiring exclusive access is already in progress for the same Site. This Expected Switch deletion is rejected before data is mutated and can be retried. Exclusive access is required for complete inventory replacements or deletions, batch Expected Machine creation, and batch Expected Machine updates that set chassis serial numbers.
           $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Switch
@@ -7839,6 +7848,8 @@ paths:
                 example-1:
                   value:
                     message: Deletion request was accepted
+        '404':
+          $ref: '#/components/responses/NotFoundError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
       description: |-
@@ -27834,7 +27845,7 @@ components:
           - Unknown
         operation:
           type: string
-          description: Recorded operation. `Reset` does not preserve the original graceful/forced/AC-cycle distinction.
+          description: Recorded operation. For `Reset`, graceful=true identifies an explicit graceful host reboot; legacy records do not preserve the original restart mode.
           enum:
           - PowerOn
           - PowerOff
@@ -27856,7 +27867,7 @@ components:
           type:
           - boolean
           - 'null'
-          description: 'Present for `PowerOff` only: true is graceful, false is forced. Null for other operations.'
+          description: 'For `PowerOff`, true is graceful and false is forced. For an explicit graceful host reboot, operation is `Reset` and graceful is true. Null for legacy Reset records and other operations.'
         chassisId:
           type:
           - string
@@ -34468,12 +34479,13 @@ components:
     DpuExtensionService:
       title: DpuExtensionService
       type: object
-      description: DPU Extension Service allows user defined services to run on DPUs of their Instances
+      description: DPU Extension Service runs user-defined services on DPUs through instance attachment or baseline deployment
       examples:
         - id: 497f6eca-6276-4993-bfeb-53cbbbba6f08
           name: busybox
           description: 'Single, multi-call executable that contains stripped-down versions of common Unix utilities'
           serviceType: KubernetesPod
+          deploymentType: DemandDriven
           siteId: 60189e9c-7d12-438c-b9ca-6998d9c364b1
           tenantId: f97df110-f4de-492e-8849-4a6af68026b0
           version: V1-T1761856992374052
@@ -34523,9 +34535,11 @@ components:
           enum:
             - KubernetesPod
             - DpfHelmChart
+        deploymentType:
+          $ref: '#/components/schemas/DpuExtensionServiceDeploymentType'
         dpuTarget:
           $ref: '#/components/schemas/DpuExtensionServiceDpuTarget'
-          description: Immutable DPU placement policy for DpfHelmChart services; null for KubernetesPod services
+          description: Immutable host-scoped placement for `DemandDriven` Helm services; null for `Baseline` Helm and KubernetesPod services
         siteId:
           type: string
           format: uuid
@@ -34575,6 +34589,23 @@ components:
         - Error
         - Updating
         - Deleting
+    DpuExtensionServiceDeploymentType:
+      title: DpuExtensionServiceDeploymentType
+      type: string
+      description: |-
+        Immutable deployment policy. Omitted or null on create defaults to `DemandDriven`,
+        which deploys through instance attachment. `Baseline` is supported only for
+        DpfHelmChart services and requests deployment to all DPUs managed by DPF at
+        creation, without a DPU target. Baseline services cannot be attached to instances.
+        Empty and unknown values are rejected. Responses always include the stored policy.
+        This field cannot be changed through updates.
+      default: DemandDriven
+      enum:
+        - DemandDriven
+        - Baseline
+      examples:
+        - DemandDriven
+        - Baseline
     DpuExtensionServiceDpuTarget:
       title: DpuExtensionServiceDpuTarget
       type:
@@ -34588,11 +34619,12 @@ components:
     DpuExtensionServiceSummary:
       title: DpuExtensionServiceSummary
       type: object
-      description: DPU Extension Service allows user defined services to run on DPUs of their Instances
+      description: DPU Extension Service runs user-defined services on DPUs through instance attachment or baseline deployment
       examples:
         - id: 497f6eca-6276-4993-bfeb-53cbbbba6f08
           name: busybox
           serviceType: KubernetesPod
+          deploymentType: DemandDriven
           latestVersion: V1-T1761856992374052
           status: Ready
       properties:
@@ -34610,9 +34642,11 @@ components:
           enum:
             - KubernetesPod
             - DpfHelmChart
+        deploymentType:
+          $ref: '#/components/schemas/DpuExtensionServiceDeploymentType'
         dpuTarget:
           $ref: '#/components/schemas/DpuExtensionServiceDpuTarget'
-          description: Immutable DPU placement policy for DpfHelmChart services; null for KubernetesPod services
+          description: Immutable host-scoped placement for `DemandDriven` Helm services; null for `Baseline` Helm and KubernetesPod services
         latestVersion:
           type:
             - string
@@ -34784,6 +34818,7 @@ components:
         - name: busybox
           description: 'Single, multi-call executable that contains stripped-down versions of common Unix utilities'
           serviceType: KubernetesPod
+          deploymentType: DemandDriven
           siteId: 60189e9c-7d12-438c-b9ca-6998d9c364b1
           data: 'apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: busybox-deployment\n  labels:\n    app: busybox\nspec:\n  replicas: 1 # You can adjust the number of desired replicas here\n  selector:\n    matchLabels:\n      app: busybox\n  template:\n    metadata:\n      labels:\n        app: busybox\n    spec:\n      containers:\n      - name: busybox-container\n        image: busybox:latest # You can specify a different BusyBox image tag\n        command: ["sh", "-c", "echo \''BusyBox container running\'' && sleep 3600"]'
           credentials:
@@ -34799,6 +34834,7 @@ components:
         - name: storage-client
           description: DPF-managed storage client
           serviceType: DpfHelmChart
+          deploymentType: DemandDriven
           dpuTarget: AllActive
           siteId: 60189e9c-7d12-438c-b9ca-6998d9c364b1
           data: '{"repoURL":"https://helm-registry.example/dpf","chartName":"storage-client","chartVersion":"2.0.0","serviceID":"storage-client-v2","deployInCluster":false,"security":{"privileged":true,"spiffe":{}},"serviceDaemonSet":{"labels":{"app.kubernetes.io/name":"storage-client"},"annotations":{},"resources":{"nvidia.com/bf_sf":"1"},"updateStrategy":{"type":"RollingUpdate","rollingUpdate":{"maxUnavailable":1}}}}'
@@ -34817,9 +34853,13 @@ components:
           enum:
             - KubernetesPod
             - DpfHelmChart
+        deploymentType:
+          oneOf:
+            - $ref: '#/components/schemas/DpuExtensionServiceDeploymentType'
+            - type: 'null'
         dpuTarget:
           $ref: '#/components/schemas/DpuExtensionServiceDpuTarget'
-          description: Required for DpfHelmChart services and unsupported for KubernetesPod services
+          description: Required for `DemandDriven` DpfHelmChart services; omitted or null for `Baseline` Helm and KubernetesPod services
         siteId:
           type: string
           format: uuid

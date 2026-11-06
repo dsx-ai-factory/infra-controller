@@ -177,6 +177,7 @@ fn expected_action(operation: MachineMaintenanceOperation) -> PowerAction {
         MachineMaintenanceOperation::PowerOff { graceful: true } => PowerAction::GracefulShutdown,
         MachineMaintenanceOperation::PowerOff { graceful: false } => PowerAction::ForceOff,
         MachineMaintenanceOperation::Reset => PowerAction::ForceRestart,
+        MachineMaintenanceOperation::Reboot => PowerAction::GracefulRestart,
         MachineMaintenanceOperation::ChassisReset { .. } => {
             unreachable!("chassis resets do not use the compute-tray backend")
         }
@@ -293,6 +294,12 @@ async fn reconcile(
             "request did not enter Maintenance from {:?}: {:?}",
             case.entry_state, entered.state.value
         ));
+    }
+
+    if matches!(case.entry_state, EntryState::Failed)
+        && entered.status.failure_details.cause != FailureCause::NoError
+    {
+        return Err("accepting maintenance did not clear the stale host failure".into());
     }
 
     // Second iteration reconciles the operation with the backend.
@@ -426,6 +433,11 @@ async fn failed_power_operations_retry_after_controller_restart(pool: PgPool) {
         ),
         (
             MachineMaintenanceOperation::Reset,
+            BackendOutcome::TransportFailure,
+            "test transport failure",
+        ),
+        (
+            MachineMaintenanceOperation::Reboot,
             BackendOutcome::TransportFailure,
             "test transport failure",
         ),

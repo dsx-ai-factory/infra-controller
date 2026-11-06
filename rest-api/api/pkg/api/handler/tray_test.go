@@ -13,12 +13,14 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/handler/util/common"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/pagination"
 	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
 	authz "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
+	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/grpcproxy"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
@@ -32,6 +34,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/uptrace/bun/extra/bundebug"
 	temporalEnums "go.temporal.io/api/enums/v1"
+	tClient "go.temporal.io/sdk/client"
 	tmocks "go.temporal.io/sdk/mocks"
 	tp "go.temporal.io/sdk/temporal"
 	"google.golang.org/protobuf/proto"
@@ -1367,20 +1370,24 @@ func TestUpdateTrayPowerStateHandler_Handle(t *testing.T) {
 	tenantUser := testTrayBuildUser(t, dbSession, "tenant-user-pc-tray", org, []string{authz.TenantAdminRole})
 
 	handler := NewUpdateTrayPowerStateHandler(dbSession, nil, scp, cfg)
+	e.PATCH("/v2/org/:orgName/nico/tray/:id/power", handler.Handle)
 
 	trayID := uuid.New().String()
 
 	ctx := context.Background()
 
 	tests := []struct {
-		name           string
-		reqOrg         string
-		user           *cdbm.User
-		trayID         string
-		body           string
-		mockTaskIDs    []*flowv1.UUID
-		mockResultErr  error
-		expectedStatus int
+		name              string
+		reqOrg            string
+		user              *cdbm.User
+		trayID            string
+		expectedTrayID    string
+		expectedRawPath   string
+		malformedEncoding bool
+		body              string
+		mockTaskIDs       []*flowv1.UUID
+		mockResultErr     error
+		expectedStatus    int
 	}{
 		{
 			name:           "failure - Flow rejects operation",
@@ -1396,9 +1403,52 @@ func TestUpdateTrayPowerStateHandler_Handle(t *testing.T) {
 			reqOrg:         org,
 			user:           providerUser,
 			trayID:         trayID,
+			expectedTrayID: trayID,
 			body:           fmt.Sprintf(`{"siteId":"%s","state":"on"}`, site.ID.String()),
 			mockTaskIDs:    []*flowv1.UUID{{Id: uuid.NewString()}},
 			expectedStatus: http.StatusOK,
+		},
+		{
+			name:            "encoded MAC",
+			reqOrg:          org,
+			user:            providerUser,
+			trayID:          "d8%3Aab%3Acd%3Aef%3A00%3A01",
+			expectedTrayID:  "d8:ab:cd:ef:00:01",
+			expectedRawPath: "/v2/org/" + org + "/nico/tray/d8%3Aab%3Acd%3Aef%3A00%3A01/power",
+			mockTaskIDs:     []*flowv1.UUID{{Id: uuid.NewString()}},
+			body:            fmt.Sprintf(`{"siteId":"%s","state":"on"}`, site.ID.String()),
+			expectedStatus:  http.StatusOK,
+		},
+		{
+			name:           "decoded once",
+			reqOrg:         org,
+			user:           providerUser,
+			trayID:         "unit%252Flabel",
+			expectedTrayID: "unit%2Flabel",
+			mockTaskIDs:    []*flowv1.UUID{{Id: uuid.NewString()}},
+			body:           fmt.Sprintf(`{"siteId":"%s","state":"on"}`, site.ID.String()),
+			expectedStatus: http.StatusOK,
+		},
+		{
+			name:            "decoded once with RawPath",
+			reqOrg:          org,
+			user:            providerUser,
+			trayID:          "unit%3Along%252Flabel",
+			expectedTrayID:  "unit:long%2Flabel",
+			expectedRawPath: "/v2/org/" + org + "/nico/tray/unit%3Along%252Flabel/power",
+			mockTaskIDs:     []*flowv1.UUID{{Id: uuid.NewString()}},
+			body:            fmt.Sprintf(`{"siteId":"%s","state":"on"}`, site.ID.String()),
+			expectedStatus:  http.StatusOK,
+		},
+		{
+			name:              "malformed encoding",
+			reqOrg:            org,
+			user:              providerUser,
+			trayID:            "d8%ZZ",
+			malformedEncoding: true,
+			expectedRawPath:   "/v2/org/" + org + "/nico/tray/d8%ZZ/power",
+			body:              fmt.Sprintf(`{"siteId":"%s","state":"on"}`, site.ID.String()),
+			expectedStatus:    http.StatusBadRequest,
 		},
 		{
 			name:           "success - power off tray",
@@ -1463,18 +1513,33 @@ func TestUpdateTrayPowerStateHandler_Handle(t *testing.T) {
 			} else {
 				testFlowProxyReply(t, mockWorkflowRun, &flowv1.SubmitTaskResponse{TaskIds: tt.mockTaskIDs})
 			}
-			mockTemporalClient.Mock.On("ExecuteWorkflow", mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(mockWorkflowRun, nil)
+			var started tClient.StartWorkflowOptions
+			var powerOnRequest flowv1.PowerOnRackRequest
+			mockTemporalClient.Mock.On("ExecuteWorkflow", mock.Anything, mock.Anything, mock.Anything, mock.Anything).
+				Run(func(args mock.Arguments) {
+					if tt.expectedTrayID != "" {
+						started = args.Get(1).(tClient.StartWorkflowOptions)
+						testFlowProxyRequest(t, args, &powerOnRequest)
+					}
+				}).Return(mockWorkflowRun, nil)
 			scp.IDClientMap[site.ID.String()] = mockTemporalClient
 
 			path := fmt.Sprintf("/v2/org/%s/nico/tray/%s/power", tt.reqOrg, tt.trayID)
 
+			if tt.malformedEncoding {
+				path = fmt.Sprintf("/v2/org/%s/nico/tray/safe/power", tt.reqOrg)
+			}
+
 			req := httptest.NewRequest(http.MethodPatch, path, strings.NewReader(tt.body))
+			if tt.malformedEncoding {
+				req.URL.RawPath = fmt.Sprintf("/v2/org/%s/nico/tray/%s/power", tt.reqOrg, tt.trayID)
+			}
+			require.Equal(t, tt.expectedRawPath, req.URL.RawPath, "request RawPath")
 			req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
 			rec := httptest.NewRecorder()
 
 			ec := e.NewContext(req, rec)
-			ec.SetParamNames("orgName", "id")
-			ec.SetParamValues(tt.reqOrg, tt.trayID)
+			e.Router().Find(http.MethodPatch, echo.GetPath(req), ec)
 			ec.Set("user", tt.user)
 
 			ec.SetRequest(ec.Request().WithContext(ctx))
@@ -1486,6 +1551,19 @@ func TestUpdateTrayPowerStateHandler_Handle(t *testing.T) {
 			}
 
 			require.Equal(t, tt.expectedStatus, rec.Code)
+			if tt.malformedEncoding {
+				var response map[string]any
+				require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &response))
+				assert.Equal(t, "Tray identifier in URL is invalid", response["message"])
+				mockTemporalClient.AssertNotCalled(t, "ExecuteWorkflow", mock.Anything, mock.Anything, mock.Anything, mock.Anything)
+			}
+			if tt.expectedTrayID != "" {
+				mockTemporalClient.AssertNumberOfCalls(t, "ExecuteWorkflow", 1)
+				targets := powerOnRequest.GetTargetSpec().GetComponents().GetTargets()
+				require.Len(t, targets, 1)
+				assert.Equal(t, tt.expectedTrayID, targets[0].GetExternal().GetId())
+				assert.Equal(t, "tray-power-state-update-on-"+tt.expectedTrayID, started.ID)
+			}
 			if tt.mockResultErr != nil {
 				assertSingleFlowProxyErrorResponse(t, ec, rec, err, tt.mockResultErr)
 				mockTemporalClient.AssertNumberOfCalls(t, "ExecuteWorkflow", 1)
@@ -1531,13 +1609,30 @@ func TestBatchUpdateTrayPowerStateHandler_Handle(t *testing.T) {
 		body           string
 		mockTaskIDs    []*flowv1.UUID
 		mockResultErr  error
+		lookupErr      error
+		noMatches      bool
 		expectedStatus int
 	}{
+		{
+			name:      "success - no matching trays",
+			reqOrg:    org,
+			user:      providerUser,
+			body:      fmt.Sprintf(`{"siteId":"%s","state":"on"}`, site.ID.String()),
+			noMatches: true, expectedStatus: http.StatusOK,
+		},
+		{
+			name:           "failure - inventory lookup",
+			reqOrg:         org,
+			user:           providerUser,
+			body:           fmt.Sprintf(`{"siteId":"%s","state":"on"}`, site.ID.String()),
+			lookupErr:      tp.NewNonRetryableApplicationError("inventory unavailable", swe.ErrTypeNICoFailedPrecondition, nil),
+			expectedStatus: http.StatusPreconditionFailed,
+		},
 		{
 			name:           "failure - Flow rejects operation",
 			reqOrg:         org,
 			user:           providerUser,
-			body:           fmt.Sprintf(`{"siteId":"%s","state":"on"}`, site.ID.String()),
+			body:           fmt.Sprintf(`{"siteId":"%s","filter":{"rackId":"rack-1"},"state":"on"}`, site.ID.String()),
 			mockResultErr:  tp.NewNonRetryableApplicationError("operation rejected", swe.ErrTypeNICoFailedPrecondition, nil),
 			expectedStatus: http.StatusPreconditionFailed,
 		},
@@ -1591,6 +1686,41 @@ func TestBatchUpdateTrayPowerStateHandler_Handle(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			mockTemporalClient := &tmocks.Client{}
+			componentID := uuid.NewString()
+			lookupRun := &tmocks.WorkflowRun{}
+			lookupRun.On("GetID").Return("tray-inventory")
+			if tt.lookupErr != nil {
+				testFlowProxyFailure(lookupRun, tt.lookupErr)
+			} else {
+				inventory := &flowv1.GetComponentsResponse{}
+				if !tt.noMatches {
+					inventory.Components = []*flowv1.Component{{Type: flowv1.ComponentType_COMPONENT_TYPE_COMPUTE, Info: &flowv1.DeviceInfo{Id: &flowv1.UUID{Id: componentID}}}}
+					inventory.Total = 1
+				}
+				testFlowProxyReply(t, lookupRun, inventory)
+			}
+			var lookupDeadline time.Time
+			testFlowProxyMethodDispatch(t, mockTemporalClient, lookupRun, flowv1.Flow_GetComponents_FullMethodName, func(args mock.Arguments) {
+				var req flowv1.GetComponentsRequest
+				testFlowProxyRequest(t, args, &req)
+				assert.Nil(t, req.TargetSpec)
+				assert.Positive(t, req.GetPagination().GetLimit())
+				assert.Equal(t, "ASC", req.GetOrderBy().GetDirection())
+				var input struct {
+					Filter *model.TrayFilter `json:"filter"`
+				}
+				require.NoError(t, json.Unmarshal([]byte(tt.body), &input))
+				types := model.ValidTrayTypeNames()
+				if input.Filter != nil && input.Filter.Type != nil {
+					types = []string{*input.Filter.Type}
+				}
+				require.Len(t, req.Filters, 1)
+				assert.ElementsMatch(t, types, req.Filters[0].GetQueryInfo().GetPatterns())
+				var ok bool
+				lookupDeadline, ok = args.Get(0).(context.Context).Deadline()
+				require.True(t, ok)
+			})
+
 			mockWorkflowRun := &tmocks.WorkflowRun{}
 			mockWorkflowRun.On("GetID").Return("test-workflow-id")
 			if tt.mockResultErr != nil {
@@ -1598,7 +1728,20 @@ func TestBatchUpdateTrayPowerStateHandler_Handle(t *testing.T) {
 			} else {
 				testFlowProxyReply(t, mockWorkflowRun, &flowv1.SubmitTaskResponse{TaskIds: tt.mockTaskIDs})
 			}
-			mockTemporalClient.Mock.On("ExecuteWorkflow", mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(mockWorkflowRun, nil)
+			mockTemporalClient.Mock.On("ExecuteWorkflow", mock.Anything, mock.Anything, mock.Anything, mock.Anything).
+				Run(func(args mock.Arguments) {
+					if lookupDeadline.IsZero() {
+						return
+					}
+					var req flowv1.PowerOnRackRequest
+					testFlowProxyRequest(t, args, &req)
+					targets := req.GetTargetSpec().GetComponents().GetTargets()
+					require.Len(t, targets, 1)
+					assert.Equal(t, componentID, targets[0].GetId().GetId())
+					deadline, ok := args.Get(0).(context.Context).Deadline()
+					require.True(t, ok)
+					assert.Equal(t, lookupDeadline, deadline)
+				}).Return(mockWorkflowRun, nil)
 			scp.IDClientMap[site.ID.String()] = mockTemporalClient
 
 			path := fmt.Sprintf("/v2/org/%s/nico/tray/power", tt.reqOrg)
@@ -1621,6 +1764,12 @@ func TestBatchUpdateTrayPowerStateHandler_Handle(t *testing.T) {
 			}
 
 			require.Equal(t, tt.expectedStatus, rec.Code)
+			if tt.lookupErr != nil {
+				assertSingleFlowProxyErrorResponse(t, ec, rec, err, tt.lookupErr)
+				mockTemporalClient.AssertNumberOfCalls(t, "ExecuteWorkflow", 1)
+				return
+			}
+
 			if tt.mockResultErr != nil {
 				assertSingleFlowProxyErrorResponse(t, ec, rec, err, tt.mockResultErr)
 				mockTemporalClient.AssertNumberOfCalls(t, "ExecuteWorkflow", 1)
@@ -1633,7 +1782,20 @@ func TestBatchUpdateTrayPowerStateHandler_Handle(t *testing.T) {
 			var apiResp model.APIUpdatePowerStateResponse
 			err = json.Unmarshal(rec.Body.Bytes(), &apiResp)
 			assert.NoError(t, err)
-			assert.NotEmpty(t, apiResp.TaskIDs)
+			assert.Equal(t, rec.Code, ec.Response().Status)
+			var raw map[string]json.RawMessage
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &raw))
+			require.Contains(t, raw, "taskIds")
+			if tt.noMatches {
+				assert.JSONEq(t, `[]`, string(raw["taskIds"]))
+				mockTemporalClient.AssertNumberOfCalls(t, "ExecuteWorkflow", 1)
+			} else {
+				expected := make([]string, 0, len(tt.mockTaskIDs))
+				for _, id := range tt.mockTaskIDs {
+					expected = append(expected, id.GetId())
+				}
+				assert.Equal(t, expected, apiResp.TaskIDs)
+			}
 		})
 	}
 }
@@ -1816,15 +1978,56 @@ func TestBatchUpdateTrayFirmwareHandler_Handle(t *testing.T) {
 		body           string
 		mockTaskIDs    []*flowv1.UUID
 		mockResultErr  error
+		lookupErr      error
+		noMatches      bool
 		expectedAuth   string
 		expectedError  string
 		expectedStatus int
 	}{
 		{
+			name:           "success - empty filter",
+			reqOrg:         org,
+			user:           providerUser,
+			body:           fmt.Sprintf(`{"siteId":"%s","filter":{},"targets":["dpu"]}`, site.ID.String()),
+			mockTaskIDs:    []*flowv1.UUID{{Id: uuid.NewString()}},
+			expectedStatus: http.StatusOK,
+		},
+		{
+			name:           "success - type-only filter",
+			reqOrg:         org,
+			user:           providerUser,
+			body:           fmt.Sprintf(`{"siteId":"%s","filter":{"type":"Compute"},"targets":["dpu"]}`, site.ID.String()),
+			mockTaskIDs:    []*flowv1.UUID{{Id: uuid.NewString()}},
+			expectedStatus: http.StatusOK,
+		},
+		{
+			name:      "success - no matching trays",
+			reqOrg:    org,
+			user:      providerUser,
+			body:      fmt.Sprintf(`{"siteId":"%s","targets":["dpu"]}`, site.ID.String()),
+			noMatches: true, expectedStatus: http.StatusOK,
+		},
+		{
+			name:           "failure - inventory lookup",
+			reqOrg:         org,
+			user:           providerUser,
+			body:           fmt.Sprintf(`{"siteId":"%s","targets":["dpu"]}`, site.ID.String()),
+			lookupErr:      tp.NewNonRetryableApplicationError("inventory unavailable", swe.ErrTypeNICoFailedPrecondition, nil),
+			expectedStatus: http.StatusPreconditionFailed,
+		},
+		{
+			name:           "success - DPU target without filter or version",
+			reqOrg:         org,
+			user:           providerUser,
+			body:           fmt.Sprintf(`{"siteId":"%s","targets":["dpu"]}`, site.ID.String()),
+			mockTaskIDs:    []*flowv1.UUID{{Id: uuid.NewString()}},
+			expectedStatus: http.StatusOK,
+		},
+		{
 			name:           "failure - Flow rejects operation",
 			reqOrg:         org,
 			user:           providerUser,
-			body:           fmt.Sprintf(`{"siteId":"%s"}`, site.ID.String()),
+			body:           fmt.Sprintf(`{"siteId":"%s","filter":{"rackId":"rack-1"}}`, site.ID.String()),
 			mockResultErr:  tp.NewNonRetryableApplicationError("operation rejected", swe.ErrTypeNICoFailedPrecondition, nil),
 			expectedStatus: http.StatusPreconditionFailed,
 		},
@@ -1872,6 +2075,41 @@ func TestBatchUpdateTrayFirmwareHandler_Handle(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			mockTemporalClient := &tmocks.Client{}
+			componentID := uuid.NewString()
+			lookupRun := &tmocks.WorkflowRun{}
+			lookupRun.On("GetID").Return("tray-inventory")
+			if tt.lookupErr != nil {
+				testFlowProxyFailure(lookupRun, tt.lookupErr)
+			} else {
+				inventory := &flowv1.GetComponentsResponse{}
+				if !tt.noMatches {
+					inventory.Components = []*flowv1.Component{{Type: flowv1.ComponentType_COMPONENT_TYPE_COMPUTE, Info: &flowv1.DeviceInfo{Id: &flowv1.UUID{Id: componentID}}}}
+					inventory.Total = 1
+				}
+				testFlowProxyReply(t, lookupRun, inventory)
+			}
+			var lookupDeadline time.Time
+			testFlowProxyMethodDispatch(t, mockTemporalClient, lookupRun, flowv1.Flow_GetComponents_FullMethodName, func(args mock.Arguments) {
+				var req flowv1.GetComponentsRequest
+				testFlowProxyRequest(t, args, &req)
+				assert.Nil(t, req.TargetSpec)
+				assert.Positive(t, req.GetPagination().GetLimit())
+				assert.Equal(t, "ASC", req.GetOrderBy().GetDirection())
+				var input struct {
+					Filter *model.TrayFilter `json:"filter"`
+				}
+				require.NoError(t, json.Unmarshal([]byte(tt.body), &input))
+				types := model.ValidTrayTypeNames()
+				if input.Filter != nil && input.Filter.Type != nil {
+					types = []string{*input.Filter.Type}
+				}
+				require.Len(t, req.Filters, 1)
+				assert.ElementsMatch(t, types, req.Filters[0].GetQueryInfo().GetPatterns())
+				var ok bool
+				lookupDeadline, ok = args.Get(0).(context.Context).Deadline()
+				require.True(t, ok)
+			})
+
 			mockWorkflowRun := &tmocks.WorkflowRun{}
 			mockWorkflowRun.On("GetID").Return("test-workflow-id")
 			if tt.mockResultErr != nil {
@@ -1881,12 +2119,25 @@ func TestBatchUpdateTrayFirmwareHandler_Handle(t *testing.T) {
 			}
 			mockTemporalClient.Mock.On("ExecuteWorkflow", mock.Anything, mock.Anything, mock.Anything, mock.Anything).
 				Run(func(args mock.Arguments) {
+					var request flowv1.UpgradeFirmwareRequest
+					if tt.expectedAuth != "" {
+						testFlowProxyRequestWithSecrets(t, args, site.ID.String(), tt.expectedAuth, &request)
+					} else {
+						testFlowProxyRequest(t, args, &request)
+					}
+					if !lookupDeadline.IsZero() {
+						targets := request.GetTargetSpec().GetComponents().GetTargets()
+						require.Len(t, targets, 1)
+						assert.Equal(t, componentID, targets[0].GetId().GetId())
+						deadline, ok := args.Get(0).(context.Context).Deadline()
+						require.True(t, ok)
+						assert.Equal(t, lookupDeadline, deadline)
+					}
+
 					if tt.expectedAuth == "" {
 						return
 					}
-					flowReq := &flowv1.UpgradeFirmwareRequest{}
-					testFlowProxyRequestWithSecrets(t, args, site.ID.String(), tt.expectedAuth, flowReq)
-					assert.Equal(t, tt.expectedAuth, flowReq.GetAuthenticationData().GetShared())
+					assert.Equal(t, tt.expectedAuth, request.GetAuthenticationData().GetShared())
 				}).
 				Return(mockWorkflowRun, nil)
 			scp.IDClientMap[site.ID.String()] = mockTemporalClient
@@ -1911,6 +2162,12 @@ func TestBatchUpdateTrayFirmwareHandler_Handle(t *testing.T) {
 			}
 
 			require.Equal(t, tt.expectedStatus, rec.Code)
+			if tt.lookupErr != nil {
+				assertSingleFlowProxyErrorResponse(t, ec, rec, err, tt.lookupErr)
+				mockTemporalClient.AssertNumberOfCalls(t, "ExecuteWorkflow", 1)
+				return
+			}
+
 			if tt.mockResultErr != nil {
 				assertSingleFlowProxyErrorResponse(t, ec, rec, err, tt.mockResultErr)
 				mockTemporalClient.AssertNumberOfCalls(t, "ExecuteWorkflow", 1)
@@ -1925,7 +2182,97 @@ func TestBatchUpdateTrayFirmwareHandler_Handle(t *testing.T) {
 			var apiResp model.APIUpdateFirmwareResponse
 			err = json.Unmarshal(rec.Body.Bytes(), &apiResp)
 			assert.NoError(t, err)
-			assert.NotEmpty(t, apiResp.TaskIDs)
+			assert.Equal(t, rec.Code, ec.Response().Status)
+			var raw map[string]json.RawMessage
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &raw))
+			require.Contains(t, raw, "taskIds")
+			if tt.noMatches {
+				assert.JSONEq(t, `[]`, string(raw["taskIds"]))
+				mockTemporalClient.AssertNumberOfCalls(t, "ExecuteWorkflow", 1)
+			} else {
+				expected := make([]string, 0, len(tt.mockTaskIDs))
+				for _, id := range tt.mockTaskIDs {
+					expected = append(expected, id.GetId())
+				}
+				assert.Equal(t, expected, apiResp.TaskIDs)
+			}
+		})
+	}
+}
+
+func TestResolveBatchTrayTargetSpec(t *testing.T) {
+	tests := []struct {
+		name         string
+		pageSizes    []int
+		total        int32
+		lastError    error
+		expectedCode int
+		cancel       bool
+	}{
+		{name: "all pages including final partial page", pageSizes: []int{100, 1}, total: 101},
+		{name: "exact final boundary", pageSizes: []int{100}, total: 100},
+		{name: "inventory shrinks between pages", pageSizes: []int{100, 0}, total: 101},
+		{name: "second page fails", pageSizes: []int{100, 0}, total: 101,
+			lastError: tp.NewNonRetryableApplicationError("inventory unavailable", swe.ErrTypeNICoFailedPrecondition, nil), expectedCode: http.StatusPreconditionFailed},
+		{name: "second page times out", pageSizes: []int{100, 0}, total: 101,
+			lastError: tp.NewTimeoutError(temporalEnums.TIMEOUT_TYPE_START_TO_CLOSE, nil), expectedCode: http.StatusGatewayTimeout},
+		{name: "caller deadline exhausted before second page completes", pageSizes: []int{100, 0}, total: 101,
+			lastError: context.DeadlineExceeded, expectedCode: http.StatusGatewayTimeout, cancel: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), cutil.WorkflowContextTimeout)
+			defer cancel()
+			deadline, _ := ctx.Deadline()
+			client := &tmocks.Client{}
+			var want []string
+			offset := int32(0)
+			for i, count := range tt.pageSizes {
+				run := &tmocks.WorkflowRun{}
+				run.On("GetID").Return(fmt.Sprintf("page-%d", i))
+				resp := &flowv1.GetComponentsResponse{Total: tt.total}
+				for range count {
+					id := uuid.NewString()
+					want = append(want, id)
+					resp.Components = append(resp.Components, &flowv1.Component{Info: &flowv1.DeviceInfo{Id: &flowv1.UUID{Id: id}}})
+				}
+				if i == len(tt.pageSizes)-1 && tt.lastError != nil {
+					if tt.cancel {
+						run.On("Get", mock.Anything, mock.Anything).Run(func(mock.Arguments) { cancel() }).Return(tt.lastError)
+					} else {
+						testFlowProxyFailure(run, tt.lastError)
+					}
+				} else {
+					testFlowProxyReply(t, run, resp)
+				}
+				pageOffset := offset
+				client.On("ExecuteWorkflow", mock.Anything, mock.Anything, grpcproxy.Flow.WorkflowName, mock.Anything).
+					Run(func(args mock.Arguments) {
+						assert.Equal(t, flowv1.Flow_GetComponents_FullMethodName, args.Get(3).(grpcproxy.Request).FullMethod)
+						var req flowv1.GetComponentsRequest
+						testFlowProxyRequest(t, args, &req)
+						assert.Equal(t, pageOffset, req.GetPagination().GetOffset())
+						assert.EqualValues(t, 100, req.GetPagination().GetLimit())
+						pageDeadline, ok := args.Get(0).(context.Context).Deadline()
+						require.True(t, ok)
+						assert.Equal(t, deadline, pageDeadline)
+					}).Return(run, nil).Once()
+				offset += int32(count)
+			}
+			spec, apiErr := resolveBatchTrayTargetSpec(ctx, client, nil)
+			if tt.expectedCode != 0 {
+				require.NotNil(t, apiErr)
+				assert.Equal(t, tt.expectedCode, apiErr.Code)
+				assert.Nil(t, spec, "a failed page must discard partial selection")
+			} else {
+				require.Nil(t, apiErr)
+				var got []string
+				for _, target := range spec.GetComponents().GetTargets() {
+					got = append(got, target.GetId().GetId())
+				}
+				assert.Equal(t, want, got)
+			}
+			client.AssertExpectations(t)
 		})
 	}
 }

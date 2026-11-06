@@ -122,6 +122,7 @@ struct RedfishSimState {
     /// tests can drive `probe_bmc_vendor`'s Lite-On/Delta chassis fallback.
     chassis_manufacturer: Option<String>,
     platform_actions: Vec<RedfishSimPlatformAction>,
+    uefi_setup_job_id: Option<String>,
     /// Lossless `machine_setup_status` target observations. These reads stay
     /// separate from mutating platform actions and preserve both `Pair` fields.
     machine_setup_status_targets: HashMap<String, Vec<Option<RedfishSimBootInterfaceRef>>>,
@@ -661,6 +662,11 @@ impl RedfishSim {
     /// [`Self::set_uefi_setup_client_creation_error`].
     pub fn clear_uefi_setup_client_creation_error(&self) {
         self.state.lock().unwrap().uefi_setup_client_creation_error = None;
+    }
+
+    /// Sets the successful `uefi_setup` result; `Some` models a staged DPU password.
+    pub fn set_uefi_setup_job_id(&self, job_id: Option<String>) {
+        self.state.lock().unwrap().uefi_setup_job_id = job_id;
     }
 
     /// Pause the next successful UEFI setup call. The receiver reports the
@@ -2996,6 +3002,6 @@ impl super::BmcCredentialOps for RedfishSim {
                 .expect("setup observer dropped");
             resume.await.ok();
         }
-        Ok(None)
+        Ok(self.state.lock().unwrap().uefi_setup_job_id.clone())
     }
 }

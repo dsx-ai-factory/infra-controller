@@ -15,6 +15,7 @@
  * limitations under the License.
  */
 
+use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv6Addr};
 use std::str::FromStr;
@@ -23,7 +24,10 @@ use std::time::Duration;
 use ::rpc::errors::RpcDataConversionError;
 use ::rpc::model::RpcInto;
 use ::rpc::{common as rpc_common, forge as rpc};
-use carbide_dpf::{DpuDeploymentType, dpu_cr_name, dpu_node_cr_name};
+use carbide_dpf::{
+    DpuDeploymentType, SERVICE_VPC_MTU, ServiceVpcSlots, dpu_cr_name, dpu_node_cr_name,
+};
+use carbide_machine_controller::handler::is_bf4_dmi_product;
 use carbide_network::virtualization::VpcVirtualizationType;
 use carbide_secrets::credentials::{BgpCredentialType, CredentialKey, Credentials};
 use carbide_utils::arch::CpuArchitecture;
@@ -47,11 +51,13 @@ use model::machine::machine_search_config::MachineSearchConfig;
 use model::machine::network::MachineNetworkStatusObservation;
 use model::machine::upgrade_policy::{AgentUpgradePolicy, BuildVersion};
 use model::machine::{
-    InstanceState, LoadSnapshotOptions, ManagedHostState, ManagedHostStateSnapshot,
+    DpuMachine, HardwareInfoScope, InstanceState, LoadSnapshotOptions, ManagedHostState,
+    ManagedHostStateSnapshot,
 };
 use model::machine_update_module::HOST_UPDATE_HEALTH_PROBE_ID;
-use model::network_segment::NetworkSegmentSearchConfig;
+use model::network_segment::{NetworkSegmentControllerState, NetworkSegmentSearchConfig};
 use model::rack_type::select_dpu_nvconfig_profile;
+use sqlx::PgConnection;
 use tonic::{Request, Response, Status};
 
 use crate::api::{Api, log_machine_id, log_request_data};
@@ -156,6 +162,360 @@ fn tenant_interface_fqdn(
     Ok(format!("{hostname}.{domain}"))
 }
 
+/// Builds the receiving DPU's fixed slot inventory from the persisted deployment evidence used by provisioning.
+/// Configured zero capacity does not require deployment evidence.
+async fn service_vpc_slot_inventory(
+    api: &Api,
+    txn: &mut PgConnection,
+    snapshot: &ManagedHostStateSnapshot,
+    dpu: &DpuMachine,
+) -> Result<rpc::ServiceVpcSlotInventory, tonic::Status> {
+    let configured_count = api.runtime_config.dpu_config.service_vpc_slot_count;
+    // Fixed service listeners exist only on DPF-ingested hosts.
+    // Skip classification at zero capacity so expected-machine edits cannot block host networking.
+    let slot_count = if configured_count == 0
+        || !snapshot.host_snapshot.config.dpf.used_for_ingestion
+    {
+        0
+    } else {
+        let product_name = dpu
+            .status
+            .hardware_info
+            .as_ref()
+            .and_then(|hardware| hardware.dmi_data.as_ref())
+            .map(|dmi| dmi.product_name.trim())
+            .filter(|product_name| !product_name.is_empty())
+            .ok_or_else(|| {
+                CarbideError::FailedPrecondition(format!(
+                    "cannot determine service-VPC slot inventory for DPU {}: product name is absent",
+                    dpu.id
+                ))
+            })?;
+
+        // Resolve BF4 through the same persisted CX9 declaration used by provisioning.
+        if is_bf4_dmi_product(product_name) {
+            let bmc_mac = snapshot.host_snapshot.status.bmc_info.mac.ok_or_else(|| {
+                CarbideError::FailedPrecondition(format!(
+                    "cannot determine service-VPC slot inventory for host {}: BMC MAC is absent",
+                    snapshot.host_snapshot.id
+                ))
+            })?;
+            let expected_machine =
+                db::expected_machine::find_by_bmc_mac_address(txn, bmc_mac).await?;
+            let astra = crate::instance::expected_machine_declares_cx9(expected_machine.as_ref());
+            // Bf4Astra does not provision service-VPC slots, so only Bf4Generic advertises configured capacity.
+            let (deployment_type, deployment_configured, slot_count) = if astra {
+                (
+                    DpuDeploymentType::Bf4Astra,
+                    api.runtime_config.dpf.deployments.bf4_astra.is_some(),
+                    0,
+                )
+            } else {
+                (
+                    DpuDeploymentType::Bf4Generic,
+                    api.runtime_config.dpf.deployments.bf4_generic.is_some(),
+                    configured_count,
+                )
+            };
+            if !deployment_configured {
+                return Err(CarbideError::FailedPrecondition(format!(
+                    "cannot determine service-VPC slot inventory for DPU {}: no DPUDeployment is configured for {deployment_type:?}",
+                    dpu.id
+                ))
+                .into());
+            }
+            slot_count
+        } else {
+            configured_count
+        }
+    };
+
+    // Use the provisioning inventory as the only source of slot names and ordering.
+    let slots = ServiceVpcSlots::new(slot_count).map_err(|error| {
+        CarbideError::FailedPrecondition(format!(
+            "invalid service-VPC slot inventory for DPU {}: {error}",
+            dpu.id
+        ))
+    })?;
+    let mut hbn_interfaces = vec![];
+    slots.append_hbn_interfaces(&mut hbn_interfaces);
+    let slots = hbn_interfaces
+        .into_iter()
+        .enumerate()
+        .map(|(slot_index, interface)| rpc::ServiceVpcSlot {
+            // ServiceVpcSlots accepts at most 32 entries, so this cast cannot truncate.
+            slot_index: slot_index as u32,
+            hbn_interface_name: interface.name,
+        })
+        .collect();
+
+    Ok(rpc::ServiceVpcSlotInventory { slots })
+}
+
+/// Renders active service interfaces for one requested DPU so hidden endpoints stay separate from host networking.
+#[allow(clippy::too_many_arguments)]
+async fn service_interfaces_for_dpu(
+    api: &Api,
+    txn: &mut PgConnection,
+    snapshot: &ManagedHostStateSnapshot,
+    dpu_id: DpuMachineId,
+    inventory: &rpc::ServiceVpcSlotInventory,
+    use_admin_network: bool,
+    is_primary_dpu: bool,
+    use_vpc_vrf_loopback: bool,
+    tenant_loopback_ips: &mut HashMap<VpcId, IpAddr>,
+) -> Result<Vec<rpc::ManagedHostServiceInterfaceConfig>, tonic::Status> {
+    // Primary Admin configuration deliberately carries no routed service ports.
+    if use_admin_network && is_primary_dpu {
+        return Ok(vec![]);
+    }
+    let Some(instance) = snapshot
+        .instance
+        .as_ref()
+        .filter(|instance| instance.deleted.is_none())
+    else {
+        return Ok(vec![]);
+    };
+
+    // Match each local endpoint to its attachment, excluding terminating attachments.
+    let attachments = instance
+        .config
+        .extension_services
+        .service_configs
+        .iter()
+        .filter_map(|attachment| attachment.id.map(|id| (id, attachment)))
+        .collect::<HashMap<_, _>>();
+    let mut active_endpoints = vec![];
+    for endpoint in instance
+        .config
+        .network
+        .service_interfaces
+        .iter()
+        .filter(|endpoint| endpoint.dpu_id == dpu_id)
+    {
+        let attachment = attachments.get(&endpoint.attachment_id).ok_or_else(|| {
+            CarbideError::FailedPrecondition(format!(
+                "service interface {} references missing attachment {}",
+                endpoint.internal_uuid, endpoint.attachment_id
+            ))
+        })?;
+        if attachment.removed.is_none() {
+            active_endpoints.push((endpoint, *attachment));
+        }
+    }
+    if active_endpoints.is_empty() {
+        return Ok(vec![]);
+    }
+
+    // Load generated segments in one query and cache all VPC-scoped reads per selected VPC.
+    let segment_ids = active_endpoints
+        .iter()
+        .map(|(endpoint, _)| endpoint.network_segment_id)
+        .unique()
+        .collect_vec();
+    let segments = db::network_segment::find_by(
+        txn,
+        ObjectColumnFilter::List(network_segment::IdColumn, &segment_ids),
+        NetworkSegmentSearchConfig::default(),
+    )
+    .await?
+    .into_iter()
+    .map(|segment| (segment.id, segment))
+    .collect::<HashMap<_, _>>();
+    let mut resolved_vpcs = HashMap::new();
+    let mut resolved_vpc_security_groups: HashMap<
+        VpcId,
+        Option<rpc::FlatInterfaceNetworkSecurityGroupConfig>,
+    > = HashMap::new();
+    let peering_policy = api
+        .runtime_config
+        .vpc_peering_policy_on_existing
+        .or(api.runtime_config.vpc_peering_policy);
+    let mut service_interfaces = Vec::with_capacity(active_endpoints.len());
+
+    for (endpoint, attachment) in active_endpoints {
+        if !inventory
+            .slots
+            .iter()
+            .any(|slot| slot.slot_index == endpoint.slot_index)
+        {
+            return Err(CarbideError::FailedPrecondition(format!(
+                "service interface {} references unavailable slot {} on DPU {dpu_id}",
+                endpoint.internal_uuid, endpoint.slot_index
+            ))
+            .into());
+        }
+        let segment = segments.get(&endpoint.network_segment_id).ok_or_else(|| {
+            CarbideError::FailedPrecondition(format!(
+                "service interface {} references missing network segment {}",
+                endpoint.internal_uuid, endpoint.network_segment_id
+            ))
+        })?;
+        if segment.deleted.is_some()
+            || segment.config.vpc_id != Some(endpoint.vpc_id)
+            || i64::from(segment.config.mtu) != SERVICE_VPC_MTU
+            || segment.status.controller_state.value != NetworkSegmentControllerState::Ready
+        {
+            return Err(CarbideError::FailedPrecondition(format!(
+                "service interface {} references network segment {} with incompatible VPC, MTU, lifecycle, or readiness state",
+                endpoint.internal_uuid, endpoint.network_segment_id
+            ))
+            .into());
+        }
+
+        let network_prefix = segment
+            .prefixes
+            .iter()
+            .find(|prefix| prefix.id == endpoint.network_prefix_id)
+            .ok_or_else(|| {
+                CarbideError::FailedPrecondition(format!(
+                    "service interface {} references missing network prefix {}",
+                    endpoint.internal_uuid, endpoint.network_prefix_id
+                ))
+            })?;
+        if network_prefix.vpc_prefix_id != Some(endpoint.vpc_prefix_id)
+            || network_prefix.prefix != endpoint.link_prefix
+        {
+            return Err(CarbideError::FailedPrecondition(format!(
+                "service interface {} network prefix does not match its persisted endpoint",
+                endpoint.internal_uuid
+            ))
+            .into());
+        }
+
+        let resolved_vpc = match resolved_vpcs.entry(endpoint.vpc_id) {
+            Entry::Occupied(entry) => entry.into_mut(),
+            Entry::Vacant(entry) => entry.insert(
+                ethernet_virtualization::resolve_vpc_network_config(
+                    txn,
+                    endpoint.vpc_id,
+                    peering_policy,
+                    api.runtime_config.fnn.as_ref(),
+                )
+                .await?,
+            ),
+        };
+        if resolved_vpc.vpc.config.network_virtualization_type != VpcVirtualizationType::Fnn {
+            return Err(CarbideError::FailedPrecondition(format!(
+                "service interface {} selected non-FNN VPC {}",
+                endpoint.internal_uuid, endpoint.vpc_id
+            ))
+            .into());
+        }
+        let vpc_vni = resolved_vpc
+            .vpc_vni
+            .filter(|vni| *vni != 0)
+            .ok_or_else(|| {
+                CarbideError::FailedPrecondition(format!(
+                    "service VPC {} has no allocated VNI",
+                    endpoint.vpc_id
+                ))
+            })?;
+        let vpc_prefix = resolved_vpc
+            .active_vpc_prefixes
+            .iter()
+            .find(|prefix| prefix.id == endpoint.vpc_prefix_id)
+            .ok_or_else(|| {
+                CarbideError::FailedPrecondition(format!(
+                    "service interface {} references missing VPC prefix {}",
+                    endpoint.internal_uuid, endpoint.vpc_prefix_id
+                ))
+            })?;
+        if !vpc_prefix
+            .config
+            .prefix
+            .contains(endpoint.link_prefix.network())
+            || !vpc_prefix
+                .config
+                .prefix
+                .contains(endpoint.link_prefix.broadcast())
+        {
+            return Err(CarbideError::FailedPrecondition(format!(
+                "service link prefix {} is outside VPC prefix {}",
+                endpoint.link_prefix, vpc_prefix.id
+            ))
+            .into());
+        }
+
+        // The persisted prefix must reserve base+0 for HBN and base+1 for the service.
+        let hbn_address = endpoint.link_prefix.network();
+        let service_address = endpoint.link_prefix.broadcast();
+        // IPv4 persists HBN as the gateway; IPv6 omits a gateway and reserves base+0.
+        let valid_address_reservation = if endpoint.link_prefix.is_ipv4() {
+            network_prefix.gateway == Some(hbn_address) && network_prefix.num_reserved == 0
+        } else {
+            network_prefix.gateway.is_none() && network_prefix.num_reserved == 1
+        };
+        if !valid_address_reservation {
+            return Err(CarbideError::FailedPrecondition(format!(
+                "service interface {} does not preserve HBN base+0 ({hbn_address}) and service base+1 ({service_address})",
+                endpoint.internal_uuid,
+            ))
+            .into());
+        }
+
+        let network_security_group = if let Some(network_security_group) =
+            resolved_vpc_security_groups.get(&endpoint.vpc_id)
+        {
+            network_security_group.clone()
+        } else {
+            let details =
+                ethernet_virtualization::resolve_vpc_network_security_group(txn, &resolved_vpc.vpc)
+                    .await?;
+            let config = ethernet_virtualization::network_security_group_config(details)?;
+            resolved_vpc_security_groups.insert(endpoint.vpc_id, config.clone());
+            config
+        };
+
+        // Reuse the existing request cache so host and service ports in one VPC share a loopback.
+        let tenant_vrf_loopback_ip = if use_vpc_vrf_loopback {
+            if let Some(loopback_ip) = tenant_loopback_ips.get(&endpoint.vpc_id) {
+                Some(*loopback_ip)
+            } else {
+                let loopback_ip = db::vpc_dpu_loopback::get_or_allocate_loopback_ip_for_vpc(
+                    &api.common_pools,
+                    txn,
+                    &dpu_id,
+                    &endpoint.vpc_id,
+                )
+                .await?;
+                tenant_loopback_ips.insert(endpoint.vpc_id, loopback_ip);
+                Some(loopback_ip)
+            }
+        } else {
+            None
+        };
+        let vpc_routing_profile = resolved_vpc.vpc_routing_profile.clone().ok_or_else(|| {
+            CarbideError::FailedPrecondition(format!(
+                "service VPC {} has no FNN routing profile",
+                endpoint.vpc_id
+            ))
+        })?;
+
+        service_interfaces.push(rpc::ManagedHostServiceInterfaceConfig {
+            service_id: attachment.service_id.to_string(),
+            attachment_id: Some(endpoint.attachment_id.into()),
+            interface_ordinal: endpoint.interface_ordinal,
+            slot_index: endpoint.slot_index,
+            vpc_id: Some(endpoint.vpc_id),
+            vpc_vni,
+            vpc_prefixes: resolved_vpc.vpc_prefixes.clone(),
+            vpc_peer_prefixes: resolved_vpc.vpc_peer_prefixes.clone(),
+            vpc_peer_vnis: resolved_vpc.vpc_peer_vnis.clone(),
+            vpc_routing_profile: Some(vpc_routing_profile),
+            interface_routing_profile: None,
+            network_security_group,
+            mtu: Some(segment.config.mtu as u32),
+            link_prefix: endpoint.link_prefix.to_string(),
+            mac_address: endpoint.mac_address.to_string(),
+            internal_uuid: Some(endpoint.internal_uuid.into()),
+            tenant_vrf_loopback_ip: tenant_vrf_loopback_ip.map(|ip| ip.to_string()),
+        });
+    }
+
+    Ok(service_interfaces)
+}
+
 async fn get_managed_host_network_config_inner(
     api: &Api,
     dpu_machine_id: DpuMachineId,
@@ -163,10 +523,13 @@ async fn get_managed_host_network_config_inner(
     let mut txn = api.txn_begin().await?;
     db::tenant_prefix_overlap::lock_config(txn.as_mut()).await?;
 
-    let snapshot = db::managed_host::load_snapshot(
+    // Network configuration reads none of the hardware component lists, so
+    // skip loading them. Code added below that reads one would find it empty.
+    let snapshot = db::managed_host::load_snapshot_with_hardware_info_scope(
         &mut txn,
         &dpu_machine_id,
         LoadSnapshotOptions::default().with_host_health(api.runtime_config.host_health),
+        HardwareInfoScope::WithoutComponents,
     )
     .await?
     .ok_or(CarbideError::NotFoundError {
@@ -279,6 +642,9 @@ async fn get_managed_host_network_config_inner(
         .fnn
         .as_ref()
         .is_some_and(|c| c.use_vpc_vrf_loopback);
+    let service_vpc_slot_inventory =
+        service_vpc_slot_inventory(api, &mut txn, &snapshot, dpu_snapshot).await?;
+    let mut tenant_loopback_ips: HashMap<VpcId, IpAddr> = HashMap::new();
 
     let booturl_override = if snapshot
         .host_snapshot
@@ -383,7 +749,7 @@ async fn get_managed_host_network_config_inner(
                 })?;
 
                 Some((
-                    i32::from(rpc::NetworkSecurityGroupSource::NsgSourceInstance),
+                    rpc::NetworkSecurityGroupSource::NsgSourceInstance,
                     network_security_group,
                 ))
             } else {
@@ -429,8 +795,6 @@ async fn get_managed_host_network_config_inner(
                 .iter()
                 .map(|x| (x.id, x))
                 .collect::<HashMap<_, _>>();
-            let mut tenant_loopback_ips: HashMap<VpcId, IpAddr> = HashMap::new();
-
             // Resolve every segment domain in a single query up front, then look each one up by id
             // inside the interface loop. The domains map keeps its rows keyed by id so a missing
             // entry still surfaces the same NotFoundError the per-interface lookup used to raise.
@@ -540,6 +904,24 @@ async fn get_managed_host_network_config_inner(
             tenant_interfaces
         }
     };
+
+    let service_interfaces = service_interfaces_for_dpu(
+        api,
+        &mut txn,
+        &snapshot,
+        dpu_machine_id,
+        &service_vpc_slot_inventory,
+        use_admin_network,
+        is_primary_dpu,
+        use_vpc_vrf_loopback,
+        &mut tenant_loopback_ips,
+    )
+    .await?;
+
+    // Service-only DPUs need FNN response settings even while their host-facing mode remains Admin.
+    if tenant_interfaces.is_empty() && !service_interfaces.is_empty() {
+        network_virtualization_type = VpcVirtualizationType::Fnn;
+    }
 
     // Deprecated compatibility field for DPU agents that do not yet read
     // FlatInterfaceConfig.vpc_routing_profile.
@@ -774,10 +1156,8 @@ async fn get_managed_host_network_config_inner(
         .unwrap_or_default();
 
     let resp = rpc::ManagedHostNetworkConfigResponse {
-        // TODO(Service VPC): Populate these fields for the authenticated receiving
-        // DPU when managed-host responses include service networking.
-        service_interfaces: vec![],
-        service_vpc_slot_inventory: None,
+        service_interfaces,
+        service_vpc_slot_inventory: Some(service_vpc_slot_inventory),
         accepted_lldp_snapshot_fingerprint: dpu_snapshot
             .network_status_observation
             .as_ref()
@@ -1368,13 +1748,12 @@ async fn wakeup_host_state_handler_by_dpu_id(
     dpu_machine_id: &DpuMachineId,
 ) -> Result<(), DatabaseError> {
     let host_machines_by_dpu_ids =
-        db::machine::lookup_host_machine_ids_by_dpu_ids(&mut api.db_reader(), &[*dpu_machine_id])
-            .await?;
+        db::machine::DpuHostAssociations::load(&mut api.db_reader(), &[*dpu_machine_id]).await?;
 
-    if let Some(host_machine_id) = host_machines_by_dpu_ids.get(dpu_machine_id)
+    if let Some(host_machine_id) = host_machines_by_dpu_ids.host_machine_id(dpu_machine_id)
         && let Err(err) = api
             .machine_state_handler_enqueuer
-            .enqueue_object(host_machine_id)
+            .enqueue_object(&host_machine_id)
             .await
     {
         carbide_instrument::emit(StateHandlerWakeupFailed {

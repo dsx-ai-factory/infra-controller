@@ -287,17 +287,16 @@ async fn test_can_retrieve_rack_state_history_with_real_handler(
 
     //--------------------------------------------------------------------------
 
-    // Iterations 3-7: FirmwareUpgrade(Start) -> Validating(Pending).
+    // Iterations 3-6: FirmwareUpgrade(Start) -> Validating(Pending).
     //
     // Simple rack has no switches, so the real handler takes a shortened path:
     // FirmwareUpgrade(Start) skips (no firmware-object JSON configured)
     // -> NVOSUpdate(Start) skips (no switches)
     // -> ConfigureNmxCluster(Start) skips (no switches)
-    // -> PowerSequence(PoweringOn) -> Completed -> Validating(Pending).
+    // -> Completed -> Validating(Pending). Skipped NVOS does not reset hosts.
     controller.run_single_iteration().await; // FirmwareUpgrade(Start) -> NVOSUpdate(Start)
     controller.run_single_iteration().await; // NVOSUpdate(Start) -> ConfigureNmxCluster(Start)
-    controller.run_single_iteration().await; // ConfigureNmxCluster(Start) -> PowerSequence(PoweringOn)
-    controller.run_single_iteration().await; // PowerSequence(PoweringOn) -> Completed
+    controller.run_single_iteration().await; // ConfigureNmxCluster(Start) -> Completed
     controller.run_single_iteration().await; // Completed -> Validating(Pending)
 
     let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
@@ -314,7 +313,7 @@ async fn test_can_retrieve_rack_state_history_with_real_handler(
 
     //--------------------------------------------------------------------------
 
-    // --- Setup for iterations 8-11: Validation states ---
+    // --- Setup for iterations 7-10: Validation states ---
     //
     // Set rv.* labels on both compute trays so the real handler can drive the
     // validation sub-state machine. Both machines are assigned to the same
@@ -344,7 +343,7 @@ async fn test_can_retrieve_rack_state_history_with_real_handler(
         txn.commit().await?;
     }
 
-    // Iteration 8: Validating(Pending) -> Validating(InProgress).
+    // Iteration 7: Validating(Pending) -> Validating(InProgress).
     // The handler finds rv.run-id on a machine and promotes to InProgress.
     controller.run_single_iteration().await;
 
@@ -362,7 +361,7 @@ async fn test_can_retrieve_rack_state_history_with_real_handler(
 
     //--------------------------------------------------------------------------
 
-    // Iteration 9: Validating(InProgress) -> Validating(Partial).
+    // Iteration 8: Validating(InProgress) -> Validating(Partial).
     // Partition p0 has validated > 0 (both nodes pass), so InProgress -> Partial.
     controller.run_single_iteration().await;
 
@@ -380,7 +379,7 @@ async fn test_can_retrieve_rack_state_history_with_real_handler(
 
     //--------------------------------------------------------------------------
 
-    // Iteration 10: Validating(Partial) -> Validating(Validated).
+    // Iteration 9: Validating(Partial) -> Validating(Validated).
     // validated(1) == total_partitions(1) -> Validated.
     controller.run_single_iteration().await;
 
@@ -398,7 +397,7 @@ async fn test_can_retrieve_rack_state_history_with_real_handler(
 
     //--------------------------------------------------------------------------
 
-    // Iteration 11: Validating(Validated) -> Ready.
+    // Iteration 10: Validating(Validated) -> Ready.
     controller.run_single_iteration().await;
 
     let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
@@ -429,7 +428,6 @@ async fn test_can_retrieve_rack_state_history_with_real_handler(
         "{\"state\": \"maintenance\", \"maintenance_state\": {\"FirmwareUpgrade\": {\"rack_firmware_upgrade\": \"Start\"}}}",
         "{\"state\": \"maintenance\", \"maintenance_state\": {\"NVOSUpdate\": {\"nvos_update\": \"Start\"}}}",
         "{\"state\": \"maintenance\", \"maintenance_state\": {\"ConfigureNmxCluster\": {\"configure_nmx_cluster\": \"Start\"}}}",
-        "{\"state\": \"maintenance\", \"maintenance_state\": {\"PowerSequence\": {\"rack_power\": \"PoweringOn\"}}}",
         "{\"state\": \"maintenance\", \"maintenance_state\": \"Completed\"}",
         "{\"state\": \"validating\", \"validating_state\": \"Pending\"}",
         "{\"state\": \"validating\", \"validating_state\": {\"Validated\": {\"run_id\": \"test-run\"}}}",

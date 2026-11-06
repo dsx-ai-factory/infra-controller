@@ -343,6 +343,11 @@ pub fn parse_carbide_config_with_deferred_diagnostics(
             config.deprecated_rack_management_enabled.is_some(),
             None,
         ),
+        (
+            "site_explorer.explore_mode",
+            config.site_explorer.deprecated_explore_mode.is_some(),
+            None,
+        ),
     ]
     .into_iter()
     .filter(|(_, is_set, _)| *is_set)
@@ -419,6 +424,11 @@ pub fn parse_carbide_config_with_deferred_diagnostics(
         .downloads
         .validate()
         .wrap_err("invalid firmware_global.downloads configuration")?;
+    carbide_firmware::FirmwareArtifactCache::validate_capacity(
+        config.firmware_global.nic_firmware_cache_capacity_bytes,
+        config.firmware_global.downloads.max_download_bytes,
+    )
+    .wrap_err("invalid firmware_global.nic_firmware_cache_capacity_bytes configuration")?;
 
     if let Some(config) = &config.dsx_exchange_event_bus {
         config.periodic_state_republish.validate()?;
@@ -754,6 +764,69 @@ request_timeout_seconds = 5"#
         })
     }
 
+    /// Validates the NIC cache budget through the production loader, including
+    /// existing configurations that omit the new setting.
+    #[test]
+    #[allow(clippy::result_large_err)]
+    fn nic_firmware_cache_capacity_is_loaded_and_validated() {
+        figment::Jail::expect_with(|jail| {
+            scenarios!(
+                run = |settings| {
+                    jail.create_file(
+                        "config.toml",
+                        &format!("{}\n{settings}\n", include_str!("test_data/min_config.toml")),
+                    ).unwrap();
+                    parse_carbide_config(Path::new("config.toml"), None)
+                        .map(|config| config.firmware_global.nic_firmware_cache_capacity_bytes)
+                        .map_err(|error| format!("{error:#}"))
+                };
+                "NIC cache startup budget" {
+                    // Omission supports even the largest previously valid download limit.
+                    "[firmware_global.downloads]\nmax_download_bytes = 17179869184"
+                        => Yields(17179869184_u64),
+                    // An explicit budget is preserved when it covers a maximum transfer.
+                    "[firmware_global]\nnic_firmware_cache_capacity_bytes = 8\n[firmware_global.downloads]\nmax_download_bytes = 8"
+                        => Yields(8_u64),
+                    // The loader enforces the relation before Core performs startup writes.
+                    "[firmware_global]\nnic_firmware_cache_capacity_bytes = 7\n[firmware_global.downloads]\nmax_download_bytes = 8"
+                        => FailsWith("invalid firmware_global.nic_firmware_cache_capacity_bytes configuration: firmware cache capacity must cover max_download_bytes and be at most 1 TiB".to_string()),
+                    // A budget above the supported storage bound is also rejected at loading.
+                    "[firmware_global]\nnic_firmware_cache_capacity_bytes = 1099511627777"
+                        => FailsWith("invalid firmware_global.nic_firmware_cache_capacity_bytes configuration: firmware cache capacity must cover max_download_bytes and be at most 1 TiB".to_string()),
+                }
+            );
+            Ok(())
+        })
+    }
+
+    #[test]
+    #[allow(clippy::result_large_err)]
+    fn nic_firmware_delivery_mode_is_loaded_and_validated() {
+        use carbide_libmlx_model::firmware::FirmwareDeliveryMode;
+
+        figment::Jail::expect_with(|jail| {
+            scenarios!(
+                run = |settings| {
+                    jail.create_file(
+                        "config.toml",
+                        &format!("{}\n{settings}\n", include_str!("test_data/min_config.toml")),
+                    ).unwrap();
+                    parse_carbide_config(Path::new("config.toml"), None)
+                        .map(|config| config.firmware_global.nic_firmware_delivery_mode)
+                        .map_err(drop)
+                };
+                "NIC firmware delivery policy" {
+                    "" => Yields(FirmwareDeliveryMode::SiteCache),
+                    "[firmware_global]\nnic_firmware_delivery_mode = \"direct\""
+                        => Yields(FirmwareDeliveryMode::Direct),
+                    "[firmware_global]\nnic_firmware_delivery_mode = \"automatic\""
+                        => Fails,
+                }
+            );
+            Ok(())
+        })
+    }
+
     /// Verifies production configuration loading traverses both admin and named
     /// profiles so invalid route targets cannot survive startup.
     #[test]
@@ -932,10 +1005,11 @@ route_target_imports = [{ asn = 429000000, vni = 0, vni_self = true }]"#,
 
     #[test]
     #[allow(clippy::result_large_err)]
-    fn legacy_rack_management_key_is_accepted_warned_and_omitted() {
+    fn legacy_keys_without_a_replacement_are_accepted_warned_and_omitted() {
         figment::Jail::expect_with(|jail| {
             let config_text = format!(
-                "{}\ndeny_unknown_fields = true\nrack_management_enabled = true\n",
+                "{}\ndeny_unknown_fields = true\nrack_management_enabled = true\n\
+                 [site_explorer]\nexplore_mode = \"libredfish\"\n",
                 include_str!("test_data/min_config.toml")
             );
             jail.create_file("config.toml", &config_text)?;
@@ -949,22 +1023,32 @@ route_target_imports = [{ asn = 429000000, vni = 0, vni_self = true }]"#,
             .expect("strict configuration with the deprecated key must load");
 
             assert_eq!(config.deprecated_rack_management_enabled, Some(true));
+            assert_eq!(
+                config.site_explorer.deprecated_explore_mode.as_deref(),
+                Some("libredfish")
+            );
             let serialized =
                 toml::to_string(config.as_ref()).expect("loaded configuration must serialize");
             assert!(!serialized.contains("rack_management_enabled"));
+            assert!(!serialized.contains("explore_mode"));
 
-            let warning = std::iter::from_fn(|| logs.try_recv().ok())
-                .find(|line| line.message == "Ignoring deprecated configuration key")
-                .expect("deprecated key warning");
-            assert_eq!(warning.level, "WARN");
+            let warnings = std::iter::from_fn(|| logs.try_recv().ok())
+                .filter(|line| line.message == "Ignoring deprecated configuration key")
+                .collect::<Vec<_>>();
             assert_eq!(
-                warning.fields.get("config_key").map(String::as_str),
-                Some("rack_management_enabled")
+                warnings
+                    .iter()
+                    .map(|line| line.fields.get("config_key").map(String::as_str))
+                    .collect::<Vec<_>>(),
+                vec![
+                    Some("rack_management_enabled"),
+                    Some("site_explorer.explore_mode"),
+                ]
             );
-            assert_eq!(
-                warning.fields.get("config_source").map(String::as_str),
-                Some("config.toml")
-            );
+            assert!(warnings.iter().all(|line| {
+                line.level == "WARN"
+                    && line.fields.get("config_source").map(String::as_str) == Some("config.toml")
+            }));
             Ok(())
         })
     }
