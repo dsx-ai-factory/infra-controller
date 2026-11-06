@@ -801,6 +801,7 @@ dependencies = [
  "carbide-test-support",
  "carbide-utils",
  "hex",
+ "mac_address",
  "nv-redfish",
  "serde",
  "serde_json",

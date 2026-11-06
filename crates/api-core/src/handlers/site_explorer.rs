@@ -19,7 +19,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::str::FromStr;
 
 use ::rpc::forge::{self as rpc, IsBmcInManagedHostResponse};
-use bmc_drivers::{Drivers, built_in_rules};
+use bmc_drivers::Drivers;
 use config_version::ConfigVersion;
 use db::ConditionalWrite::{Applied, NotApplied};
 use db::explored_endpoints::EndpointReportNotCurrent;
@@ -451,7 +451,11 @@ pub(crate) async fn find_bmc_driver_selection(
         return Ok(Response::new(rpc::BmcDriverSelection::default()));
     }
     let identity = bmc_explorer::platform_identity(&endpoint.report);
-    let selection = Drivers::select(&built_in_rules(), &identity)
+    let rules = api
+        .runtime_config
+        .driver_rules()
+        .map_err(|error| CarbideError::internal(error.to_string()))?;
+    let selection = Drivers::select(&rules, &identity)
         .map_err(|error| CarbideError::internal(error.to_string()))?;
     Ok(Response::new(rpc::BmcDriverSelection {
         selection: Some(serde_json::to_string(&selection).map_err(CarbideError::from)?),

@@ -300,6 +300,7 @@ pub fn get() -> CarbideConfig {
             restart_ovs_on_use_admin_network_change: false,
         },
         host_models: host_firmware_example(),
+        bmc_driver_rules: Vec::new(),
         firmware_global: FirmwareGlobal::test_default(),
         machine_updater: MachineUpdater {
             instance_autoreboot_period: None,

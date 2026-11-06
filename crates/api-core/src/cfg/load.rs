@@ -420,6 +420,9 @@ pub fn parse_carbide_config_with_deferred_diagnostics(
     config.api_admission_control.validate()?;
     config.validate_admin_lock_admission_permits()?;
     config
+        .driver_rules()
+        .wrap_err("invalid bmc_driver_rules configuration")?;
+    config
         .firmware_global
         .downloads
         .validate()
@@ -758,6 +761,62 @@ request_timeout_seconds = 5"#
                         => FailsWith(
                             "invalid firmware_global.downloads configuration: max_concurrent_downloads must be between 1 and 16".to_string(),
                         ),
+                }
+            );
+            Ok(())
+        })
+    }
+
+    /// Loads BMC driver rule overrides and rejects any the drivers cannot
+    /// serve before activating Core.
+    #[test]
+    #[allow(clippy::result_large_err)]
+    fn bmc_driver_rules_are_loaded_and_validated() {
+        figment::Jail::expect_with(|jail| {
+            scenarios!(
+                run = |settings| {
+                    jail.create_file(
+                        "config.toml",
+                        &format!("{}\n{settings}\n", include_str!("test_data/min_config.toml")),
+                    ).unwrap();
+                    parse_carbide_config(Path::new("config.toml"), None)
+                        .map(|config| {
+                            config
+                                .bmc_driver_rules
+                                .iter()
+                                .map(|rule| rule.id.clone())
+                                .collect::<Vec<_>>()
+                        })
+                        .map_err(|error| format!("{error:#}"))
+                };
+                "BMC driver rule overrides" {
+                    "" => Yields(Vec::new()),
+                    r#"[[bmc_driver_rules]]
+id = "site-xcc3"
+matchers = [{ field = "manager_model", pattern = { kind = "exact", value = "XCC3" } }]
+selections = { boot_order = "lenovo-xcc3-boot-order" }"#
+                        => Yields(vec!["site-xcc3".to_string()]),
+                    r#"[[bmc_driver_rules]]
+id = "site-one-bmc"
+matchers = [{ field = "manager_mac_address", pattern = { kind = "mac_address", value = "c4-5a-b1-c8-38-0d" } }]
+selections = { power = "standard" }"#
+                        => Yields(vec!["site-one-bmc".to_string()]),
+                    r#"[[bmc_driver_rules]]
+id = "site-one-bmc"
+matchers = [{ field = "manager_mac_address", pattern = { kind = "mac_address", value = "not-a-mac" } }]
+selections = { power = "standard" }"#
+                        => FailsWith(
+                            "failed to load configuration files: invalid MAC address not-a-mac: invalid length".to_string(),
+                        ),
+                    // A misspelled key inside a rule follows the same unknown-field policy.
+                    "[[bmc_driver_rules]]\nid = \"site\"\nselections = { power = \"standard\" }\nquirk = []"
+                        => Yields(vec!["site".to_string()]),
+                    "deny_unknown_fields = true\n[[bmc_driver_rules]]\nid = \"site\"\nselections = { power = \"standard\" }\nquirk = []"
+                        => FailsWith("failed to load configuration files: unknown configuration fields: bmc_driver_rules.0.quirk (configuration)".to_string()),
+                    "[[bmc_driver_rules]]\nid = \"site\"\nselections = { power = \"no-such-driver\" }"
+                        => FailsWith("invalid bmc_driver_rules configuration: unknown power driver no-such-driver".to_string()),
+                    "[[bmc_driver_rules]]\nid = \"lenovo-xcc3\"\nselections = { power = \"standard\" }"
+                        => FailsWith("invalid bmc_driver_rules configuration: rule id lenovo-xcc3 is used more than once".to_string()),
                 }
             );
             Ok(())
