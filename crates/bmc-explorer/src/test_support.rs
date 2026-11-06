@@ -54,7 +54,8 @@ pub async fn detect_hw_type<B: Bmc>(
 ) -> Result<Option<hw::HwType>, Error<B>> {
     let chassis_explore_config = build_chassis_explore_config(&root);
     let explored_chassis =
-        ExploredChassisCollection::explore(&root, &chassis_explore_config).await?;
+        ExploredChassisCollection::explore(&root, &chassis_explore_config, config.error_classifier)
+            .await?;
 
     if explored_chassis.is_bluefield2() {
         root = root.as_ref().clone().restrict_expand().into();
@@ -100,7 +101,8 @@ pub async fn explore_network_adapter_ports<B: Bmc>(
     linked_chassis_ids: &[ODataId],
 ) -> Result<Vec<model::site_explorer::Chassis>, Error<B>> {
     let config = build_chassis_explore_config(root);
-    let mut explored_chassis = ExploredChassisCollection::explore(root, &config).await?;
+    let mut explored_chassis =
+        ExploredChassisCollection::explore(root, &config, &|_: &B::Error| None).await?;
     explored_chassis
         .fetch_network_adapter_ports(linked_chassis_ids)
         .await;
