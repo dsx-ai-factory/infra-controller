@@ -17,8 +17,10 @@
 use std::collections::HashMap;
 
 use carbide_uuid::DbTable;
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::{HostMachineId, MachineId};
 use mac_address::MacAddress;
+use model::machine_boot_interface::MachineBootInterface;
+use model::network_segment::NetworkSegmentType;
 use model::predicted_machine_interface::{NewPredictedMachineInterface, PredictedMachineInterface};
 use sqlx::PgConnection;
 
@@ -62,6 +64,21 @@ pub async fn find_by<'a, C: ColumnInfo<'a, TableType = PredictedMachineInterface
         .fetch_all(txn)
         .await
         .map_err(|e| DatabaseError::query(query.sql(), e))
+}
+
+/// Matches a host's primary HostInband prediction to a supplied boot pair so callers can verify boot intent before DHCP promotion.
+///
+/// Callers must obtain the target from current host Redfish evidence before accepting it for boot work.
+pub(crate) fn matches_primary_host_boot_interface(
+    prediction: &PredictedMachineInterface,
+    host_machine_id: &HostMachineId,
+    target: &MachineBootInterface,
+) -> bool {
+    prediction.machine_id == MachineId::from(*host_machine_id)
+        && prediction.mac_address == target.mac_address
+        && prediction.primary_interface
+        && prediction.expected_network_segment_type == NetworkSegmentType::HostInband
+        && prediction.boot_interface_id.as_deref() == Some(target.interface_id.as_str())
 }
 
 /// Records the vendor-named Redfish `EthernetInterface.Id` on the predicted

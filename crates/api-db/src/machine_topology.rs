@@ -19,11 +19,11 @@ use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 
 use carbide_uuid::DbTable;
-use carbide_uuid::machine::{AsMachineId, MachineId, MachineIdSubtypeTrait};
+use carbide_uuid::machine::{AsMachineId, DpuMachineId, MachineId, MachineIdSubtypeTrait};
 use chrono::{TimeDelta, Utc};
 use itertools::Itertools;
 use model::bmc_info::BmcInfo;
-use model::hardware_info::HardwareInfo;
+use model::hardware_info::{DpuData, HardwareInfo};
 use model::machine::topology::{DiscoveryData, MachineTopology, TopologyData};
 use sqlx::PgConnection;
 
@@ -33,6 +33,10 @@ use crate::db_read::DbReader;
 
 #[cfg(test)]
 mod test_explicit_columns;
+#[cfg(test)]
+mod test_host_pf_migration;
+#[cfg(test)]
+mod test_host_pfs;
 
 async fn update(
     txn: &mut PgConnection,
@@ -67,19 +71,59 @@ pub async fn create_or_update(
     hardware_info: &HardwareInfo,
 ) -> DatabaseResult<MachineTopology> {
     let machine_id = machine_id.to_machine_id();
-    let topology_data = find_latest_by_machine_ids(txn, &[machine_id]).await?;
+    let mut topology_data = find_latest_by_machine_ids(txn, &[machine_id]).await?;
+    if topology_data
+        .get(&machine_id)
+        .is_some_and(|topology| topology.topology_update_needed)
+    {
+        // Lock only refreshes that write discovery data, so unchanged hosts do not wait after discovery locks their interface.
+        lock_by_machine_id(txn, &machine_id).await?;
+        // Reload registered inventory after waiting to avoid overwriting an agent registration that just committed.
+        topology_data = find_latest_by_machine_ids(txn, &[machine_id]).await?;
+    }
     let topology_data = topology_data.get(&machine_id);
 
     if let Some(topology) = topology_data {
         if topology.topology_update_needed {
-            return update(txn, &machine_id, hardware_info).await;
+            let mut refreshed = hardware_info.clone();
+            // Generic discovery does not own host-PF identity, including when it omits DpuData.
+            match (
+                refreshed.dpu_info.as_mut(),
+                topology.topology.discovery_data.info.dpu_info.as_ref(),
+            ) {
+                (Some(incoming), registered) => {
+                    incoming.host_pfs = registered
+                        .map(|dpu| dpu.host_pfs.clone())
+                        .unwrap_or_default();
+                    // Retain Redfish's BF4 classification before first registration so missing inventory cannot waive its requirement.
+                    if let Some(registered) = registered
+                        && registered.required_host_pf(1).is_some()
+                        && incoming.required_host_pf(1).is_none()
+                    {
+                        incoming.part_number.clone_from(&registered.part_number);
+                    }
+                }
+                (None, Some(registered))
+                    if !registered.host_pfs.is_empty()
+                        || registered.required_host_pf(1).is_some() =>
+                {
+                    refreshed.dpu_info = Some(registered.clone());
+                }
+                _ => {}
+            }
+            return update(txn, &machine_id, &refreshed).await;
         }
         return Ok(topology.clone());
     }
 
+    let mut hardware_info = hardware_info.clone();
+    // Only the DPU-agent repository operation may initialize the registered mapping.
+    if let Some(dpu_info) = hardware_info.dpu_info.as_mut() {
+        dpu_info.host_pfs.clear();
+    }
     let topology_data = TopologyData {
         discovery_data: DiscoveryData {
-            info: hardware_info.clone(),
+            info: hardware_info,
         },
         bmc_info: BmcInfo {
             machine_interface_id: None,
@@ -123,6 +167,72 @@ pub async fn create_or_update(
         })?;
 
     Ok(res)
+}
+
+/// Initializes BF4 DPU-agent host-PF inventory independently of BOM throttling and rejects later identity drift.
+///
+/// Callers must authenticate a DPUAgent report and keep this transaction open through discovery.
+/// Returns true only when previously absent inventory was initialized, retaining BF4 classification independently of BOM throttling.
+pub async fn record_dpu_host_pfs(
+    txn: &mut PgConnection,
+    dpu_machine_id: &DpuMachineId,
+    incoming: &DpuData,
+) -> DatabaseResult<bool> {
+    let invalid = |source| DatabaseError::DpuHostPf {
+        dpu_machine_id: *dpu_machine_id,
+        source,
+    };
+    lock_by_machine_id(txn, &(*dpu_machine_id).into()).await?;
+    let mut topologies = find_latest_by_machine_ids(txn, &[*dpu_machine_id]).await?;
+    let topology =
+        topologies
+            .remove(dpu_machine_id)
+            .ok_or_else(|| DatabaseError::NotFoundError {
+                kind: "DPU topology",
+                id: dpu_machine_id.to_string(),
+            })?;
+    let registered = topology
+        .topology
+        .discovery_data
+        .info
+        .dpu_info
+        .as_ref()
+        .ok_or_else(|| {
+            DatabaseError::FailedPrecondition(format!(
+                "DPU topology {dpu_machine_id} has no DpuData"
+            ))
+        })?;
+    // Ignore host-PF reports for BF2/BF3 so optional inventory cannot change their factory-MAC discovery path.
+    if registered.required_host_pf(1).is_none() && incoming.required_host_pf(1).is_none() {
+        return Ok(false);
+    }
+    registered
+        .check_host_pf_identity(incoming)
+        .map_err(invalid)?;
+    // Repeated registration must not reset BOM age or replace diagnostic metadata.
+    if !registered.host_pfs.is_empty() || incoming.host_pfs.is_empty() {
+        return Ok(false);
+    }
+
+    // Persist a newly reported BF4 classification with its first inventory even when generic refresh is throttled.
+    let part_number = if registered.required_host_pf(1).is_some() {
+        &registered.part_number
+    } else {
+        &incoming.part_number
+    };
+    // Update the registered inventory and classification while preserving concurrent discovery metadata and BOM age.
+    let query = "UPDATE machine_topologies SET topology = jsonb_set(
+        jsonb_set(topology, '{discovery_data,Info,dpu_info,host_pfs}', $2::jsonb),
+        '{discovery_data,Info,dpu_info,part_number}', $3::jsonb)
+        WHERE machine_id = $1";
+    sqlx::query(query)
+        .bind(dpu_machine_id)
+        .bind(sqlx::types::Json(&incoming.host_pfs))
+        .bind(sqlx::types::Json(part_number))
+        .execute(txn)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))?;
+    Ok(true)
 }
 
 //  Wrapper for create_or_update to set topology_update_needed to true if bom_validation is enabled and

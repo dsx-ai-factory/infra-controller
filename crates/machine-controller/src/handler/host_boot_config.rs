@@ -36,6 +36,7 @@ use libredfish::Redfish;
 use model::machine::{
     BiosConfigInfo, ManagedHostStateSnapshot, SetBootOrderInfo, SetBootOrderState,
 };
+use model::machine_boot_interface::MachineBootInterfaceTarget;
 use state_controller::state_handler::{StateHandlerContext, StateHandlerError};
 
 use super::bios_config::{
@@ -345,13 +346,43 @@ pub(super) async fn run_host_boot_config_stage(
         HostBootConfigStage::SetBootOrder {
             set_boot_order_info,
         } => {
+            // Check before publishing a new boot-order job; existing jobs must still be polled and completed after an upgrade.
+            let checked_target =
+                if set_boot_order_info.set_boot_order_state == SetBootOrderState::SetBootOrder {
+                    let resolution =
+                        resolve_boot_interface_for_step(ctx, mh_snapshot, explicit_target).await?;
+                    let target = match require_boot_interface(
+                        &mh_snapshot.host_snapshot.id,
+                        resolution,
+                        "setting boot order",
+                        HostBootConfigOutcome::Wait,
+                    )? {
+                        RequiredBootInterface::Ready(target) => target,
+                        RequiredBootInterface::Wait(outcome) => return Ok(outcome),
+                    };
+                    if let Some(reason) = db::host_boot_interface::boot_order_not_ready_reason(
+                        &ctx.services.db_pool,
+                        &mh_snapshot.host_snapshot.id,
+                        ctx.services.site_config.dpu_host_pf_pci_controller_id,
+                        &MachineBootInterfaceTarget::from(&target),
+                    )
+                    .await?
+                    {
+                        return Ok(HostBootConfigOutcome::Wait(format!(
+                            "Waiting for BF4 boot interface: {reason}"
+                        )));
+                    }
+                    Some(target)
+                } else {
+                    None
+                };
             let retry_count = set_boot_order_info.retry_count;
             match set_host_boot_order(
                 ctx,
                 reachability_params,
                 redfish_client,
                 mh_snapshot,
-                explicit_target,
+                checked_target.as_ref().or(explicit_target),
                 set_boot_order_info,
             )
             .await?
@@ -480,6 +511,7 @@ mod tests {
     use carbide_redfish::libredfish::test_support::{RedfishSim, RedfishSimBootInterfaceRef};
     use carbide_redfish::libredfish::{RedfishAuth, RedfishClientPool};
     use carbide_secrets::test_support::credentials::TestCredentialManager;
+    use carbide_test_harness::prelude::{sqlx_test, sqlx_testing};
     use carbide_test_support::value_scenarios;
     use model::machine_boot_interface::MachineBootInterface;
     use model::test_support::machine_snapshot::managed_host_state_snapshot;
@@ -516,8 +548,12 @@ mod tests {
         interface.boot_interface_id = Some(format!("mutable-{mac_address}"));
     }
 
-    #[tokio::test]
-    async fn explicit_target_is_stable_across_boot_config_stages() {
+    /// Verifies each exercised boot-config stage sends the explicit MAC/ID to Redfish after the
+    /// observed primary interface changes, preserving captured boot intent.
+    #[sqlx_test]
+    async fn explicit_target_is_stable_across_boot_config_stages(db_pool: sqlx::PgPool) {
+        // Capture one explicit MAC/ID target and record Redfish calls to detect later use of the
+        // mutable primary.
         const REDFISH_HOST: &str = "boot-config-test";
         let explicit_boot_interface = MachineBootInterface {
             mac_address: "10:00:00:00:00:01".parse().unwrap(),
@@ -534,14 +570,11 @@ mod tests {
             .create_client(REDFISH_HOST, None, RedfishAuth::Anonymous, None)
             .await
             .unwrap();
+        // Return a BIOS job ID so ConfigureBios advances to WaitingForBiosJob.
         redfish_sim.set_machine_setup_bios_job_id(Some("bios-job".to_string()));
 
-        // Explicit-target stages do not need prediction data. A short-timeout
-        // unreachable pool makes an accidental lookup fail promptly.
-        let db_pool = sqlx::postgres::PgPoolOptions::new()
-            .acquire_timeout(Duration::from_millis(50))
-            .connect_lazy("postgres://unused:unused@127.0.0.1:1/unused")
-            .unwrap();
+        // Explicit-target stages do not need prediction data. Supply the migrated database
+        // required by boot-order readiness without adding persisted BF4 inventory.
         let mut services = MachineStateHandlerServices {
             db_pool: db_pool.clone(),
             db_reader: db_pool.into(),
@@ -583,6 +616,8 @@ mod tests {
         let reachability_params = reachability_params();
         let mut mh_snapshot = managed_host_state_snapshot();
 
+        // Change the observed MAC/ID before inspection to expose any fallback from the explicit
+        // target.
         change_observed_boot_interface(&mut mh_snapshot, "20:00:00:00:00:01");
         assert_eq!(
             check_host_boot_config(
@@ -620,19 +655,27 @@ mod tests {
             },
         };
 
+        // Change the observed MAC/ID before ConfigureBios to expose any fallback during the BIOS
+        // write.
         change_observed_boot_interface(&mut mh_snapshot, "30:00:00:00:00:01");
         assert!(matches!(
             run_stage!(HostBootConfigStage::ConfigureBios { retry_count: 0 }),
             HostBootConfigOutcome::Continue(HostBootConfigStage::WaitingForBiosJob { .. }),
         ));
 
+        // Change the observed MAC/ID before PollingBiosSetup to expose any fallback during BIOS
+        // verification.
         change_observed_boot_interface(&mut mh_snapshot, "40:00:00:00:00:01");
         assert!(matches!(
             run_stage!(HostBootConfigStage::PollingBiosSetup { retry_count: 0 }),
             HostBootConfigOutcome::Continue(HostBootConfigStage::SetBootOrder { .. }),
         ));
 
+        // Mark boot order unconfigured to exercise its write path instead of skipping directly to
+        // CheckBootOrder.
         redfish_sim.set_is_boot_order_setup(false);
+        // Change the observed MAC/ID again to expose any fallback while publishing the boot-order
+        // job.
         change_observed_boot_interface(&mut mh_snapshot, "50:00:00:00:00:01");
         assert!(matches!(
             run_stage!(set_boot_order_stage(SetBootOrderState::SetBootOrder)),
@@ -644,6 +687,8 @@ mod tests {
             }),
         ));
 
+        // Change the observed MAC/ID before the legacy HTTP-device check to detect fallback while
+        // resuming that state.
         change_observed_boot_interface(&mut mh_snapshot, "60:00:00:00:00:01");
         assert!(matches!(
             run_stage!(set_boot_order_stage(
@@ -657,12 +702,15 @@ mod tests {
             }),
         ));
 
+        // Change the observed MAC/ID once more before CheckBootOrder to detect fallback in final
+        // verification.
         change_observed_boot_interface(&mut mh_snapshot, "70:00:00:00:00:01");
         assert_eq!(
             run_stage!(set_boot_order_stage(SetBootOrderState::CheckBootOrder)),
             HostBootConfigOutcome::Complete,
         );
 
+        // Verify every recorded Redfish target so an intermediate fallback cannot pass unnoticed.
         let observed_targets = redfish_sim.boot_interface_targets(REDFISH_HOST);
         assert_eq!(
             observed_targets.len(),

@@ -1243,6 +1243,582 @@ async fn check_legacy_first_dpu_discovery_waits_on_admin_segment_locks(
     Ok(())
 }
 
+/// Verifies BF4 discovery excludes concurrent host-PF insertion and requires a fresh discovery
+/// after classification changes, so omitted part numbers cannot bypass host-PF ownership protection.
+/// Resubmitting the same report then registers host_pfs and attaches the selected MAC to the DPU.
+#[crate::sqlx_test]
+async fn test_bf4_discovery_preserves_host_pf_ownership_across_classification_races(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // Enable source-IP authentication and Site Explorer creation to exercise the legacy shared IPv4 allocation path.
+    let config = secure_discovery_config();
+    config
+        .site_explorer
+        .create_machines
+        .store(true, Ordering::Relaxed);
+    let env = create_test_env_with_overrides(pool, TestEnvOverrides::with_config(config)).await;
+    for (scenario, initially_bf4) in [
+        // Retained BF4 classification must exclude a BF3 writer even when its selected MAC is initially absent.
+        ("concurrent BF3 insertion", true),
+        // A classification learned after shared locks were chosen must require a retry before creating the link.
+        ("classification changes after lock selection", false),
+    ] {
+        // Vary only when BF4 classification is persisted; the remaining fixture supplies independent authenticated DPU callers.
+        let bf4_config = env
+            .managed_host_config()
+            .get_and_assert_single_dpu()
+            .clone();
+        let bf3_config = env
+            .managed_host_config()
+            .get_and_assert_single_dpu()
+            .clone();
+        let target_mac = bf3_config.host_mac_address;
+        let mut bf4_inventory = HardwareInfo::from(&bf4_config);
+        let bf4 = bf4_inventory.dpu_info.as_mut().expect("BF4 DpuData");
+        bf4.part_number = "900-9D4B4-CWAA-TSA".to_string(); // Supply trusted BF4 classification without changing the DPU identity.
+        bf4.host_pfs = vec![model::hardware_info::DpuHostPf {
+            pci_controller_id: 1,    // Match the default configured controller.
+            pf_id: 0,                // Select the boot PF required by BF4 policy.
+            mac_address: target_mac, // Conflict with the BF3 link inserted during discovery.
+            physical_port_name: "c1pf0".to_string(),
+            netdev_name: None,
+            pci_address: None,
+        }];
+        // Omit the agent's part number so only persisted topology can select BF4 locking.
+        let mut bf4_report = bf4_inventory.clone();
+        bf4_report
+            .dpu_info
+            .as_mut()
+            .expect("BF4 DpuData")
+            .part_number
+            .clear();
+        // Classify the factory-MAC writer as BF3 to exercise its shared allocation path.
+        let mut bf3_inventory = HardwareInfo::from(&bf3_config);
+        bf3_inventory
+            .dpu_info
+            .as_mut()
+            .expect("BF3 DpuData")
+            .part_number = "900-9D3B6-00CV-AA0".to_string();
+
+        // Seed trusted DPU caller records directly because normal host fixtures already materialize their factory links.
+        let mut callers = Vec::new();
+        for (dpu_config, inventory) in [
+            // Keep the claimed host-PF absent while supplying the class visible to the early lock decision.
+            (
+                &bf4_config,
+                if initially_bf4 {
+                    &bf4_inventory
+                } else {
+                    &bf4_report
+                },
+            ),
+            // Give the competing BF3 request its own stable identity and no preexisting factory link.
+            (&bf3_config, &bf3_inventory),
+        ] {
+            let caller_id = dpu_discover_dhcp(&env, &dpu_config.oob_mac_address.to_string()).await;
+            let caller = db::machine_interface::find_one(&env.pool, caller_id).await?;
+            let dpu_id = from_hardware_info(inventory)?;
+            let mut txn = env.pool.begin().await?;
+            db::machine::get_or_create(&mut txn, Some(&env.api.common_pools), &dpu_id, &caller)
+                .await?;
+            db::machine_topology::create_or_update(&mut txn, &dpu_id, inventory).await?;
+            txn.commit().await?;
+            callers.push((dpu_id, caller));
+        }
+        let (bf3_id, bf3_caller) = callers.pop().expect("BF3 caller");
+        let (bf4_id, bf4_caller) = callers.pop().expect("BF4 caller");
+
+        // Confirm IPv4-only Admin prefixes make the allocation locks shared in both scenarios.
+        let mut txn = env.pool.begin().await?;
+        let admin_networks = db::network_segment::admin(&mut txn).await?;
+        assert!(!admin_networks.is_empty());
+        assert!(admin_networks.iter().all(|network| {
+            network
+                .prefixes
+                .iter()
+                .all(|prefix| prefix.prefix.is_ipv4())
+        }));
+        if initially_bf4 {
+            // Initialize immutable inventory before discovery without creating a host interface.
+            db::machine_topology::record_dpu_host_pfs(
+                &mut txn,
+                &DpuMachineId::try_from(bf4_id)?,
+                bf4_inventory.dpu_info.as_ref().expect("BF4 DpuData"),
+            )
+            .await?;
+        }
+        // Confirm the selected MAC is absent before introducing either race.
+        assert!(
+            db::machine_interface::find_by_mac_address(txn.as_mut(), target_mac)
+                .await?
+                .is_empty()
+        );
+        txn.commit().await?;
+
+        // Park the request that must first acquire shared locks before either insertion or classification changes.
+        let mut gate = env.pool.begin().await?;
+        let gate_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *gate)
+            .await?;
+        sqlx::query("SELECT id FROM machine_interfaces WHERE id = $1 FOR UPDATE")
+            .bind(if initially_bf4 {
+                bf3_caller.id
+            } else {
+                bf4_caller.id
+            })
+            .fetch_one(&mut *gate)
+            .await?;
+        let bf3_request = discovery_request_from(
+            &bf3_inventory,
+            Some(bf3_caller.id),
+            *bf3_caller.addresses.first().expect("BF3 caller address"),
+        );
+        let mut bf4_request = discovery_request_from(
+            &bf4_report,
+            Some(bf4_caller.id),
+            *bf4_caller.addresses.first().expect("BF4 caller address"),
+        );
+        bf4_request.get_mut().discovery_reporter = rpc::MachineDiscoveryReporter::DpuAgent as i32;
+        let bf3_discovery = env.api.discover_machine(bf3_request);
+        let bf4_discovery = env.api.discover_machine(bf4_request);
+        tokio::pin!(bf3_discovery, bf4_discovery);
+
+        // Observe shared locks before either inserting the selected MAC or publishing BF4 classification.
+        let first_discovery = if initially_bf4 {
+            bf3_discovery.as_mut()
+        } else {
+            bf4_discovery.as_mut()
+        };
+        let first_pid = tokio::select! {
+            result = first_discovery => panic!("{scenario}: discovery bypassed its caller row gate: {result:?}"),
+            blocked = wait_for_blocked_query(&env.pool, gate_pid, "FOR UPDATE OF mi") => blocked,
+        };
+        let shared_locks: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM pg_locks WHERE pid = $1 AND locktype = 'advisory'
+             AND mode = 'ShareLock' AND granted",
+        )
+        .bind(first_pid)
+        .fetch_one(&env.pool)
+        .await?;
+        assert_eq!(
+            usize::try_from(shared_locks)?,
+            env.admin_segments.len(),
+            "{scenario}"
+        );
+
+        if initially_bf4 {
+            // Queue BF4 after BF3 holds shared locks, because PostgreSQL does not admit later shared requests past an exclusive waiter.
+            let bf4_pid = tokio::select! {
+                result = &mut bf4_discovery => panic!("{scenario}: BF4 bypassed the BF3 allocation locks: {result:?}"),
+                blocked = wait_for_blocked_query(&env.pool, first_pid, "pg_advisory_xact_lock(") => blocked,
+            };
+            assert_eq!(
+                pending_advisory_lock_mode(&env.pool, bf4_pid).await?,
+                "ExclusiveLock"
+            );
+            assert!(has_written_nothing(&env.pool, bf4_pid).await?, "{scenario}");
+
+            // Release BF3 to insert and commit the selected MAC before BF4 can check host-PF ownership.
+            gate.rollback().await?;
+            let (bf3_response, bf4_response) =
+                tokio::time::timeout(Duration::from_secs(30), async {
+                    tokio::join!(&mut bf3_discovery, &mut bf4_discovery)
+                })
+                .await?;
+            assert_eq!(bf3_response?.into_inner().machine_id, Some(bf3_id));
+            let rejection =
+                bf4_response.expect_err("BF4 must not claim the newly inserted BF3 link");
+            assert_eq!(rejection.code(), Code::FailedPrecondition);
+            assert!(rejection.message().contains("conflicting ownership"));
+
+            // Reload the inserted row to prove the rejected request preserved its committed DPU and host associations.
+            let links = db::machine_interface::find_by_mac_address(&env.pool, target_mac).await?;
+            let [link] = links.as_slice() else {
+                panic!("{scenario}: BF3 must own exactly one selected-MAC row");
+            };
+            assert_eq!(
+                link.attached_dpu_machine_id,
+                Some(DpuMachineId::try_from(bf3_id)?)
+            );
+            assert_eq!(
+                link.machine_id,
+                Some(model::machine::machine_id::host_id_from_dpu_hardware_info(
+                    &bf3_inventory,
+                )?),
+            );
+        } else {
+            // Publish new BF4 classification through generic topology refresh while its caller row remains locked.
+            let mut txn = env.pool.begin().await?;
+            db::machine_topology::set_topology_update_needed(&mut txn, &bf4_id, true).await?;
+            db::machine_topology::create_or_update(&mut txn, &bf4_id, &bf4_inventory).await?;
+            txn.commit().await?;
+
+            // Resume with no selected link, so only the stale lock decision can prevent first attachment.
+            gate.rollback().await?;
+            let rejection = tokio::time::timeout(Duration::from_secs(30), &mut bf4_discovery)
+                .await?
+                .expect_err("new BF4 classification must require exclusive locks on retry");
+            assert_eq!(rejection.code(), Code::FailedPrecondition);
+            assert!(rejection.message().contains("classification changed"));
+            assert!(
+                db::machine_interface::find_by_mac_address(&env.pool, target_mac)
+                    .await?
+                    .is_empty()
+            );
+        }
+
+        // Reload host_pfs and host pairing to prove rejection preserves existing inventory and rolls back first registration.
+        let mut txn = env.pool.begin().await?;
+        let topology = db::machine_topology::find_latest_by_machine_ids(&mut txn, &[bf4_id])
+            .await?
+            .remove(&bf4_id)
+            .expect("persisted DPU topology");
+        let persisted = topology
+            .topology
+            .discovery_data
+            .info
+            .dpu_info
+            .expect("persisted BF4");
+        assert!(persisted.required_host_pf(1).is_some(), "{scenario}");
+        assert_eq!(
+            persisted.host_pfs,
+            if initially_bf4 {
+                bf4_inventory
+                    .dpu_info
+                    .as_ref()
+                    .expect("BF4 DpuData")
+                    .host_pfs
+                    .clone()
+            } else {
+                Vec::new()
+            },
+            "{scenario}"
+        );
+        assert!(
+            db::machine::find_host_by_dpu_machine_id(&mut txn, &DpuMachineId::try_from(bf4_id)?)
+                .await?
+                .is_none()
+        );
+        txn.rollback().await?;
+
+        if !initially_bf4 {
+            // Resubmit the unchanged report after classification is visible so a fresh request can take exclusive locks.
+            let mut retry = discovery_request_from(
+                &bf4_report,
+                Some(bf4_caller.id),
+                *bf4_caller.addresses.first().expect("BF4 caller address"),
+            );
+            retry.get_mut().discovery_reporter = rpc::MachineDiscoveryReporter::DpuAgent as i32;
+            let response =
+                tokio::time::timeout(Duration::from_secs(30), env.api.discover_machine(retry))
+                    .await??
+                    .into_inner();
+            assert_eq!(response.machine_id, Some(bf4_id));
+
+            // Reload association and host_pfs to prove retry persisted the selected link and first registration.
+            let mut txn = env.pool.begin().await?;
+            let links =
+                db::machine_interface::find_by_mac_address(txn.as_mut(), target_mac).await?;
+            let [link] = links.as_slice() else {
+                panic!("{scenario}: retry must create exactly one selected-MAC row");
+            };
+            assert_eq!(
+                link.attached_dpu_machine_id,
+                Some(DpuMachineId::try_from(bf4_id)?)
+            );
+            assert_eq!(
+                link.machine_id,
+                Some(model::machine::machine_id::host_id_from_dpu_hardware_info(
+                    &bf4_inventory
+                )?),
+            );
+            let topology = db::machine_topology::find_latest_by_machine_ids(&mut txn, &[bf4_id])
+                .await?
+                .remove(&bf4_id)
+                .expect("registered DPU topology");
+            assert_eq!(
+                topology
+                    .topology
+                    .discovery_data
+                    .info
+                    .dpu_info
+                    .expect("registered BF4")
+                    .host_pfs,
+                bf4_inventory
+                    .dpu_info
+                    .as_ref()
+                    .expect("BF4 DpuData")
+                    .host_pfs,
+            );
+            txn.rollback().await?;
+        }
+    }
+    Ok(())
+}
+
+/// Rejects a host-owned static row inserted after an empty BF4 lookup while preserving the allocated host's network and boot settings.
+/// Ownership committed while the selected-row lock waits must be reread; a later unowned static row succeeds through the same authenticated DPU caller.
+#[crate::sqlx_test]
+async fn test_bf4_first_attachment_rechecks_static_inventory_after_empty_lookup(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // Create an unrelated allocated host and retain its persisted network, boot selection, and Instance.
+    let env = create_test_env(pool).await;
+    let secure_api = secure_api_for(&env);
+    let (allocated_host, _, _, _) = allocated_host_for_secure_discovery(&env).await;
+    let allocated_host_id: MachineId = allocated_host.host().id.into();
+    let original_host = load_scout_pci_selection_state(&env.pool, allocated_host.host().id).await?;
+    let mut txn = env.pool.begin().await?;
+    let static_segment = db::network_segment::static_assignments(&mut txn).await?;
+    let original_allocation = db::instance::find_by_machine_id(&mut txn, &allocated_host_id)
+        .await?
+        .expect("the unrelated host has a persisted Instance");
+    txn.rollback().await?;
+
+    // Keep a trusted stable DPU identity while varying only the selected host-PF MAC and its static row's ownership.
+    let dpu_config = env
+        .managed_host_config()
+        .get_and_assert_single_dpu()
+        .clone();
+    let mut inventory = HardwareInfo::from(&dpu_config);
+    let dpu = inventory.dpu_info.as_mut().expect("DpuData");
+    dpu.part_number = "900-9D4B4-CWAA-TSA".to_string(); // Persist BF4 classification before the caller chooses its Admin locks.
+    dpu.host_pfs.clear(); // Leave registered inventory empty to observe whether a rejected first registration persists it.
+    let dpu_id = from_hardware_info(&inventory)?;
+    let caller_id = dpu_discover_dhcp(&env, &dpu_config.oob_mac_address.to_string()).await;
+    let caller = db::machine_interface::find_one(&env.pool, caller_id).await?;
+    let source_address = *caller.addresses.first().expect("authenticated DPU address");
+    let mut txn = env.pool.begin().await?;
+    db::machine::get_or_create(&mut txn, Some(&env.api.common_pools), &dpu_id, &caller).await?;
+    db::machine_topology::create_or_update(&mut txn, &dpu_id, &inventory).await?;
+    txn.commit().await?;
+
+    for (scenario, selected_mac, static_address, owner) in [
+        // An inventory writer may publish unrelated host ownership while BF4 holds every Admin lock.
+        (
+            "host-owned static row",
+            "02:00:00:00:55:01",
+            "203.0.113.85",
+            Some(allocated_host_id),
+        ),
+        // The same caller may attach an unowned static row without using its factory MAC or losing the reservation.
+        (
+            "unowned static row",
+            "02:00:00:00:55:02",
+            "203.0.113.86",
+            None,
+        ),
+    ] {
+        let selected_mac: MacAddress = selected_mac.parse()?;
+        let static_address: IpAddr = static_address.parse()?;
+        assert_ne!(selected_mac, inventory.factory_mac_address()?, "{scenario}");
+        assert_ne!(selected_mac, caller.mac_address, "{scenario}");
+        let mut report = inventory.clone();
+        report.dpu_info.as_mut().expect("BF4 DpuData").host_pfs =
+            vec![model::hardware_info::DpuHostPf {
+                pci_controller_id: 1,      // Select the configured BF4 controller.
+                pf_id: 0,                  // Register its boot PF rather than a sibling PF.
+                mac_address: selected_mac, // Keep the claimed link distinct from the authenticated source and factory MAC.
+                physical_port_name: "c1pf0".to_string(),
+                netdev_name: None,
+                pci_address: None,
+            }];
+        assert_eq!(from_hardware_info(&report)?, dpu_id, "{scenario}");
+
+        // Hold exclusive Admin locks across an empty MAC lookup, matching first BF4 discovery.
+        let mut attachment = env.pool.begin().await?;
+        db::machine_interface::lock_all_admin_segments(&mut attachment).await?;
+        assert!(
+            db::machine_interface::find_by_mac_address(attachment.as_mut(), selected_mac)
+                .await?
+                .is_empty(),
+            "{scenario}"
+        );
+
+        // Commit static preallocation on another connection while the attachment transaction keeps those locks.
+        let published = tokio::time::timeout(Duration::from_secs(5), async {
+            let mut worker = db::Transaction::begin(&env.pool).await?;
+            db::machine_interface::preallocate_machine_interface(
+                &mut worker,
+                selected_mac,
+                static_address,
+                None,
+            )
+            .await?;
+            let selected =
+                db::machine_interface::find_by_mac_address(worker.as_pgconn(), selected_mac)
+                    .await?
+                    .remove(0);
+            if owner.is_some() {
+                // Prepare the additional NIC without replacing the unrelated host's existing primary.
+                db::machine_interface::set_primary_interface(&selected.id, false, &mut worker)
+                    .await?;
+            }
+            db::machine_interface::set_boot_interface_id(selected_mac, "NIC.Static.1", &mut worker)
+                .await?;
+            worker.commit().await?;
+            db::machine_interface::find_one(&env.pool, selected.id).await
+        })
+        .await??;
+        assert!(published.machine_id.is_none(), "{scenario}");
+        assert_eq!(published.segment_id, static_segment.id, "{scenario}");
+        assert!(published.attached_dpu_machine_id.is_none(), "{scenario}");
+        assert_eq!(published.addresses, vec![static_address], "{scenario}");
+        assert_eq!(published.boot_interface_id.as_deref(), Some("NIC.Static.1"));
+
+        if let Some(owner) = owner {
+            // Lock the new static row and stage host ownership so the helper first reads its committed unowned snapshot.
+            let mut owner_writer = env.pool.begin().await?;
+            let writer_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+                .fetch_one(&mut *owner_writer)
+                .await?;
+            db::machine_interface::lock_for_address_assignment(&mut owner_writer, published.id)
+                .await?;
+            db::machine_interface::associate_interface_with_machine(
+                &published.id,
+                model::machine_interface_address::MachineInterfaceAssociation::Machine(owner),
+                &mut owner_writer,
+            )
+            .await?;
+
+            // Wait until the production helper locks its actual selected row, then publish ownership before its reread.
+            let attempt = db::machine_interface::create_host_machine_dpu_interface_proactively(
+                &mut attachment,
+                selected_mac,
+                &dpu_id,
+                db::machine_interface::DpuHostInterfaceOwnership::UnpairedDpu,
+                false,
+                None,
+            );
+            tokio::pin!(attempt);
+            tokio::select! {
+                result = &mut attempt => panic!("{scenario}: attachment bypassed the static writer: {result:?}"),
+                _ = wait_for_blocked_query(&env.pool, writer_pid, "WHERE id = $1 FOR UPDATE") => {},
+            }
+            owner_writer.commit().await?;
+            let error = tokio::time::timeout(Duration::from_secs(30), &mut attempt)
+                .await?
+                .expect_err(
+                    "BF4 must reject ownership committed while its selected-row lock waited",
+                );
+            assert!(
+                matches!(error, db::DatabaseError::FailedPrecondition(message)
+                if message.contains("conflicting ownership"))
+            );
+        }
+        attachment.rollback().await?;
+
+        // Reload the committed ownership before the public request so helper rejection cannot hide a changed DPU attachment.
+        let published = db::machine_interface::find_one(&env.pool, published.id).await?;
+        assert_eq!(published.machine_id, owner, "{scenario}");
+        assert!(published.attached_dpu_machine_id.is_none(), "{scenario}");
+        assert_eq!(published.addresses, vec![static_address], "{scenario}");
+        assert_eq!(published.primary_interface, owner.is_none(), "{scenario}");
+        assert_eq!(published.boot_interface_id.as_deref(), Some("NIC.Static.1"));
+
+        // Exercise public source-IP authentication with the same stable DPU for rejection and the unowned success control.
+        let mut request = discovery_request_from(&report, Some(caller.id), source_address);
+        request.get_mut().discovery_reporter = rpc::MachineDiscoveryReporter::DpuAgent as i32;
+        let response = secure_api.discover_machine(request).await;
+        if owner.is_some() {
+            let rejection =
+                response.expect_err("the authenticated DPU cannot claim an owned host PF");
+            assert_eq!(rejection.code(), Code::FailedPrecondition);
+            assert!(rejection.message().contains("conflicting ownership"));
+        } else {
+            assert_eq!(response?.into_inner().machine_id, Some(dpu_id));
+        }
+
+        // Reload the row and allocation to prove failed attachment preserves inventory and successful attachment keeps Static addressing.
+        let persisted = db::machine_interface::find_one(&env.pool, published.id).await?;
+        if owner.is_some() {
+            assert_eq!(
+                serde_json::to_value(&persisted)?,
+                serde_json::to_value(&published)?
+            );
+        } else {
+            assert_eq!(
+                persisted.attached_dpu_machine_id,
+                Some(DpuMachineId::try_from(dpu_id)?)
+            );
+            assert_eq!(
+                persisted.machine_id,
+                Some(model::machine::machine_id::host_id_from_dpu_hardware_info(
+                    &report
+                )?)
+            );
+            assert_eq!(persisted.segment_id, published.segment_id);
+            assert_eq!(persisted.addresses, published.addresses);
+            assert_eq!(persisted.primary_interface, published.primary_interface);
+            assert_eq!(persisted.boot_interface_id, published.boot_interface_id);
+        }
+        let mut txn = env.pool.begin().await?;
+        let addresses =
+            db::machine_interface_address::find_for_interface(&mut txn, published.id).await?;
+        assert_eq!(addresses.len(), 1, "{scenario}");
+        assert_eq!(addresses[0].address, static_address, "{scenario}");
+        assert_eq!(
+            addresses[0].allocation_type,
+            model::allocation_type::AllocationType::Static,
+            "{scenario}"
+        );
+        let persisted_allocation = db::instance::find_by_machine_id(&mut txn, &allocated_host_id)
+            .await?
+            .expect("the unrelated host retains its persisted Instance");
+        assert_eq!(
+            persisted_allocation.id, original_allocation.id,
+            "{scenario}"
+        );
+        assert_eq!(
+            persisted_allocation.machine_id, original_allocation.machine_id,
+            "{scenario}"
+        );
+        assert_eq!(
+            persisted_allocation.config.network, original_allocation.config.network,
+            "{scenario}"
+        );
+        assert_eq!(
+            persisted_allocation.network_config_version, original_allocation.network_config_version,
+            "{scenario}"
+        );
+        assert_eq!(
+            persisted_allocation.deleted, original_allocation.deleted,
+            "{scenario}"
+        );
+        let topology = db::machine_topology::find_latest_by_machine_ids(&mut txn, &[dpu_id])
+            .await?
+            .remove(&dpu_id)
+            .expect("persisted DPU topology");
+        assert_eq!(
+            topology
+                .topology
+                .discovery_data
+                .info
+                .dpu_info
+                .expect("persisted DpuData")
+                .host_pfs,
+            if owner.is_some() {
+                Vec::new()
+            } else {
+                report
+                    .dpu_info
+                    .as_ref()
+                    .expect("BF4 report")
+                    .host_pfs
+                    .clone()
+            },
+            "{scenario}"
+        );
+        txn.rollback().await?;
+        assert_eq!(
+            load_scout_pci_selection_state(&env.pool, allocated_host.host().id).await?,
+            original_host,
+            "{scenario}"
+        );
+    }
+    Ok(())
+}
+
 /// While a DPU rediscovery holds its row locks mid-transaction it holds no
 /// advisory lock, so a creation-mode request for the admin segments is
 /// admitted beside it instead of queueing behind the fleet.

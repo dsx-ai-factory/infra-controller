@@ -2356,6 +2356,7 @@ version = "0.0.0"
 dependencies = [
  "arc-swap",
  "base64",
+ "carbide-api-model",
  "carbide-dpu-agent-utils",
  "carbide-instrument",
  "carbide-libmlx",

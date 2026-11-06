@@ -190,6 +190,23 @@ message LldpMedInventory {
   optional string model = 3;
 }
 
+// Records every host physical function observed by the DPU agent.
+// The API selects the boot target from this inventory.
+message DpuHostPf {
+  // PCI controller parsed from physical_port_name (zero is valid).
+  uint32 pci_controller_id = 1;
+  // Physical function parsed from physical_port_name (zero is valid).
+  uint32 pf_id = 2;
+  // Host-visible MAC read from this netdev's sysfs address.
+  string mac_address = 3;
+  // Complete Linux phys_port_name in c<decimal>pf<decimal> format.
+  string physical_port_name = 4;
+  // Linux interface name, when available, for diagnostics.
+  optional string netdev_name = 5;
+  // PCI BDF, when available, for diagnostics.
+  optional string pci_address = 6;
+}
+
 message DpuData {
   string part_number = 1;
   string part_description = 2;
@@ -198,6 +215,25 @@ message DpuData {
   string firmware_version = 5;
   string firmware_date = 6;
   repeated LldpSwitchData switches = 7;
+  // Complete BF4 host-PF inventory from DpuAgent discovery (not a partial update).
+  // BF2/BF3 registration ignores this field after wire conversion and retains
+  // existing boot selection. Malformed MAC text fails with INVALID_ARGUMENT
+  // before generation-specific registration checks.
+  // BF4 DpuAgent reports require nonempty inventory. Omission and an empty list
+  // both fail with FAILED_PRECONDITION, including after initial registration.
+  // Each (pci_controller_id, pf_id) must be unique, match physical_port_name,
+  // and carry a nonzero unicast MAC. Zero identifies controller/PF 0, not a fallback.
+  // Invalid physical-port identities, duplicate keys, and zero or multicast MACs
+  // fail with FAILED_PRECONDITION for BF4 DpuAgent reports.
+  // Only BF4 DpuAgent discovery initializes and enforces registered inventory.
+  // Later reports must retain the registered controller/PF keys and MACs.
+  // Changed identity fails with FAILED_PRECONDITION. Diagnostic fields can differ
+  // without replacing stored values. Generic discovery preserves registration.
+  // Legacy BF4 data can omit this field until the first supporting agent report.
+  // Automatic BF4 boot selection waits for the configured controller's PF 0.
+  // Older APIs ignore this field, so a BF4 agent whose first report reaches one
+  // must register again after supporting APIs serve all traffic.
+  repeated DpuHostPf host_pfs = 8;
 }
 
 message GpuPlatformInfo {

@@ -32,11 +32,12 @@ name = "carbide_host_support"
 carbide-instrument = { path = "../instrument" }
 
 # [local-dependencies]
+carbide-api-model = { path = "../api-model" }
 carbide-dpu-agent-utils = { path = "../dpu-agent-utils" }
 carbide-tls = { path = "../tls" }
 carbide-libmlx = { path = "../libmlx" }
 logfmt = { path = "../logfmt" }
-carbide-rpc = { path = "../rpc" }
+carbide-rpc = { path = "../rpc", features = ["model"] }
 carbide-rpc-utils = { path = "../rpc-utils" }
 carbide-utils = { path = "../utils" }
 carbide-uuid = { path = "../uuid" }

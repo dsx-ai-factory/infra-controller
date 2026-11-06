@@ -446,6 +446,7 @@ impl From<DatabaseError> for CarbideError {
                 ExpectedSwitchDuplicateNvosMacAddress(e)
             }
             DatabaseError::FailedPrecondition(e) => FailedPrecondition(e),
+            error @ DatabaseError::DpuHostPf { .. } => FailedPrecondition(error.to_string()),
             DatabaseError::FindOneReturnedManyResultsError(e) => FindOneReturnedManyResultsError(e),
             DatabaseError::FindOneReturnedNoResultsError(e) => FindOneReturnedNoResultsError(e),
             DatabaseError::GenericErrorFromReport(e) => GenericErrorFromReport(e),

@@ -3182,6 +3182,42 @@ pub async fn try_update_controller_state(
     Ok(ConditionalWrite::Applied(()))
 }
 
+/// Locks a host's captured controller and network versions until HostInit publication so BF4 repair cannot invalidate accepted DPU acknowledgments.
+///
+/// A missing host or either changed version returns `NotApplied(ControllerStateNotCurrent)`.
+/// Callers must keep this transaction open through the controller-state write and commit or rollback.
+pub async fn lock_host_init_network_config(
+    txn: &mut PgConnection,
+    host_id: &HostMachineId,
+    expected_state_version: ConfigVersion,
+    expected_network_version: ConfigVersion,
+) -> Result<ConditionalWrite<(), ControllerStateNotCurrent>, DatabaseError> {
+    // Acquire history retention before the host row to match `advance` and controller-state persistence.
+    let query = "SELECT pg_advisory_xact_lock(\
+                    hashtextextended($1, 'machine_state_history'::regclass::bigint)\
+                )";
+    sqlx::query(query)
+        .bind(host_id.to_string())
+        .execute(&mut *txn)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))?;
+    // Reject either stale token while locking the host row so network writers cannot advance the accepted version.
+    let query = "SELECT id FROM machines
+                 WHERE id = $1 AND controller_state_version = $2 AND network_config_version = $3
+                 FOR UPDATE";
+    let locked: Option<HostMachineId> = sqlx::query_scalar(query)
+        .bind(host_id)
+        .bind(expected_state_version)
+        .bind(expected_network_version)
+        .fetch_optional(txn)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))?;
+    Ok(match locked {
+        Some(_) => ConditionalWrite::Applied(()),
+        None => ConditionalWrite::NotApplied(ControllerStateNotCurrent),
+    })
+}
+
 /// `lock_nic_firmware_state` locks history retention before the host row and
 /// checks the snapshot used by firmware reconciliation. A missing host or stale
 /// version returns `NotApplied(ControllerStateNotCurrent)` without any writes.

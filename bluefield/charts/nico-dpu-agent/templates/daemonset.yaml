@@ -229,6 +229,9 @@ spec:
               mountPath: {{ .Values.certsDir | default "/opt/forge" }}
             - name: hw-cache
               mountPath: /data
+              readOnly: false
+            - name: sys
+              mountPath: /host-sys
               readOnly: true
             - name: host-grpc-socket-dir
               mountPath: /var/run/dpf/weave/grpc

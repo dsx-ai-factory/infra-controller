@@ -111,19 +111,23 @@ impl MachineCreator {
     /// Identification runs independently of whether machine creation is enabled.
     pub(crate) fn identify_managed_hosts(
         candidates: Vec<ConfiguredIngestionCandidate>,
+        registered: &HashMap<
+            carbide_uuid::machine::MachineId,
+            model::machine::topology::MachineTopology,
+        >,
+        controller: u8,
         metrics: &mut SiteExplorationMetrics,
     ) -> (Vec<IdentifiedManagedHost>, HostBootInterfaces) {
         let mut managed_hosts = Vec::new();
         let mut boot_interfaces = HostBootInterfaces::new();
         for candidate in candidates {
-            let ConfiguredIngestionCandidate {
-                endpoint: ep,
-                dpus,
-                host_dpu_policy,
-                declared_primary,
-            } = candidate;
-            let managed_host = match host_dpu_policy {
+            let managed_host = match candidate.host_dpu_policy {
                 HostDpuPolicy::Ignore => {
+                    let ConfiguredIngestionCandidate {
+                        endpoint: ep,
+                        declared_primary,
+                        ..
+                    } = candidate;
                     // Keep the DPU slice empty so ignored DPU PFs cannot become
                     // fallback primaries, while still refreshing a declared host NIC.
                     let primary_interface_selection = ep
@@ -143,10 +147,9 @@ impl MachineCreator {
                     })
                 }
                 HostDpuPolicy::Manage | HostDpuPolicy::Nic => Self::build_managed_host(
-                    ep,
-                    dpus,
-                    host_dpu_policy,
-                    declared_primary,
+                    candidate,
+                    registered,
+                    controller,
                     &mut boot_interfaces,
                     metrics,
                 ),
@@ -163,17 +166,25 @@ impl MachineCreator {
 
     /// Builds an identified managed host by ordering DPUs and selecting its primary interface.
     ///
-    /// Returns `None` when the selected boot MAC does not match the discovered DPUs.
+    /// Returns `None` when the selected boot MAC does not match the discovered DPUs, except for a resolved declared primary.
     /// Report-selected boot interfaces are recorded even when that mismatch blocks
     /// identification. The caller handles hosts with the `Ignore` policy separately.
     fn build_managed_host(
-        ep: ExploredEndpoint,
-        mut dpus_explored_for_host: Vec<ExploredDpu>,
-        host_dpu_policy: HostDpuPolicy,
-        declared_primary: Option<MacAddress>,
+        candidate: ConfiguredIngestionCandidate,
+        registered: &HashMap<
+            carbide_uuid::machine::MachineId,
+            model::machine::topology::MachineTopology,
+        >,
+        controller: u8,
         boot_interfaces: &mut HostBootInterfaces,
         metrics: &mut SiteExplorationMetrics,
     ) -> Option<IdentifiedManagedHost> {
+        let ConfiguredIngestionCandidate {
+            endpoint: ep,
+            dpus: mut dpus_explored_for_host,
+            host_dpu_policy,
+            declared_primary,
+        } = candidate;
         // The host report owns the physical chassis identity, while each
         // `ExploredDpu` owns the DPU endpoint report. Join those views by
         // the same serial number used for DPU pairing before we choose a
@@ -183,14 +194,79 @@ impl MachineCreator {
         // ExpectedMachine and complete UEFI PCI evidence resolve the order
         // before either provisional Redfish fallback is considered.
         let mut dpu_order_resolved = false;
-        let mut primary_interface_selection = ep
-            .report
-            .select_host_primary_interface(&dpus_explored_for_host, declared_primary);
+        let boot_dpus = match dpus_explored_for_host
+            .iter()
+            .map(|dpu| {
+                dpu.boot_interface_dpu(
+                    dpu.report
+                        .machine_id
+                        .as_ref()
+                        .and_then(|id| registered.get(id))
+                        .and_then(|topology| {
+                            topology.topology.discovery_data.info.dpu_info.as_ref()
+                        }),
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()
+        {
+            Ok(dpus) => dpus,
+            Err(error) => {
+                tracing::warn!(host_bmc_ip_address = %ep.address, %error,
+                    "Cannot resolve paired DPU identities for boot selection");
+                return None;
+            }
+        };
+        let uses_registered_host_pfs = host_dpu_policy == HostDpuPolicy::Manage
+            && boot_dpus
+                .iter()
+                .any(|dpu| dpu.hardware.required_host_pf(controller).is_some());
+        let mut primary_interface_selection = if uses_registered_host_pfs {
+            ep.report
+                .select_host_primary_interface_from_dpus(&boot_dpus, declared_primary, controller)
+                .map_err(|reason| {
+                    tracing::debug!(host_bmc_ip_address = %ep.address, %reason,
+                    "Registered BF4 boot-interface selection is unresolved")
+                })
+                .ok()
+        } else {
+            ep.report
+                .select_host_primary_interface(&dpus_explored_for_host, declared_primary)
+        };
         if let Some(selection) = primary_interface_selection {
             let mac_address = selection.mac_address;
             boot_interfaces.add(&ep, mac_address);
 
-            match Self::apply_report_selection(&mut dpus_explored_for_host, selection.mac_address) {
+            let ordering = if uses_registered_host_pfs {
+                // Derive DPU order from the selected registered MAC while preserving provisional base identity.
+                let selected_dpu = boot_dpus.iter().find(|dpu| {
+                    dpu.host_mac_address(controller).ok().flatten() == Some(selection.mac_address)
+                });
+                match selected_dpu.and_then(|selected_dpu| {
+                    dpus_explored_for_host.iter().position(|dpu| {
+                        dpu.report.machine_id == Some(selected_dpu.dpu_machine_id.into())
+                    })
+                }) {
+                    Some(position) => {
+                        dpus_explored_for_host.swap(0, position);
+                        ReportSelectionOrdering::Applied
+                    }
+                    // A declared integrated NIC need not match any DPU.
+                    None if selection.source == BootInterfaceSelectionSource::ExpectedMachine => {
+                        ReportSelectionOrdering::Applied
+                    }
+                    None => ReportSelectionOrdering::Mismatch,
+                }
+            } else if selection.source == BootInterfaceSelectionSource::ExpectedMachine
+                && !dpus_explored_for_host
+                    .iter()
+                    .any(|dpu| dpu.host_pf_mac_address == Some(selection.mac_address))
+            {
+                // The declaration can identify an integrated NIC while every DPU remains managed.
+                ReportSelectionOrdering::Applied
+            } else {
+                Self::apply_report_selection(&mut dpus_explored_for_host, selection.mac_address)
+            };
+            match ordering {
                 ReportSelectionOrdering::Applied => dpu_order_resolved = true,
                 ReportSelectionOrdering::NoDpus => {}
                 ReportSelectionOrdering::Mismatch => {
@@ -222,7 +298,10 @@ impl MachineCreator {
         if !dpu_order_resolved && dpus_explored_for_host.len() > 1 {
             match Self::sort_dpus_by_redfish_chassis_id(&mut dpus_explored_for_host) {
                 Ok(selection) => {
-                    primary_interface_selection = Some(selection);
+                    // Chassis ordering remains provisional for BF4 and cannot satisfy boot readiness.
+                    if !uses_registered_host_pfs {
+                        primary_interface_selection = Some(selection);
+                    }
                     dpu_order_resolved = true;
                 }
                 Err(error) => {
@@ -246,7 +325,9 @@ impl MachineCreator {
             // persist the exact reason only when that same MAC becomes the
             // durable desired target.
             let serial_selection = Self::sort_dpus_by_redfish_serial(&mut dpus_explored_for_host);
-            if let Some(selection) = serial_selection {
+            if let Some(selection) = serial_selection
+                && !uses_registered_host_pfs
+            {
                 primary_interface_selection = Some(selection);
             }
         }

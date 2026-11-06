@@ -4713,7 +4713,7 @@ async fn load_boot_predictions(
     Ok(predictions)
 }
 
-/// Resolve one boot-config step from either its explicit target or current
+/// Resolve one boot-config step from its explicit target, BF4 desired intent, or current
 /// interface state.
 ///
 /// An explicit target is complete input, so resolving it does not require
@@ -4725,6 +4725,22 @@ async fn resolve_boot_interface_for_step(
 ) -> Result<BootInterfaceResolution, StateHandlerError> {
     if let Some(target) = explicit_target {
         return Ok(BootInterfaceResolution::Ready(target.clone()));
+    }
+
+    // BF4 boot intent can differ from networking primary selection; retain the existing interface fallback for other platforms.
+    if mh_snapshot.dpu_snapshots.iter().any(|dpu| {
+        dpu.status
+            .hardware_info
+            .as_ref()
+            .and_then(|hardware| hardware.dpu_info.as_ref())
+            .is_some_and(|hardware| {
+                hardware
+                    .required_host_pf(ctx.services.site_config.dpu_host_pf_pci_controller_id)
+                    .is_some()
+            })
+    }) && let Some(desired) = &mh_snapshot.host_snapshot.config.desired_boot_interface
+    {
+        return Ok(BootInterfaceResolution::Ready(desired.value.clone().into()));
     }
 
     let predictions = load_boot_predictions(ctx, &mh_snapshot.host_snapshot.id).await?;
@@ -5739,10 +5755,60 @@ impl DpuMachineStateHandler {
                     }
                 }
 
+                // Reject a completed repair and hold the accepted network version through HostInit persistence.
+                let mut txn = ctx.services.db_pool.begin().await?;
+                let locked = db::machine::lock_host_init_network_config(
+                    &mut txn,
+                    &state.host_snapshot.id,
+                    state.host_snapshot.state.version,
+                    state.host_snapshot.network_config.version,
+                )
+                .await?;
+                if let Err(error) = locked.check_applied() {
+                    txn.rollback().await?;
+                    return Err(error);
+                }
+
+                // Re-read acknowledgments under the host lock because DPU reports may have changed since the controller snapshot.
+                let current = db::managed_host::load_snapshot(
+                    txn.as_mut(),
+                    &state.host_snapshot.id.into(),
+                    LoadSnapshotOptions::default(),
+                )
+                .await?
+                .ok_or_else(|| StateHandlerError::MissingData {
+                    object_id: state.host_snapshot.id.to_string(),
+                    missing: "host after HostInit network lock",
+                })?;
+                for dpu in &current.dpu_snapshots {
+                    if let Some(reason) = dpu_network_not_ready_reason(
+                        dpu,
+                        current.host_snapshot.network_config.version,
+                    ) {
+                        txn.rollback().await?;
+                        return Ok(StateHandlerOutcome::wait(
+                            dpu_network_not_ready_wait_message(&dpu.id, reason, &None),
+                        ));
+                    }
+                }
+
+                // Recompute registered boot readiness after network convergence and resumed exploration.
+                if let Some(reason) = db::host_boot_interface::not_ready_reason_for_snapshot(
+                    &mut txn,
+                    current,
+                    ctx.services.site_config.dpu_host_pf_pci_controller_id,
+                )
+                .await?
+                {
+                    txn.rollback().await?;
+                    return Ok(StateHandlerOutcome::wait(format!(
+                        "Waiting for BF4 boot interface: {reason}"
+                    )));
+                }
                 let next_state = ManagedHostState::HostInit {
                     machine_state: MachineState::EnableIpmiOverLan,
                 };
-                Ok(StateHandlerOutcome::transition(next_state))
+                Ok(StateHandlerOutcome::transition(next_state).with_txn(txn))
             }
             DpuInitState::WaitingForNetworkInstall => {
                 tracing::warn!(

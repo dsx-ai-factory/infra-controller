@@ -35,6 +35,9 @@ use regex::Regex;
 use serde::{Deserialize, Deserializer, Serialize};
 use sha2::Digest;
 
+mod boot_interface;
+pub use boot_interface::{HostBootInterfaceDpu, HostPrimaryInterfaceError};
+
 use super::DpuModel;
 use super::bmc_info::BmcInfo;
 use super::hardware_info::DpuData;
@@ -563,59 +566,13 @@ impl EndpointExplorationReport {
         explored_dpus: &[ExploredDpu],
         declared_primary: Option<MacAddress>,
     ) -> Option<HostPrimaryInterfaceSelection> {
-        // A declared primary wins as long as the report has it as a full pair
-        // (`find_interface_id_for_mac` scans every system ethernet interface,
-        // integrated NICs included).
-        if let Some(declared) = declared_primary
-            && self.find_interface_id_for_mac(declared).is_some()
-        {
-            return Some(HostPrimaryInterfaceSelection {
-                mac_address: declared,
-                source: BootInterfaceSelectionSource::ExpectedMachine,
-            });
-        }
-
-        let system = self.systems.first()?;
-
         // Gather explored DPUs mac.
-        let explored_dpus_macs = explored_dpus
+        let macs = explored_dpus
             .iter()
-            .filter_map(|x| x.host_pf_mac_address)
-            .collect::<Vec<MacAddress>>();
-
-        // Filter PCI device names only for the interfaces which are mapped to DPU.
-        // Host might have some integrated or embedded interfaces, which are not used by forge.
-        // Need to ignore them.
-        let interfaces = system
-            .ethernet_interfaces
-            .iter()
-            .filter(|x| {
-                if let Some(mac) = x.mac_address {
-                    explored_dpus_macs.contains(&mac)
-                } else {
-                    false
-                }
-            })
-            .collect::<Vec<&EthernetInterface>>();
-
-        let interfaces = interfaces
-            .into_iter()
-            .map(|interface| {
-                let ordering_key = interface.uefi_device_path.as_ref()?.ordering_key().ok()?;
-                Some((interface, ordering_key))
-            })
-            .collect::<Option<Vec<_>>>()?;
-        let (interface_with_min_pci, _) = interfaces
-            .into_iter()
-            .min_by(|(_, left), (_, right)| left.cmp(right))?;
-
-        // If we know the bootable interface name, find the MAC address associated with it.
-        interface_with_min_pci
-            .mac_address
-            .map(|mac_address| HostPrimaryInterfaceSelection {
-                mac_address,
-                source: BootInterfaceSelectionSource::RedfishUefiPci,
-            })
+            .filter_map(|dpu| dpu.host_pf_mac_address)
+            .collect::<Vec<_>>();
+        self.select_host_primary_interface_from_macs(&macs, declared_primary)
+            .ok()
     }
 }
 
@@ -882,7 +839,9 @@ pub struct SystemStatus {
 pub struct ExploredDpu {
     /// The DPUs BMC IP
     pub bmc_ip: IpAddr,
-    /// The MAC address that is visible to the host (provided by the DPU)
+    /// The MAC address visible to the host for BF2/BF3 (provided by the DPU).
+    /// For BF4 this Redfish-derived base MAC is provisional pairing evidence;
+    /// registered host-visible PF MACs are stored in HardwareInfo instead.
     #[serde(with = "serialize_option_display", default)]
     pub host_pf_mac_address: Option<MacAddress>,
     /// The trimmed, nonblank host BMC `Chassis.id` associated with this DPU's

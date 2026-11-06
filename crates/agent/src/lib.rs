@@ -25,9 +25,11 @@ use std::time::Duration;
 use ::rpc::DiscoveryInfo;
 use ::rpc::forge_tls_client::ForgeClientConfig;
 use ::rpc::machine_discovery::{DmiData, DpuData};
-use carbide_host_support::agent_config::AgentConfig;
+use backon::{ConstantBuilder, Retryable};
+use carbide_host_support::agent_config::{AgentConfig, IterationTime};
 use carbide_host_support::hardware_enumeration::{
-    enumerate_and_save_hardware, enumerate_hardware, load_hardware_from_cache,
+    HardwareEnumerationError, enumerate_and_save_hardware, enumerate_hardware,
+    load_hardware_from_cache, validate_enumerated,
 };
 use carbide_host_support::registration::register_machine;
 use carbide_utils::arch::CpuArchitecture;
@@ -892,12 +894,12 @@ async fn register(
     let hardware_info = if agent.machine.is_fake_dpu {
         fake_dpu_discovery_info()
     } else {
-        match platform_type {
-            AgentPlatformType::Containerized => {
-                load_hardware_from_cache().wrap_err("load_hardware_from_cache failed")
-            }
-            _ => enumerate_hardware().wrap_err("enumerate_hardware failed"),
-        }?
+        // Retry incomplete sysfs inventory before phone-home using the existing registration limits.
+        enumerate_registration_hardware(&agent.period, || match platform_type {
+            AgentPlatformType::Containerized => load_hardware_from_cache(),
+            _ => enumerate_hardware(),
+        })
+        .await?
     };
 
     let factory_mac_address: MacAddress = match hardware_info.dpu_info.as_ref() {
@@ -936,6 +938,32 @@ async fn register(
         machine_id,
         factory_mac_address,
     })
+}
+
+/// Retries hardware enumeration and completeness validation within the registration limits so
+/// incomplete inventory cannot reach registration.
+async fn enumerate_registration_hardware(
+    period: &IterationTime,
+    mut enumerate: impl FnMut() -> Result<DiscoveryInfo, HardwareEnumerationError>,
+) -> eyre::Result<DiscoveryInfo> {
+    // Validate each fresh observation so newly available sysfs facts can complete an earlier probe.
+    (|| {
+        std::future::ready(enumerate().and_then(|info| {
+            validate_enumerated(&info)?;
+            Ok(info)
+        }))
+    })
+    .retry(
+        ConstantBuilder::default()
+            .with_delay(Duration::from_secs(period.discovery_retry_secs))
+            .with_max_times(period.discovery_retries_max as usize),
+    )
+    .notify(|error, delay| {
+        tracing::warn!(%error, retry_delay_seconds = delay.as_secs(),
+            "DPU hardware inventory is incomplete; retrying before registration");
+    })
+    .await
+    .wrap_err("DPU hardware inventory could not be completed before registration")
 }
 
 /// Builds synthetic DPU discovery information for fake-DPU tests and local development.
@@ -996,6 +1024,7 @@ fn fill_fake_dpu_info(hardware_info: &mut DiscoveryInfo) {
         firmware_version: "1".to_string(),
         firmware_date: "01/01/1970".to_string(),
         switches: vec![],
+        host_pfs: vec![],
     });
 }
 

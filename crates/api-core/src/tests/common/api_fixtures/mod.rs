@@ -1866,6 +1866,8 @@ async fn create_test_env_with_overrides_inner(
         SiteExplorerConfig {
             enabled: Arc::new(true.into()),
             retained_boot_interface_window: None,
+            // Keep manual exploration on the API's configured host-PF controller.
+            dpu_host_pf_pci_controller_id: api.runtime_config.dpu_host_pf_pci_controller_id,
             admin_fnn_enabled: api
                 .runtime_config
                 .fnn
@@ -2708,7 +2710,8 @@ pub(in crate::tests) async fn create_managed_host_with_config(
     env: &TestEnv,
     config: ManagedHostConfig,
 ) -> TestManagedHost {
-    let mh = site_explorer::new_host(env, config)
+    // Keep the host-ingestion future on the heap to reduce stack use in tests that construct managed hosts.
+    let mh = Box::pin(site_explorer::new_host(env, config))
         .await
         .expect("Failed to create a new host");
 
