@@ -1409,6 +1409,72 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn empty_gnmi_plan_remains_registered_across_discovery_passes() {
+        // Exercise prune and spawn with gNMI enabled but no streams selected.
+        // Its idle parent must survive each pass and still stop normally.
+        let mut gnmi = NvueGnmiConfig {
+            system_events_enabled: false,
+            ..Default::default()
+        };
+        gnmi.paths.components_enabled = false;
+        gnmi.paths.interfaces_enabled = false;
+        gnmi.paths.platform_general_enabled = false;
+        gnmi.paths.leak_sensors_enabled = false;
+        let mut config = Config::default();
+        config.collectors.nvue = Configurable::Enabled(NvueCollectorConfig {
+            rest: Configurable::Disabled,
+            gnmi: Configurable::Enabled(gnmi),
+        });
+        let mut ctx = context_with_config(config, "empty_gnmi_discovery");
+        let endpoint = test_endpoint(
+            Ipv4Addr::new(10, 0, 0, 9),
+            "55:66:77:88:99:cc",
+            Some(switch_metadata_with_role(
+                SwitchEndpointRole::Host,
+                true,
+                false,
+                "empty",
+            )),
+        );
+
+        for _ in 0..2 {
+            ctx.collectors.prune_finished_collectors();
+            spawn_collectors_for_endpoint(&mut ctx, &endpoint, None, "empty_gnmi_discovery")
+                .expect("empty plan must remain registered");
+            tokio::task::yield_now().await;
+            assert_eq!(ctx.collectors.len(CollectorKind::NvueGnmi), 1);
+            assert!(
+                !ctx.collectors
+                    .map_mut(CollectorKind::NvueGnmi)
+                    .get(endpoint.key().as_str())
+                    .unwrap()
+                    .is_finished()
+            );
+        }
+
+        assert!(
+            ctx.metrics_manager
+                .export_metrics()
+                .unwrap()
+                .contains("nvue_gnmi_connection_state")
+        );
+        let collector = ctx
+            .collectors
+            .map_mut(CollectorKind::NvueGnmi)
+            .remove(endpoint.key().as_str())
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), collector.stop())
+            .await
+            .expect("idle collector must stop on cancellation");
+        assert!(
+            !ctx.metrics_manager
+                .export_metrics()
+                .unwrap()
+                .contains("nvue_gnmi")
+        );
+    }
+
+    #[tokio::test]
     async fn test_switch_host_primary_starts_collectors_and_reuses_gnmi_cache() {
         let mut config = Config::default();
         config.collectors.sensors = Configurable::Disabled;
@@ -1492,7 +1558,20 @@ mod tests {
         spawn_collectors_for_endpoint(&mut ctx, &endpoint, Some(sink), "test")
             .expect("respawn should succeed");
 
-        let exported = ctx.metrics_manager.export_telemetry().unwrap();
+        let exported = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let exported = ctx.metrics_manager.export_telemetry().unwrap();
+                if exported.lines().any(|line| {
+                    line.starts_with("test_nvue_gnmi_extended_retained_scalar_count{")
+                        && line.contains("serial_number=\"MT2515600ZYB\"")
+                }) {
+                    break exported;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("replacement stream must republish its retained reading");
 
         let reading = exported
             .lines()
@@ -2123,7 +2202,7 @@ mod tests {
         .await
         .expect("periodic fallback expiry should request immediate reconciliation");
 
-        ctx.collectors.prune_finished_logs();
+        ctx.collectors.prune_finished_collectors();
 
         assert_eq!(ctx.collectors.len(CollectorKind::Logs), 0);
 
