@@ -440,7 +440,7 @@ type InstanceDAO interface {
 	//
 	CreateMultiple(ctx context.Context, tx *db.Tx, inputs []InstanceCreateInput) ([]Instance, error)
 	//
-	GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, includeRelations []string) (*Instance, error)
+	GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, includeRelations []string, forUpdate bool) (*Instance, error)
 	//
 	GetCountByStatus(ctx context.Context, tx *db.Tx, tenantID *uuid.UUID, siteID *uuid.UUID) (InstanceCountByStatus, error)
 	//
@@ -487,7 +487,7 @@ func (isd InstanceSQLDAO) Create(ctx context.Context, tx *db.Tx, input InstanceC
 // "Site", "InstanceType", "Vpc", "Machine", "OperatingSystem", "NetworkSecurityGroup"
 // Allocation relations are intentionally omitted because direct instance-allocation linkage was removed.
 // returns db.ErrDoesNotExist error if the record is not found
-func (isd InstanceSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, includeRelations []string) (_ *Instance, retErr error) {
+func (isd InstanceSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, includeRelations []string, forUpdate bool) (_ *Instance, retErr error) {
 	i := &Instance{}
 	// Create a child span and set the attributes for current request
 	ctx, instanceDAOSpan := cotel.StartSpan(ctx, "InstanceDAO.GetByID")
@@ -495,6 +495,10 @@ func (isd InstanceSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, 
 	cotel.SetAttribute(instanceDAOSpan, attribute.String("id", id.String()))
 
 	query := db.GetIDB(tx, isd.dbSession).NewSelect().Model(i).Where("i.id = ?", id)
+
+	if forUpdate {
+		query = query.For("UPDATE")
+	}
 
 	for _, relation := range includeRelations {
 		query = query.Relation(relation)
@@ -811,7 +815,7 @@ func (isd InstanceSQLDAO) Clear(ctx context.Context, tx *db.Tx, input InstanceCl
 		}
 	}
 
-	nv, err := isd.GetByID(ctx, tx, i.ID, nil)
+	nv, err := isd.GetByID(ctx, tx, i.ID, nil, false)
 	if err != nil {
 		return nil, err
 	}
