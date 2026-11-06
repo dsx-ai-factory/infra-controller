@@ -6569,7 +6569,10 @@ path = "credentials.yaml"
                 ))
             };
             assert!(parse(max).is_ok(), "{field}={max} must be accepted");
-            assert!(parse(above_max).is_err(), "{field}={above_max} must be rejected");
+            assert!(
+                parse(above_max).is_err(),
+                "{field}={above_max} must be rejected"
+            );
         }
     }
 
