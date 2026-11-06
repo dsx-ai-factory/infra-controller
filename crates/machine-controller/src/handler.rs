@@ -6196,6 +6196,53 @@ fn host_power_cycle_due(cycle: i64, allow_power_cycle: bool, first_restart_in_st
     allow_power_cycle && !first_restart_in_state && cycle != 0 && cycle % 4 == 0
 }
 
+struct RestartSchedule {
+    next_potential_reboot_time: DateTime<Utc>,
+    first_restart_in_state: bool,
+    max_retry_duration: Duration,
+}
+
+fn restart_schedule(
+    reachability_params: &ReachabilityParams,
+    is_dpu: bool,
+    wait_period: Duration,
+    last_reboot_requested_at: DateTime<Utc>,
+    entered_state_at: DateTime<Utc>,
+) -> RestartSchedule {
+    let first_restart_delay = reachability_params.first_restart_delay(is_dpu);
+    let first_restart_at = entered_state_at + first_restart_delay;
+    let retry_at = last_reboot_requested_at + wait_period;
+    let first_restart_in_state = last_reboot_requested_at <= entered_state_at;
+    let hold_first_restart = is_dpu && reachability_params.dpu_first_restart_delay.is_some();
+    let next_potential_reboot_time = if retry_at <= entered_state_at {
+        // Handles this case:
+        // T0: State A
+        //      DPU was hung--Reboot DPU
+        //      DPU last requested reboot requested time: T0
+        // T1 (T0 + 1 hour): State B
+        //      DPU was hung; DPU wait period is 45 mins
+        //      If we only calculate the next reboot time from the last requested reboot time
+        //      the DPU's next potential reboot time = T0 + 45 < T1
+        // Our logic to detect the reboot cycle will return an error here,
+        // because the next reboot time is before the time the DPU entered State B.
+        // Update the DPU's next reboot time to be 5 minutes after it entered State B to handle
+        // this edge case.
+        first_restart_at
+    } else if first_restart_in_state && hold_first_restart {
+        retry_at.max(first_restart_at)
+    } else {
+        retry_at
+    };
+    // Let's stop at 15 cycles of reboot.
+    let max_retry_duration =
+        Duration::minutes(wait_period.num_minutes() * 15).max(first_restart_delay + wait_period);
+    RestartSchedule {
+        next_potential_reboot_time,
+        first_restart_in_state,
+        max_retry_duration,
+    }
+}
+
 #[derive(Debug)]
 pub struct RebootStatus {
     increase_retry_count: bool, // the vague previous return value
@@ -6476,29 +6523,19 @@ async fn trigger_reboot_if_needed_with_policy(
 
     let current_time = Utc::now();
     let entered_state_at = target.state.version.timestamp();
-    let first_restart_in_state = last_reboot_requested.time + wait_period <= entered_state_at;
-    let next_potential_reboot_time: DateTime<Utc> =
-        if !first_restart_in_state {
-            last_reboot_requested.time + wait_period
-        } else {
-            // Handles this case:
-            // T0: State A
-            //      DPU was hung--Reboot DPU
-            //      DPU last requested reboot requested time: T0
-            // T1 (T0 + 1 hour): State B
-            //      DPU was hung; DPU wait period is 45 mins
-            //      If we only calculate the next reboot time from the last requested reboot time
-            //      the DPU's next potential reboot time = T0 + 45 < T1
-            // Our logic to detect the reboot cycle will return an error here,
-            // because the next reboot time is before the time the DPU entered State B.
-            // Update the DPU's next reboot time to be 5 minutes after it entered State B to handle
-            // this edge case.
-            entered_state_at + reachability_params.first_restart_delay(target.is_dpu())
-        };
+    let RestartSchedule {
+        next_potential_reboot_time,
+        first_restart_in_state,
+        max_retry_duration,
+    } = restart_schedule(
+        reachability_params,
+        target.is_dpu(),
+        wait_period,
+        last_reboot_requested.time,
+        entered_state_at,
+    );
 
     let time_elapsed_since_state_change = (current_time - entered_state_at).num_minutes();
-    // Let's stop at 15 cycles of reboot.
-    let max_retry_duration = Duration::minutes(wait_period.num_minutes() * 15);
 
     let should_try = if let Some(retry_count) = retry_count {
         retry_count < 15
@@ -16479,6 +16516,74 @@ mod tests {
             ],
             |(cycle, allow_power_cycle, first_restart_in_state)| {
                 host_power_cycle_due(cycle, allow_power_cycle, first_restart_in_state)
+            },
+        );
+    }
+
+    #[test]
+    fn first_dpu_restart_waits_for_the_configured_delay() {
+        let entered_state_at =
+            chrono::DateTime::<Utc>::from_str("2024-01-30T11:26:18.261228950+00:00").unwrap();
+        let reachability_params = |dpu_first_restart_delay| ReachabilityParams {
+            dpu_wait_time: Duration::zero(),
+            power_down_wait: Duration::zero(),
+            failure_retry_time: Duration::zero(),
+            scout_reporting_timeout: Duration::zero(),
+            waiting_for_measurements_timeout: Duration::zero(),
+            uefi_boot_wait: Duration::zero(),
+            dpu_first_restart_delay,
+        };
+        check_values(
+            [
+                Check {
+                    scenario: "a DPU restarted just before the state waits the configured delay",
+                    input: (Some(15), true, 5, -1),
+                    expect: (15, true, 75),
+                },
+                Check {
+                    scenario: "unset keeps the retry period after a recent restart",
+                    input: (None, true, 5, -1),
+                    expect: (4, true, 75),
+                },
+                Check {
+                    scenario: "hosts keep the retry period after a recent restart",
+                    input: (Some(15), false, 5, -1),
+                    expect: (4, true, 75),
+                },
+                Check {
+                    scenario: "a DPU with an old restart waits the configured delay",
+                    input: (Some(15), true, 5, -60),
+                    expect: (15, true, 75),
+                },
+                Check {
+                    scenario: "later restarts in the state use the retry period",
+                    input: (Some(15), true, 5, 15),
+                    expect: (20, false, 75),
+                },
+                Check {
+                    scenario: "the retry budget outlasts a long first restart delay",
+                    input: (Some(20), true, 1, -60),
+                    expect: (20, true, 21),
+                },
+                Check {
+                    scenario: "unset keeps fifteen retry periods",
+                    input: (None, true, 1, -60),
+                    expect: (5, true, 15),
+                },
+            ],
+            |(dpu_first_restart_delay, is_dpu, wait_minutes, last_reboot_minutes)| {
+                let schedule = restart_schedule(
+                    &reachability_params(dpu_first_restart_delay.map(Duration::minutes)),
+                    is_dpu,
+                    Duration::minutes(wait_minutes),
+                    entered_state_at + Duration::minutes(last_reboot_minutes),
+                    entered_state_at,
+                );
+                (
+                    (schedule.next_potential_reboot_time - entered_state_at).num_minutes(),
+                    schedule.first_restart_in_state,
+                    schedule.max_retry_duration.num_minutes(),
+                )
             },
         );
     }
