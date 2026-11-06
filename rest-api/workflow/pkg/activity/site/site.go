@@ -170,7 +170,7 @@ func (mst ManageSite) UpdateSiteInDB(ctx context.Context, siteID uuid.UUID, core
 // machine interface, machine capability, operating system site association, instance, subnet, vpc, vpc peering, vpc prefix,
 // infiniband partition, nvlink logical partition, dpu extension service deployment, interface,
 // nvlink interface, infiniband interface, ssh key group associations to site and instance, sku, expected machine,
-// expected switch and expected power shelf.
+// pending Expected Machine batches, expected switch and expected power shelf.
 func (mst ManageSite) DeleteSiteComponentsFromDB(ctx context.Context, siteID uuid.UUID, infrastructureProviderID uuid.UUID, purgeMachines bool) error {
 	logger := log.With().Str("Activity", "DeleteSiteComponentsFromDB").Str("Site ID", siteID.String()).
 		Str("InfrastructureProvider ID", infrastructureProviderID.String()).Bool("Purge Machines", purgeMachines).Logger()
@@ -185,6 +185,15 @@ func (mst ManageSite) DeleteSiteComponentsFromDB(ctx context.Context, siteID uui
 			logger.Error().Err(err).Msg("failed to retrieve Site from DB by ID")
 			return err
 		}
+	}
+
+	// The API soft-deletes the Site before teardown. Durable batch admission and
+	// recovery lock and re-read that row, preventing a late batch from recreating its
+	// members. Release private SKU references before deleting SKUs.
+	err = cdbm.NewPendingExpectedMachineBatchDAO(mst.dbSession).DeleteAllBySiteID(ctx, nil, siteID)
+	if err != nil {
+		logger.Error().Err(err).Msg("failed to delete pending Expected Machine batches from DB")
+		return err
 	}
 
 	itDAO := cdbm.NewInstanceTypeDAO(mst.dbSession)
