@@ -3857,7 +3857,7 @@ pub async fn try_set_machine_maintenance_requested(
     Ok(claimed)
 }
 
-/// Cancels only an unstarted Reboot or legacy Reset owned by the rack initiator.
+/// Cancels only an unstarted Reboot or Reset owned by the rack initiator.
 /// Requests already claimed by a machine controller or owned by others are preserved.
 pub async fn clear_unclaimed_machine_restart_request(
     txn: &mut PgConnection,
@@ -3870,12 +3870,17 @@ pub async fn clear_unclaimed_machine_restart_request(
     let query = r#"UPDATE machines SET machine_maintenance_requested = NULL
         WHERE id = $1 AND controller_state->>'state' <> 'maintenance'
           AND machine_maintenance_requested->>'initiator' = $2
-          AND machine_maintenance_requested->'operation' IN ($3, $4)
+          AND machine_maintenance_requested->'operation' IN ($3, $4, $5)
         RETURNING id"#;
     Ok(sqlx::query_as::<_, MachineId>(query)
         .bind(machine_id)
         .bind(initiator)
-        .bind(sqlx::types::Json(MachineMaintenanceOperation::Reset))
+        .bind(sqlx::types::Json(MachineMaintenanceOperation::Reset {
+            graceful: false,
+        }))
+        .bind(sqlx::types::Json(MachineMaintenanceOperation::Reset {
+            graceful: true,
+        }))
         .bind(sqlx::types::Json(MachineMaintenanceOperation::Reboot))
         .fetch_optional(txn)
         .await
@@ -7697,7 +7702,7 @@ mod test {
                 txn.as_mut(),
                 machine_id,
                 "rack-test",
-                super::MachineMaintenanceOperation::Reset,
+                super::MachineMaintenanceOperation::Reset { graceful: false },
             )
             .await?;
             txn.commit().await?;
@@ -7870,7 +7875,7 @@ mod test {
                 txn.as_mut(),
                 machine_id,
                 "rack-test",
-                super::MachineMaintenanceOperation::Reset
+                super::MachineMaintenanceOperation::Reset { graceful: false }
             )
             .await?
         );
@@ -7905,10 +7910,11 @@ mod test {
             ("rack-test", Reboot, false, true),
             ("operator", Reboot, false, false),
             ("rack-test", Reboot, true, false),
-            ("rack-test", Reset, false, true),
-            ("operator", Reset, false, false),
+            ("rack-test", Reset { graceful: false }, false, true),
+            ("rack-test", Reset { graceful: true }, false, true),
+            ("operator", Reset { graceful: false }, false, false),
             ("rack-test", PowerOn, false, false),
-            ("rack-test", Reset, true, false),
+            ("rack-test", Reset { graceful: false }, true, false),
         ] {
             let mut txn = pool.begin().await?;
             super::create(
@@ -7920,13 +7926,26 @@ mod test {
                 super::CURRENT_STATE_MODEL_VERSION,
             )
             .await?;
-            super::set_machine_maintenance_requested(
-                txn.as_mut(),
-                machine_id,
-                initiator,
-                operation,
-            )
-            .await?;
+            if matches!(operation, Reset { graceful: false }) {
+                // Seed the predecessor JSON directly, independent of current serde behavior.
+                sqlx::query("UPDATE machines SET machine_maintenance_requested = $1 WHERE id = $2")
+                    .bind(serde_json::json!({
+                        "requested_at": "2026-10-01T00:00:00Z",
+                        "initiator": initiator,
+                        "operation": { "operation": "reset" }
+                    }))
+                    .bind(machine_id)
+                    .execute(txn.as_mut())
+                    .await?;
+            } else {
+                super::set_machine_maintenance_requested(
+                    txn.as_mut(),
+                    machine_id,
+                    initiator,
+                    operation,
+                )
+                .await?;
+            }
             let machine = super::find_one(txn.as_mut(), &machine_id, Default::default())
                 .await?
                 .unwrap();
@@ -8070,20 +8089,23 @@ mod test {
                 super::CURRENT_STATE_MODEL_VERSION,
             )
             .await?;
-            super::set_machine_maintenance_requested(
-                txn.as_mut(),
-                machine_id,
-                "component-manager",
-                Reset,
-            )
-            .await?;
+            // These requests were persisted before Reset carried a graceful flag.
+            sqlx::query("UPDATE machines SET machine_maintenance_requested = $1 WHERE id = $2")
+                .bind(serde_json::json!({
+                    "requested_at": "2026-10-01T00:00:00Z",
+                    "initiator": "component-manager",
+                    "operation": { "operation": "reset" }
+                }))
+                .bind(machine_id)
+                .execute(txn.as_mut())
+                .await?;
             let snapshot = super::find_one(txn.as_mut(), &machine_id, Default::default())
                 .await?
                 .unwrap();
             let captured = snapshot.machine_maintenance_requested.clone().unwrap();
             let next = if matches!(case, Pending::Legacy) {
                 ManagedHostState::Maintenance {
-                    operation: Reset,
+                    operation: Reset { graceful: false },
                     request: None,
                 }
             } else {
@@ -8165,6 +8187,17 @@ mod test {
                 history_before + if applied { 1 } else { 0 },
                 "{case:?}"
             );
+            if matches!(case, Pending::Current) {
+                assert_eq!(
+                    super::clear_machine_maintenance_requested(txn.as_mut(), machine_id, &captured)
+                        .await?,
+                    crate::ConditionalWrite::Applied(())
+                );
+                let completed = super::find_one(txn.as_mut(), &machine_id, Default::default())
+                    .await?
+                    .unwrap();
+                assert!(completed.machine_maintenance_requested.is_none());
+            }
             txn.rollback().await?;
         }
         Ok(())
