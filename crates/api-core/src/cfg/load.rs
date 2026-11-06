@@ -833,6 +833,14 @@ request_timeout_seconds = 5"#
     #[allow(clippy::result_large_err)]
     fn route_targets_are_validated_during_startup_loading() {
         figment::Jail::expect_with(|jail| {
+            // Put 257 valid targets in one prefix rule to exercise expanded-action admission.
+            let oversized_targets = (0..=256)
+                .map(|vni| format!("{{ asn = 64512, vni = {vni} }}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let oversized_conditional_exports = format!(
+                "[fnn.routing_profiles.OVERSIZED]\nroute_targets_on_exports_by_prefix = [{{ prefix = \"0.0.0.0/0\", route_targets = [{oversized_targets}] }}]"
+            );
             scenarios!(
                 run = |(name, settings)| {
                     // Parse each invalid profile through the same deferred loader used at startup.
@@ -865,6 +873,39 @@ route_target_imports = [{ asn = 429000000, vni = 0, vni_self = true }]"#,
             route_targets_on_exports = [{ asn = 429000000, vni = 0, vni_self = true }]"#,
                     ) => FailsWith(
                         "fnn.routing_profiles.INVALID.route_targets_on_exports[0] is invalid: route target cannot specify both vni and vni_self".to_string(),
+                    ),
+                    // Admin conditional rules must reject ineffective target lists at startup.
+                    (
+                        "admin-conditional-exports",
+                        r#"[fnn.admin_vpc]
+enabled = true
+[fnn.admin_vpc.routing_profile]
+route_targets_on_exports_by_prefix = [{ prefix = "::/0", route_targets = [] }]"#,
+                    ) => FailsWith(
+                        "fnn.admin_vpc.routing_profile.route_targets_on_exports_by_prefix is invalid: route_targets must contain at least one route target".to_string(),
+                    ),
+                    // Named profiles must validate the match mode as well as nested targets.
+                    (
+                        "named-conditional-exports",
+                        r#"[fnn.routing_profiles.INVALID]
+            route_targets_on_exports_by_prefix = [{ prefix = "0.0.0.0/0", match_type = "exact", max_prefix_length = 0, route_targets = [{ asn = 64512, vni = 100 }] }]"#,
+                    ) => FailsWith(
+                        "fnn.routing_profiles.INVALID.route_targets_on_exports_by_prefix is invalid: max_prefix_length is only accepted with match_type = le".to_string(),
+                    ),
+                    // A valid prefix rule must not bypass semantic validation of its nested target.
+                    (
+                        "named-conditional-target",
+                        r#"[fnn.routing_profiles.INVALID]
+            route_targets_on_exports_by_prefix = [{ prefix = "0.0.0.0/0", match_type = "exact", route_targets = [{ asn = 429000000, vni = 0, vni_self = true }] }]"#,
+                    ) => FailsWith(
+                        "fnn.routing_profiles.INVALID.route_targets_on_exports_by_prefix[0].route_targets[0] is invalid: route target cannot specify both vni and vni_self".to_string(),
+                    ),
+                    // Startup must count targets within a rule rather than only prefix entries.
+                    (
+                        "named-conditional-action-limit",
+                        oversized_conditional_exports.as_str(),
+                    ) => FailsWith(
+                        "fnn.routing_profiles.OVERSIZED.route_targets_on_exports_by_prefix is invalid: route_targets_on_exports_by_prefix exceeds 256 route-target actions".to_string(),
                     ),
                 }
             );

@@ -328,6 +328,7 @@ fn secondary_admin_service_listener_requires_dhcp_acceptance() {
 /// collection used by the fingerprint tests.
 fn comparison_routing_profile() -> rpc::RoutingProfile {
     rpc::RoutingProfile {
+        route_targets_on_exports_by_prefix: vec![],
         route_target_imports: vec![
             ::rpc::common::RouteTarget {
                 asn: 65_001,
@@ -1423,6 +1424,105 @@ impl OrderSensitiveInputReordering {
             }
         }
     }
+}
+
+/// Verifies cumulative export rules ignore ordering while changed targets and removal trigger reconciliation.
+#[test]
+fn current_network_version_tracks_conditional_export_changes() {
+    // Use distinct prefixes and targets to make both collection orders observable.
+    let mut config = comparison_service_network_config();
+    let rules = vec![
+        // Exact default-route tags have different matching semantics from the following rule.
+        rpc::PrefixRouteTarget {
+            prefix: "0.0.0.0/0".into(),
+            match_type: rpc::ExportPrefixMatchType::Exact as i32,
+            route_targets: vec![
+                ::rpc::common::RouteTarget {
+                    asn: 64512,
+                    vni: Some(100),
+                    vni_self: false,
+                },
+                ::rpc::common::RouteTarget {
+                    asn: 64512,
+                    vni: Some(200),
+                    vni_self: false,
+                },
+            ],
+            ..Default::default()
+        },
+        // The broader rule distinguishes entry ordering from target ordering.
+        rpc::PrefixRouteTarget {
+            prefix: "10.0.0.0/8".into(),
+            route_targets: vec![::rpc::common::RouteTarget {
+                asn: 64512,
+                vni: Some(300),
+                vni_self: false,
+            }],
+            ..Default::default()
+        },
+    ];
+    config
+        .routing_profile
+        .as_mut()
+        .expect("response profile")
+        .route_targets_on_exports_by_prefix = rules.clone();
+    for interface in &mut config.service_interfaces {
+        interface
+            .vpc_routing_profile
+            .as_mut()
+            .expect("service profile")
+            .route_targets_on_exports_by_prefix = rules.clone();
+    }
+    let mut current = CurrentNetworkVersion::default();
+    current.update_from(&config, None);
+
+    // Reorder every cumulative collection without changing any configured match or target.
+    let profile = config.routing_profile.as_mut().expect("response profile");
+    profile.route_targets_on_exports_by_prefix.reverse();
+    for entry in &mut profile.route_targets_on_exports_by_prefix {
+        entry.route_targets.reverse();
+    }
+    for interface in &mut config.service_interfaces {
+        let profile = interface
+            .vpc_routing_profile
+            .as_mut()
+            .expect("service profile");
+        profile.route_targets_on_exports_by_prefix.reverse();
+        for entry in &mut profile.route_targets_on_exports_by_prefix {
+            entry.route_targets.reverse();
+        }
+    }
+    assert!(current.matches_versions_from(&config, None));
+
+    // A changed target must invalidate the recorded configuration even with unchanged versions.
+    for interface in &mut config.service_interfaces {
+        interface
+            .vpc_routing_profile
+            .as_mut()
+            .expect("service profile")
+            .route_targets_on_exports_by_prefix[0]
+            .route_targets[0]
+            .vni = Some(301);
+    }
+    assert!(!current.matches_versions_from(&config, None));
+    current.update_from(&config, None);
+
+    // Removing the collection must trigger replacement so stale export maps can disappear.
+    config
+        .routing_profile
+        .as_mut()
+        .expect("response profile")
+        .route_targets_on_exports_by_prefix
+        .clear();
+    for interface in &mut config.service_interfaces {
+        interface
+            .vpc_routing_profile
+            .as_mut()
+            .expect("service profile")
+            .route_targets_on_exports_by_prefix
+            .clear();
+    }
+    assert!(!current.matches_versions_from(&config, None));
 }
 
 /// Interface order and equal-priority rule order must remain part of the

@@ -301,7 +301,8 @@ pub fn build(conf: NvueConfig) -> eyre::Result<String> {
     let deprecated_routing_profile = conf.ct_routing_profile.clone();
     let deprecated_tenant_routing_profile = deprecated_routing_profile
         .as_ref()
-        .map(TmplRoutingProfile::from);
+        .map(TmplRoutingProfile::try_from)
+        .transpose()?;
 
     // There are two assumptions about pre-FNN...
     // 1 - ManagedHostNetworkConfigResponse only has rules inherited either from VPC or Instance,
@@ -442,7 +443,9 @@ pub fn build(conf: NvueConfig) -> eyre::Result<String> {
             )
         });
 
-        let routing_profile = vpc_routing_profile.map(TmplRoutingProfile::from);
+        let routing_profile = vpc_routing_profile
+            .map(TmplRoutingProfile::try_from)
+            .transpose()?;
         let interface_profile = network.interface_routing_profile.as_ref();
         let interface_routing_profile = {
             match (vpc_routing_profile, interface_profile) {
@@ -1346,9 +1349,57 @@ pub struct RouteTargetConfig {
     pub vni: u32,
 }
 
-/// Converts an agent routing profile into the template-ready routing profile.
-impl From<&RoutingProfile> for TmplRoutingProfile {
-    fn from(profile: &RoutingProfile) -> Self {
+/// Converts a routing profile while validating conditional exports before NVUE publication.
+impl TryFrom<&RoutingProfile> for TmplRoutingProfile {
+    type Error = eyre::Report;
+
+    /// Validates conditional rules and prepares their ordered NVUE actions.
+    fn try_from(profile: &RoutingProfile) -> Result<Self, Self::Error> {
+        PrefixRouteTargetConfig::validate_entries(&profile.route_targets_on_exports_by_prefix)?;
+        let mut conditional_ipv4 = Vec::new();
+        let mut conditional_ipv6 = Vec::new();
+        for entry in &profile.route_targets_on_exports_by_prefix {
+            let maximum = entry.validate()?;
+            let rules = if entry.prefix.addr().is_ipv4() {
+                &mut conditional_ipv4
+            } else {
+                &mut conditional_ipv6
+            };
+            // Keep each RT action separate so continuation accumulates every matching target.
+            for target in &entry.route_targets {
+                target.validate()?;
+                rules.push(TmplPrefixRouteTarget {
+                    Index: String::new(),
+                    Prefix: entry.prefix.trunc().to_string(),
+                    Exact: maximum == u32::from(entry.prefix.prefix_len()),
+                    MaxPrefixLength: maximum,
+                    RouteTarget: TmplRouteTargetConfig {
+                        ASN: target.asn,
+                        VNI: target.vni,
+                    },
+                });
+            }
+        }
+        // Stabilize rule numbers independently of entry and target ordering.
+        for rules in [&mut conditional_ipv4, &mut conditional_ipv6] {
+            rules.sort_by(|left, right| {
+                (
+                    &left.Prefix,
+                    left.MaxPrefixLength,
+                    left.RouteTarget.ASN,
+                    left.RouteTarget.VNI,
+                )
+                    .cmp(&(
+                        &right.Prefix,
+                        right.MaxPrefixLength,
+                        right.RouteTarget.ASN,
+                        right.RouteTarget.VNI,
+                    ))
+            });
+            for (index, rule) in rules.iter_mut().enumerate() {
+                rule.Index = (index + 1).to_string();
+            }
+        }
         // Split mixed-family prefix lists before passing them to the template.
         let (v4leaks, v6leaks) =
             split_prefixes_by_family(&profile.accepted_leaks_from_underlay, None, 1);
@@ -1359,7 +1410,9 @@ impl From<&RoutingProfile> for TmplRoutingProfile {
         let has_leaks_from_underlay_ipv6 =
             profile.leak_default_route_from_underlay || !v6leaks.is_empty();
 
-        TmplRoutingProfile {
+        Ok(TmplRoutingProfile {
+            RouteTargetsOnExportsByPrefixIpv4: conditional_ipv4,
+            RouteTargetsOnExportsByPrefixIpv6: conditional_ipv6,
             TenantLeakCommunitiesAccepted: profile.tenant_leak_communities_accepted,
             LeakDefaultRouteFromUnderlay: profile.leak_default_route_from_underlay,
             LeakTenantHostRoutesToUnderlay: profile.leak_tenant_host_routes_to_underlay,
@@ -1387,7 +1440,7 @@ impl From<&RoutingProfile> for TmplRoutingProfile {
                     VNI: rt.vni,
                 })
                 .collect(),
-        }
+        })
     }
 }
 
@@ -1448,12 +1501,32 @@ pub struct NvueConfig {
     pub ct_routing_profile: Option<RoutingProfile>,
 }
 
+impl RouteTargetConfig {
+    /// Rejects concrete targets that cannot fit either ASN-specific BGP encoding.
+    pub(crate) fn validate(&self) -> eyre::Result<()> {
+        eyre::ensure!(
+            self.asn <= u16::MAX as u32 || self.vni <= u16::MAX as u32,
+            "route target ASN {} and local administrator {} cannot both exceed 65535",
+            self.asn,
+            self.vni,
+        );
+        Ok(())
+    }
+}
+
+/// Uses the shared prefix contract with the concrete targets required by NVUE.
+pub type PrefixRouteTargetConfig =
+    carbide_network::virtualization::PrefixRouteTargetConfig<RouteTargetConfig>;
+
 #[derive(Clone, Deserialize, Debug, PartialEq)]
 pub struct RoutingProfile {
     pub leak_default_route_from_underlay: bool,
     pub leak_tenant_host_routes_to_underlay: bool,
     pub route_target_imports: Vec<RouteTargetConfig>,
     pub route_targets_on_exports: Vec<RouteTargetConfig>,
+    /// Adds concrete targets to every matching export; omission preserves existing behavior.
+    #[serde(default)]
+    pub route_targets_on_exports_by_prefix: Vec<PrefixRouteTargetConfig>,
     pub tenant_leak_communities_accepted: bool,
     pub accepted_leaks_from_underlay: Vec<String>,
     #[serde(default)]
@@ -1803,6 +1876,8 @@ struct TmplNetworkSecurityGroupRule {
 #[allow(non_snake_case)]
 #[derive(Clone, Gtmpl, Debug, PartialEq)]
 struct TmplRoutingProfile {
+    RouteTargetsOnExportsByPrefixIpv4: Vec<TmplPrefixRouteTarget>,
+    RouteTargetsOnExportsByPrefixIpv6: Vec<TmplPrefixRouteTarget>,
     LeakTenantHostRoutesToUnderlay: bool,
     LeakDefaultRouteFromUnderlay: bool,
     RouteTargetImports: Vec<TmplRouteTargetConfig>,
@@ -1818,6 +1893,17 @@ struct TmplRoutingProfile {
     HasAllowedAnycastPrefixesIpv6: bool,
     AllowedAnycastPrefixesIpv4: Vec<Prefix>,
     AllowedAnycastPrefixesIpv6: Vec<Prefix>,
+}
+
+/// Carries one continuing RT action and its family-specific prefix-list match.
+#[allow(non_snake_case)]
+#[derive(Clone, Gtmpl, Debug, PartialEq)]
+struct TmplPrefixRouteTarget {
+    Index: String,
+    Prefix: String,
+    Exact: bool,
+    MaxPrefixLength: u32,
+    RouteTarget: TmplRouteTargetConfig,
 }
 
 #[allow(non_snake_case)]
@@ -2531,6 +2617,7 @@ mod tests {
         conf.deny_prefixes = vec!["192.0.2.0/24".into(), "2001:db8:bad::/48".into()];
         conf.site_fabric_prefixes = vec!["10.0.0.0/16".into(), "fd00:abcd::/32".into()];
         conf.ct_routing_profile = Some(RoutingProfile {
+            route_targets_on_exports_by_prefix: vec![],
             tenant_leak_communities_accepted: false,
             leak_default_route_from_underlay: false,
             leak_tenant_host_routes_to_underlay: false,
@@ -2671,6 +2758,7 @@ mod tests {
         conf.use_vpc_isolation = true;
         conf.site_fabric_prefixes = vec!["10.0.0.0/16".into(), "fd00::/32".into()];
         conf.ct_routing_profile = Some(RoutingProfile {
+            route_targets_on_exports_by_prefix: vec![],
             leak_default_route_from_underlay: false,
             leak_tenant_host_routes_to_underlay: false,
             tenant_leak_communities_accepted: false,
@@ -2738,6 +2826,173 @@ mod tests {
 
         // Require the loopback error so an unrelated fixture failure cannot satisfy the test.
         assert!(error.to_string().contains("invalid tenant VRF loopback"));
+    }
+
+    /// Verifies configured rules produce scoped, continuing export maps that disappear when the rules are cleared.
+    ///
+    /// Terminal permits and unchanged ordinary RT sources keep the generated policy additive;
+    /// advertised RT attributes still require qualification on the supported HBN image.
+    #[test]
+    fn conditional_exports_render_scoped_continuing_maps_and_remove_cleanly() {
+        // Render the same complete two-VPC fixture with only the first VPC's rules varied.
+        let render = |entries| {
+            let mut conf = dual_stack_fnn_config();
+            conf.common_internal_route_target = Some(RouteTargetConfig {
+                asn: 65002,
+                vni: 22,
+            });
+            let profile = conf.ct_routing_profile.as_mut().expect("FNN profile");
+            profile.route_targets_on_exports = vec![RouteTargetConfig {
+                asn: 64512,
+                vni: 90,
+            }];
+            profile.route_targets_on_exports_by_prefix = entries;
+            let mut other_port = dual_stack_fnn_config().ct_port_configs.swap_remove(0);
+            other_port.interface_name = "pf0vf1_if".into();
+            other_port.vlan = 101;
+            other_port.vni = Some(1001);
+            other_port.l3_vni = Some(200); // This VPC must not inherit the first VPC's conditional tags.
+            other_port.routing_profile = Some(minimal_fnn_routing_profile());
+            conf.ct_port_configs.push(other_port);
+            build(conf).expect("valid conditional export policy")
+        };
+        let mut entries: Vec<PrefixRouteTargetConfig> = serde_json::from_str(r#"[
+            {"prefix":"0.0.0.0/0","match_type":"exact","route_targets":[{"asn":64512,"vni":50000}]},
+            {"prefix":"10.0.0.0/8","route_targets":[{"asn":64512,"vni":50001}]},
+            {"prefix":"10.0.0.7/16","match_type":"le","max_prefix_length":24,"route_targets":[{"asn":64512,"vni":50002},{"asn":64512,"vni":50003}]},
+            {"prefix":"::/0","match_type":"exact","route_targets":[{"asn":64512,"vni":50004}]}
+        ]"#).expect("mixed-family overlapping rules");
+
+        // Compare configured output with the complete replacement after removing its rules.
+        let configured = render(entries.clone());
+        let removed = render(vec![]);
+        let configured: serde_yaml::Value =
+            serde_yaml::from_str(&configured).expect("configured YAML");
+        let removed: serde_yaml::Value = serde_yaml::from_str(&removed).expect("replacement YAML");
+        let active = &configured.as_sequence().expect("documents")[1]["set"];
+        let cleared = &removed.as_sequence().expect("documents")[1]["set"];
+        let maps = &active["router"]["policy"]["route-map"];
+
+        // Every matched action must continue, and every family must end with an unconditional permit.
+        for (family, action_count) in [
+            // IPv4 carries overlapping rules and multiple targets on one prefix.
+            ("4", 4),
+            // IPv6 uses its own map and exact default-route prefix list.
+            ("6", 1),
+        ] {
+            let map_name = format!("EXPORT_RT_vpc_100_V{family}");
+            let rules = &maps[&map_name]["rule"];
+            assert_eq!(
+                rules.as_mapping().expect("export rules").len(),
+                action_count + 1
+            );
+            for index in 1..=action_count {
+                assert!(
+                    rules[index.to_string()]["action"]["permit"]["exit-policy"]["next-rule"]
+                        .is_mapping()
+                );
+            }
+            assert!(rules["65535"]["action"]["permit"].is_mapping());
+            assert!(rules["65535"]["match"].is_null());
+            let address_family = format!("ipv{family}-unicast");
+            assert_eq!(
+                active["vrf"]["vpc_100"]["router"]["bgp"]["address-family"][&address_family]["route-export"]
+                    ["to-evpn"]["route-map"],
+                map_name
+            );
+            assert!(active["vrf"]["vpc_200"]["router"]["bgp"]["address-family"][&address_family]
+                ["route-export"]["to-evpn"]["route-map"].is_null());
+            assert!(cleared["router"]["policy"]["route-map"][&map_name].is_null());
+            assert!(cleared["router"]["policy"]["prefix-list"][format!("{map_name}_1")].is_null());
+            assert!(cleared["vrf"]["vpc_100"]["router"]["bgp"]["address-family"][&address_family]
+                ["route-export"]["to-evpn"]["route-map"].is_null());
+        }
+        // Pair each action with its complete prefix match and target to detect misdirected tags.
+        let lists = &active["router"]["policy"]["prefix-list"];
+        for (family, index, prefix_match, target) in [
+            // Keep the IPv4 default-route tag separate from more-specific prefix tags.
+            (
+                "4",
+                "1",
+                serde_json::json!({"0.0.0.0/0": {}}),
+                "64512:50000",
+            ),
+            // Retain the canonical /16 and its /24 limit for the first bounded target.
+            (
+                "4",
+                "2",
+                serde_json::json!({"10.0.0.0/16": {"max-prefix-len": 24}}),
+                "64512:50002",
+            ),
+            // Keep the second target on the same bounded /16 so both actions remain cumulative.
+            (
+                "4",
+                "3",
+                serde_json::json!({"10.0.0.0/16": {"max-prefix-len": 24}}),
+                "64512:50003",
+            ),
+            // Preserve omitted matching as GE through the IPv4 family width.
+            (
+                "4",
+                "4",
+                serde_json::json!({"10.0.0.0/8": {"max-prefix-len": 32}}),
+                "64512:50001",
+            ),
+            // Keep the IPv6 default-route tag in its own family-specific prefix list.
+            ("6", "1", serde_json::json!({"::/0": {}}), "64512:50004"),
+        ] {
+            let map_name = format!("EXPORT_RT_vpc_100_V{family}");
+            let list_name = format!("{map_name}_{index}");
+            let rule = &maps[&map_name]["rule"][index];
+
+            // Require the action to reference the prefix list for its own family and sequence.
+            assert_eq!(
+                rule["match"],
+                serde_yaml::to_value(serde_json::json!({
+                    "type": format!("ipv{family}"),
+                    "ip-prefix-list": list_name,
+                }))
+                .expect("expected action match")
+            );
+            let matched_list_name = rule["match"]["ip-prefix-list"]
+                .as_str()
+                .expect("matched prefix-list name");
+
+            // Follow the action's reference to prove its full prefix bounds stay paired with its RT.
+            assert_eq!(
+                lists[matched_list_name],
+                serde_yaml::to_value(serde_json::json!({
+                    "type": format!("ipv{family}"),
+                    "rule": {"1": {"action": "permit", "match": prefix_match}},
+                }))
+                .expect("expected matched prefix list")
+            );
+            assert_eq!(rule["set"]["ext-community-rt"], target);
+        }
+
+        // Preserve native, site, and unconditional profile targets alongside the session-level filter.
+        assert_eq!(
+            yaml_mapping_keys(
+                &active["vrf"]["vpc_100"]["router"]["bgp"]["route-export"]["to-evpn"]["route-target"]
+            ),
+            ["11414:100", "65002:22", "64512:90"]
+                .map(String::from)
+                .into_iter()
+                .collect()
+        );
+        assert_eq!(
+            maps["dpu_to_evpn"],
+            cleared["router"]["policy"]["route-map"]["dpu_to_evpn"]
+        );
+
+        // Reordering either cumulative collection must preserve the parsed policy.
+        entries.reverse();
+        for entry in &mut entries {
+            entry.route_targets.reverse();
+        }
+        let reordered: serde_yaml::Value =
+            serde_yaml::from_str(&render(entries)).expect("reordered YAML");
+        assert_eq!(reordered, configured);
     }
 
     /// Verifies the VPC uses its first selected profile, including when a later
@@ -3769,6 +4024,7 @@ type: ipv6
 
     fn minimal_fnn_routing_profile() -> RoutingProfile {
         RoutingProfile {
+            route_targets_on_exports_by_prefix: vec![],
             tenant_leak_communities_accepted: false,
             leak_default_route_from_underlay: false,
             leak_tenant_host_routes_to_underlay: false,

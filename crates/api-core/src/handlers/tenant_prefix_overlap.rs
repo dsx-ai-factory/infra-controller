@@ -313,6 +313,7 @@ pub(super) fn routing_profile_is_nonexpanding(
     let FnnRoutingProfileConfig {
         route_target_imports,
         route_targets_on_exports,
+        route_targets_on_exports_by_prefix,
         internal,
         tenant_prefix_overlap_eligible,
         leak_default_route_from_underlay,
@@ -339,6 +340,17 @@ pub(super) fn routing_profile_is_nonexpanding(
                 .unwrap_or_default()
                 .iter()
                 .any(|allowed| route_targets_match(allowed, target))
+        })
+        // Require an unchanged prefix match and retained targets to prove a contraction.
+        && route_targets_on_exports_by_prefix.as_deref().unwrap_or_default().iter().all(|entry| {
+            previous.route_targets_on_exports_by_prefix.as_deref().unwrap_or_default().iter()
+                .any(|retained| {
+                    entry.prefix.trunc() == retained.prefix.trunc()
+                        && entry.match_type == retained.match_type
+                        && entry.max_prefix_length == retained.max_prefix_length
+                        && entry.route_targets.iter().all(|target| retained.route_targets.iter()
+                            .any(|allowed| route_targets_match(allowed, target)))
+                })
         })
         && (!leak_default_route_from_underlay.unwrap_or_default()
             || previous.leak_default_route_from_underlay.unwrap_or_default())
@@ -1279,6 +1291,72 @@ mod tests {
                 config.anycast_site_prefixes = legacy_anycast;
                 routing_profile_is_nonexpanding(&config, &previous, &candidate)
             },
+        );
+    }
+
+    /// Verifies conditional export removals are contractions while added tags and widened matches are rejected.
+    #[test]
+    fn conditional_export_contractions_require_retained_matches_and_targets() {
+        use carbide_network::virtualization::ExportPrefixMatchType;
+        use carbide_test_support::value_scenarios;
+        use model::vpc::PrefixRouteTargetConfig;
+
+        // Retain two tags on one bounded prefix so removal differs from expansion.
+        let target = RouteTargetConfig {
+            asn: 64512,
+            vni: Some(100),
+            vni_self: false,
+        };
+        let extra = RouteTargetConfig {
+            vni: Some(200),
+            ..target
+        };
+        let entry = PrefixRouteTargetConfig {
+            prefix: "10.0.0.0/16".parse().expect("test prefix"),
+            match_type: ExportPrefixMatchType::Le,
+            max_prefix_length: Some(24), // Widening this bound could expose reused tenant prefixes.
+            route_targets: vec![target.clone(), extra],
+        };
+        let previous = FnnRoutingProfileConfig {
+            tenant_prefix_overlap_eligible: true,
+            internal: Some(true),
+            route_targets_on_exports_by_prefix: Some(vec![entry.clone()]),
+            ..Default::default()
+        };
+        value_scenarios!(run = |entries| {
+            let candidate = FnnRoutingProfileConfig {
+                route_targets_on_exports_by_prefix: Some(entries),
+                ..previous.clone()
+            };
+            routing_profile_is_nonexpanding(&eligible_config(), &previous, &candidate)
+        };
+            "proven contractions" {
+                // Removing the rule removes every conditional export contribution.
+                vec![] => true,
+                // Removing one target retains the same set of matched prefixes.
+                vec![PrefixRouteTargetConfig {
+                    route_targets: vec![target.clone()], ..entry.clone()
+                }] => true,
+            }
+            "unproven expansions" {
+                // Adding a new target could make the same prefixes reachable in another VRF.
+                vec![PrefixRouteTargetConfig {
+                    route_targets: vec![RouteTargetConfig { vni: Some(300), ..target }],
+                    ..entry.clone()
+                }] => false,
+                // A covering prefix could tag routes outside the retained prefix.
+                vec![PrefixRouteTargetConfig {
+                    prefix: "10.0.0.0/8".parse().expect("covering prefix"), ..entry.clone()
+                }] => false,
+                // Raising the maximum could tag more-specific routes that were excluded.
+                vec![PrefixRouteTargetConfig {
+                    max_prefix_length: Some(25), ..entry.clone()
+                }] => false,
+                // GE removes the LE upper bound and cannot be treated as an unchanged match.
+                vec![PrefixRouteTargetConfig {
+                    match_type: ExportPrefixMatchType::Ge, max_prefix_length: None, ..entry
+                }] => false,
+            }
         );
     }
 
