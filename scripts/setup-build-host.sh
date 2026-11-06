@@ -40,7 +40,15 @@ ${SUDO} env DEBIAN_FRONTEND=noninteractive apt-get install -y \
     build-essential cpio direnv mkosi uidmap curl file fakeroot git \
     docker.io docker-buildx sccache protobuf-compiler libopenipmi-dev \
     libudev-dev libboost-dev libgrpc-dev libprotobuf-dev libssl-dev \
-    libtss2-dev kea-dev systemd-boot systemd-ukify jq zip
+    libtss2-dev systemd-boot systemd-ukify jq zip
+
+${SUDO} sh dev/docker/setup-kea-repository.sh
+${SUDO} apt-get update
+KEA_VERSION="$(cat dev/docker/kea.version)"
+${SUDO} env DEBIAN_FRONTEND=noninteractive apt-get install -y kea-common- \
+    "isc-kea-common=${KEA_VERSION}" "isc-kea-hooks=${KEA_VERSION}" "isc-kea-dev=${KEA_VERSION}" \
+    "isc-kea-dhcp4=${KEA_VERSION}" "isc-kea-dhcp6=${KEA_VERSION}"
+${SUDO} usermod -aG _kea "${DOCKER_USER}"
 
 # --- 2. Rust toolchain --------------------------------------------------------
 echo "=== [2/9] Installing rustup + Rust toolchain ==="

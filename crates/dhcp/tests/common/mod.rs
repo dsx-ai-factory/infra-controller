@@ -220,16 +220,21 @@ pub(super) fn assert_hook_v6_ntp_servers(response: &Message) {
 /// Return IPv6 NTP server addresses from a DHCPv6 option 56 response.
 #[allow(dead_code)]
 fn ntp_server_addresses(response: &Message) -> Vec<Ipv6Addr> {
-    match response.opts().get(OptionCode::NtpServer) {
-        Some(DhcpOption::NtpServer(suboptions)) => suboptions
-            .iter()
-            .filter_map(|option| match option {
-                NtpSuboption::ServerAddress(address) | NtpSuboption::MulticastAddress(address) => {
-                    Some(*address)
-                }
-                NtpSuboption::FQDN(_) => None,
-            })
-            .collect(),
-        other => panic!("DHCPv6 response did not include NTP server addresses: {other:?}"),
-    }
+    // Kea 3 emits a separate option 56 for each server (RFC 5908 section 4).
+    response
+        .opts()
+        .get_all(OptionCode::NtpServer)
+        .expect("DHCPv6 response did not include NTP server addresses")
+        .iter()
+        .flat_map(|option| match option {
+            DhcpOption::NtpServer(suboptions) => suboptions,
+            other => panic!("invalid NTP server option: {other:?}"),
+        })
+        .filter_map(|option| match option {
+            NtpSuboption::ServerAddress(address) | NtpSuboption::MulticastAddress(address) => {
+                Some(*address)
+            }
+            NtpSuboption::FQDN(_) => None,
+        })
+        .collect()
 }
