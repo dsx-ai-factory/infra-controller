@@ -129,7 +129,7 @@ Vault provides a PKI engine for certificate issuance and a KV secrets engine for
   - `VAULT_PKI_ROLE_NAME=nico-cluster`
 - Injector (optional) may be enabled for sidecar-based secret injection.
 
-Vault is consumed by nico-api for PKI and secrets (env `VAULT_*`) and by credsmgr (cloud-cert-manager) for CA material exposed to the site bootstrap flow.
+Vault is consumed by nico-api for PKI and secrets (env `VAULT_*`) and by REST Cert Manager (`nico-rest-cert-manager`) for CA material exposed to the site bootstrap flow.
 
 ## Workflow Orchestration
 
@@ -189,7 +189,7 @@ These prerequisites should be installed in the following order:
 1. **Cluster and networking**: Kubernetes, containerd, Calico (or conformant CNI), ingress controller (Contour/Envoy), load balancer (MetalLB or cloud LB), DNS recursive resolvers, NTP
 2. **Foundation services** (in order): ESO (optional) → cert-manager → PostgreSQL → Vault → Temporal
 3. **NICo Core** (nico-system): nico-api and supporting services (DHCP/PXE/DNS as required)
-4. **NICo REST components**: Deploy cloud-api, cloud-workflow (cloud-worker & site-worker), and cloud-cert-manager (credsmgr). Seed DB and register Temporal namespaces (`cloud`, `site`, then site UUID). Create OTP and bootstrap secrets for elektra-site-agent; roll restart it.
+4. **NICo REST components**: Deploy cloud-api, cloud-workflow (cloud-worker & site-worker), and REST Cert Manager (`nico-rest-cert-manager`). Seed DB and register Temporal namespaces (`cloud`, `site`, then site UUID). Create OTP and bootstrap secrets for elektra-site-agent; roll restart it.
 5. **Monitoring** (optional): Prometheus operator, Grafana, Loki, OTel, node exporter
 
 To use the automated deployment path, refer to the [Quick Start Guide](../quick-start.md).

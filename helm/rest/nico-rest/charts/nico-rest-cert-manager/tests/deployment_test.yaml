@@ -48,12 +48,12 @@ tests:
     set:
       config:
         dnsNames:
-          - credsmgr.override.example.com
+          - cert-manager.override.example.com
           - localhost
     asserts:
       - contains:
           path: spec.template.spec.containers[0].args
-          content: --dns-name=credsmgr.override.example.com
+          content: --dns-name=cert-manager.override.example.com
       - notContains:
           path: spec.template.spec.containers[0].args
           content: --dns-name=nico-rest-cert-manager

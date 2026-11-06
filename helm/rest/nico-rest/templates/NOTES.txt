@@ -5,7 +5,7 @@ Components deployed:
   - nico-rest-common (common secrets + temporal-client-cloud-cert)
 {{- end }}
 {{- if index .Values "nico-rest-cert-manager" "enabled" }}
-  - nico-rest-cert-manager (credential manager / credsmgr)
+  - nico-rest-cert-manager (certificate issuer, port 8000)
 {{- end }}
 {{- if index .Values "nico-rest-api" "enabled" }}
   - nico-rest-api (REST API server, port 8388)
@@ -38,7 +38,7 @@ Prerequisites (must exist before install):
 {{- $certManager := (index .Values "nico-rest-cert-manager") | default dict }}
 {{- $siteManager := (index .Values "nico-rest-site-manager") | default dict }}
 {{- $signingSecret := ($certManager.secrets | default dict).caSigningSecret | default "" }}
-{{- $trustedSecret := ($siteManager.credsManagerCa | default dict).secretName | default "" }}
+{{- $trustedSecret := ($siteManager.credsManagerCa | default dict).secretName | default ($siteManager.certManagerCa | default dict).secretName | default "" }}
 {{- $signingNamespace := $certManager.namespaceOverride | default .Release.Namespace }}
 {{- $trustedNamespace := $siteManager.namespaceOverride | default .Release.Namespace }}
 {{- if and $certManager.enabled $siteManager.enabled (eq $signingSecret $trustedSecret) (eq $signingNamespace $trustedNamespace) }}
@@ -48,17 +48,37 @@ Prerequisites (must exist before install):
 {{- else }}
 {{- if $certManager.enabled }}
   - Secret: {{ $signingSecret }} in namespace {{ $signingNamespace }} (CA cert+key that
-    signs the credsmgr listener — provisioned by Vault or setup-local.sh)
+    signs the REST Cert Manager listener — provisioned by Vault or setup-local.sh)
 {{- end }}
 {{- if $siteManager.enabled }}
   - Secret: {{ $trustedSecret }} in namespace {{ $trustedNamespace }} (certificate of the
-    CA that signs the credsmgr listener — nico-rest-site-manager reads it to verify
+    CA that signs the REST Cert Manager listener — nico-rest-site-manager reads it to verify
     that endpoint)
 {{- end }}
 {{- end }}
 {{- if not (index .Values "nico-rest-common" "enabled") }}
   - Secrets: db-creds, keycloak-client-secret, temporal-encryption-key, temporal-client-cloud-certs
     (nico-rest-common is disabled — pre-create these secrets before install)
+{{- end }}
+{{- $siteManagerArgs := $siteManager.args | default dict }}
+{{- $formerNames := list }}
+{{- if $siteManagerArgs.credsManagerUrl }}
+{{- $formerNames = append $formerNames "args.credsManagerUrl, now args.certManagerUrl" }}
+{{- end }}
+{{- if $siteManagerArgs.credsManagerCaPath }}
+{{- $formerNames = append $formerNames "args.credsManagerCaPath, now args.certManagerCaPath" }}
+{{- end }}
+{{- if $siteManager.credsManagerCa }}
+{{- $formerNames = append $formerNames "credsManagerCa, now certManagerCa" }}
+{{- end }}
+{{- if and $siteManager.enabled $formerNames }}
+
+Deprecated values:
+{{- range $formerNames }}
+  - nico-rest-site-manager.{{ . }}
+{{- end }}
+  A former name still applies and overrides the current one. Move these
+  settings to the current names.
 {{- end }}
 
 Site Agent:

@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# nico-rest-cert-manager (credsmgr) Deployment with native Go PKI
+# nico-rest-cert-manager Deployment with native Go PKI
 # Requires CA certificate to be provided via K8s secrets (no fallback generation)
 apiVersion: apps/v1
 kind: Deployment

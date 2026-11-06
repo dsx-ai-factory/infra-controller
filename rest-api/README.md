@@ -260,7 +260,7 @@ done
 | nico-rest-db | `migrations` | Database migrations |
 | nico-rest-site-agent | `site-agent` | On-site agent |
 | nico-rest-site-manager | `site-manager` | Site management service |
-| nico-rest-cert-manager | `credsmgr` | Native PKI certificate manager |
+| nico-rest-cert-manager | `cert-manager` | Native PKI certificate manager |
 | nico-cli | `nicocli` | [CLI client](cli/README.md) for the REST API |
 
 Supporting modules:

@@ -205,8 +205,8 @@ jobs:
       ngc_path: ${{ inputs.ngc_path }}
       runner: ${{ inputs.runner }}
       service_name: nico-rest-cert-manager
-      binary_name: credsmgr
-      binary_path: /app/credsmgr
+      binary_name: cert-manager
+      binary_path: /app/cert-manager
       dockerfile: ./rest-api/docker/production/Dockerfile.nico-rest-cert-manager
       semantic_version: ${{ inputs.semantic_version }}
       short_sha: ${{ inputs.short_sha }}

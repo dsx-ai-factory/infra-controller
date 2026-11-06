@@ -24,7 +24,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// received is what a Cert Manager stub received.
+// received is what a REST Cert Manager stub received.
 type received struct {
 	method, path, body string
 }
