@@ -14,7 +14,7 @@ stateDiagram-v2
     DPUInit --> HostInit
     HostInit --> HostInit_HI_Discovered
     state "HostInit/Discovered" as HostInit_HI_Discovered
-    HostInit_HI_Discovered --> Ready
+    HostInit_HI_Discovered --> Ready : NIC check completed or not required
     Ready --> Assigned
     Assigned --> WaitingForCleanup
 ```
@@ -33,10 +33,12 @@ The following table lists these overview transitions:
 | `DPUInit` | `HostInit` | DPU Ready |
 | `HostInit` | `BomValidating` | Host Configured |
 | `HostInit` | `HostInit/Discovered` | See HostInit diagram |
-| `HostInit/Discovered` | `Ready` | State details |
-| `BomValidating` | `Validation` | BOM Valid AND Validation Enabled |
-| `BomValidating` | `HostInit/Discovered` | BOM Valid AND Validation Disabled |
-| `Validation` | `HostInit/Discovered` | Validation Complete |
+| `HostInit/Discovered` | `NicFirmwareUpdating/Pending` | Reboot gate passed; enabled baseline check or recovery obligation |
+| `HostInit/Discovered` | `Ready` | NIC preparation checked or not required; existing boot/readiness gate passes |
+| `BomValidating` | `Validation` | BOM checks completed or skipped; machine validation context present |
+| `BomValidating` | `HostInit/Discovered` | BOM checks completed or skipped; no machine validation context |
+| `Validation` | `HostInit/Discovered` | Validation completed or skipped; no Cleanup-context NIC readiness qualification obligation |
+| `Validation` | `HostInit/WaitingForPlatformConfiguration` | Cleanup-context validation completed or skipped; NIC readiness qualification required |
 
 ### Assignment and Host Work
 
@@ -46,6 +48,7 @@ The following table lists these overview transitions:
 | --- | --- | --- |
 | `Measuring` | `Ready` | Measurements Valid |
 | `Ready` | `HostInit` | BIOS Password Setup Needed |
+| `Ready` | `HostInit/WaitingForPlatformConfiguration` | No attached instance; NIC readiness qualification required |
 | `Ready` | `Assigned` | Instance Assigned |
 | `Ready` | `HostReprovision` | Host Reprovision Request |
 | `Ready` | `DPUReprovision` | DPU Reprovision Request |
@@ -62,7 +65,8 @@ The following table lists these overview transitions:
 | `DPUReprovision` | `Assigned` | if came from Assigned |
 | `DPUReprovision` | `HostInit/Discovered` | if came from Ready |
 | `DPUReprovision` | `HostReprovision` | Host reprovision requested |
-| `WaitingForCleanup` | `BomValidating` | State details |
+| `WaitingForCleanup/Init` | `NicFirmwareUpdating/Pending` | Deprovision cleanup needs a baseline check or restoration |
+| `WaitingForCleanup` | `BomValidating` | Deprovision cleanup completed; retain Cleanup validation context and any NIC readiness qualification obligation |
 | `PostAssignedMeasuring` | `WaitingForCleanup` | Measurements complete |
 | `Decommissioning` | `Decommissioned` | Device reset and credential deletion complete |
 
@@ -72,8 +76,13 @@ The following table lists these overview transitions:
 
 | From | To | Condition |
 | --- | --- | --- |
-| `NicFirmwareUpdating` | `HostInit/Discovered` | Baseline initial preparation complete |
-| `NicFirmwareUpdating` | `Ready` | Baseline ready continuation complete |
+| `NicFirmwareUpdating/Pending` | `HostInit/Discovered` | Initial check needs no mutation and has no recovery obligation |
+| `NicFirmwareUpdating` | `HostInit/WaitingForPlatformConfiguration` | Initial baseline mutation restored and verified; idle continuation is model support only |
+| `NicFirmwareUpdating/Pending` | `HostInit/WaitingForPlatformConfiguration` | Initial restoration verified without mutation, or qualification-only recovery while admission is disabled |
+| `NicFirmwareUpdating/Pending` | `Ready` | Model-only queued idle check needs no mutation or recovery; no production producer |
+| `NicFirmwareUpdating/Pending` | `WaitingForCleanup/Init` | Release check needs no mutation, or admission disabled without restoration |
+| `NicFirmwareUpdating/Pending` | `Reset/DeletingInstance` | Eligible managed-host reset requested |
+| `NicFirmwareUpdating/Pending` | `Failed` | Recorded host or DPU failure |
 | `NicFirmwareUpdating` | `Assigned` | Allocation complete |
 | `NicFirmwareUpdating` | `Assigned` | Restored allocation failure |
 | `NicFirmwareUpdating` | `Reset` | Eligible reset after restored failure |
@@ -90,9 +99,81 @@ The following table lists these overview transitions:
 
 ## NIC Firmware Recovery
 
-This section documents unreleased recovery work in [PR #8596](https://github.com/dsx-ai-factory/infra-controller/pull/8596). The `ManagedHostState::NicFirmwareUpdating` engine reconciles an already persisted operation. Production lifecycle admission is separate work in [issue #6680](https://github.com/dsx-ai-factory/infra-controller/issues/6680); these diagrams deliberately have no incoming admission edge.
+The recovery engine introduced in [PR #8596](https://github.com/dsx-ai-factory/infra-controller/pull/8596) reconciles persisted operations. Its entry points during initial preparation and deprovision release require a Core build and schema containing the unreleased [lifecycle admission implementation](https://github.com/dsx-ai-factory/infra-controller/issues/6680). They are disabled by default: `firmware_global.nic_firmware_admission_enabled = false` and `nic_firmware_platforms = []`. No hardware cohort is qualified by those defaults or by software tests.
 
-NICo Core freezes the operation's purpose, ordered cards, firmware inputs, execution options, and original lockdown policies. It saves each card's progress and the supervisor's receipt, which records accepted work and its results. After a Core restart, Core reloads that operation and reconciles the retained supervisor receipt. It does not select new targets or repeat completed firmware writes. Supervisor daemon loss leaves unfinished work blocked for explicit reconciliation. A host reboot can remove the default supervisor journal. Reconcile any lost or interrupted work with the card before permitting a new mutation.
+Before enablement, deploy supporting Core replicas, Scout, matching helpers, and any native DPA agents. Core must accept the admission settings. Scout must advertise `nic_firmware_dispatch_supported`; SiteCache delivery also requires `nic_firmware_site_cache_supported`. Without the required Scout capability, Core rejects the tracked dispatch rather than sending an untracked command. There is no native-agent capability flag that establishes physical completion semantics. Keep admission disabled until the deployed native agent and exact platform/card combination satisfy [hardware qualification](https://github.com/dsx-ai-factory/infra-controller/issues/6689), including physical identity and reset scope, running-version evidence, recovery, network readiness, and applicable preparation checks.
+
+Apply the same admission policy to all Core replicas; changes require restart. Before first enablement, drain or fence every older untracked sender and reconcile its effects. Inventory alone cannot establish that an earlier sender has settled. Older Core must not own machines with pending or admitted NIC work, restoration or readiness qualification obligations, or unresolved dispatch state. Rollback across that boundary is unsupported. Refer to the [Core configuration contract](https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/api-core/src/cfg/README.md#firmwareglobal) for field syntax, defaults, and validation.
+
+### Admission and Preparation
+
+Initial preparation requests a baseline check from `HostInit/Discovered` after its reboot gate. Deprovision release requests the check from `WaitingForCleanup/Init` and preserves the cleanup context. Initial-discovery and reset cleanup do not produce release checks. Reset preserves recorded baseline obligations through re-ingestion, where the initial-preparation hook handles them.
+
+The controller saves `NicFirmwareUpdating/Pending` before the update manager acts. This queues a check without reserving hardware or an update slot. The manager resolves baseline selections in precedence order: card, machine, then site. It requires whole-host inventory collected and received after the request and any prior dispatch settlement. Changed cards also require correlated lockdown status. A changed target or a newer recorded dispatch invalidates earlier candidate status.
+
+NIC demand notifications trigger additional admission checks through the same host update budget. These checks leave the normal firmware-check interval unchanged.
+
+The following diagram separates a queued check from admitted execution and its preparation continuation:
+
+```mermaid
+stateDiagram-v2
+    state "HostInit/Discovered" as Initial
+    state "WaitingForCleanup/Init" as Cleanup
+    state "NicFirmwareUpdating/Pending" as Pending
+    state "Admitted NIC operation" as Admitted
+    state "HostInit/WaitingForPlatformConfiguration" as Prepare
+    state "Reset/DeletingInstance" as Reset
+    state "Failed" as Failed
+
+    Initial --> Pending : Enabled or recovery required
+    Cleanup --> Pending : Deprovision, enabled or restoration required
+    Pending --> Pending : Evidence, policy, other host work, or capacity wait
+    Pending --> Initial : Disabled or unchanged, no recovery obligation
+    Pending --> Cleanup : Release check needs no mutation
+    Pending --> Prepare : Initial restoration verified, or disabled qualification-only recovery
+    Pending --> Admitted : Valid changed targets and available slot
+    Pending --> Reset : Eligible reset requested
+    Pending --> Failed : Recorded host or DPU failure
+    Admitted --> Prepare : Initial mutation and recovery complete
+    Admitted --> Cleanup : Release mutation and recovery complete
+```
+
+The following table distinguishes the admission results:
+
+**NIC Preparation Results**
+
+| Condition | Result |
+| --- | --- |
+| No applicable target and no restoration obligation | Unmanaged skip; resume the saved lifecycle without a slot |
+| Selected installed/running versions already match, with sufficient configuration evidence | Record baseline approval and resume without mutation or a slot |
+| Selected target in the current check scope is missing, ambiguous, unsupported, or overlapping legacy DPA policy | Keep `Pending` with a diagnostic; do not reinterpret the error as an unmanaged skip |
+| Inventory, prior sender settlement, or lockdown/key evidence is missing | Keep `Pending` and retry the checks |
+| Active DPA interface work, maintenance health override, or started host/DPU reprovision | Keep `Pending` with "waiting for other host hardware work to settle" |
+| Shared update capacity is zero or full | Keep changed work pending; unmanaged and matching-version checks can still complete |
+| Admission disabled, with no restoration or readiness qualification obligation | Resume ordinary preparation without starting NIC mutation |
+| Admission disabled, with readiness qualification required but no restoration required | Resume full host preparation without selecting new targets or starting a burn |
+| Admission disabled after an operation was admitted | Continue the saved operation and its recovery |
+| Admission disabled with a restoration obligation | Resolve the current baseline only for the saved restoration scope; a required new mutation still needs matching platform entries, identical options, settled evidence, and a shared slot |
+
+An unresolved dispatch also prevents admission, allocation, and ordinary controller progress until the recorded sender and its effects settle. Refer to [Other Senders and Operator Reconciliation](#other-senders-and-operator-reconciliation) for the supported evidence and limits.
+
+A mutation requires an exact, case-sensitive `sys_vendor`/`product_name` and PN/PSID allow-list match. Every changed card must be qualified and use the same execution options. The allow-list does not select artifacts or certify a reset level. Retain entries needed by recorded restoration obligations until those obligations clear; disabling admission does not remove those prerequisites.
+
+A machine-scoped profile must cover each non-DPU NIC reached by that selection. Missing PN/PSID or an unsupported pair leaves the check pending. An unselected card with incomplete PN/PSID is skipped when it is a managed DPU or no machine profile is set. A target resolved through card, machine, or site policy is rejected if it identifies a managed DPU. A generic target overlapping a configured legacy DPA firmware policy also remains pending. On a tracked overlapping cohort, the legacy DPA `ApplyFirmware` path returns `FAILED_PRECONDITION` until [shared execution is implemented](https://github.com/dsx-ai-factory/infra-controller/issues/6686).
+
+A locked changed card needs its MAC and settled current IKM version; a rotation in progress does not supply that evidence. Refer to [Generic NIC Firmware Recovery](../supernic_lockdown_key_management.md#generic-nic-firmware-recovery) for original key identity and lockdown restoration.
+
+Admission freezes ordered targets, profile revisions, artifacts and digests, activation options, delivery mode, and original lockdown policies. Only the committed admitted state reserves the host. NIC requests are considered oldest request first, then host ID, after the DPU and host update modules. Admitted NIC work joins the union of active host IDs, including `NicFirmwareUpdating/Failed` until state departure. Refer to [Managed-Machine Scheduling](../../operations/firmware-updates/configuration.md#managed-machine-scheduling) for the shared budget. If both `machine_updater.max_concurrent_machine_updates_absolute` and `machine_updater.max_concurrent_machine_updates_percent` are unset, effective capacity is zero. Changed NIC work requires positive effective capacity and an available slot. Pending checks do not add a budget entry.
+
+The model also supports a queued idle check that continues to `Ready`. It remains allocatable; allocation invalidates it while retaining the allocation's frozen selection. An idle check yields to a queued decommission request. Required initial preparation, release restoration, and readiness qualification finish before `Ready` consumes that request. There is no production idle-check producer or allocation admission entry point.
+
+Baseline restoration uses the current baseline policy rather than the previous tenant's frozen selection. Exact cards requiring restoration remain recorded across teardown. An unrelated approved card cannot clear a missing card's obligation; restoration waits for a current target or operator reconciliation. Matching versions alone do not prove an optional configuration artifact was applied to a dirty card. Recorded artifacts identify the approved selection; ordinary inventory reports identity and installed/running versions, not image-byte identity.
+
+With admission disabled, restoration checks only the saved required cards. Unrelated selections, drift, and missing unrelated selected cards neither add work nor block that recovery, and unrelated approvals remain unchanged. For a legacy record with restoration required and an empty saved selector list, the required scope is every previously approved card. If that record has no prior approved cards, Core cannot infer a restoration scope from current selections; it remains pending for operator reconciliation. Missing or ambiguous required cards still block recovery. With no restoration or readiness qualification obligation, disablement creates no recovery work.
+
+Admitted non-failed operations retain their artifact digests. Cache eviction and physical file opening are fenced against newly committed admission. Each request rechecks current operation authorization and retention membership before opening a cached file. Pending checks do not pin artifacts. Restored `Failed` still reserves a host update slot, but its artifacts can return to normal cache eviction. Refer to [supervised firmware operations](https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/libmlx/README.md#supervised-firmware-operations) for transport behavior. The [managed artifact cache](https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/firmware/README.md#managed-artifact-cache) describes storage and retention; the [Core configuration contract](https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/api-core/src/cfg/README.md#firmwareglobal) defines cache capacity.
+
+NICo Core saves each admitted card's progress and the supervisor's receipt, which records accepted work and its results. After a Core restart, Core reloads that frozen operation and reconciles the retained receipt. It does not select new targets or repeat completed firmware writes. Supervisor daemon loss leaves unfinished work blocked for explicit reconciliation. A host reboot can remove the default supervisor journal; lost state does not establish safe hardware settlement.
 
 ### Execution and Activation
 
@@ -140,40 +221,44 @@ Core checks every original lockdown policy before parking a failure or resuming 
 stateDiagram-v2
     direction LR
     state "RestoringLockdown" as Restore
-    state "Failed (firmware phase)" as FirmwareFailed
-    state "HostInit/Discovered" as Prepare
-    state "Ready" as Ready
+    state "NicFirmwareUpdating/Failed" as FirmwareFailed
+    state "HostInit/WaitingForPlatformConfiguration" as Prepare
     state "Assigned/DpaProvisioning" as Allocate
     state "WaitingForCleanup/Init" as Cleanup
-    state "Assigned/WaitingForRebootToReady" as Release
+    state "Assigned/WaitingForRebootToReady" as RebootToReady
     state "Reset" as Reset
 
     Restore --> Restore
     Restore --> FirmwareFailed : Restored, failure retained
-    Restore --> Prepare : Initial preparation
-    Restore --> Ready : Baseline ready
+    Restore --> Prepare : Initial mutation, idle continuation is model-only
     Restore --> Allocate : Allocation
     Restore --> Cleanup : Baseline restoration
-    FirmwareFailed --> Release : Deleted owner, no recorded failure
+    FirmwareFailed --> RebootToReady : Deleted owner, no recorded failure
     FirmwareFailed --> Reset : Eligible reset
 ```
 
-The following table maps each saved purpose to its successful continuation:
+The following table maps the saved purpose and outcome to its continuation:
 
-| Purpose | Continuation |
+**NIC Firmware Continuations**
+
+| Purpose and Outcome | Continuation |
 | --- | --- |
-| Baseline initial preparation | `HostInit/Discovered`, preserving `skip_reboot_wait` |
-| Baseline ready | `Ready`, only for an already prepared host whose admitted recipe preserves readiness qualification |
-| Allocation | `Assigned/DpaProvisioning` |
-| Baseline restoration | `WaitingForCleanup/Init`, preserving the cleanup context |
+| Initial baseline check without mutation or a recovery obligation | `HostInit/Discovered` with the reboot wait already satisfied (`skip_reboot_wait = true`) |
+| Initial baseline mutation, verified restoration, or readiness qualification recovery | `HostInit/WaitingForPlatformConfiguration`, repeating host preparation |
+| Idle baseline mutation or recovery (model support only; no production producer) | `HostInit/WaitingForPlatformConfiguration`, repeating host preparation |
+| Queued idle check without mutation or recovery (model support only; no production producer) | `Ready`, subject to allocation guards |
+| Already persisted allocation operation | `Assigned/DpaProvisioning` |
+| Release baseline check or restoration | `WaitingForCleanup/Init`, preserving the cleanup context |
 
-Firmware and lockdown checks alone do not establish readiness for the direct `Ready` continuation. Admission must preserve that qualification. Before handoff, Core transactionally rechecks the controller state version, ownership, attachments, and recorded host or DPU failures. Busy interface or DPU locks defer completion for another iteration without changing the operation.
+Firmware convergence and original-lockdown restoration do not themselves establish readiness. Initial mutation repeats platform configuration, discovery, BOM validation, and applicable readiness checks. Deprovision release first completes host cleanup, then follows BOM and machine validation with the saved `Cleanup` context. After successful Cleanup validation or a configured validation skip, a retained NIC readiness qualification obligation returns the host to `HostInit/WaitingForPlatformConfiguration`. That preparation cycle runs the applicable `Discovery` checks before Ready; it does not replace Cleanup checks. The obligation remains recorded through both stages.
 
-Destination-specific diagrams later on this page show their internal transitions. Firmware continuation edges are centralized in this section.
+`HostInit/Discovered` clears readiness qualification only after the preparation cycle reaches its boot/readiness gate. A recorded obligation prevents allocation even if the visible state is `Ready`. An attached instance takes precedence over redirecting an otherwise idle `Ready` host into preparation.
+
+Before handoff, Core transactionally rechecks the controller state version, ownership, attachments, and recorded host or DPU failures. Busy interface or DPU locks defer completion without changing the operation. Destination-specific diagrams below retain the ordinary preparation and cleanup transitions.
 
 ### Failure and Ownership Changes
 
-A recorded host or DPU failure, or ineligible allocation ownership, stops new firmware submissions and pending unlocks. Core continues observing work that might already have started. After those effects settle safely, it restores the original policies and records failure:
+During an admitted operation, a recorded host or DPU failure, or ineligible allocation ownership, stops new firmware submissions and pending unlocks. Core continues observing work that might already have started. After those effects settle safely, it restores the original policies and records failure:
 
 ```mermaid
 stateDiagram-v2
@@ -188,22 +273,25 @@ stateDiagram-v2
     Unlock --> Restore : Failure or owner loss
     Update --> Restore : Failure or owner loss
     Inventory --> Restore : Failure or owner loss
-    Restore --> Restore : New stop during success, card zero
+    Restore --> Restore : New stop condition during success, restart at first card
 ```
 
 Baseline work requires no instance owner. Allocation requires its original live instance. Baseline restoration permits the original deleted instance or no instance; disappearance of that cleanup owner does not stop restoration. A replacement owner is never eligible.
 
 A completed receipt establishes settled execution. An unsuccessful receipt permits restoration only when execution failed or was canceled before configuration or firmware writing, with no reported successful mutation, reset, or verification. Uncertain terminal effects require operator intervention.
 
-In `Rebooting`, Core completes the persisted activation handshake, including reboot retries, before reacting to a stop. A new stop during successful restoration restarts policy checks at the first card. Restoration already recording a failure preserves its position and original reason.
+In `Rebooting`, Core completes the persisted activation handshake, including reboot retries, before reacting to a stop condition. A new stop condition during successful restoration restarts policy checks at the first card. Restoration already recording a failure preserves its position and original reason.
 
 ### Phase Behavior
 
-- **`ObservingSupervisor`:** Core polls for the current card's receipt. During receipt-free initial observation, Core can establish or refresh `supervisor_instance_id` before permitting `Unlocking`. After leaving that phase, a missing receipt from a replacement supervisor cannot renew submission permission. A retained receipt resumes `UpdatingFirmware`. Without a stop reason or retained receipt, `InvalidTask`, `Conflict`, and `Unsupported` delivery errors require operator intervention. Unresolved terminal evidence also requires intervention.
+`Pending` is a queued check; the remaining phases belong to an admitted operation. A managed-host reset can preempt `Pending`, and a recorded host or DPU failure can move it to the global `Failed` state.
+
+- **`Pending`:** The controller exposes the last admission diagnostic while the update manager retries policy and evidence checks. Restart preserves the original request age. Capacity waits do not freeze targets or reserve a slot; disablement and no-change continuations follow the admission results above.
+- **`ObservingSupervisor`:** Core polls for the current card's receipt. During receipt-free initial observation, Core can establish or refresh `supervisor_instance_id` before permitting `Unlocking`. After leaving that phase, a missing receipt from a replacement supervisor cannot renew submission permission. A retained receipt resumes `UpdatingFirmware`. Without a stop condition or retained receipt, `InvalidTask`, `Conflict`, and `Unsupported` delivery errors require operator intervention. Unresolved terminal evidence also requires intervention.
 - **`Unlocking`:** Core observes lockdown and changes it only when needed and the saved key identity permits it. An independent unlocked readback advances to `UpdatingFirmware`. Missing replies wait; change acknowledgements and reported errors return to observation.
 - **`UpdatingFirmware`:** Core delivers the frozen request under the saved operation and supervisor identities. Without a receipt, an eligible retry resends that identical request only to the saved supervisor instance, which deduplicates it. Scout checks that instance before submitting; a replacement without the receipt blocks resubmission and requires reconciliation. Once a receipt exists or submission is prohibited, delivery only observes accepted work. Successful evidence for every requested step advances to the next card, or after the last card to `Rebooting` or `Reobserving`. A safely settled unsuccessful execution enters `RestoringLockdown` with a failure; unavailable or missing receipts alone never establish safe settlement.
 - **`Rebooting`:** Core commits activation intent and each attempt timestamp before requesting power. Health overrides can block the reboot. A failed or timed-out power call leaves this phase pending. An authenticated reboot report covering activation and the latest attempt advances to `Reobserving`.
-- **`Reobserving`:** Core waits for one inventory containing every saved card at the requested installed and running firmware version. Both collection and Core receipt times must follow the activation boundary. Missing, stale, partial, ambiguous, or mismatched evidence waits; matching evidence enters `RestoringLockdown`. A stop instead begins restoration without claiming successful inventory convergence.
+- **`Reobserving`:** Core waits for one inventory containing every saved card at the requested installed and running firmware version. Both collection and Core receipt times must follow the activation boundary. Missing, stale, partial, ambiguous, or mismatched evidence waits; matching evidence enters `RestoringLockdown`. A stop condition instead begins restoration without claiming successful inventory convergence.
 - **`RestoringLockdown`:** Core reconciles every original policy with independent readback. Originally unlocked cards remain unlocked. Missing replies wait; acknowledgements and reported errors return to observation. After all cards, a retained failure enters `NicFirmwareUpdating/Failed`; success resumes the continuation after the transactional checks above.
 - **`Failed`:** Core retains the operation and receipts after policy restoration. A deleted original allocation can resume `Assigned/WaitingForRebootToReady` when no host or DPU failure remains and the transactional checks pass. An eligible managed-host reset can enter `Reset`. Otherwise Core requires intervention and includes any current recorded failure without replacing the saved firmware reason.
 
@@ -217,11 +305,37 @@ Reboot calls have a 120-second attempt deadline. The retry interval is the great
 
 Missing IKM versions, credential backend errors, and credential lookup timeouts return lockdown changes to observation and retry. They do not automatically become terminal failures. For retained phase errors and controller outcomes, use [state-history diagnostics](../../playbooks/stuck_objects/diagnostic_tools.md#query-state-history). Inspect [manual intervention alerts](../../observability/alerts.md#manual-intervention-alerts), including `carbide_object_manual_intervention_required`, when the controller cannot safely proceed. During uncertain active work, preserve the operation and its evidence rather than bypassing its guards.
 
-Clearing a recorded cause does not restart a parked firmware recipe. After original-policy restoration, recovery is an [eligible managed-host reset](../../manuals/nico-admin-cli/commands/managed-host/managed-host-reset-set.md) or the deleted-allocation release described above. Reset is rejected before firmware `Failed`; its existing DPF, instance, and health preconditions still apply. Instance power requests remain rejected throughout `NicFirmwareUpdating`.
+### Reset, Power, and Deletion
 
-Firmware handling precedes ordinary maintenance, DPU reprovisioning, restart verification, and reset dispatch. Tenant allocation status is `Updating`, or `Failed` in the firmware failure phase; baseline restoration reports `Terminating`. Operator force deletion and direct BMC power retain their existing manual semantics. They do not establish safe firmware completion or restored lockdown.
+Clearing a recorded cause does not restart a parked firmware recipe. After original-policy restoration, recovery is an [eligible managed-host reset](../../manuals/nico-admin-cli/commands/managed-host/managed-host-reset-set.md) or the deleted-allocation release described above. Admitted operations reject reset until `NicFirmwareUpdating/Failed`; the DPF, instance, and health preconditions still apply. Queued checks retain ordinary reset preconditions.
 
-The supervisor's host claim serializes cooperating callers. Mutation paths that omit the claim can bypass that protection, including direct `FirmwareFlasher` calls, legacy integrations, and independently launched vendor tools. Do not run those mutation paths concurrently with `NicFirmwareUpdating`. If completion is uncertain, preserve the operation and reconcile its process and hardware effects before another mutation.
+Force deletion has a separate guard. It refuses admitted NIC ownership, an unsettled dispatch, or a recorded restoration or readiness qualification obligation, including after admission is disabled. A force flag does not bypass those conditions. Reset can preserve an obligation through re-ingestion; it does not establish that a recorded sender has settled.
+
+Admitted firmware handling precedes ordinary maintenance, DPU reprovisioning, restart verification, and reset dispatch. Admitted ownership rejects instance power requests. Direct component compute-power control, direct compute-tray firmware updates, and raw Redfish actions are refused for participating hosts because those paths have no supported NIC completion proof. When admission is enabled, these paths also refuse targets without an unambiguous managed-host owner. With a nonempty platform list, missing DMI identity also prevents excluding a host from that policy. Tenant allocation status is `Updating`, or `Failed` in the firmware failure phase; baseline restoration reports `Terminating`.
+
+### Other Senders and Operator Reconciliation
+
+A queued check does not own hardware or exclude ordinary legacy work. Admitted NIC ownership rejects overlapping DPA, MLX administration, instance/admin power, and destructive ownership changes. Legacy dispatch tracking applies when admission is enabled for the host's listed DMI platform or the host has a restoration or readiness qualification obligation. The latter keeps tracking active after admission is disabled. Each participating sender records its UUID and origin before sending. An unresolved dispatch prevents further dispatch, NIC admission, allocation, and ordinary controller progress until its effects settle.
+
+Tracked MLX profile/configuration synchronization and configuration writes mark saved baseline cards for restoration and readiness qualification. That obligation prevents allocation. After the sender settles, an idle `Ready` host returns to platform preparation; an attached instance takes precedence over that idle redirect. Fresh preparation checks or restoration run through the initial-preparation hook. Legacy operations outside participation do not create new admission work.
+
+Tracked DPA requests require a Scout that echoes dispatch tokens and supports receipt-only polling. They are omitted from legacy JSON. Known successful replies settle only the matching token. An explicit rejection from the matching helper before it accepts Submit can establish that no work was accepted. A missing receipt or transport failure cannot. Receipt-only polling does not resubmit a mutation.
+
+While `firmware_global.nic_firmware_admission_enabled` is enabled, untracked admin power is refused with `FAILED_PRECONDITION` before sending. This includes known hosts excluded from the platform list and targets without usable ownership or DMI evidence. Qualified tracked admin power and recovery tracking remain available under the evidence rules below.
+
+BFB manual recovery requests are also refused while admission is enabled, including requests with `pre_copy_powercycle = false`. Already queued BFB host `PowerOff` and `PowerOn` steps are refused before sending. A blocked `PowerOn` can leave the host off. The queued recovery phase and pause state remain recorded; refusal does not claim completion or automatically clear the recovery.
+
+With admission disabled, ordinary untracked admin power retains its legacy behavior. BFB host power checks current ownership after client setup and refuses known admitted NIC ownership, restoration or readiness qualification obligations, and unresolved dispatches. These guards do not create new NIC recovery obligations.
+
+Tracked instance restart and admin power require action-specific stable evidence before sending. Unsupported admin actions or insufficient observed pre-dispatch evidence return `FAILED_PRECONDITION` with no command sent. A failed pre-dispatch observation also returns an error without sending. On/off needs a stable initial power state; restart/cycle needs a stable running-boot generation. After accepted delivery, on/off settles through the observed stable transition. Restart/cycle requires two different, nonempty boot generations that each reached `OSRunning`, or `OEM` with `OsIsRunning`. A BMC acceptance reply, `OSBootStarted`, unchanged power, or unrelated Scout report is insufficient. An on/off request already at its stable target returns without sending a command. Uncertain effects after a send require reconciliation.
+
+Tracked native DPA requests include configuration requests and heartbeats. Publication alone does not establish settlement; completion must correlate to the exact recorded request. Hardware qualification must establish that the deployed native agent acknowledges mutations only after actual completion. A failed publication or lost acknowledgement leaves the dispatch unresolved; it does not authorize a replacement mutation.
+
+`FindMachinesByIds` exposes the last dispatch in `MachineStatus.nic_firmware_dispatch`: token, origin, start and settlement times, settled status, the `not_admitted` result, any power target, and any DPA interface/version correlation. This status does not expose all internal completion evidence, including the original power observation or native request.
+
+Lost replies, vendor errors, and uncertain execution do not expire or clear themselves. An operator must fence or quiesce every original Core sender, Scout stream, native-agent delivery path, and BMC task, preserve the evidence, and establish both tool and hardware settlement. Only then can a privileged procedure condition a settlement write on the exact current token and record a new database settlement time. Knowing the UUID, resetting the host, or changing a flag does not fence delayed delivery. There is no supported public token-clear API. [Operator reconciliation tooling](https://github.com/dsx-ai-factory/infra-controller/issues/6687) remains separately tracked.
+
+The supervisor claim coordinates participating local tools. Do not run direct `FirmwareFlasher` mutations, legacy integrations, or independently launched vendor tools concurrently with admitted NIC execution. Those paths require site coordination. Neither sender settlement nor process exit qualifies physical recovery of an interrupted flash.
 
 ## DPU Discovery State Details (DpuDiscoveringState)
 
@@ -376,6 +490,7 @@ stateDiagram-v2
     state "DpuInitState/WaitingForNetworkConfig" as DpuInitState_DI_WaitingForNetworkConfig
     state "DPUReprovision/RebootHost" as DPUReprovision_DR_RebootHost
     state "Validation/MachineValidating" as Validation_V_MachineValidating
+    state "Validation/RebootHost" as Validation_V_RebootHost
 
     state "SetBootOrder" as HI_SetBootOrder {
         state hi_sbo_if_zero_dpu <<choice>>
@@ -485,11 +600,16 @@ stateDiagram-v2
     HI_WFL_TimeWaitForDPUDown --> HI_WFL_WaitForDPUUp
     HI_WFL_WaitForDPUUp --> BomValidating_BV_MatchingSku
 
-    BomValidating --> HI_Discovered
-    Validation_V_MachineValidating --> HI_Discovered
+    BomValidating --> HI_Discovered : No machine validation context
+    Validation_V_MachineValidating --> HI_Discovered : No Cleanup NIC readiness qualification obligation
+    Validation_V_MachineValidating --> HI_WaitingForPlatformConfiguration : Cleanup completed or skipped, NIC readiness qualification required
+    Validation_V_RebootHost --> HI_Discovered : Validation skipped, no Cleanup NIC readiness qualification obligation
+    Validation_V_RebootHost --> HI_WaitingForPlatformConfiguration : Validation skipped, Cleanup NIC readiness qualification required
     DPUReprovision_DR_RebootHost --> HI_Discovered
     HI_Discovered --> HI_Discovered : need reboot
-    HI_Discovered --> Ready : rebooted
+    state "NicFirmwareUpdating/Pending" as HI_NicPending
+    HI_Discovered --> HI_NicPending : Boot gate passed, NIC check required
+    HI_Discovered --> Ready : Boot gate passed, NIC check completed or not required
     Ready --> HI_USS_UnlockHost : Need setup BIOS password
 ```
 
@@ -511,14 +631,14 @@ stateDiagram-v2
     state "SkuVerificationFailed" as BV_SkuVerificationFailed
     state "WaitingForSkuAssignment" as BV_WaitingForSkuAssignment
     state "SkuMissing" as BV_SkuMissing
-    state bv_validation_enabled <<choice>>
+    state bv_validation_context <<choice>>
 
     state "Validation/RebootHost" as Validation_V_RebootHost
     state "HostInit/Discovered" as HostInit_HI_Discovered
 
     HostInitState_HI_WFL_WaitForDPUUp --> BV_MatchingSku
-    WaitingForCleanup_C_HostCleanup --> BV_UpdatingInventory
-    WaitingForCleanup_C_SBV_LockHost --> BV_UpdatingInventory
+    WaitingForCleanup_C_HostCleanup --> BV_UpdatingInventory : Deprovision, retain Cleanup context
+    WaitingForCleanup_C_SBV_LockHost --> BV_UpdatingInventory : Deprovision, retain Cleanup context
     Ready --> bv_requested
 
     bv_requested --> BV_UpdatingInventory : Possible SKU match
@@ -542,36 +662,40 @@ stateDiagram-v2
     BV_SkuMissing --> BV_SkuMissing : SKU present and not found
     BV_SkuMissing --> BV_WaitingForSkuAssignment : SKU not present
 
-    BV_WaitingForSkuAssignment --> bv_validation_enabled : BOM validation disabled
-    BV_MatchingSku --> bv_validation_enabled : BOM validation disabled OR (SKU Present and matched)
-    BV_VerifyingSku --> bv_validation_enabled : SKU diff is empty
+    BV_WaitingForSkuAssignment --> bv_validation_context : BOM validation disabled
+    BV_MatchingSku --> bv_validation_context : BOM validation disabled OR (SKU Present and matched)
+    BV_VerifyingSku --> bv_validation_context : SKU diff is empty
 
-    bv_validation_enabled --> Validation_V_RebootHost : validation enabled
-    bv_validation_enabled --> HostInit_HI_Discovered : validation disabled
+    bv_validation_context --> Validation_V_RebootHost : Machine validation context present
+    bv_validation_context --> HostInit_HI_Discovered : No machine validation context
 ```
 
 ## Machine Validation State Details (ValidationState)
 
-Shows the machine validation process:
+Shows the machine validation process. Deprovision cleanup preserves the `Cleanup` context through BOM and machine validation. After Cleanup validation succeeds or is skipped by configuration, the host returns to platform preparation when NIC readiness qualification remains required. The later preparation cycle uses `Discovery` validation.
 
 ```mermaid
 stateDiagram-v2
     direction LR
 
-    state "BomValidating/bv_validation_enabled" as BomValidating_bv_validation_enabled
+    state "BomValidating/bv_validation_context" as BomValidating_bv_validation_context
     state Ready
 
     state "RebootHost" as V_RebootHost
     state "MachineValidating" as V_MachineValidating
 
     state "HostInit/Discovered" as HostInit_HI_Discovered
+    state "HostInit/WaitingForPlatformConfiguration" as HostInit_HI_WaitingForPlatformConfiguration
     state Failed
 
     Ready --> V_RebootHost : validation is requested
-    BomValidating_bv_validation_enabled --> V_RebootHost : validation is enabled
-    V_RebootHost --> V_MachineValidating
+    BomValidating_bv_validation_context --> V_RebootHost : Machine validation context present
+    V_RebootHost --> V_MachineValidating : Validation enabled
+    V_RebootHost --> HostInit_HI_Discovered : Validation skipped, no Cleanup NIC readiness qualification obligation
+    V_RebootHost --> HostInit_HI_WaitingForPlatformConfiguration : Validation skipped, Cleanup NIC readiness qualification required
     V_MachineValidating --> V_MachineValidating : validation in progress
-    V_MachineValidating --> HostInit_HI_Discovered : validation disabled OR validated successfully
+    V_MachineValidating --> HostInit_HI_Discovered : Completed or skipped, no Cleanup NIC readiness qualification obligation
+    V_MachineValidating --> HostInit_HI_WaitingForPlatformConfiguration : Cleanup completed or skipped, NIC readiness qualification required
     V_MachineValidating --> Failed : validation failed
 ```
 
@@ -602,7 +726,9 @@ stateDiagram-v2
     state "HostReprovision/CheckingFirmware" as HostReprovision_HR_CheckingFirmware
     state "Decommissioning/SuppressingSiteExplorer" as Decommissioning_SuppressingSiteExplorer
 
-    HostInit_HI_Discovered --> Ready
+    HostInit_HI_Discovered --> Ready : NIC check completed or not required
+    state "HostInit/WaitingForPlatformConfiguration" as HostInit_NicQualification
+    Ready --> HostInit_NicQualification : No attached instance, NIC readiness qualification required
     Measuring --> Ready : Measuring completed
     HostReprovision --> Ready : Host reprovision completed
 
@@ -1018,8 +1144,8 @@ stateDiagram-v2
         state "WaitForJobCompletion" as C_SEB_WaitForJobCompletion
         state "HandleJobFailure" as C_SEB_HandleJobFailure
     }
-    state C_HostCleanup
-    state C_CreateBossVolume {
+    state "HostCleanup" as C_HostCleanup
+    state "CreateBossVolume" as C_CreateBossVolume {
         state "CreateBossVolume" as C_SBV_CreateBossVolume
         state "WaitForJobScheduled" as C_SBV_WaitForJobScheduled
         state "RebootHost" as C_SBV_RebootHost
@@ -1033,8 +1159,10 @@ stateDiagram-v2
 
     Failed --> C_Init
     Assigned_A_WaitingForNetworkReconfig --> C_Init
-    C_Init --> C_SEB_UnlockHost : If Dell AND has Boss controller
-    C_Init --> C_HostCleanup : If not Dell OR no Boss controller
+    state "NicFirmwareUpdating/Pending" as C_NicPending
+    C_Init --> C_NicPending : Deprovision cleanup, NIC check required
+    C_Init --> C_SEB_UnlockHost : NIC check completed or not required, Boss controller present
+    C_Init --> C_HostCleanup : NIC check completed or not required, no Boss controller
 
     C_SEB_UnlockHost --> C_SEB_SecureEraseBoss
     C_SEB_SecureEraseBoss --> C_SEB_WaitForJobCompletion
@@ -1046,7 +1174,10 @@ stateDiagram-v2
     C_SEB_HandleJobFailure --> C_SEB_HandleJobFailure : Power cycle (Off / On)
     C_HostCleanup --> C_HostCleanup : Wait for cleanup
     C_HostCleanup --> C_SBV_CreateBossVolume : if Boss controller present
-    C_HostCleanup --> BomValidating_BV_UpdatingInventory : if Boss controller not present
+    state c_return_context <<choice>>
+    state "HostInit/WaitingForDiscovery" as C_InitialDiscovery
+    state "Reset/DeletingCrs" as C_Reset
+    C_HostCleanup --> c_return_context : No Boss controller
 
     C_SBV_CreateBossVolume --> C_SBV_WaitForJobScheduled
     C_SBV_WaitForJobScheduled --> C_SBV_RebootHost
@@ -1057,7 +1188,10 @@ stateDiagram-v2
     C_SBV_HandleJobFailure --> C_SBV_HandleJobFailure : Power off OR Power on if needed
     C_SBV_HandleJobFailure --> C_SBV_CreateBossVolume : Retry
     C_SBV_HandleJobFailure --> C_SBV_HandleJobFailure : Power cycle (Off / On)
-    C_SBV_LockHost --> BomValidating_BV_UpdatingInventory
+    C_SBV_LockHost --> c_return_context
+    c_return_context --> BomValidating_BV_UpdatingInventory : Deprovision, retain Cleanup context and NIC readiness qualification obligation
+    c_return_context --> C_InitialDiscovery : Initial discovery cleanup
+    c_return_context --> C_Reset : Reset cleanup
 ```
 
 ## Measuring and PostAssignedMeasuring State Details
