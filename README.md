@@ -466,7 +466,7 @@ than a commitment, and each item links to its tracking issue.
 - **Chat:** join the [NICo community Slack](https://inviter.co/dsx-ai-factory)
 - **Slack channel:** `#nico`
 - **Mailing list:** [nico@dsxaifactory.com](https://groups.google.com/a/dsxaifactory.com/g/nico) for announcements and meeting invites
-- **Community meeting:** public and recorded. Dates are announced on the mailing list
+- **Community meeting:** public and recorded. Dates will be announced on the mailing list
 - **Meeting notes and recordings:** [meeting notes](https://docs.google.com/document/d/1olv3nwIOjSWnO9azeMgzIyvZA8ssSdn-ACip_2JI9zQ/edit), [recordings](https://drive.google.com/drive/folders/1hACf1AJWBhpzhdxpC5ZBZBudWc_-1f5D)
 - **Questions and ideas:** [GitHub Discussions](https://github.com/dsx-ai-factory/infra-controller/discussions)
 - **Bugs and feature requests:** [GitHub Issues](https://github.com/dsx-ai-factory/infra-controller/issues)
