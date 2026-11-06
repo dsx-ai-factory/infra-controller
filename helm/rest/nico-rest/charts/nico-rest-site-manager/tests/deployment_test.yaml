@@ -18,6 +18,28 @@ tests:
   - it: targets nico-rest-cert-manager in the release namespace by default
     asserts:
       - contains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content:
+            name: credsmgr-client
+            mountPath: /etc/credsmgr-client
+            readOnly: true
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: credsmgr-client
+            secret:
+              secretName: site-manager-client-tls
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: CREDS_MANAGER_CLIENT_CERT_PATH
+            value: /etc/credsmgr-client/tls.crt
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: CREDS_MANAGER_CLIENT_KEY_PATH
+            value: /etc/credsmgr-client/tls.key
+      - contains:
           path: spec.template.spec.containers[0].args
           content: --creds-manager-url=https://nico-rest-cert-manager.nico-rest:8000
       - contains:
