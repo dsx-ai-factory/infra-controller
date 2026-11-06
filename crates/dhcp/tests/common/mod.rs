@@ -31,7 +31,8 @@ use std::time::{Duration, Instant};
 use dhcp::mock_api_server::DHCP_RESPONSE_FQDN;
 #[allow(unused_imports)]
 pub(super) use dhcp_factory::DHCPFactory;
-use dhcproto::v6::{DhcpOption, Message, NtpSuboption, OptionCode};
+use dhcproto::v6::NtpSuboption::{MulticastAddress, ServerAddress};
+use dhcproto::v6::{DhcpOption, Message, OptionCode};
 #[allow(unused_imports)]
 pub(super) use dhcpv6_factory::DHCPv6Factory;
 #[allow(unused_imports)]
@@ -258,27 +259,33 @@ pub(super) fn assert_api_v6_domain_search(response: &Message) {
 #[allow(dead_code)]
 pub(super) fn assert_hook_v6_ntp_servers(response: &Message) {
     // Keep the expected value tied to the Kea test config, not API mock data.
-    let expected = HOOK_NTP_SERVERS_IPV6
+    let mut expected = HOOK_NTP_SERVERS_IPV6
         .into_iter()
         .map(|server| server.parse::<Ipv6Addr>().unwrap())
         .collect::<Vec<_>>();
 
-    assert_eq!(ntp_server_addresses(response), expected);
+    // dhcproto sorts by option code without preserving equal-code wire order.
+    let mut actual = ntp_server_addresses(response);
+    actual.sort_unstable();
+    expected.sort_unstable();
+    assert_eq!(actual, expected);
 }
 
 /// Return IPv6 NTP server addresses from a DHCPv6 option 56 response.
 #[allow(dead_code)]
 fn ntp_server_addresses(response: &Message) -> Vec<Ipv6Addr> {
-    match response.opts().get(OptionCode::NtpServer) {
-        Some(DhcpOption::NtpServer(suboptions)) => suboptions
-            .iter()
-            .filter_map(|option| match option {
-                NtpSuboption::ServerAddress(address) | NtpSuboption::MulticastAddress(address) => {
-                    Some(*address)
-                }
-                NtpSuboption::FQDN(_) => None,
-            })
-            .collect(),
-        other => panic!("DHCPv6 response did not include NTP server addresses: {other:?}"),
-    }
+    // Kea 3 emits a separate option 56 for each server (RFC 5908 section 4).
+    response
+        .opts()
+        .get_all(OptionCode::NtpServer)
+        .expect("DHCPv6 response did not include NTP server addresses")
+        .iter()
+        .map(|option| match option {
+            DhcpOption::NtpServer(suboptions) => match suboptions.as_slice() {
+                [ServerAddress(address) | MulticastAddress(address)] => *address,
+                other => panic!("expected one NTP address suboption per option 56, got {other:?}"),
+            },
+            other => panic!("invalid NTP server option: {other:?}"),
+        })
+        .collect()
 }

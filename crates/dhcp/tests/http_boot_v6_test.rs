@@ -18,7 +18,6 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::net::{Ipv6Addr, UdpSocket};
 use std::path::PathBuf;
-use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 
 use carbide_test_support::Outcome::{Fails, Yields};
@@ -30,6 +29,7 @@ use dhcproto::v6::{
 };
 use eyre::WrapErr;
 use rpc::forge as rpc;
+use serde_json::{Value, json};
 
 mod common;
 
@@ -401,6 +401,20 @@ fn api_boot_url_override_and_empty_suppression_reach_the_wire() -> Result<(), ey
     Ok(())
 }
 
+/// Kea 3 builds option 17 from the enterprise number and its vendor option space.
+fn vendor_option_data(enterprise: u32, suboptions: &[(u16, &str)]) -> Vec<Value> {
+    let mut options = vec![json!({
+        "name": "vendor-opts", "data": enterprise.to_string(), "always-send": true,
+    })];
+    for (code, hex_data) in suboptions {
+        options.push(json!({
+            "space": format!("vendor-{enterprise}"), "code": code,
+            "csv-format": false, "data": hex_data, "always-send": true,
+        }));
+    }
+    options
+}
+
 /// Requested service URLs replace only NICo's suboption and preserve boot data.
 #[test]
 fn nico_pxe_service_url_preserves_ipv6_boot_and_vendor_options() -> Result<(), eyre::Report> {
@@ -430,9 +444,8 @@ fn nico_pxe_service_url_preserves_ipv6_boot_and_vendor_options() -> Result<(), e
             })
             .collect(),
     };
-    // Native option 17: duplicate NVIDIA 72="old", 73="keep"; another enterprise 72="other".
-    let nvidia = Some("00001647004800036f6c64004800036f6c64004900046b656570");
-    let other = Some("00007ed9004800056f74686572");
+    let nvidia = vendor_option_data(5703, &[(72, "6f6c64"), (73, "6b656570")]);
+    let other = vendor_option_data(ENTERPRISE_NUMBER, &[(72, "6f74686572")]);
     let requested = &[
         OptionCode::OptBootfileUrl,
         OptionCode::VendorClass,
@@ -442,17 +455,17 @@ fn nico_pxe_service_url_preserves_ipv6_boot_and_vendor_options() -> Result<(), e
         [
             Case {
                 scenario: "omitted",
-                input: (None, None, requested),
+                input: (None, vec![], requested),
                 expect: Yields(vec![]),
             },
             Case {
                 scenario: "vendor options not requested",
-                input: (Some(url), None, BOOT_REQUESTS),
+                input: (Some(url), vec![], BOOT_REQUESTS),
                 expect: Yields(vec![]),
             },
             Case {
-                scenario: "replace all NVIDIA URLs and preserve other suboptions",
-                input: (Some(url), nvidia, requested),
+                scenario: "replace the NVIDIA URL and preserve other suboptions",
+                input: (Some(url), nvidia.clone(), requested),
                 expect: Yields(vec![vendor(5703, &[(72, url), (73, "keep")])]),
             },
             Case {
@@ -465,26 +478,23 @@ fn nico_pxe_service_url_preserves_ipv6_boot_and_vendor_options() -> Result<(), e
             },
             Case {
                 scenario: "reject URL above the shared length limit",
-                input: (Some(oversized_url), None, requested),
+                input: (Some(oversized_url), vec![], requested),
                 expect: Fails,
             },
             Case {
                 scenario: "empty leaves native data",
                 input: (Some(""), nvidia, requested),
-                expect: Yields(vec![vendor(
-                    5703,
-                    &[(72, "old"), (72, "old"), (73, "keep")],
-                )]),
+                expect: Yields(vec![vendor(5703, &[(72, "old"), (73, "keep")])]),
             },
         ],
-        |(nico_pxe_service_url, native_vendor_opts_hex, requested)| -> Result<Vec<VendorOpts>, String> {
+        |(nico_pxe_service_url, option_data, requested)| -> Result<Vec<VendorOpts>, String> {
             let (_kea, socket) = Kea6::start_with_config(
                 api_server.local_http_addr(),
                 None,
                 Kea6Config {
                     provisioning_server_ipv6: "2001:db8::10",
                     nico_pxe_service_url,
-                    native_vendor_opts_hex,
+                    option_data,
                     ..Kea6Config::default()
                 },
             )
@@ -530,8 +540,6 @@ fn nico_pxe_service_url_preserves_ipv6_boot_and_vendor_options() -> Result<(), e
 #[test]
 fn nico_pxe_service_url_rejects_oversized_ipv6_replies() -> Result<(), eyre::Report> {
     static URL: [u8; 245] = [b'a'; 245];
-    static NATIVE_VENDOR_OPTS_HEX: LazyLock<String> =
-        LazyLock::new(|| format!("000016470049feb0{}", "6b".repeat(65_200)));
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
@@ -542,7 +550,7 @@ fn nico_pxe_service_url_rejects_oversized_ipv6_replies() -> Result<(), eyre::Rep
         Kea6Config {
             nico_pxe_service_url: Some(std::str::from_utf8(&URL)?),
             // Option 17 fits in 65,535 bytes; the complete relayed reply exceeds the UDP limit.
-            native_vendor_opts_hex: Some(NATIVE_VENDOR_OPTS_HEX.as_str()),
+            option_data: vendor_option_data(5703, &[(73, &"6b".repeat(65_200))]),
             ..Kea6Config::default()
         },
     )?;

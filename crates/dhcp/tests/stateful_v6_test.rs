@@ -544,11 +544,11 @@ fn mixed_address_and_prefix_requests_keep_address_lease() -> Result<(), eyre::Re
 #[test]
 fn mixed_requests_leave_existing_prefix_lease_unchanged() -> Result<(), eyre::Report> {
     const PREFIX: &str = "2001:db8:1::";
-    const HEADER: &str = "address,duid,valid_lifetime,expire,subnet_id,pref_lifetime,lease_type,iaid,prefix_len,fqdn_fwd,fqdn_rev,hostname,hwaddr,state,user_context,hwtype,hwaddr_source";
+    const HEADER: &str = "address,duid,valid_lifetime,expire,subnet_id,pref_lifetime,lease_type,iaid,prefix_len,fqdn_fwd,fqdn_rev,hostname,hwaddr,state,user_context,hwtype,hwaddr_source,pool_id";
     let idx = 43;
     let duid = DHCPv6Factory::duid_ll_hex(idx);
     let expires = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() + 600;
-    let prefix_row = format!("{PREFIX},{duid},600,{expires},1,300,2,{idx},64,0,0,,,0,,0,0");
+    let prefix_row = format!("{PREFIX},{duid},600,{expires},1,300,2,{idx},64,0,0,,,0,,0,0,0");
     let h = Harness::new_with_leases(
         Kea6Config {
             prefix_pool: true,
@@ -587,6 +587,65 @@ fn mixed_requests_leave_existing_prefix_lease_unchanged() -> Result<(), eyre::Re
         assert_eq!(prefix_rows, vec![prefix_row.as_str()], "{exchange}");
     }
     assert_eq!(h.read_leases()?.len(), 2);
+    Ok(())
+}
+
+/// Kea 2.2 memfiles are converted before use without changing lease ownership.
+#[test]
+fn legacy_memfile_lease_survives_upgrade_and_restart() -> Result<(), eyre::Report> {
+    const LEGACY_HEADER: &str = "address,duid,valid_lifetime,expire,subnet_id,pref_lifetime,lease_type,iaid,prefix_len,fqdn_fwd,fqdn_rev,hostname,hwaddr,state,user_context,hwtype,hwaddr_source";
+    let idx = 44;
+    let address = DHCPv6Factory::mock_addr(idx);
+    let duid = DHCPv6Factory::duid_ll_hex(idx);
+    let mac = DHCPv6Factory::mac_string(idx);
+    let expires = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() + 600;
+    let row = format!("{address},{duid},600,{expires},1,300,0,{idx},128,0,0,,{mac},0,,1,8");
+    let mut h =
+        Harness::new_with_leases(Kea6Config::default(), &format!("{LEGACY_HEADER}\n{row}\n"));
+
+    // Conversion runs asynchronously via LFC and writes the retained leases to .2.
+    let converted_path = h.lease_file_path.with_extension("csv.2");
+    let deadline = Instant::now() + MEMFILE_TIMEOUT;
+    loop {
+        if let Ok(contents) = fs::read_to_string(&converted_path) {
+            let columns = contents
+                .lines()
+                .find(|line| line.starts_with(&address.to_string()))
+                .map(|line| line.split(',').collect::<Vec<_>>());
+            if let Some(columns) = columns {
+                let mut original = row.split(',').map(str::to_string).collect::<Vec<_>>();
+                original[1] = normalize_hex(&original[1]);
+                original.push("0".to_string());
+                let mut converted = columns.into_iter().map(str::to_string).collect::<Vec<_>>();
+                converted[1] = normalize_hex(&converted[1]);
+                assert_eq!(converted, original);
+                break;
+            }
+        }
+        eyre::ensure!(Instant::now() < deadline, "legacy lease was not converted");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    // REBIND works after upgrade and after a restart without warming the hook cache.
+    for restart in [false, true] {
+        if restart {
+            h.kea.restart()?;
+        }
+        let reply = send_and_recv_v6(&h.socket, DHCPv6Factory::rebind(idx, address))?
+            .expect("Kea must reply to the existing lease owner");
+        assert_eq!(reply.msg_type(), v6::MessageType::Reply);
+        assert_eq!(DHCPv6Factory::ia_addr(&reply), Some(address));
+        let Some(DhcpOption::IANA(ia_na)) = reply.opts().get(OptionCode::IANA) else {
+            panic!("recovered lease reply is missing IA_NA");
+        };
+        let Some(DhcpOption::IAAddr(ia_addr)) = ia_na.opts.get(OptionCode::IAAddr) else {
+            panic!("recovered lease reply is missing IAADDR");
+        };
+        assert!(ia_addr.preferred_life > 0);
+        assert!(ia_addr.valid_life >= ia_addr.preferred_life);
+        let lease = h.wait_for_active_lease(address, &duid)?;
+        assert!(lease.is_active_na_for(address, &duid));
+    }
     Ok(())
 }
 

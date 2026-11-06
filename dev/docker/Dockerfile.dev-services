@@ -184,12 +184,21 @@ ARG TARGETARCH
 
 ARG KEA_VERSION
 
+COPY dev/docker/setup-kea-repository.sh dev/docker/isc-kea-3-0.asc dev/docker/configure-kea-runtime.sh /tmp/kea-repository/
+RUN sh /tmp/kea-repository/setup-kea-repository.sh
+
+ENV KEA_HOOKS_PATH=/usr/lib/kea/hooks
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
   curl \
   iproute2 \
-  kea-dhcp4-server=${KEA_VERSION} \
-  kea-dhcp6-server=${KEA_VERSION} \
+  isc-kea-common=${KEA_VERSION} \
+  isc-kea-hooks=${KEA_VERSION} \
+  isc-kea-dhcp4=${KEA_VERSION} \
+  isc-kea-dhcp6=${KEA_VERSION} \
   && rm -rf /var/lib/apt/lists/*
+
+RUN sh /tmp/kea-repository/configure-kea-runtime.sh && rm -rf /tmp/kea-repository
 
 RUN mkdir -p /usr/lib/kea/hooks /var/lib/kea /var/run/kea
 

@@ -271,7 +271,7 @@ Default: `false`. Creates the IPv6 Deployment, ConfigMap, and data and metrics S
 </ParamField>
 
 <ParamField path="dhcp.v6NtpServers" type="string">
-Default: empty. Comma-separated IPv6 literals, emitted in option 56 as Network Time Protocol (NTP) servers in input order. Whitespace is trimmed, empty entries are skipped, and duplicates are retained. An empty value omits the option.
+Default: empty. Comma-separated IPv6 literals, emitted as one Network Time Protocol (NTP) option 56 per server. Kea groups unicast servers before multicast servers, preserving input order within each group. Whitespace is trimmed, empty entries are skipped, and duplicates are retained. An empty value omits the option.
 </ParamField>
 
 <ParamField path="dhcp.v6ProvisioningServer" type="string">
