@@ -2598,6 +2598,9 @@ jobs:
       - name: Test KMIP client Secret
         run: bash helm-prereqs/tests/setup-kmip-client-secret_test.sh
 
+      - name: Test Keycloak token error redaction
+        run: /usr/bin/python3 -m unittest discover -s helm-prereqs/tests -p 'test_keycloak_token.py'
+
   # Waits for the nico chart push. NGC answers an upload with HTTP 409 while
   # another upload to the same namespace is updating its chart index, and the
   # CLI reports that as "already exists". `!cancelled()` still runs this job
