@@ -638,6 +638,7 @@ enum RenderedInputChange {
     SiteFabricPrefix,
     SiteFabricNullRoute,
     AdminInterfaceVni,
+    AdminL2Segment,
     AdminIpv6Prefix,
     AdminIpv6Loopback,
     TenantInterfaceVni,
@@ -690,6 +691,13 @@ impl RenderedInputChange {
                     .as_mut()
                     .expect("comparison fixture has an admin interface")
                     .vni += 1;
+            }
+            Self::AdminL2Segment => {
+                let interface = config
+                    .admin_interface
+                    .as_mut()
+                    .expect("comparison fixture has an admin interface");
+                interface.is_l2_segment = !interface.is_l2_segment;
             }
             Self::AdminIpv6Prefix => {
                 config
@@ -816,6 +824,7 @@ fn current_network_version_tracks_supplemental_config_hash() {
 /// Every input consumed by HBN must invalidate the cache, and either
 /// explicit version must do the same. Canonical IPv6 VRF loopback replacement must also invalidate
 /// the fingerprint when the deprecated IPv4 loopback field remains absent.
+/// Switching admin between L2 and routed attachments must invalidate unchanged versions.
 #[test]
 #[allow(deprecated)]
 fn current_network_version_detects_rendered_input_changes() {
@@ -823,10 +832,12 @@ fn current_network_version_detects_rendered_input_changes() {
 
     value_scenarios!(run = |change| {
         let mut config = comparison_network_config();
-        // Enable Admin rendering so its canonical IPv6 fields participate in the fingerprint.
+        // Enable Admin rendering so attachment and canonical IPv6 changes exercise active inputs.
         if matches!(
             change,
-            RenderedInputChange::AdminIpv6Prefix | RenderedInputChange::AdminIpv6Loopback
+            RenderedInputChange::AdminL2Segment
+                | RenderedInputChange::AdminIpv6Prefix
+                | RenderedInputChange::AdminIpv6Loopback
         ) {
             config.use_admin_network = true;
             config
@@ -870,6 +881,8 @@ fn current_network_version_detects_rendered_input_changes() {
         }
         "interface rendering inputs" {
             RenderedInputChange::AdminInterfaceVni => false,
+            // Changing admin attachment must reconcile even when both explicit versions are unchanged.
+            RenderedInputChange::AdminL2Segment => false,
             // Admin prefix replacement changes the SVI VRR/RA desired state.
             RenderedInputChange::AdminIpv6Prefix => false,
             // An Admin VRF loopback replacement changes the rendered IPv6 /128.
