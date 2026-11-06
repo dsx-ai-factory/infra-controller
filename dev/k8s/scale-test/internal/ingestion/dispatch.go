@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -31,7 +32,12 @@ type ForgeWriter interface {
 }
 
 // Concurrency is how many writes of each stream are in flight at once.
-type Concurrency struct{ Rack, Host, Switch, PowerShelf int }
+type Concurrency struct {
+	Rack       int `yaml:"rack"`
+	Host       int `yaml:"host"`
+	Switch     int `yaml:"switch"`
+	PowerShelf int `yaml:"powerShelf"`
+}
 
 // DefaultConcurrency is 8 writes in flight per stream.
 var DefaultConcurrency = Concurrency{8, 8, 8, 8}
@@ -73,39 +79,49 @@ type KeyOutcome struct {
 	SentAt, RepliedAt time.Time
 }
 
-// Results holds one outcome per planned key, and the first error that stopped dispatch.
+// Results holds one outcome per planned key, the first error that stopped dispatch and each dispatched stream's window.
 type Results struct {
 	Outcomes map[WriteKey]KeyOutcome
 	Err      error
+	Windows  map[Stream]Window
 }
+
+// Window is a stream's dispatch window. T0 is its first unit attempt to go out, past the writer's last gate, stop and cutoff check (a rack group is a prerequisite,
+// not timed), set even when that attempt is rejected. End is the last accepted reply, or the later return of an unclear send, which may have landed by then;
+// zero when neither came. A stream with no attempt out has no T0.
+type Window struct{ T0, End time.Time }
 
 type dispatcher struct {
 	ctx    context.Context
 	w      *writer.Writer
 	f      ForgeWriter
 	recs   map[WriteKey]Record
+	until  time.Time // no send starts at or past it, when set
 	dryRun bool
 
 	mu  sync.Mutex
 	out map[WriteKey]KeyOutcome
 	err error // the first error that stops dispatch: no send starts once it is set
+	win map[Stream]Window
 }
 
 // Dispatch sends every planned write through the writer: each rack's group and then, once the group is accepted, the rack, at most conc.Rack racks at a time;
 // then the host, switch and power shelf streams in parallel, each at most its concurrency. A device naming a rack that was not accepted is not sent. The first
-// lock loss, stop or journal error stops every later send; the sends in flight finish. Under dryRun every write is journaled, none is dispatched and an
-// accepted key is planned. Bad input is an error with every key notSent.
-func Dispatch(ctx context.Context, w *writer.Writer, f ForgeWriter, plan WritePlan, recs map[WriteKey]Record, conc Concurrency, dryRun bool) Results {
-	d := &dispatcher{ctx: ctx, w: w, f: f, recs: recs, dryRun: dryRun, out: map[WriteKey]KeyOutcome{}}
+// lock loss, stop or journal error stops every later send, and no attempt goes out at or past a nonzero deadline, the writer's last check before the RPC; the RPCs already out finish. Under dryRun every
+// write is journaled, none is dispatched and an accepted key is planned. Bad input is an error with every key notSent.
+func Dispatch(ctx context.Context, w *writer.Writer, f ForgeWriter, plan WritePlan, recs map[WriteKey]Record, conc Concurrency, deadline time.Time, dryRun bool) Results {
+	d := &dispatcher{ctx: ctx, w: w, f: f, recs: recs, until: deadline, dryRun: dryRun, out: map[WriteKey]KeyOutcome{}, win: map[Stream]Window{}}
 	keys := plan.keys()
 	if err := d.check(keys, conc); err != nil {
 		d.err = err
 	} else {
 		each(len(plan.Racks), conc.Rack, func(i int) {
 			r := plan.Racks[i]
-			switch {
-			case accepted(d.send(r.Group).Status):
+			switch s := d.send(r.Group).Status; {
+			case accepted(s):
 				d.send(r.Rack)
+			case s == NotSent:
+				d.set(r.Rack, KeyOutcome{Status: NotSent})
 			case !d.stopped():
 				d.set(r.Rack, KeyOutcome{Status: GroupNotAccepted})
 			}
@@ -117,7 +133,7 @@ func Dispatch(ctx context.Context, w *writer.Writer, f ForgeWriter, plan WritePl
 			d.out[k] = KeyOutcome{Status: NotSent}
 		}
 	}
-	return Results{Outcomes: d.out, Err: d.err}
+	return Results{Outcomes: d.out, Err: d.err, Windows: d.win}
 }
 
 // devices sends the three device streams in parallel, unless the racks stopped dispatch. The rack outcomes are final: every rack send has returned.
@@ -125,9 +141,9 @@ func (d *dispatcher) devices(plan WritePlan, conc Concurrency) {
 	if d.stopped() {
 		return
 	}
-	racks := map[string]bool{}
+	racks := map[string]Status{}
 	for _, r := range plan.Racks {
-		racks[r.RackID] = accepted(d.out[r.Rack].Status)
+		racks[r.RackID] = d.out[r.Rack].Status
 	}
 	var streams sync.WaitGroup
 	for _, s := range []Stream{Host, Switch, PowerShelf} {
@@ -135,7 +151,9 @@ func (d *dispatcher) devices(plan WritePlan, conc Concurrency) {
 		streams.Go(func() {
 			each(len(devices), conc.of(s), func(i int) {
 				// A device naming no rack has no rack to wait for.
-				if dw := devices[i]; dw.RackID != "" && !racks[dw.RackID] {
+				if dw := devices[i]; dw.RackID != "" && racks[dw.RackID] == NotSent {
+					d.set(dw.Key, KeyOutcome{Status: NotSent})
+				} else if dw.RackID != "" && !accepted(racks[dw.RackID]) {
 					d.set(dw.Key, KeyOutcome{Status: RackNotAccepted})
 				} else {
 					d.send(dw.Key)
@@ -191,36 +209,65 @@ func (d *dispatcher) set(k WriteKey, o KeyOutcome) KeyOutcome {
 	return o
 }
 
-// send sends one key through the writer and records its outcome. A key refused as busy or unclear is unclear and dispatch goes on; any other error stops it.
+// send sends one key through the writer and records its outcome. A key refused as busy or unclear is unclear and dispatch goes on, as does one the writer's cutoff stopped (notSent); any other error stops it.
 func (d *dispatcher) send(k WriteKey) KeyOutcome {
-	if d.stopped() {
+	if d.stopped() || !d.until.IsZero() && !time.Now().Before(d.until) {
 		return d.set(k, KeyOutcome{Status: NotSent})
 	}
 	rec := d.recs[k]
 	// Up to 30 attempts for an expected-record write (spec-E 1.5), with the writer's default backoff, pushback floor and deadlines; its generic default is 5.
 	retry := writer.DefaultRetry
 	retry.MaxAttempts = 30
-	call := writer.Call{WriteCall: journal.WriteCall{Scope: "test", Kind: rec.Kind, Key: string(k), Idempotent: true, RequestDigest: rec.Digest}, Retry: retry}
-	out, err := writer.Send(d.ctx, d.w, call, func(ctx context.Context) writer.Attempt {
-		if d.dryRun {
-			return writer.Attempt{}
-		}
-		return attempt(ctx, d.f, rec.Body)
-	})
-	if err != nil && !errors.Is(err, journal.ErrKeyBusy) && !errors.Is(err, journal.ErrUnclearKey) {
+	call := writer.Call{WriteCall: journal.WriteCall{Scope: "test", Kind: rec.Kind, Key: string(k), Idempotent: true, RequestDigest: rec.Digest}, Retry: retry, Cutoff: d.until}
+	send := func() (writer.Outcome, error) {
+		return writer.Send(d.ctx, d.w, call, func(ctx context.Context) writer.Attempt {
+			d.window(k, time.Now(), false)
+			return attempt(ctx, d.f, rec.Body)
+		})
+	}
+	if d.dryRun {
+		send = func() (writer.Outcome, error) { return writer.Plan(d.ctx, d.w, call) }
+	}
+	out, err := send()
+	if err != nil && !errors.Is(err, journal.ErrKeyBusy) && !errors.Is(err, journal.ErrUnclearKey) && !errors.Is(err, writer.ErrCutoff) {
 		d.mu.Lock()
 		if d.err == nil {
 			d.err = err
 		}
 		d.mu.Unlock()
 	}
-	return d.set(k, account(out, err, d.dryRun))
+	o := account(out, err)
+	switch o.Status {
+	case Sent:
+		d.window(k, o.RepliedAt, true)
+	case Unclear:
+		d.window(k, time.Now(), true)
+	}
+	return d.set(k, o)
+}
+
+// window opens the stream of k at its first dispatch, or moves the stream's end to at.
+func (d *dispatcher) window(k WriteKey, at time.Time, end bool) {
+	s, _, _ := strings.Cut(string(k), "/")
+	if Stream(s) != Rack && Stream(s) != Host && Stream(s) != Switch && Stream(s) != PowerShelf {
+		return
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	w := d.win[Stream(s)]
+	switch {
+	case !end && w.T0.IsZero():
+		w.T0 = at
+	case end && at.After(w.End):
+		w.End = at
+	}
+	d.win[Stream(s)] = w
 }
 
 // account maps the writer's outcome to the key's. An error after a dispatched attempt leaves the key unclear: that attempt may have landed. The one exception is
-// a known outcome, accepted or rejected, whose receipt then failed to persist: the writer returns it with the error, and the key keeps it. Under dryRun an
-// accepted key is planned: nothing went out, so it has no attempt, send or reply.
-func account(out writer.Outcome, err error, dryRun bool) KeyOutcome {
+// a known outcome, accepted or rejected, whose receipt then failed to persist: the writer returns it with the error, and the key keeps it. A planned key
+// (dryRun) has no attempt, send or reply: nothing went out.
+func account(out writer.Outcome, err error) KeyOutcome {
 	var opErr *writer.OpError
 	known := out.Kind == writer.Accepted || out.Kind == writer.Failed
 	switch {
@@ -230,10 +277,9 @@ func account(out writer.Outcome, err error, dryRun bool) KeyOutcome {
 		return KeyOutcome{Status: NotSent}
 	}
 	switch out.Kind {
+	case writer.Planned:
+		return KeyOutcome{Status: Planned}
 	case writer.Accepted:
-		if dryRun {
-			return KeyOutcome{Status: Planned}
-		}
 		return KeyOutcome{Status: Sent, Attempts: out.Attempts, SentAt: out.SentAt, RepliedAt: out.RepliedAt}
 	case writer.Failed:
 		if out.Reason == journal.Grpc("AlreadyExists") {

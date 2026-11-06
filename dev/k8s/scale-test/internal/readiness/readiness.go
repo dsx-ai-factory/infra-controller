@@ -93,11 +93,12 @@ type Check struct {
 	Detail string `json:"detail"`
 }
 
-// Report is every check, sorted by name, and the restart count of every serving control-plane pod ("namespace/pod"),
-// the whole baseline an ingestion run must not raise.
+// Report is every check, sorted by name, the restart count of every serving control-plane pod ("namespace/pod"),
+// the whole baseline an ingestion run must not raise, and the MAT inventory the checks read, which ingestion sends.
 type Report struct {
-	Checks   []Check
-	Restarts map[string]uint32
+	Checks    []Check
+	Restarts  map[string]uint32
+	Inventory inventory.SiteInventory
 }
 
 // Ready is true when there are checks and every one passed.
@@ -150,7 +151,7 @@ wait:
 			break wait
 		}
 	}
-	var r Report
+	r := Report{Inventory: inv}
 	for name := range checks {
 		late := Check{name, false, "not finished before the readiness deadline"}
 		if ctx.Err() == context.Canceled {
@@ -313,8 +314,7 @@ func (d Deps) controlPlane(ctx context.Context) (bool, string, map[string]uint32
 		}
 		serving := 0
 		for _, p := range pods {
-			_, job := p.Labels["batch.kubernetes.io/job-name"]
-			if _, old := p.Labels["job-name"]; job || old || p.Phase == "Succeeded" {
+			if !Serving(p) {
 				continue
 			}
 			serving++
@@ -336,6 +336,13 @@ func (d Deps) controlPlane(ctx context.Context) (bool, string, map[string]uint32
 		return false, "no control-plane pod besides the MAT pods", restarts
 	}
 	return true, fmt.Sprintf("%d serving pods Ready, restarts: %s", len(baseline), listed(baseline)), restarts
+}
+
+// Serving is false for a pod that ran to completion or that a Job runs: it serves nothing.
+func Serving(p cluster.PodInfo) bool {
+	_, job := p.Labels["batch.kubernetes.io/job-name"]
+	_, old := p.Labels["job-name"]
+	return !job && !old && p.Phase != "Succeeded"
 }
 
 // bmcCheck reconciles the host and DPU Services with the served inventory, then gates the external IP of each. A

@@ -109,6 +109,14 @@ claim can delete the journal and result.json, depending on the volume's
 reclaim policy, so preserve required data first. The Job deadline must exceed
 `runner.wholeRunSeconds` plus the run's 90 s shutdown budget.
 
+The stage window is `runner.wholeRunSeconds` minus `runner.finalizeSeconds`:
+readiness and, for ingestion, the writes and every stage to Ready must fit in
+it. The finalize budget after it holds ingestion's ten stage summaries and end
+reads, at least 1800 s. The defaults leave 4800 s for readiness, ingestion
+writes and stage completion, plus 1800 s for evidence collection. Increase
+wholeRunSeconds and activeDeadlineSeconds when the fleet needs a longer
+work window. Increasing finalizeSeconds alone shortens that window.
+
 Install the runner into the MAT namespace: the release namespace must be the
 one that holds the MAT Pods and Services, because the runner reads them in its
 own namespace (not `inventory.namespace`) and keeps the site lock and the

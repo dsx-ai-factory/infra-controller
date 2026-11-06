@@ -3,10 +3,20 @@
 {{- $inv := .Values.inventory }}
 {{- $s := .Values.store }}
 {{- $name := include "scale-test.jobName" (dict "root" . "suite" "runner") }}
+{{- $ingest := eq (toString $r.command) "ingestion" }}
+{{- if not (has $r.command (list "fleet-up" "ingestion")) }}
+{{- fail "runner.command must be fleet-up or ingestion" }}
+{{- else if and $ingest (not (kindIs "bool" $r.dryRun)) }}
+{{- fail "runner.dryRun must be true or false for ingestion, which writes" }}
+{{- else if and (not $ingest) (not (kindIs "invalid" $r.dryRun)) }}
+{{- fail "runner.dryRun must be unset for fleet-up, which writes nothing" }}
+{{- else if and $ingest (or (le (int64 $r.wholeRunSeconds) 1800) (lt (int64 $r.finalizeSeconds) 1800)) }}
+{{- fail "ingestion needs runner.wholeRunSeconds over 1800 and runner.finalizeSeconds of at least 1800" }}
+{{- end }}
 {{- if not $r.controlPlane }}
 {{- fail "runner.controlPlane needs at least one namespace and labelSelector when the runner is enabled" }}
 {{- end }}
-# The fleet-up run config. The MAT Pods and Services are read in the release
+# The fleet-up or ingestion run config. The MAT Pods and Services are read in the release
 # namespace, where the site lock and the result ConfigMap live too.
 apiVersion: v1
 kind: ConfigMap
@@ -18,7 +28,10 @@ metadata:
 data:
   config.yaml: |
     runId: {{ required "runner.runId is required when the runner is enabled" $r.runId | quote }}
-    command: fleet-up
+    command: {{ $r.command }}
+    {{- if $ingest }}
+    dryRun: {{ $r.dryRun }}
+    {{- end }}
     namespace: {{ .Release.Namespace | quote }}
     site:
       lockName: {{ required "runner.lockName is required when the runner is enabled" $r.lockName | quote }}
@@ -61,5 +74,14 @@ data:
         {{- if $s.caSecret }}
         caFile: /var/run/secrets/store-ca/ca.crt
         {{- end }}
+      {{- end }}
+      {{- if $ingest }}
+      writes:
+        concurrency:
+          {{- range $k := list "rack" "host" "switch" "powerShelf" }}
+          {{- $n := include "scale-test.count" (dict "key" (printf "runner.writes.concurrency.%s" $k) "value" (index $r.writes.concurrency $k)) }}
+          {{- if eq $n "0" }}{{ fail (printf "runner.writes.concurrency.%s must be at least 1" $k) }}{{ end }}
+          {{ $k }}: {{ $n }}
+          {{- end }}
       {{- end }}
 {{- end }}
