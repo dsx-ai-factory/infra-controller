@@ -1017,6 +1017,7 @@ if enable_dpf:
         'dpf-sim-controller',
         dpf_sim_dir,
         dockerfile=os.path.join(dpf_sim_dir, 'Dockerfile'),
+        platform=build_platform,
     )
     k8s_yaml(os.path.join(dpf_sim_dir, 'config/rbac/role.yaml'))
     k8s_yaml(os.path.join(dpf_sim_dir, 'config/manager/manager.yaml'))
