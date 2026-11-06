@@ -25,7 +25,7 @@ ARG TRANSCEIVER_VERSION=1.5.0
 # Runtime base, matching the other bluefield images (carbide-fmds,
 # forge-dhcp-server, forge-dpu-agent). Declared before the first FROM so the
 # values are in scope for the runtime stage's FROM below.
-ARG CC_VERSION=v3.2.1 # NVIDIA Distroless Container version
+ARG CC_VERSION=v3.4.0 # NVIDIA Distroless Container version
 ARG TAG=${CC_VERSION}
 ARG IMG=nvcr.io/nvidia/distroless/cc
 ARG DEBUG_DISTROLESS=true
