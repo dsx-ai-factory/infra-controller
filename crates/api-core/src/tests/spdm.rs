@@ -1536,6 +1536,7 @@ pub(in crate::tests) mod tests {
             cancel_error: Option<libredfish::RedfishError>,
             finish_collection: bool,
             claim_without_task: bool,
+            task_missing: bool,
         }
         let cases = [
             Case {
@@ -1545,6 +1546,16 @@ pub(in crate::tests) mod tests {
                 cancel_error: None,
                 finish_collection: false,
                 claim_without_task: false,
+                task_missing: false,
+            },
+            Case {
+                scenario: "waive releases the claim when the task is already missing",
+                fail: false,
+                trigger_iterations: 3,
+                cancel_error: None,
+                finish_collection: false,
+                claim_without_task: false,
+                task_missing: true,
             },
             Case {
                 scenario: "retry a transient cancellation failure, then wait for the BMC",
@@ -1555,6 +1566,7 @@ pub(in crate::tests) mod tests {
                 }),
                 finish_collection: true,
                 claim_without_task: false,
+                task_missing: false,
             },
             Case {
                 scenario: "unsupported cancellation releases the lock only at the deadline",
@@ -1565,6 +1577,7 @@ pub(in crate::tests) mod tests {
                 )),
                 finish_collection: false,
                 claim_without_task: false,
+                task_missing: false,
             },
             Case {
                 scenario: "a collection claim without a task ID uses the deadline",
@@ -1573,6 +1586,7 @@ pub(in crate::tests) mod tests {
                 cancel_error: None,
                 finish_collection: false,
                 claim_without_task: true,
+                task_missing: false,
             },
             Case {
                 scenario: "fail unfinished work before collection starts",
@@ -1581,6 +1595,16 @@ pub(in crate::tests) mod tests {
                 cancel_error: None,
                 finish_collection: false,
                 claim_without_task: false,
+                task_missing: false,
+            },
+            Case {
+                scenario: "fail releases the claim when the task is already missing",
+                fail: true,
+                trigger_iterations: 3,
+                cancel_error: None,
+                finish_collection: false,
+                claim_without_task: false,
+                task_missing: true,
             },
             Case {
                 scenario: "fail retains the lock until the BMC confirms cleanup",
@@ -1589,6 +1613,7 @@ pub(in crate::tests) mod tests {
                 cancel_error: None,
                 finish_collection: true,
                 claim_without_task: false,
+                task_missing: false,
             },
             Case {
                 scenario: "fail completes at the cleanup deadline when cancellation is unsupported",
@@ -1599,6 +1624,7 @@ pub(in crate::tests) mod tests {
                 )),
                 finish_collection: false,
                 claim_without_task: false,
+                task_missing: false,
             },
         ];
         let env = create_test_env_with_overrides(
@@ -1647,6 +1673,24 @@ pub(in crate::tests) mod tests {
             )?;
             for _ in 0..case.trigger_iterations {
                 env.run_spdm_controller_iteration_no_requeue().await;
+            }
+            if case.task_missing {
+                // Exercise both missing-task responses for each operator target before cleanup begins.
+                let mut txn = env.db_txn().await;
+                let devices =
+                    db::attestation::spdm::get_attestations_for_job_id(&mut txn, &job_id).await?;
+                for (device, status_code) in devices.iter().zip(
+                    [http::StatusCode::NOT_FOUND, http::StatusCode::GONE]
+                        .into_iter()
+                        .cycle(),
+                ) {
+                    let SpdmAttestationState::PollEvidenceCollection { task_id, .. } =
+                        &device.state
+                    else {
+                        panic!("{}: expected evidence collection polling", case.scenario);
+                    };
+                    env.redfish_sim.set_task_http_error(task_id, status_code);
+                }
             }
             let completed_device = if case.trigger_iterations == 2 && !case.claim_without_task {
                 // A terminal result in a mixed job must survive either operator request.
@@ -1717,8 +1761,8 @@ pub(in crate::tests) mod tests {
             let devices =
                 db::attestation::spdm::get_attestations_for_job_id(&mut txn, &job_id).await?;
             assert_eq!(devices.len(), 3, "{}", case.scenario);
-            let collecting = case.trigger_iterations == 3;
-            let waiting = collecting || case.claim_without_task;
+            let cancelling = case.trigger_iterations == 3 && !case.task_missing;
+            let waiting = cancelling || case.claim_without_task;
             let expected_task_ids = devices
                 .iter()
                 .filter_map(|device| {
@@ -1736,11 +1780,11 @@ pub(in crate::tests) mod tests {
                 env.redfish_sim.task_cancellation_requests()[initial_cancel_requests..].to_vec();
             assert_eq!(
                 requests.len(),
-                if collecting { 3 } else { 0 },
+                if cancelling { 3 } else { 0 },
                 "{}",
                 case.scenario
             );
-            if collecting {
+            if cancelling {
                 // Distinct task IDs prove cancellation targets each component's own task.
                 assert_eq!(expected_task_ids.len(), 3, "{}", case.scenario);
                 assert_eq!(
@@ -1842,7 +1886,7 @@ pub(in crate::tests) mod tests {
                 )
                 .await?;
                 assert!(snapshot.evidence_collection_locked, "{}", case.scenario);
-                if collecting {
+                if cancelling {
                     let SpdmAttestationState::WaitForTaskCancellation {
                         cleanup_started_at, ..
                     } = snapshot.state

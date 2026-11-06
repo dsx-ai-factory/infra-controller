@@ -88,10 +88,16 @@ impl SpdmAttestationStateHandler {
                 // The waiting state records that cancellation was already requested;
                 // a transient request failure remains here for the next iteration.
                 let client = redfish_client(&snapshot.bmc_info, ctx).await?;
-                let task = client
-                    .get_task(task_id)
-                    .await
-                    .map_err(|error| redfish_error("get_task_state", error))?;
+                let task = match client.get_task(task_id).await {
+                    Ok(task) => task,
+                    Err(libredfish::RedfishError::HTTPErrorCode { status_code, .. })
+                        if matches!(status_code.as_u16(), 404 | 410) =>
+                    {
+                        // The BMC may remove a stopped task before cleanup begins.
+                        return self.complete_fail_waive(object_id, ctx).await;
+                    }
+                    Err(error) => return Err(redfish_error("get_task_state", error)),
+                };
                 if evidence_collection_task_stopped(task.task_state.as_ref()) {
                     return self.complete_fail_waive(object_id, ctx).await;
                 }
