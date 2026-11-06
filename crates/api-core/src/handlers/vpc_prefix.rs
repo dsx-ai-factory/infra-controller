@@ -306,6 +306,15 @@ pub(crate) async fn create(
             .await?;
         match candidates.len() {
             0 => {
+                // A replica can still have the old config after another replica
+                // retires its roots. Do not reopen that space as rootless.
+                if !api.runtime_config.site_fabric_prefixes.is_empty() {
+                    return Err(CarbideError::FailedPrecondition(format!(
+                        "the VPC prefix {} has no containing operator-managed SitePrefix",
+                        new_prefix.config.prefix
+                    ))
+                    .into());
+                }
                 let vpc = ::db::vpc::find_by(
                     &mut txn,
                     ObjectColumnFilter::One(::db::vpc::IdColumn, &new_prefix.vpc_id),
@@ -366,10 +375,9 @@ pub(crate) async fn create(
         validate_site_prefix_attachment(site_prefix, vpc, new_prefix.config.prefix)?;
         new_prefix.site_prefix_id = Some(site_prefix.id);
     } else if let Some(ref site_prefixes) = api.eth_data.site_fabric_prefixes {
-        // Preserve the mixed-version configured-root path. Production startup
-        // reconciles configured roots into SitePrefix rows; this fallback keeps
-        // feature-off sites and older writers behaviorally compatible while
-        // the nullable expand phase is deployed.
+        // Sites without configured roots may admit rootless prefixes, subject
+        // to any legacy in-memory allowlist. Configured roots require persisted
+        // parentage even while replicas run different configurations.
         let prefix = new_prefix.config.prefix;
         if !site_prefixes.contains(prefix) {
             return Err(CarbideError::InvalidArgument(format!(

@@ -315,7 +315,7 @@ async fn lock_configured_reconciliation(txn: &mut PgConnection) -> DatabaseResul
 }
 
 /// Prevents configured SitePrefix reconciliation from changing the operator
-/// namespace while a legacy VpcPrefix request resolves its exact root.
+/// namespace while a prefix request validates its containing roots.
 ///
 /// This namespace lock covers the zero-row case that row locks cannot protect.
 pub async fn lock_operator_managed_site_prefix_attachments(
@@ -480,12 +480,12 @@ pub async fn find_by_id_for_vpc_prefix_attachment(
         .map_err(|error| DatabaseError::query(query, error))
 }
 
-/// Locks every operator-managed SitePrefix containing a legacy VpcPrefix.
+/// Locks every operator-managed SitePrefix containing the requested prefix.
 ///
-/// Results are ordered deterministically, but the caller must require exactly
-/// one match. In particular, it must not guess between nested operator roots.
-/// Lifecycle state is deliberately not filtered so Core can reject a more
-/// specific or otherwise matching root that has begun retirement.
+/// VpcPrefix attachment requires exactly one match, without guessing between
+/// nested roots. Direct NetworkPrefix admission requires any Ready match because
+/// it has no exact SitePrefix parent. Results are ordered deterministically and
+/// include retiring roots so callers can enforce these distinct lifecycle rules.
 pub async fn find_legacy_operator_managed_for_vpc_prefix_attachment(
     txn: &mut PgConnection,
     prefix: IpNetwork,
@@ -934,10 +934,11 @@ pub async fn retire_tenant_managed(
     Ok(site_prefix)
 }
 
-/// Physically removes a retired tenant root after its exact children are gone.
+/// Physically removes a retired root after its retained children are gone.
 ///
-/// The caller holds the routing and parent row locks and verifies that the root
-/// is TenantManaged and Deleting. The child foreign key prevents premature removal.
+/// The caller holds the routing and parent row locks, verifies that the root is
+/// Deleting, and checks its authority-specific retention rules. The child foreign
+/// key also prevents removal while exact VpcPrefix references remain.
 pub async fn final_delete(
     site_prefix_id: SitePrefixId,
     txn: &mut PgConnection,

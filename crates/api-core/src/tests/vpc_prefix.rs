@@ -528,6 +528,9 @@ async fn generated_linknets_inherit_scope_but_adopted_segments_stay_global(
     pool: PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let env = create_test_env_with_overrides(pool, tenant_prefix_overlap_overrides(true)).await;
+    let mut txn = env.pool.begin().await?;
+    db::site_prefix::reconcile_configured(&mut txn, &env.config.site_fabric_prefixes).await?;
+    txn.commit().await?;
     let tenant = "scope-inheritance";
     create_overlap_tenant(&env, tenant).await?;
     let vpc_id = create_fnn_vpc_for_tenant(&env, tenant, "scoped VPC", Some("OVERLAP")).await;
@@ -604,6 +607,9 @@ async fn configured_networks_reject_scoped_children_but_preserve_global_parents(
     pool: PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let env = create_test_env_with_overrides(pool, tenant_prefix_overlap_overrides(true)).await;
+    let mut txn = env.pool.begin().await?;
+    db::site_prefix::reconcile_configured(&mut txn, &env.config.site_fabric_prefixes).await?;
+    txn.commit().await?;
     let tenant = "configured-network-overlap";
     let vpc_name = "configured network VPC";
     create_overlap_tenant(&env, tenant).await?;
@@ -1271,6 +1277,9 @@ async fn vpc_prefix_and_attached_segment_recheck_both_commit_orders(
     pool: PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let env = create_test_env_with_overrides(pool, tenant_prefix_overlap_overrides(false)).await;
+    let mut txn = env.pool.begin().await?;
+    db::site_prefix::reconcile_configured(&mut txn, &env.config.site_fabric_prefixes).await?;
+    txn.commit().await?;
     let tenant_a = "serialized-cross-table-a";
     let tenant_b = "serialized-cross-table-b";
     create_overlap_tenant(&env, tenant_a).await?;
