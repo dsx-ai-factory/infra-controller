@@ -747,9 +747,9 @@ fn ready_for_ingestion_firmware(machine: &HostMachine) -> bool {
 /// Loads only devices ready to join the first automatic ingestion batch.
 async fn load_ingestion_firmware_inventory(
     rack: &Rack,
-    ctx: &StateHandlerContext<'_, RackStateHandlerContextObjects>,
+    services: &crate::context::RackStateHandlerServices,
 ) -> Result<RackFirmwareInventory, StateHandlerError> {
-    let mut conn = ctx.services.db_pool.acquire().await?;
+    let mut conn = services.db_pool.acquire().await?;
     let machine_ids = load_scoped_machines(conn.as_mut(), &rack.id, &MaintenanceScope::default())
         .await?
         .iter()
@@ -776,8 +776,8 @@ async fn load_ingestion_firmware_inventory(
         .collect::<Vec<_>>();
     drop(conn);
     let machines = load_compute_firmware_inventory(
-        &ctx.services.db_pool,
-        ctx.services.credential_manager.as_ref(),
+        &services.db_pool,
+        services.credential_manager.as_ref(),
         &machine_ids,
     )
     .await
@@ -786,8 +786,8 @@ async fn load_ingestion_firmware_inventory(
     for switch_id in &switch_ids {
         switches.push(
             load_switch_firmware_device_info(
-                &ctx.services.db_pool,
-                ctx.services.credential_manager.as_ref(),
+                &services.db_pool,
+                services.credential_manager.as_ref(),
                 switch_id,
             )
             .await
@@ -2632,7 +2632,7 @@ pub async fn handle_maintenance(
                 let profile = super::resolve_profile(id, rack_profile_id, ctx);
 
                 let inventory = if is_automatic_ingestion(state) {
-                    load_ingestion_firmware_inventory(state, ctx).await?
+                    load_ingestion_firmware_inventory(state, ctx.services).await?
                 } else {
                     load_rack_firmware_inventory(
                         &ctx.services.db_pool,
