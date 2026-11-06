@@ -815,10 +815,17 @@ TOML section: `[observability.per_object_state_metrics]`.
 
 ### `MachineStateControllerConfig`
 
+TOML section: `[machine_state_controller]`.
+
+For `spdm_attester_selection_timeout`, environment values override the site
+override, which overrides the base configuration file. Changes require an API
+restart.
+
 Extends `StateControllerConfig` with:
 
 | Field | Type | Default | Description |
 | ------- | ------ | --------- | ------------- |
+| `spdm_attester_selection_timeout` | `Duration` | `30s` | Optional positive duration up to `3m`, such as `500ms`, `30s` or `3m`. One total budget per managed-host SPDM selection during triggering, terminal-job polling and failed-state recovery, including database/profile lookup, client creation and both Redfish reads. It does not reset between phases. Expiry returns an error, preserves the lifecycle state and job, and permits a later iteration to retry. The enclosing `controller.max_object_handling_time` can expire earlier. Zero, negative, malformed and greater-than-three-minute values fail configuration loading. Omission uses `30s`, including when this section is absent. Read at startup; changes require an API restart. API-triggered attestation and assessment retain their request-supplied timeouts. |
 | `dpu_wait_time` | `Duration` | `5m` | Time before a DPU is considered definitively down. |
 | `power_down_wait` | `Duration` | `2m` | Wait after power-down before powering on. |
 | `failure_retry_time` | `Duration` | `90m` | Time before re-triggering reboot if machine hasn't called back. |

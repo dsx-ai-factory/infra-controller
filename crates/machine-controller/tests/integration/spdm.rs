@@ -44,6 +44,11 @@ async fn setup_spdm_host(pool: PgPool, spdm_enabled: bool) -> (Env, TestManagedH
         .configure_runtime(|config| config.spdm.enabled = spdm_enabled)
         .build()
         .await;
+    discover_spdm_host(env).await
+}
+
+async fn discover_spdm_host(env: Env) -> (Env, TestManagedHost) {
+    // Share the discovered inventory between default-config and timeout tests.
     let domain = env.test_harness.test_domain().await;
     let network_controller = env.test_harness.network_controller();
     let underlay_segment = network_controller.create_underlay_segment(&domain).await;
@@ -57,6 +62,169 @@ async fn setup_spdm_host(pool: PgPool, spdm_enabled: bool) -> (Env, TestManagedH
         .await
         .0;
     (env, mh)
+}
+
+/// The configured deadline covers every MH selection path and permits recovery after expiry.
+#[sqlx_test]
+async fn spdm_selection_timeouts_preserve_state_and_retry(pool: PgPool) -> eyre::Result<()> {
+    use std::time::Duration;
+
+    let env = Env::builder(pool.clone())
+        .configure_runtime(|config| {
+            config.spdm.enabled = true;
+            config
+                .machine_state_controller
+                .spdm_attester_selection_timeout = Duration::from_secs(1);
+        })
+        .build()
+        .await;
+    let (mut env, mh) = discover_spdm_host(env).await;
+    let machine_id: MachineId = mh.host.id.into();
+    let job_id = uuid::Uuid::new_v4();
+    let trigger_state = ManagedHostState::HostInit {
+        machine_state: MachineState::SpdmMeasuring {
+            spdm_measuring_state: SpdmMeasuringState::TriggerMeasurements,
+        },
+    };
+    let poll_state = ManagedHostState::HostInit {
+        machine_state: MachineState::SpdmMeasuring {
+            spdm_measuring_state: SpdmMeasuringState::PollResult(job_id),
+        },
+    };
+    let failed_state = ManagedHostState::Failed {
+        details: FailureDetails {
+            cause: FailureCause::SpdmAttestationFailed {
+                err: "previous failure".to_string(),
+            },
+            failed_at: Utc::now(),
+            source: FailureSource::StateMachineArea(StateMachineArea::HostInit),
+        },
+        retry_count: 7,
+        machine_id,
+    };
+    // Each case adds a distinct proof: client creation, the first read, or a
+    // cumulative deadline even when both reads fit their individual timeout.
+    let cases = [
+        ("trigger client creation", trigger_state, [2000, 0, 0], true),
+        (
+            "terminal polling service root",
+            poll_state,
+            [0, 2000, 0],
+            false,
+        ),
+        (
+            "recovery shares the read budget",
+            failed_state,
+            [0, 600, 600],
+            false,
+        ),
+    ];
+    for (scenario, state, delays_ms, creates_job) in cases {
+        let mut txn = env.test_harness.db_txn().await;
+        sqlx::query("DELETE FROM attestation_profiles")
+            .execute(&mut *txn)
+            .await?;
+        db::attestation_profile::create(
+            &mut txn,
+            MOCK_HOST_HARDWARE_CLASS,
+            &AttestationPolicyDocument::new(AttesterSelection {
+                mode: AttesterSelectionMode::Allowlist,
+                component_ids: vec![ComponentIdMatch::Exact("HGX_IRoT_GPU_0".to_string())],
+            }),
+            "test",
+        )
+        .await?;
+        sqlx::query("DELETE FROM spdm_machine_devices_attestation WHERE machine_id = $1")
+            .bind(machine_id)
+            .execute(&mut *txn)
+            .await?;
+        // A terminal job supplies both polling membership and recovery's passed result.
+        sqlx::query(
+            "INSERT INTO spdm_machine_devices_attestation
+             (machine_id, device_id, nonce, state, job_id, started_at, completed_at)
+             VALUES ($1, 'HGX_IRoT_GPU_0', gen_random_uuid(), $2, $3, now(), now())",
+        )
+        .bind(machine_id)
+        .bind(sqlx::types::Json(SpdmAttestationState::Passed))
+        .bind(job_id)
+        .execute(&mut *txn)
+        .await?;
+        db::machine::update_state(&mut txn, &mh.host.id, &state).await?;
+        txn.commit().await?;
+
+        let [client, root, integrities] = delays_ms.map(Duration::from_millis);
+        env.redfish_sim
+            .set_attester_selection_delays(client, root, integrities);
+        let client_calls_before = env.redfish_sim.create_client_calls().len();
+        env.run_single_iteration().await;
+
+        // Persisted error text proves a selection timer ran, rather than an unrelated error.
+        // The first read's timer can expire on the same Tokio tick as the outer timer.
+        let mut txn = env.test_harness.db_txn().await;
+        let machine = mh.host.db_machine(&mut txn).await;
+        assert_eq!(machine.current_state(), &state, "{scenario}");
+        assert!(
+            matches!(
+                &machine.controller_state_outcome,
+                Some(PersistentStateHandlerOutcome::Error { err, .. })
+                    if err.contains("SPDM attester selection timed out after 1s")
+                        || err.contains("redfish service_root could not finish in 1 seconds")
+            ),
+            "{scenario}: {:?}",
+            machine.controller_state_outcome
+        );
+        assert!(
+            env.redfish_sim.create_client_calls().len() > client_calls_before,
+            "{scenario}"
+        );
+        let jobs_before: Vec<uuid::Uuid> = sqlx::query_scalar(
+            "SELECT job_id FROM spdm_machine_devices_attestation WHERE machine_id = $1",
+        )
+        .bind(machine_id)
+        .fetch_all(&mut *txn)
+        .await?;
+        assert_eq!(
+            jobs_before,
+            vec![job_id],
+            "{scenario}: expiry must preserve jobs"
+        );
+        txn.commit().await?;
+
+        // Clear the injected latency and prove a later iteration retries successfully.
+        env.redfish_sim.set_attester_selection_delays(
+            Duration::ZERO,
+            Duration::ZERO,
+            Duration::ZERO,
+        );
+        env.run_single_iteration().await;
+        let mut txn = env.test_harness.db_txn().await;
+        let machine = mh.host.db_machine(&mut txn).await;
+        if creates_job {
+            let ManagedHostState::HostInit {
+                machine_state:
+                    MachineState::SpdmMeasuring {
+                        spdm_measuring_state: SpdmMeasuringState::PollResult(new_job_id),
+                    },
+            } = machine.current_state()
+            else {
+                panic!("{scenario}: {:?}", machine.current_state());
+            };
+            assert_ne!(
+                *new_job_id, job_id,
+                "{scenario}: triggering must create a new job"
+            );
+        } else {
+            assert_eq!(
+                machine.current_state(),
+                &ManagedHostState::HostInit {
+                    machine_state: MachineState::WaitingForDiscovery,
+                },
+                "{scenario}"
+            );
+        }
+        txn.commit().await?;
+    }
+    Ok(())
 }
 
 /// A matching job polls the latest machine results for its devices, including failure details.

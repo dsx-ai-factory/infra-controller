@@ -206,12 +206,20 @@ pub async fn trigger_attestation(
     redfish_timeout_duration: std::time::Duration,
     triggered_by_mh_controller: bool,
 ) -> Result<SchedulingResult, StateHandlerError> {
-    let (result, txn) = schedule(
+    // API callers retain their own client-creation and per-read timeout policy.
+    let selection = select_machine_attesters(
         db_pool,
         connect,
         bmc_info,
         machine_id,
         redfish_timeout_duration,
+    )
+    .await?;
+    let (result, txn) = schedule(
+        db_pool,
+        selection,
+        bmc_info,
+        machine_id,
         triggered_by_mh_controller,
     )
     .await?;
@@ -227,21 +235,12 @@ pub async fn trigger_attestation(
 
 async fn schedule(
     db_pool: &PgPool,
-    connect: impl AsyncFnOnce() -> Result<Box<dyn libredfish::Redfish>, StateHandlerError>,
+    selection: MachineAttesterSelection,
     bmc_info: &BmcInfo,
     machine_id: &MachineId,
-    redfish_timeout_duration: std::time::Duration,
     triggered_by_mh_controller: bool,
 ) -> Result<(SchedulingResult, Option<PgTransaction<'static>>), StateHandlerError> {
-    // Complete profile resolution and BMC discovery before opening a write transaction.
-    let selection = select_machine_attesters(
-        db_pool,
-        connect,
-        bmc_info,
-        machine_id,
-        redfish_timeout_duration,
-    )
-    .await?;
+    // Selection has finished before this function opens a write transaction.
     let result = SchedulingResult {
         outcome: selection.outcome,
         hardware_class: selection.hardware_class,
@@ -411,18 +410,8 @@ pub(crate) async fn handle_spdm_attestation_failed_recovery(
     let selected_device_ids = if !ctx.services.site_config.spdm_enabled {
         Vec::new()
     } else {
-        let selection = select_machine_attesters(
-            &ctx.services.db_pool,
-            async || {
-                ctx.services
-                    .create_redfish_client_from_machine(&mh_snapshot.host_snapshot)
-                    .await
-            },
-            &mh_snapshot.host_snapshot.status.bmc_info,
-            host_machine_id,
-            std::time::Duration::MAX,
-        )
-        .await?;
+        let selection =
+            select_managed_host_attesters(ctx.services, mh_snapshot, host_machine_id).await?;
         selection
             .attesters
             .into_iter()
@@ -478,16 +467,12 @@ pub(crate) async fn handle_spdm_trigger_state(
     next_skip_state: ManagedHostState,
 ) -> Result<StateHandlerOutcome<ManagedHostState>, StateHandlerError> {
     // Create the BMC client only when the resolved profile requires collection.
+    let selection = select_managed_host_attesters(services, mh_snapshot, host_machine_id).await?;
     let (result, txn) = schedule(
         &services.db_pool,
-        async || {
-            services
-                .create_redfish_client_from_machine(&mh_snapshot.host_snapshot)
-                .await
-        },
+        selection,
         &mh_snapshot.host_snapshot.status.bmc_info,
         host_machine_id,
-        std::time::Duration::MAX,
         true, // This job is part of the managed-host lifecycle.
     )
     .await?;
@@ -533,18 +518,7 @@ pub(crate) async fn handle_spdm_poll_state(
     }
 
     // Recheck current membership before accepting a terminal job's results.
-    let selection = select_machine_attesters(
-        &services.db_pool,
-        async || {
-            services
-                .create_redfish_client_from_machine(&mh_snapshot.host_snapshot)
-                .await
-        },
-        &mh_snapshot.host_snapshot.status.bmc_info,
-        host_machine_id,
-        std::time::Duration::MAX,
-    )
-    .await?;
+    let selection = select_managed_host_attesters(services, mh_snapshot, host_machine_id).await?;
     let mut txn = services.db_pool.begin().await?;
 
     // Retention can remove a job during Redfish discovery; restart in the caller's lifecycle stage.
@@ -628,6 +602,40 @@ pub(crate) async fn handle_spdm_poll_state(
         }
         SpdmAttestationStatus::InProgress => Ok(StateHandlerOutcome::do_nothing()),
     }
+}
+
+/// Applies the managed-host budget to profile lookup, authentication and inventory together.
+async fn select_managed_host_attesters(
+    services: &MachineStateHandlerServices,
+    mh_snapshot: &ManagedHostStateSnapshot,
+    host_machine_id: &MachineId,
+) -> Result<MachineAttesterSelection, StateHandlerError> {
+    let timeout = services
+        .site_config
+        .machine_state_controller
+        .spdm_attester_selection_timeout;
+    // One timer covers every prerequisite and read, without restarting between phases.
+    // Expiry leaves the lifecycle and job unchanged so a later iteration can retry.
+    tokio::time::timeout(
+        timeout,
+        select_machine_attesters(
+            &services.db_pool,
+            async || {
+                services
+                    .create_redfish_client_from_machine(&mh_snapshot.host_snapshot)
+                    .await
+            },
+            &mh_snapshot.host_snapshot.status.bmc_info,
+            host_machine_id,
+            timeout,
+        ),
+    )
+    .await
+    .map_err(|_| {
+        StateHandlerError::GenericError(eyre::eyre!(
+            "SPDM attester selection timed out after {timeout:?}"
+        ))
+    })?
 }
 
 /// Resolves the machine's profile and selects eligible BMC components without scheduling work.

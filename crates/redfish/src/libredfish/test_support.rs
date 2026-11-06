@@ -168,6 +168,10 @@ struct RedfishSimState {
     /// vendor probe). Drives the [`super::CredentialOpError::ClientCreation`]
     /// retry paths at credential-op call sites.
     create_client_error: Option<String>,
+    /// Optional latency for the three phases of SPDM attester discovery.
+    create_client_delay: Duration,
+    service_root_delay: Duration,
+    component_integrities_delay: Duration,
     /// When set, the sim's `BmcCredentialOps::uefi_setup` override fails with
     /// [`super::CredentialOpError::ClientCreation`] carrying this message,
     /// modeling a client-creation failure inside the credential op (the sim
@@ -691,6 +695,20 @@ impl RedfishSim {
     /// clearing so a retry can be asserted.
     pub fn clear_create_client_error(&self) {
         self.state.lock().unwrap().create_client_error = None;
+    }
+
+    /// Delays client creation and both attester inventory reads independently.
+    /// Zero durations restore immediate responses; delays release the state lock.
+    pub fn set_attester_selection_delays(
+        &self,
+        client_creation: Duration,
+        service_root: Duration,
+        component_integrities: Duration,
+    ) {
+        let mut state = self.state.lock().unwrap();
+        state.create_client_delay = client_creation;
+        state.service_root_delay = service_root;
+        state.component_integrities_delay = component_integrities;
     }
 
     /// Force the sim's `uefi_setup` override to fail with
@@ -1975,6 +1993,11 @@ impl Redfish for RedfishSimClient {
         Result<libredfish::model::service_root::ServiceRoot, RedfishError>,
     > {
         Box::pin(async move {
+            // Never hold the simulator lock while modelling an unresponsive BMC.
+            let delay = self.state.lock().unwrap().service_root_delay;
+            if !delay.is_zero() {
+                tokio::time::sleep(delay).await;
+            }
             let state = self.state.lock().unwrap();
             let vendor = state
                 .service_root_vendor
@@ -2647,6 +2670,10 @@ impl Redfish for RedfishSimClient {
         Result<libredfish::model::component_integrity::ComponentIntegrities, RedfishError>,
     > {
         Box::pin(async move {
+            let delay = self.state.lock().unwrap().component_integrities_delay;
+            if !delay.is_zero() {
+                tokio::time::sleep(delay).await;
+            }
             if self.state.lock().unwrap().no_component_integrities {
                 return Ok(ComponentIntegrities {
                     members: Vec::new(),
@@ -3055,6 +3082,11 @@ impl RedfishClientPool for RedfishSim {
             if state.fw_version.is_empty() {
                 state.fw_version = Arc::new("24.10-17".to_string());
             }
+        }
+        // Client creation can wait on credentials or authentication before returning a client.
+        let delay = self.state.lock().unwrap().create_client_delay;
+        if !delay.is_zero() {
+            tokio::time::sleep(delay).await;
         }
         Ok(Box::new(RedfishSimClient {
             state: self.state.clone(),

@@ -6411,6 +6411,7 @@ path = "credentials.yaml"
                 metric_emission_interval: std::time::Duration::from_secs(60),
                 metric_hold_time: std::time::Duration::from_secs(5 * 60),
             },
+            spdm_attester_selection_timeout: std::time::Duration::from_secs(45),
             dpu_wait_time: Duration::minutes(20),
             power_down_wait: Duration::seconds(10),
             failure_retry_time: Duration::minutes(90),
@@ -6443,6 +6444,7 @@ path = "credentials.yaml"
         let config = r#"{"dpu_wait_time": "20m","power_down_wait":"10s",
         "failure_retry_time":"1h30m", "dpu_up_threshold": "1w",
         "boot_interface_observation_interval": "2h",
+        "spdm_attester_selection_timeout": "3m",
         "controller": {"iteration_time": "33s", "max_object_handling_time": "63s", "max_concurrency": 13}}"#;
         let config: MachineStateControllerConfig = serde_json::from_str(config).unwrap();
 
@@ -6460,6 +6462,7 @@ path = "credentials.yaml"
                         metric_hold_time: std::time::Duration::from_secs(5 * 60),
                     }
                 },
+                spdm_attester_selection_timeout: std::time::Duration::from_secs(180),
                 dpu_wait_time: Duration::minutes(20),
                 power_down_wait: Duration::seconds(10),
                 failure_retry_time: Duration::minutes(90),
@@ -6485,6 +6488,7 @@ path = "credentials.yaml"
             config,
             MachineStateControllerConfig {
                 controller: StateControllerConfig::default(),
+                spdm_attester_selection_timeout: std::time::Duration::from_secs(30),
                 dpu_wait_time: Duration::minutes(5),
                 power_down_wait: Duration::seconds(10),
                 failure_retry_time: Duration::minutes(90),
@@ -6520,6 +6524,30 @@ path = "credentials.yaml"
                 "boot_interface_observation_interval={invalid_interval} must be rejected",
             );
         }
+    }
+
+    #[test]
+    fn reject_invalid_spdm_attester_selection_timeouts() {
+        use carbide_test_support::Outcome::Fails;
+        use carbide_test_support::scenarios;
+
+        // These values must fail configuration loading before any selection can run.
+        scenarios!(
+            run = |timeout: &str| {
+                let config_json = format!(r#"{{"spdm_attester_selection_timeout":"{timeout}"}}"#);
+                serde_json::from_str::<MachineStateControllerConfig>(&config_json).map_err(drop)
+            };
+            "a timeout must be positive" {
+                "0s" => Fails,
+                "-1s" => Fails,
+            }
+            "a timeout must stay within the hard maximum" {
+                "180001ms" => Fails,
+            }
+            "a timeout must be a duration" {
+                "invalid" => Fails,
+            }
+        );
     }
 
     #[test]
