@@ -78,6 +78,7 @@ fn host_bmc_report() -> EndpointExplorationReport {
             bios_version: None,
             serial_console_ssh_port: None,
             processors: None,
+            part_number: None,
         }],
         chassis: vec![Chassis {
             id: String::new(),

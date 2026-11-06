@@ -1329,6 +1329,13 @@ impl Forge for Api {
         crate::handlers::bmc_endpoint_explorer::bmc_credential_status(self, request).await
     }
 
+    async fn find_bmc_driver_selection(
+        &self,
+        request: Request<rpc::BmcEndpointRequest>,
+    ) -> Result<Response<rpc::BmcDriverSelection>, Status> {
+        crate::handlers::site_explorer::find_bmc_driver_selection(self, request).await
+    }
+
     async fn re_explore_endpoint(
         &self,
         request: Request<rpc::ReExploreEndpointRequest>,

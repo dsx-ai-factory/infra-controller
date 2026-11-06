@@ -380,6 +380,9 @@ service Forge {
   rpc IsBmcInManagedHost(BmcEndpointRequest) returns (IsBmcInManagedHostResponse);
   // BmcCredentialStatus returns true if site explorer has the credentials to login to this BMC
   rpc BmcCredentialStatus(BmcEndpointRequest) returns (BmcCredentialStatusResponse);
+  // Returns the drivers this API server's rules select for a BMC from its
+  // latest exploration report, and the identity they were selected from
+  rpc FindBmcDriverSelection(BmcEndpointRequest) returns (BmcDriverSelection);
   // Explore an individual BMC and show the report
   // The results of this exploration call will not be persisted in the database
   rpc Explore(BmcEndpointRequest) returns (site_explorer.EndpointExplorationReport);
@@ -8539,6 +8542,16 @@ message MachineValidationHeartbeatResponse {
 
 message IsBmcInManagedHostResponse {
   bool in_managed_host = 1;
+}
+
+// A BMC's driver selection. Every field is absent until site exploration
+// records the BMC's service root in its report.
+message BmcDriverSelection {
+  // The drivers by capability, the rule that chose each, the quirks, and the
+  // rules hash, as JSON.
+  optional string selection = 1;
+  // What the latest exploration report says about the BMC, as JSON.
+  optional string identity = 2;
 }
 
 message BmcCredentialStatusResponse {

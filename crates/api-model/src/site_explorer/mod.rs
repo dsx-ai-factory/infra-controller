@@ -191,6 +191,9 @@ pub struct EndpointExplorationReport {
     /// Vendor as reported by Redfish
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vendor: Option<bmc_vendor::BMCVendor>,
+    /// The Redfish service root as the BMC reported it
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service_root: Option<ServiceRoot>,
     /// The class [`derive_hardware_class`] derived from what the BMC reported.
     /// `None` if no exploration has recorded one for this endpoint.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1894,6 +1897,8 @@ pub struct ComputerSystem {
     /// SSH port for the system's Redfish serial-console service.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub serial_console_ssh_port: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub part_number: Option<String>,
 }
 
 /// Minimal processor inventory with position normalized by the explorer.
@@ -1959,6 +1964,19 @@ pub enum PowerState {
     Unknown,
 }
 
+/// The Redfish `ServiceRoot` fields that identify a BMC.
+#[derive(Clone, Default, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct ServiceRoot {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vendor: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub product: Option<String>,
+    /// Keys of the `Oem` object, for example `Ami` or `Dell`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub oem_keys: Vec<String>,
+}
+
 /// `Manager` definition. Matches redfish definition
 #[derive(Clone, Default, PartialEq, Eq, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase")]
@@ -1968,6 +1986,10 @@ pub struct Manager {
     pub id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ipmi_port: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub firmware_version: Option<String>,
 }
 
 /// `EthernetInterface` definition. Matches redfish definition
@@ -4789,6 +4811,8 @@ mod tests {
                 ethernet_interfaces: vec![],
                 id: "bmc".to_string(),
                 ipmi_port: None,
+                firmware_version: None,
+                model: None,
             }],
             systems: vec![ComputerSystem {
                 ethernet_interfaces: vec![],
@@ -4808,6 +4832,7 @@ mod tests {
                 bios_version: None,
                 serial_console_ssh_port: None,
                 processors: None,
+                part_number: None,
             }],
             chassis: vec![Chassis {
                 id: "NIC.Slot.1".to_string(),
@@ -4953,6 +4978,8 @@ mod tests {
                 ethernet_interfaces: vec![],
                 id: "bmc".to_string(),
                 ipmi_port: None,
+                firmware_version: None,
+                model: None,
             }],
             systems: vec![ComputerSystem {
                 ethernet_interfaces: vec![],
@@ -4972,6 +4999,7 @@ mod tests {
                 bios_version: None,
                 serial_console_ssh_port: None,
                 processors: None,
+                part_number: None,
             }],
             chassis: vec![Chassis {
                 id: "NIC.Slot.1".to_string(),
