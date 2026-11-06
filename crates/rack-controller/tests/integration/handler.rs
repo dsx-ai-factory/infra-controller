@@ -2545,7 +2545,8 @@ async fn test_ingestion_transitions_to_firmware_upgrade_and_submits_rack_profile
         .bind(unfinished.host_snapshot.id)
         .execute(&pool)
         .await?;
-    let extra_switch = attach_switch_with_nvos_credentials(&env, &rack_id).await?;
+    let initial_switches = attach_switches_with_nvos_credentials(&env, &rack_id, 2).await?;
+    let extra_switch = initial_switches[0];
     set_switch_state(
         pool.acquire().await?.as_mut(),
         &extra_switch,
@@ -2562,7 +2563,7 @@ async fn test_ingestion_transitions_to_firmware_upgrade_and_submits_rack_profile
     )
     .await;
     let machine_id = host.host_snapshot.id.to_string();
-    let switch_id = attach_switch_with_nvos_credentials(&env, &rack_id).await?;
+    let switch_id = initial_switches[1];
     set_switch_state(
         pool.acquire().await?.as_mut(),
         &switch_id,
