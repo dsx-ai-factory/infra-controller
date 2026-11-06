@@ -1631,6 +1631,20 @@ async fn runtime_config_retains_removed_operator_root_until_direct_segment_hard_
         vec![configured_root.to_string(), retiring_root.to_string()]
     );
 
+    // The retained Deleting root must not admit another direct segment through
+    // the predecessor configuration after its last Ready coverage is retired.
+    let error = NetworkSegmentHelper::new_with_tenant_prefix("172.16.2.0/24", "172.16.2.1", vpc_id)
+        .create_with_api(&env.api)
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), Code::FailedPrecondition);
+    let segment_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM network_segments WHERE vpc_id = $1")
+            .bind(vpc_id)
+            .fetch_one(&env.pool)
+            .await?;
+    assert_eq!(segment_count, 1, "only the existing segment must persist");
+
     // Soft deletion must not withdraw isolation while the segment's direct
     // NetworkPrefix remains present during controller draining.
     env.api

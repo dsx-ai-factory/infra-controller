@@ -1199,9 +1199,10 @@ removed, it no longer prevents selection of its replacement roots. An explicit
 `site_prefix_id` selects its parent directly and still requires `Ready`, containment,
 and the applicable tenant-ownership and VPC-virtualization checks. An omitted ID
 prefers a unique containing operator root even when the tenant also owns a
-containing root. If no operator root contains the request, a root owned by the
-VPC's tenant requires explicit selection; otherwise Core returns
-`FailedPrecondition` with a request to supply the ID.
+containing root. If no operator root contains the request but a root owned by the
+VPC's tenant does, omitting `site_prefix_id` returns `FailedPrecondition` with a
+request to select that tenant root explicitly. If neither contains the request,
+the configured-range and rootless admission rules below apply.
 
 On replicas with nonempty `site_fabric_prefixes`, a direct `Tenant` segment also
 requires at least one persisted, `Ready`, containing operator root for each

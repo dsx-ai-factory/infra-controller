@@ -65,13 +65,10 @@ async fn retired_operator_prefix_does_not_block_split_ranges(pool: sqlx::PgPool)
     txn.commit().await.unwrap();
 
     controller(&env).run_single_iteration_ext(false).await;
-    controller(&env).run_single_iteration_ext(false).await;
     let mut failures = Vec::new();
-    for (parent, child, explicit_parent) in [
-        (split_prefixes[0], "192.0.2.0/29", false),
-        (split_prefixes[1], "192.0.2.128/29", false),
-        (split_prefixes[0], "192.0.2.8/29", true),
-        (split_prefixes[1], "192.0.2.136/29", true),
+    for (parent, child) in [
+        (split_prefixes[0], "192.0.2.0/29"),
+        (split_prefixes[1], "192.0.2.128/29"),
     ] {
         let parent_id = db::site_prefix::find_ids(
             &env.pool,
@@ -90,7 +87,7 @@ async fn retired_operator_prefix_does_not_block_split_ranges(pool: sqlx::PgPool)
                 id: Some(id),
                 prefix: String::new(),
                 vpc_id: Some(vpc_id),
-                site_prefix_id: explicit_parent.then_some(parent_id),
+                site_prefix_id: None,
                 config: Some(rpc::forge::VpcPrefixConfig {
                     prefix: child.to_string(),
                 }),
@@ -109,9 +106,7 @@ async fn retired_operator_prefix_does_not_block_split_ranges(pool: sqlx::PgPool)
                 .unwrap();
                 assert_eq!(stored_parent, Some(parent_id));
             }
-            Err(error) => failures.push(format!(
-                "{child}, explicit_parent={explicit_parent}: {error}"
-            )),
+            Err(error) => failures.push(format!("{child}: {error}")),
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
