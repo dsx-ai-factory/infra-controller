@@ -207,6 +207,16 @@ func TestDialRefusals(t *testing.T) {
 	is(t, strings.HasSuffix(errText(err), "the key is not the certificate's"), true, "foreign key")
 
 	write("tls.key", keyPEM)
+
+	// A certificate that names another service is refused eagerly at Dial, before any connection, with the sanitized identity reason.
+	wrongCert, wrongKey, _ := leaf(t, "spiffe://nico.local/ns/forge/sa/other", nil)
+	write("tls.crt", wrongCert)
+	write("tls.key", wrongKey)
+	_, err = Dial("https://nico", s)
+	is(t, errText(err), "the SPIFFE ID names another service, not machine-a-tron", "wrong initial identity")
+	write("tls.crt", certPEM)
+	write("tls.key", keyPEM)
+
 	c, err := Dial("https://nico:443", s)
 	is(t, errText(err), "", "dial builds")
 	if c != nil {
