@@ -167,6 +167,8 @@ struct RedfishSimState {
     /// override replaces the default body, so `create_client_error` cannot
     /// reach it).
     uefi_setup_client_creation_error: Option<String>,
+    /// Fail one dispatched UEFI setup call with a device-level error.
+    next_uefi_setup_error: Option<RedfishError>,
     /// Observe and pause one UEFI setup call while a test changes the site target.
     uefi_setup_pause: Option<(
         tokio::sync::oneshot::Sender<Credentials>,
@@ -661,6 +663,11 @@ impl RedfishSim {
     /// [`Self::set_uefi_setup_client_creation_error`].
     pub fn clear_uefi_setup_client_creation_error(&self) {
         self.state.lock().unwrap().uefi_setup_client_creation_error = None;
+    }
+
+    /// Fail the next dispatched UEFI setup operation with a device-level error.
+    pub fn fail_next_uefi_setup(&self, error: RedfishError) {
+        self.state.lock().unwrap().next_uefi_setup_error = Some(error);
     }
 
     /// Pause the next successful UEFI setup call. The receiver reports the
@@ -2988,6 +2995,11 @@ impl super::BmcCredentialOps for RedfishSim {
             state
                 .platform_actions
                 .push(RedfishSimPlatformAction::UefiSetup { dpu });
+            if let Some(error) = state.next_uefi_setup_error.take() {
+                return Err(super::CredentialOpError::Operation(
+                    RedfishClientCreationError::RedfishError(error),
+                ));
+            }
             state.uefi_setup_pause.take()
         };
         if let Some((started, resume)) = pause {

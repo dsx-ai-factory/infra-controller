@@ -8218,6 +8218,40 @@ async fn handle_host_uefi_setup(
                     .lockdown_bmc(libredfish::EnabledDisabled::Disabled)
                     .await
                     .map_err(|e| redfish_error("lockdown", e))?;
+
+                if state.host_snapshot.bmc_vendor().is_lenovo() {
+                    let addr = state
+                        .host_snapshot
+                        .status
+                        .bmc_info
+                        .ip_addr()
+                        .map_err(StateHandlerError::GenericError)?;
+                    let endpoints = db::explored_endpoints::find_by_ips(
+                        &mut ctx.services.db_reader,
+                        vec![addr],
+                    )
+                    .await?;
+                    if endpoints.is_empty()
+                        || endpoints.iter().any(|endpoint| {
+                            endpoint.report.vendor.is_none() || endpoint.report.model.is_none()
+                        })
+                    {
+                        tracing::warn!(
+                            machine_id = %state.host_snapshot.id,
+                            bmc_ip_address = %addr,
+                            "Skipping HS350 UEFI unlock reboot because BMC exploration metadata is incomplete"
+                        );
+                    }
+                    if endpoints.iter().any(|endpoint| {
+                        endpoint.report.vendor == Some(bmc_vendor::BMCVendor::LenovoAMI)
+                            && endpoint.report.model.as_deref() == Some("ThinkSystem HS350X V3")
+                    }) {
+                        // HS350 BIOS password operations remain unavailable until the
+                        // host boots with its Redfish host interface enabled.
+                        handler_host_power_control(state, ctx, SystemPowerControl::ForceRestart)
+                            .await?;
+                    }
+                }
             }
 
             Ok(StateHandlerOutcome::transition(
@@ -8280,6 +8314,8 @@ async fn handle_host_uefi_setup(
                         e
                     );
 
+                    // Lenovo HTTP 503 responses during boot retry this step without
+                    // repeating UnlockHost or requesting another reboot.
                     // This feature has only been tested thoroughly on Dells, Lenovos, and Vikings.
                     if state.host_snapshot.bmc_vendor().is_dell()
                         || state.host_snapshot.bmc_vendor().is_lenovo()
@@ -8828,7 +8864,17 @@ impl StateHandler for HostMachineStateHandler {
                                 uefi_setup_info: UefiSetupInfo {
                                     uefi_password_jid: None,
                                     credential_version: None,
-                                    uefi_setup_state: UefiSetupState::SetUefiPassword,
+                                    // Use each Lenovo backend's existing unlock operation
+                                    // before changing the BIOS password.
+                                    uefi_setup_state: if mh_snapshot
+                                        .host_snapshot
+                                        .bmc_vendor()
+                                        .is_lenovo()
+                                    {
+                                        UefiSetupState::UnlockHost
+                                    } else {
+                                        UefiSetupState::SetUefiPassword
+                                    },
                                 },
                             },
                         },
