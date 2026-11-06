@@ -110,13 +110,9 @@ nameservers / ntpServer / provisioningServer are passed through
 verbatim — operators provide the real IPs via the umbrella
 helm-prereqs/values/nico-core.yaml.
 
-Robustness contract — every value the helper interpolates into JSON
-runs through `toJson` (numbers, bools, lists, structures) or `quote`
-(strings) so a partial override that nils a field fails CLOSED at
-template-render time rather than producing `<no value>` in the config
-and crashlooping kea at startup. Scalar string fields likewise default
-to the chart placeholder so a `null` override doesn't leak into the
-DHCP advertisement.
+Serialize structured values with `toJson` and strings with `quote`.
+Required hook strings reject null values at render time while preserving
+explicit empty values.
 
 Note on toJson use: any field that is a free-form structure (subnets,
 pools, lease database backend) is serialised with toJson so future
@@ -127,21 +123,40 @@ controls the YAML→JSON name mapping.
 {{- define "nico-dhcp.keaConfigJson" -}}
 {{- $ns := include "nico-dhcp.namespace" . -}}
 {{- $apiSvc := include "nico-dhcp.apiServiceName" . -}}
-{{- $k := .Values.config.kea -}}
+{{- $k := default (dict) .Values.config.kea -}}
 {{/* Nil-safe access: `hookParameters: null` from an overlay shouldn't panic. */}}
 {{- $hp := default (dict) $k.hookParameters -}}
+{{- range $name := list "nameservers" "ntpServer" "provisioningServer" -}}
+{{- if kindIs "invalid" (index $hp $name) -}}
+{{- fail (printf "nico-dhcp: config.kea.hookParameters.%s must be set; null is not supported" $name) -}}
+{{- end -}}
+{{- end -}}
 {{- $apiUrl := default "" $hp.nicoApiUrl -}}
 {{- if not $apiUrl -}}
 {{- $apiUrl = printf "https://%s.%s.svc.cluster.local:1079" $apiSvc $ns -}}
 {{- end -}}
 {{- $metricsEndpoint := default "[::]:1089" $hp.nicoMetricsEndpoint -}}
-{{- $libPath := default "/usr/lib/x86_64-linux-gnu/kea/hooks/libdhcp.so" $k.hookLibraryPath -}}
+{{- $libPath := default "/usr/lib/kea/hooks/libdhcp.so" $k.hookLibraryPath -}}
 {{- $extraHooks := default (list) $k.additionalHooksLibraries -}}
 {{- $ic := default (dict) $k.interfacesConfig -}}
 {{- $interfaces := default (list "eth0") $ic.interfaces -}}
 {{- $socketType := default "udp" $ic.dhcpSocketType -}}
 {{- $ld := default (dict) $k.leaseDatabase -}}
 {{- $subnets := default (list) $k.subnet4 -}}
+{{- $subnetIds := dict -}}
+{{- range $s := $subnets -}}
+{{- if and (gt (len $subnets) 1) (not (hasKey $s "id")) -}}
+{{- fail "nico-dhcp: multiple IPv4 subnets require explicit id values matching existing leases" -}}
+{{- end -}}
+{{- $id := "1" -}}
+{{- if hasKey $s "id" -}}
+{{- $id = toString (int64 $s.id) -}}
+{{- end -}}
+{{- if hasKey $subnetIds $id -}}
+{{- fail (printf "nico-dhcp: duplicate IPv4 subnet id %s" $id) -}}
+{{- end -}}
+{{- $_ := set $subnetIds $id true -}}
+{{- end -}}
 {{- $loggers := default (list) $k.loggers -}}
 {{- $declineProbationPeriod := 900 -}}
 {{- if hasKey $k "declineProbationPeriod" -}}
@@ -192,6 +207,8 @@ controls the YAML→JSON name mapping.
       "type": {{ default "memfile" $ld.type | quote }},
       "lfc-interval": {{ default 3600 $ld.lfcInterval | toJson }}
     },
+    "cache-threshold": 0.0,
+    "multi-threading": { "enable-multi-threading": false },
     "match-client-id": {{ default false $k.matchClientId | toJson }},
     "authoritative": {{ default true $k.authoritative | toJson }},
     "renew-timer": {{ default 900 $k.renewTimer | toJson }},
@@ -213,12 +230,8 @@ controls the YAML→JSON name mapping.
       they expect. Drop the carbide-* mirror once every consuming binary
       has been rebuilt to read nico-*.
 
-      nameservers / ntpServer / provisioningServer fall back to the chart-
-      level placeholders in values.yaml when site values don't override
-      them. The placeholders are loud "REPLACE_WITH_..." strings — kea
-      will surface them at startup so operators see the misconfiguration
-      instead of getting a silently-non-functional cluster (which is what
-      the old "127.0.0.1" fallback produced).
+      Required hook strings must be present. Preserve explicit empty
+      strings for compatibility; operators must supply site addresses.
     */ -}}
     "hooks-libraries": [
       {
@@ -244,6 +257,7 @@ controls the YAML→JSON name mapping.
 {{- range $i, $s := $subnets }}
 {{- if $i }},{{ end }}
       {
+        "id": {{ if hasKey $s "id" }}{{ $s.id | toJson }}{{ else }}1{{ end }},
         "subnet": {{ $s.subnet | quote }},
         "pools": [
 {{- range $j, $p := default (list) $s.pools }}
@@ -253,7 +267,7 @@ controls the YAML→JSON name mapping.
 {{- else if kindIs "map" $p }}
           {{ $p | toJson }}
 {{- else }}
-{{- fail (printf "nico-dhcp: config.kea.subnet4[%d].pools[%d] must be a pool-range string (e.g. \"0.0.0.0-255.255.255.255\") or a kea pool object; got %s" $i $j (kindOf $p)) }}
+{{- fail (printf "nico-dhcp: config.kea.subnet4[%d].pools[%d] must be a pool-range string (e.g. \"0.0.0.1-255.255.255.254\") or a kea pool object; got %s" $i $j (kindOf $p)) }}
 {{- end }}
 {{- end }}
         ]

@@ -277,15 +277,25 @@ jobs:
             build_container:
               - 'dev/docker/Dockerfile.build-container-x86_64'
               - 'dev/docker/kea.version'
+              - 'dev/docker/setup-kea-repository.sh'
+              - 'dev/docker/isc-kea-3-0.asc'
             runtime_container:
               - 'dev/docker/Dockerfile.runtime-container-x86_64'
               - 'dev/docker/kea.version'
+              - 'dev/docker/setup-kea-repository.sh'
+              - 'dev/docker/configure-kea-runtime.sh'
+              - 'dev/docker/isc-kea-3-0.asc'
             runtime_container_aarch64:
               - 'dev/docker/Dockerfile.runtime-container-aarch64'
               - 'dev/docker/kea.version'
+              - 'dev/docker/setup-kea-repository.sh'
+              - 'dev/docker/configure-kea-runtime.sh'
+              - 'dev/docker/isc-kea-3-0.asc'
             build_container_aarch64:
               - 'dev/docker/Dockerfile.build-container-aarch64'
               - 'dev/docker/kea.version'
+              - 'dev/docker/setup-kea-repository.sh'
+              - 'dev/docker/isc-kea-3-0.asc'
             build_artifacts_x86_64:
               - 'dev/docker/Dockerfile.build-artifacts-container-x86_64'
             build_artifacts_aarch64:

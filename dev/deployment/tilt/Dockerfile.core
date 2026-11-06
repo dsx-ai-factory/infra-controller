@@ -173,18 +173,28 @@ FROM nico-tilt-runtime-base AS dhcp
 
 ARG KEA_VERSION
 
+COPY dev/docker/setup-kea-repository.sh dev/docker/isc-kea-3-0.asc dev/docker/configure-kea-runtime.sh /tmp/kea-repository/
+RUN sh /tmp/kea-repository/setup-kea-repository.sh
+
+ENV KEA_HOOKS_PATH=/usr/lib/kea/hooks
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
-  kea-dhcp4-server=${KEA_VERSION} \
+  isc-kea-common=${KEA_VERSION} \
+  isc-kea-hooks=${KEA_VERSION} \
+  isc-kea-dhcp4=${KEA_VERSION} \
+  isc-kea-dhcp6=${KEA_VERSION} \
   && rm -rf /var/lib/apt/lists/*
 
-RUN mkdir -p /usr/lib/x86_64-linux-gnu/kea/hooks /var/lib/kea /var/run/kea
+RUN sh /tmp/kea-repository/configure-kea-runtime.sh && rm -rf /tmp/kea-repository
+
+RUN mkdir -p /usr/lib/kea/hooks /var/lib/kea /var/run/kea
 
 COPY --from=dhcp-builder /out/libdhcp.so.sha256sum /tmp/libdhcp.so.sha256sum
 
 RUN --mount=type=cache,id=nico-tilt-cargo-home,target=/cargo-home,sharing=locked \
     --mount=type=cache,id=nico-tilt-cargo-target,target=/cargo-target,sharing=locked \
-    cp /cargo-target/debug/libdhcp.so /usr/lib/x86_64-linux-gnu/kea/hooks/libdhcp.so \
-    && test "$(sha256sum < /usr/lib/x86_64-linux-gnu/kea/hooks/libdhcp.so)" = "$(cat /tmp/libdhcp.so.sha256sum)" \
+    cp /cargo-target/debug/libdhcp.so /usr/lib/kea/hooks/libdhcp.so \
+    && test "$(sha256sum < /usr/lib/kea/hooks/libdhcp.so)" = "$(cat /tmp/libdhcp.so.sha256sum)" \
     && rm /tmp/libdhcp.so.sha256sum
 
 # machine-a-tron runtime image

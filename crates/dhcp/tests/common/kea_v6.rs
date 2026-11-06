@@ -144,6 +144,7 @@ impl Drop for Kea6RunPermit {
 
 pub(crate) struct Kea6 {
     temp_conf_file: PathBuf,
+    lease_file: PathBuf,
     dhcp_in_port: u16,
     dhcp_out_port: u16,
     dhcp_in_port_reservation: Option<UdpSocket>,
@@ -232,6 +233,7 @@ impl Kea6 {
 
         Ok(Kea6 {
             temp_conf_file,
+            lease_file,
             temp_base_directory,
             dhcp_in_port: ports.dhcp_in_port,
             dhcp_out_port: ports.dhcp_out_port,
@@ -316,6 +318,11 @@ impl Kea6 {
         let mut process = Command::new("/usr/sbin/kea-dhcp6")
             .env("KEA_PIDFILE_DIR", self.temp_base_directory.path())
             .env("KEA_LOCKFILE_DIR", self.temp_base_directory.path())
+            .env("KEA_DHCP_DATA_DIR", self.lease_file.parent().unwrap())
+            .env(
+                "KEA_HOOKS_PATH",
+                Path::new(&super::hook_library_path()).parent().unwrap(),
+            )
             .arg("-c")
             .arg(self.temp_conf_file.as_os_str())
             .arg("-p")
@@ -513,6 +520,7 @@ impl Kea6 {
             },
             // Persist the memfile so restart and lease-inspection tests observe
             // Kea's on-disk state; tempdir cleanup still bounds artifacts.
+            "cache-threshold": 0.0,
             "lease-database": {
                 "type": "memfile",
                 "persist": true,
@@ -549,6 +557,7 @@ impl Kea6 {
             ],
             "subnet6": [
                 {
+                    "id": 1,
                     "subnet": "::/0",
                     // Kea owns the rapid-commit state transition; the hook
                     // remains the policy gate by stripping option 14.
