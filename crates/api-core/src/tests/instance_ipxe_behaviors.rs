@@ -118,6 +118,13 @@ async fn test_instance_uses_custom_ipxe_only_once(pool: sqlx::PgPool) {
     assert!(pxe.pxe_script.contains(
         "This state assumes an OS is provisioned and will exit into the OS in 5 seconds."
     ));
+    // The interface is closed before handing back to firmware, otherwise the
+    // local OS can hang at kernel handoff on some platforms.
+    assert!(
+        pxe.pxe_script.contains("ifclose ||\nexit ||"),
+        "Actual script: {}",
+        pxe.pxe_script
+    );
 
     // A regular reboot attempt should still lead to returning "exit"
     invoke_instance_power(&env, tinstance.id, false).await;
