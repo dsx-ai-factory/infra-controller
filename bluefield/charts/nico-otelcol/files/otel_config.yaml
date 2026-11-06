@@ -194,6 +194,17 @@ receivers:
               replacement: '$$1'
               action: replace
 
+  prometheus/ovnkube-node-dpu:
+    config:
+      scrape_configs:
+        - job_name: 'ovnkube-node-dpu-metrics'
+          scrape_interval: 1m
+          scheme: https
+          tls_config:
+            insecure_skip_verify: true
+          static_configs:
+            - targets: ['127.0.0.1:9410']
+
   prometheus/log-stats:
     config:
       scrape_configs:
@@ -337,6 +348,11 @@ processors:
     attributes:
       - key: component
         value: node-exporter
+        action: upsert
+  resource/metrics-ovnkube-node-dpu:
+    attributes:
+      - key: component
+        value: ovnkube
         action: upsert
   resource/metrics-transceiver:
     attributes:
@@ -504,6 +520,15 @@ service:
         - resourcedetection
         - resource/metrics-dts
         - transform/metrics-dts
+        - telemetry_stats
+        - batch/metrics
+      exporters: [otlp/site, prometheus]
+    metrics/ovnkube-node-dpu:
+      receivers: [prometheus/ovnkube-node-dpu]
+      processors:
+        - memory_limiter
+        - resourcedetection
+        - resource/metrics-ovnkube-node-dpu
         - telemetry_stats
         - batch/metrics
       exporters: [otlp/site, prometheus]
