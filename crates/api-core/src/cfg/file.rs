@@ -2015,20 +2015,18 @@ pub struct DpfConfig {
     /// endpoints plus fixed allocations.
     #[serde(default = "default_dpf_pf_total_sf_reserved")]
     pub pf_total_sf_reserved: u32,
-    /// Whether carbide rolls a changed DPUService out on its own, by releasing
-    /// the DPF maintenance hold for hosts it has confirmed are already running
-    /// the software their DPUDeployment declares.
+    /// Whether carbide automatically releases DPF maintenance holds for changed
+    /// DPUDeployment-owned DPUService revisions whose upgrade policy enables NodeEffect.
     ///
-    /// This selects *who* opens the gate, never whether one exists. DPF is
-    /// always configured to park a changed DPUService behind a maintenance hold
-    /// (`upgradePolicy.applyNodeEffect`), so no service update ever reaches a DPU
-    /// without something having checked its side effects first.
+    /// This selects *who* opens an existing gate; it does not add one. NICo services,
+    /// HBN, DTS, and extra services use the gated default. Direct, detached DPUService
+    /// objects do not use this setting.
     ///
-    /// On by default. Setting it to false does not resume unchecked rollout: it
-    /// means the held DPUs wait for an operator to release them deliberately,
-    /// rather than for carbide to do it on the host's next idle sweep. Hosts
-    /// still awaiting reprovisioning, and hosts carrying a live tenant instance,
-    /// keep their hold either way.
+    /// Enabled by default. When disabled, service-update holds wait for deliberate
+    /// operator release. Provisioning still releases its own NodeEffect holds and
+    /// clears pending service-sync markers regardless of this setting. Automatic
+    /// service synchronization does not release holds for hosts awaiting
+    /// reprovisioning or carrying a live tenant instance.
     #[serde(default = "default_to_true")]
     pub dpu_service_sync_enabled: bool,
     /// Optional override for the Kubernetes `imagePullSecrets` entry used to pull service
