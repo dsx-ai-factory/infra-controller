@@ -27,7 +27,7 @@ use carbide_rack::firmware_object::{
 use carbide_rack::firmware_update::{
     RackFirmwareInventory, RackSwitchFirmwareInventory, firmware_type_for_profile,
     load_compute_firmware_inventory, load_rack_firmware_inventory,
-    load_rack_switch_firmware_inventory,
+    load_rack_switch_firmware_inventory, load_switch_firmware_device_info,
 };
 use carbide_rack::rms_node_type::switch_node_identity_for_profile;
 use carbide_rack_controller::context::RackStateHandlerContextObjects;
@@ -104,6 +104,22 @@ async fn request_compute_host_restarts(
 ) -> Result<StateHandlerOutcome<RackState>, StateHandlerError> {
     let mut txn = ctx.services.db_pool.begin().await?;
     let mut machines = super::get_machines_from_rack(rack, txn.as_mut()).await?;
+    let automatic = is_automatic_ingestion(rack);
+    if automatic {
+        if let Some(job) = &rack.firmware_upgrade_job {
+            let admitted = submitted_firmware_machine_ids(txn.as_mut(), job).await?;
+            machines.retain(|machine| {
+                admitted.contains(&machine.id.into())
+                    && !matches!(machine.state.value, ManagedHostState::Assigned { .. })
+            });
+        } else {
+            machines.retain(|machine| {
+                matches!(machine.state.value, ManagedHostState::Ready)
+                    && machine.host_reprovision_requested.is_none()
+                    && machine.machine_maintenance_requested.is_none()
+            });
+        }
+    }
     // Match allocation's lock order when claiming multiple hosts.
     machines.sort_by_key(|machine| machine.id);
 
@@ -112,7 +128,10 @@ async fn request_compute_host_restarts(
         .map(|machine| HostMachineId::from(machine.id))
         .collect::<Vec<_>>();
     let desired_off_ids = desired_off_machine_ids(txn.as_mut(), &machine_ids).await?;
-    if !desired_off_ids.is_empty() {
+    if automatic {
+        machines.retain(|machine| !desired_off_ids.contains(&machine.id.into()));
+    }
+    if !automatic && !desired_off_ids.is_empty() {
         txn.rollback().await?;
         let rack_id = rack.id.clone();
         return transition_to_rack_error(
@@ -183,7 +202,7 @@ async fn wait_for_compute_host_restarts(
     scope: &MaintenanceScope,
     ctx: &mut StateHandlerContext<'_, RackStateHandlerContextObjects>,
 ) -> Result<StateHandlerOutcome<RackState>, StateHandlerError> {
-    let machines = {
+    let mut machines = {
         let mut connection = ctx.services.db_pool.acquire().await?;
         super::get_machines_from_rack(rack, &mut connection).await?
     };
@@ -195,7 +214,17 @@ async fn wait_for_compute_host_restarts(
         .iter()
         .copied()
         .collect::<std::collections::HashSet<_>>();
-    if current_machine_ids != requested_machine_ids {
+    if is_automatic_ingestion(rack) {
+        machines.retain(|machine| requested_machine_ids.contains(&machine.id.into()));
+        if requested_machine_ids
+            .iter()
+            .any(|id| !current_machine_ids.contains(id))
+        {
+            return Ok(StateHandlerOutcome::wait(
+                "waiting for a saved compute restart target to reappear".into(),
+            ));
+        }
+    } else if current_machine_ids != requested_machine_ids {
         tracing::info!(
             rack_id = %rack.id,
             "Compute host membership changed while restarts were in progress; restarting the current set"
@@ -705,6 +734,74 @@ fn firmware_device_status(
     }
 }
 
+fn is_automatic_ingestion(rack: &Rack) -> bool {
+    rack.config.ingestion_in_progress && rack.config.maintenance_requested.is_none()
+}
+
+fn ready_for_ingestion_firmware(machine: &HostMachine) -> bool {
+    matches!(machine.state.value, ManagedHostState::Ready)
+        && machine.host_reprovision_requested.is_none()
+        && machine.machine_maintenance_requested.is_none()
+}
+
+/// Loads only devices ready to join the first automatic ingestion batch.
+async fn load_ingestion_firmware_inventory(
+    rack: &Rack,
+    ctx: &StateHandlerContext<'_, RackStateHandlerContextObjects>,
+) -> Result<RackFirmwareInventory, StateHandlerError> {
+    let mut conn = ctx.services.db_pool.acquire().await?;
+    let machine_ids = load_scoped_machines(conn.as_mut(), &rack.id, &MaintenanceScope::default())
+        .await?
+        .iter()
+        .filter(|machine| ready_for_ingestion_firmware(machine))
+        .map(|machine| machine.id)
+        .collect::<Vec<_>>();
+    let off = desired_off_machine_ids(conn.as_mut(), &machine_ids).await?;
+    if !off.is_empty() {
+        return Err(StateHandlerError::GenericError(eyre::eyre!(
+            "ingestion firmware cannot target machines whose desired power state is off: {}",
+            format_machine_ids(&off),
+        )));
+    }
+    let switch_ids = load_scoped_switches(conn.as_mut(), &rack.id, &MaintenanceScope::default())
+        .await?
+        .iter()
+        .filter(|switch| {
+            matches!(
+                switch.controller_state.value,
+                model::switch::SwitchControllerState::Ready
+            ) && switch.switch_reprovisioning_requested.is_none()
+        })
+        .map(|switch| switch.id)
+        .collect::<Vec<_>>();
+    drop(conn);
+    let machines = load_compute_firmware_inventory(
+        &ctx.services.db_pool,
+        ctx.services.credential_manager.as_ref(),
+        &machine_ids,
+    )
+    .await
+    .map_err(|error| StateHandlerError::GenericError(eyre::eyre!(error)))?;
+    let mut switches = Vec::with_capacity(switch_ids.len());
+    for switch_id in &switch_ids {
+        switches.push(
+            load_switch_firmware_device_info(
+                &ctx.services.db_pool,
+                ctx.services.credential_manager.as_ref(),
+                switch_id,
+            )
+            .await
+            .map_err(|error| StateHandlerError::GenericError(eyre::eyre!(error)))?,
+        );
+    }
+    Ok(RackFirmwareInventory {
+        machine_ids,
+        machines,
+        switch_ids,
+        switches,
+    })
+}
+
 async fn submitted_firmware_machine_ids(
     txn: &mut sqlx::PgConnection,
     job: &FirmwareUpgradeJob,
@@ -743,11 +840,7 @@ async fn reconcile_ingestion_firmware_machines(
         .collect::<Vec<_>>();
     let ready_ids = missing
         .iter()
-        .filter(|machine| {
-            matches!(machine.state.value, ManagedHostState::Ready)
-                && machine.host_reprovision_requested.is_none()
-                && machine.machine_maintenance_requested.is_none()
-        })
+        .filter(|machine| ready_for_ingestion_firmware(machine))
         .map(|machine| machine.id)
         .collect::<Vec<_>>();
     if ready_ids.is_empty() {
@@ -1037,7 +1130,27 @@ async fn evaluate_firmware_progress_from_devices(
         }
         outcomes.push(outcome);
     }
+    let mut submitted_switches = HashSet::new();
+    let mut submitted_shelves = HashSet::new();
+    if let Some(job) = ingestion_job {
+        for device in &job.switches {
+            if let Some(id) = resolve_switch_id_for_firmware_device(txn, rack_id, device).await? {
+                submitted_switches.insert(id);
+            }
+        }
+        submitted_shelves.extend(job.ingestion_power_shelf_ids.iter().flatten().copied());
+        for device in &job.power_shelves {
+            if let Some(id) =
+                resolve_power_shelf_id_for_firmware_device(txn, rack_id, device).await?
+            {
+                submitted_shelves.insert(id);
+            }
+        }
+    }
     for switch in &switches {
+        if ingestion_job.is_some() && !submitted_switches.contains(&switch.id) {
+            continue;
+        }
         let outcome = switch_firmware_outcome(switch);
         if outcome == DeviceFirmwareOutcome::Waiting {
             pending_device_ids.push(switch.id.to_string());
@@ -1045,6 +1158,9 @@ async fn evaluate_firmware_progress_from_devices(
         outcomes.push(outcome);
     }
     for power_shelf in &power_shelves {
+        if ingestion_job.is_some() && !submitted_shelves.contains(&power_shelf.id) {
+            continue;
+        }
         let outcome = power_shelf_firmware_outcome(power_shelf);
         if outcome == DeviceFirmwareOutcome::Waiting {
             pending_device_ids.push(power_shelf.id.to_string());
@@ -2459,7 +2575,7 @@ pub async fn handle_maintenance(
                         .collect::<Vec<_>>();
                     desired_off_machine_ids(conn.as_mut(), &machine_ids).await?
                 };
-                if !desired_off_machine_ids.is_empty() {
+                if !is_automatic_ingestion(state) && !desired_off_machine_ids.is_empty() {
                     if uses_stored_token {
                         delete_rack_maintenance_access_token(
                             ctx.services.credential_manager.as_ref(),
@@ -2515,21 +2631,28 @@ pub async fn handle_maintenance(
 
                 let profile = super::resolve_profile(id, rack_profile_id, ctx);
 
-                let inventory = load_rack_firmware_inventory(
-                    &ctx.services.db_pool,
-                    ctx.services.credential_manager.as_ref(),
-                    id,
-                )
-                .await
-                .map_err(|error| {
-                    StateHandlerError::GenericError(eyre::eyre!(
-                        "failed to load rack firmware inventory: {}",
-                        error
-                    ))
-                })?;
+                let inventory = if is_automatic_ingestion(state) {
+                    load_ingestion_firmware_inventory(state, ctx).await?
+                } else {
+                    load_rack_firmware_inventory(
+                        &ctx.services.db_pool,
+                        ctx.services.credential_manager.as_ref(),
+                        id,
+                    )
+                    .await
+                    .map_err(|error| {
+                        StateHandlerError::GenericError(eyre::eyre!(
+                            "failed to load rack firmware inventory: {}",
+                            error
+                        ))
+                    })?
+                };
                 let inventory = filter_inventory_by_scope(inventory, scope);
 
-                if inventory.machines.is_empty() && inventory.switches.is_empty() {
+                if !is_automatic_ingestion(state)
+                    && inventory.machines.is_empty()
+                    && inventory.switches.is_empty()
+                {
                     if uses_stored_token && !nvos_json_pending {
                         delete_rack_maintenance_access_token(
                             ctx.services.credential_manager.as_ref(),
@@ -2579,18 +2702,25 @@ pub async fn handle_maintenance(
                     "Submitting rack firmware update"
                 );
 
-                let submit_result = rack_firmware_update_manager
-                    .start_firmware_update(RackFirmwareUpdateRequest {
-                        rack_id: id,
-                        profile,
-                        config_json: &config_json,
-                        access_token: access_token.as_deref(),
-                        force_update,
-                        components: &components,
-                        machines: inventory.machines.clone(),
-                        switches: inventory.switches.clone(),
-                    })
-                    .await;
+                // Keep an empty current-cycle job when no device is ready yet,
+                // so subsequent iterations can admit compute without an empty RPC.
+                let submit_result =
+                    if inventory.machines.is_empty() && inventory.switches.is_empty() {
+                        Ok(FirmwareUpgradeJob::default())
+                    } else {
+                        rack_firmware_update_manager
+                            .start_firmware_update(RackFirmwareUpdateRequest {
+                                rack_id: id,
+                                profile,
+                                config_json: &config_json,
+                                access_token: access_token.as_deref(),
+                                force_update,
+                                components: &components,
+                                machines: inventory.machines.clone(),
+                                switches: inventory.switches.clone(),
+                            })
+                            .await
+                    };
 
                 if uses_stored_token && (submit_result.is_err() || !nvos_json_pending) {
                     delete_rack_maintenance_access_token(
@@ -2645,7 +2775,32 @@ pub async fn handle_maintenance(
                     },
                 )
                 .await?;
-                let power_shelf_ids = filter_power_shelf_ids_by_scope(power_shelf_ids, scope);
+                let mut power_shelf_ids = filter_power_shelf_ids_by_scope(power_shelf_ids, scope);
+                if is_automatic_ingestion(state) {
+                    let shelves = if power_shelf_ids.is_empty() {
+                        Vec::new()
+                    } else {
+                        db_power_shelf::find_by(
+                            txn.as_mut(),
+                            db::ObjectColumnFilter::List(
+                                db_power_shelf::IdColumn,
+                                &power_shelf_ids,
+                            ),
+                        )
+                        .await?
+                    };
+                    power_shelf_ids = shelves
+                        .iter()
+                        .filter(|shelf| {
+                            matches!(
+                                shelf.controller_state.value,
+                                model::power_shelf::PowerShelfControllerState::Ready
+                            ) && shelf.power_shelf_reprovisioning_requested.is_none()
+                        })
+                        .map(|shelf| shelf.id)
+                        .collect();
+                    job.ingestion_power_shelf_ids = Some(power_shelf_ids.clone());
+                }
                 trigger_rack_firmware_reprovisioning_requests(
                     txn.as_mut(),
                     id,
@@ -2822,7 +2977,39 @@ pub async fn handle_maintenance(
                         },
                     )
                     .await?;
-                    let power_shelf_ids = filter_power_shelf_ids_by_scope(power_shelf_ids, scope);
+                    let mut power_shelf_ids =
+                        filter_power_shelf_ids_by_scope(power_shelf_ids, scope);
+                    if is_automatic_ingestion(state) {
+                        if let Some(admitted) = &job.ingestion_power_shelf_ids {
+                            power_shelf_ids.retain(|id| admitted.contains(id));
+                        } else {
+                            // Predecessor jobs recorded shelf ownership in child requests.
+                            let shelves = if power_shelf_ids.is_empty() {
+                                Vec::new()
+                            } else {
+                                db_power_shelf::find_by(
+                                    txn.as_mut(),
+                                    db::ObjectColumnFilter::List(
+                                        db_power_shelf::IdColumn,
+                                        &power_shelf_ids,
+                                    ),
+                                )
+                                .await?
+                            };
+                            let initiator = rack_maintenance_initiator(id);
+                            power_shelf_ids = shelves
+                                .iter()
+                                .filter(|shelf| {
+                                    shelf
+                                        .power_shelf_reprovisioning_requested
+                                        .as_ref()
+                                        .is_some_and(|request| request.initiator == initiator)
+                                })
+                                .map(|shelf| shelf.id)
+                                .collect();
+                            job.ingestion_power_shelf_ids = Some(power_shelf_ids.clone());
+                        }
+                    }
                     if !power_shelf_ids.is_empty() {
                         let fw_status = RackFirmwareUpgradeStatus {
                             task_id: job.job_id.clone().unwrap_or_else(|| "unknown".to_string()),

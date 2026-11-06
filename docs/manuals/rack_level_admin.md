@@ -105,7 +105,7 @@ After NICo imports the expected inventory, it goes through the following workflo
 2. NICo explores these trays and ingest them for management.
 3. The site administrator tells NICo to start the rack bringup.
 4. NICo starts rack ingestion when the discovered and ready switch counts meet the rack profile minimum. Missing compute or powershelf trays remain visible in rack health without blocking ingestion. NICo then updates firmware and performs the configured bringup operations. See the [rack state machine](../architecture/state_machines/rackstatemachine.md#discovering-r_discovering) for the transition contract.
-5. Once all the components are ready, the rack is considered *ready*.
+5. After maintenance and rack validation complete, the rack is considered *ready*. Missing trays continue to raise rack health alerts.
 
 </Step>
 

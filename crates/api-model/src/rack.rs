@@ -102,6 +102,11 @@ pub struct FirmwareUpgradeJob {
     pub switches: Vec<FirmwareUpgradeDeviceStatus>,
     #[serde(default)]
     pub power_shelves: Vec<FirmwareUpgradeDeviceStatus>,
+    /// Shelves admitted to this automatic ingestion cycle's controller requests.
+    /// Separate from RMS handles because the backend may not return shelf jobs.
+    /// Missing on predecessor jobs; polling recovers membership from rack-owned requests.
+    #[serde(default)]
+    pub ingestion_power_shelf_ids: Option<Vec<PowerShelfId>>,
 }
 
 impl FirmwareUpgradeJob {
@@ -1495,6 +1500,24 @@ mod tests {
                 serde_json::from_str::<FirmwareProgressState>(wire).unwrap(),
                 state
             );
+        }
+    }
+
+    #[test]
+    fn firmware_upgrade_job_preserves_shelf_membership() {
+        for ids in [
+            None,
+            Some(Vec::new()),
+            Some(vec![PowerShelfId::from(uuid::Uuid::from_bytes([1; 16]))]),
+        ] {
+            let mut wire = serde_json::json!({ "job_id": null, "status": null, "started_at": null, "completed_at": null });
+            if let Some(ids) = &ids {
+                wire["ingestion_power_shelf_ids"] = serde_json::to_value(ids).unwrap();
+            }
+            let job: FirmwareUpgradeJob = serde_json::from_value(wire).unwrap();
+            let reloaded: FirmwareUpgradeJob =
+                serde_json::from_str(&serde_json::to_string(&job).unwrap()).unwrap();
+            assert_eq!(reloaded.ingestion_power_shelf_ids, ids);
         }
     }
 

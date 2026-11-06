@@ -74,6 +74,9 @@ pub async fn handle_discovering(
         rack_id = %id,
         "Rack has enough ready switches, transitioning to Maintenance",
     );
+    // A new ingestion cycle must not reconcile against a previous cycle's job.
+    state.firmware_upgrade_job = None;
+    db_rack::update_firmware_upgrade_job(txn.as_mut(), id, None).await?;
     state.config.ingestion_in_progress = true;
     db_rack::update(txn.as_mut(), id, &state.config).await?;
     Ok(StateHandlerOutcome::transition(RackState::Maintenance {

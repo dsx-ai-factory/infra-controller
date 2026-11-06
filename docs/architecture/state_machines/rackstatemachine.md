@@ -171,7 +171,7 @@ stateDiagram-v2
 - **Entry:** From `Created` when discovery starts. Also re-entered from `Ready` when `topology_changed` is set (tray replacement).
 - **Exit:** When the number of switches in `SwitchControllerState::Ready` reaches the rack profile switch count, the rack atomically sets `ingestion_in_progress` and transitions to **Maintenance** at `FirmwareUpgrade(Start)`. A missing or unknown rack profile keeps the rack in `Discovering`.
 
-Compute and power shelf counts and readiness do not gate either ingestion transition. Their profile counts describe expected inventory for `MissingRackComponent` health alerts. Helm defaults are 16 compute trays, 9 switches, and 8 power shelves for GB200, 6 for GB300, or 4 for VR; `_NO_POWERSHELF` profiles expect zero power shelves. Site configuration can override these defaults. The switch count is a minimum threshold: zero allows progression without switches, and extra switches do not prevent either transition.
+Compute and power shelf counts and readiness do not gate either ingestion transition. Their profile counts describe expected inventory for `MissingRackComponent` health alerts. The Helm chart defaults expect 16 compute trays and 9 switches in every profile. The default power shelf count is 8 for GB200, 6 for GB300, and 4 for VR profiles. `_NO_POWERSHELF` profiles expect zero power shelves. Site configuration can override these defaults. The switch count is a minimum threshold: zero allows progression without switches, and extra switches do not prevent either transition.
 
 #### Maintenance (R_Maintenance)
 
@@ -198,6 +198,12 @@ both update phases. If a switch in the maintenance scope is already in
 `ReProvisioning::WaitingForNVOSUpgrade`, the rack transitions to `Error` instead
 of skipping the NVOS phase.
 
+The first automatic firmware batch includes only ready compute hosts without
+reprovision or machine-maintenance requests, ready switches without reprovision
+requests, and ready power shelves without reprovision requests. Unready compute
+is left for supplemental admission. If no compute or switch is ready, NICo keeps
+an empty current-cycle job without submitting an empty RMS request.
+
 While automatic ingestion has a persisted firmware job, `WaitForComplete`
 compares current compute membership with that job's device handles. A newly
 arrived host stays pending until it is `Ready` and has no reprovision or machine
@@ -210,7 +216,13 @@ rack firmware job. An unsubmitted host already in `Assigned` is excluded from
 supplemental firmware and does not block ingestion. Its firmware requires a
 separate maintenance operation when the host is eligible.
 
-A late host with desired power `Off` blocks submission with a retryable handler
+Switch and power shelf firmware progress includes only devices admitted to the
+current job. Unsubmitted devices do not fail or delay this firmware phase merely
+because their own provisioning is waiting or failed. Shelf membership is persisted
+separately from RMS handles because RMS may omit shelf jobs; the existing
+controller-completion fallback applies only to those admitted shelves.
+
+A ready host with desired power `Off` blocks submission with a retryable handler
 error; its desired power is not changed. Results polled for existing devices
 are committed before supplemental admission. Inventory, credential, or dispatch
 errors for a late host therefore do not prevent existing devices from observing
@@ -222,12 +234,23 @@ and validation labels. Unsubmitted hosts outside `Assigned`, or a pending firmwa
 rack to `FirmwareUpgrade(WaitForComplete)`, including after a restart between
 persisting a new batch and transitioning the rack. The firmware job persists
 `return_to_completed = true` with the supplemental batch, or with the transition
-to firmware waiting when hosts are not ready. Once that job completes, the rack returns directly to
+to firmware waiting when hosts are not ready. After that job completes, the rack returns directly to
 `Completed` and repeats the membership check. It does not repeat switch NVOS
 updates, rack-wide compute reboots, or NMX configuration. Predecessor jobs
 without the marker default to `false` and retain the normal firmware continuation.
-Explicit maintenance retains its selected device scope. If no firmware job was created, the existing skip path
-is unchanged; hosts arriving after ingestion ends are outside this check.
+Explicit maintenance retains its selected device scope. Entering a new ingestion cycle
+clears the previous cycle's firmware job in the same transaction as the state transition.
+If the new cycle skips firmware because its profile has no firmware object, no old job
+can trigger supplemental admission at `Completed`. Hosts arriving after ingestion ends
+are outside this check.
+
+When a firmware job exists, automatic ingestion selects restart targets from its
+admitted compute hosts, excluding `Assigned` hosts and desired power `Off`.
+It waits for selected targets to accept maintenance. Without a firmware job,
+only ready, unclaimed hosts whose desired power is not `Off` are selected. It saves that batch in `restart_machine_ids` and waits for
+those targets, including across restarts. New arrivals do not enlarge an active
+batch or restart previously completed targets. Explicit power maintenance retains
+its existing desired-off rejection and membership handling.
 
 Discovery persists `ingestion_in_progress` when entering maintenance. Only an
 actual successful NVOS update in that ingestion cycle automatically reboots
