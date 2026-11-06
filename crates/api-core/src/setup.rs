@@ -1058,6 +1058,9 @@ fn build_dpf_init_config(
         .enable_delay_host_init(deployment.enable_delay_host_init)
         .partial_multiplane_disabled(!carbide_config.is_partial_multiplane_enabled())
         .deployment_type(deployment_type);
+    if let Some(dpu_node_selector) = deployment.dpu_node_selector.clone() {
+        builder = builder.dpu_node_selector(dpu_node_selector);
+    }
     if let Some(bluefield_software) = bluefield_software {
         builder = builder.bluefield_software(bluefield_software);
     }

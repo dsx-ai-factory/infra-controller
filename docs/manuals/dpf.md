@@ -46,6 +46,14 @@ NICo Core); phase 6 deploys Core once with carbide-api DPF enabled.
 Pass `--skip-dpf` (or `NICO_SKIP_DPF=true`) to opt out — e.g. sites with no
 DPUs, or that still use the deprecated iPXE DPU path.
 
+When DPF is installed separately by an administrator or another automation,
+set `NICO_DPF_EXTERNAL=true` instead. This skips NICo's DPF platform install
+while keeping NICo Core's `[dpf].enabled=true`, DPF RBAC, DPUDevice/DPUNode
+registration, and NICo-owned DPUService initialization. The external
+installation must already provide the DPF CRDs/operator, `DPFOperatorConfig`,
+`DPUCluster`, the shared BMC credential, and reachable DPF/Argo repositories.
+Do not combine `NICO_DPF_EXTERNAL=true` with `--skip-dpf`.
+
 ```bash
 export NICO_DPF_DPU_INTERFACE=<controller-interface>   # keepalived interface for the DPU cluster VIP
 export NICO_DPF_DPU_CLUSTER_VIP=<vip>                  # VIP the DPUs use to reach their control plane

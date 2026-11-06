@@ -2601,6 +2601,11 @@ pub struct DpfDeploymentConfig {
     pub deployment_name: String,
     /// Label key applied to DPUNode CRs for this deployment's node selector.
     pub node_label_key: String,
+    /// Optional exact DPUNode labels used by an externally provisioned DPF deployment.
+    /// When set, NICo uses these labels for the DPUSet selector instead of the labels it owns.
+    /// This allows NICo to consume DPUNode objects created by separate DPF automation.
+    #[serde(default)]
+    pub dpu_node_selector: Option<BTreeMap<String, String>>,
     /// Operator-declared SF ceiling per parent PF (default 126).
     /// Must be positive and bounds the generated pool when BF3/generic BF4 service slots are enabled.
     /// Ignored with zero slots; GB200 uses its fixed 128-SF profile and Astra ignores this field.
@@ -2650,6 +2655,7 @@ impl Default for DpfDeploymentConfig {
             flavor_name: default_dpf_flavor_name(),
             deployment_name: default_dpf_deployment_name(),
             node_label_key: default_dpf_node_label_key(),
+            dpu_node_selector: None,
             max_sf_per_pf: default_dpf_max_sf_per_pf(),
             service_vpc_enabled_address_families: Default::default(),
             services: None,

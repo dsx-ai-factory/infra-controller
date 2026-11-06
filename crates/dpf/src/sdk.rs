@@ -2629,7 +2629,7 @@ async fn create_flavor_services_and_deployment<
         }
     }
 
-    let deployment = build_deployment(
+    let mut deployment = build_deployment(
         services,
         &config.deployment_name,
         source,
@@ -2639,6 +2639,16 @@ async fn create_flavor_services_and_deployment<
         deployment_node_labels,
         deployment_type,
     );
+    if let Some(selector_labels) = &config.dpu_node_selector {
+        if let Some(dpu_sets) = deployment.spec.dpus.dpu_sets.as_mut() {
+            for dpu_set in dpu_sets {
+                dpu_set.dpu_node_selector = Some(DpuDeploymentDpusDpuSetsDpuNodeSelector {
+                    match_expressions: None,
+                    match_labels: Some(selector_labels.clone()),
+                });
+            }
+        }
+    }
     DpuDeploymentRepository::apply(repo, &deployment).await?;
     Ok(())
 }
