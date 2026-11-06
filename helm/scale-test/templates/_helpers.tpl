@@ -15,12 +15,23 @@ own distinct objects. fullnameOverride replaces it.
 {{- end -}}
 
 {{/*
-Job name for a suite. The base reserves room so the suite suffix is never
-truncated away: each suite keeps a distinct Job and its retained logs.
+Job name for a suite, kept within the 63-character bound with the suite suffix
+intact. When the base fits, it is used whole. When it must be truncated, an
+8-character hash of the full base is inserted before the suffix, so two
+releases that share a long prefix but differ later get distinct Job names
+(before-hook-creation would otherwise delete the other release's Job).
 Usage: {{ include "scale-test.jobName" (dict "root" $root "suite" $name) }}
 */}}
 {{- define "scale-test.jobName" -}}
-{{- printf "%s-%s" (include "scale-test.fullname" .root | trunc 55 | trimSuffix "-") .suite | trunc 63 | trimSuffix "-" -}}
+{{- $base := include "scale-test.fullname" .root -}}
+{{- $reserve := int (sub 62 (len .suite)) -}}
+{{- if le (len $base) $reserve -}}
+{{- printf "%s-%s" $base .suite -}}
+{{- else -}}
+{{- $hash := $base | sha256sum | trunc 8 -}}
+{{- $keep := int (sub $reserve 9) -}}
+{{- printf "%s-%s-%s" ($base | trunc $keep | trimSuffix "-") $hash .suite -}}
+{{- end -}}
 {{- end -}}
 
 {{/*
@@ -31,6 +42,15 @@ helm.sh/chart: {{ include "scale-test.chart" . }}
 app.kubernetes.io/managed-by: {{ .Release.Service }}
 app.kubernetes.io/part-of: scale-test
 app.kubernetes.io/name: scale-test
+{{- end -}}
+
+{{/*
+Name of the shared run-data claim, derived from the release unless
+persistence.claimName overrides it. The journal Jobs and the PVC resolve the
+same name through this helper.
+*/}}
+{{- define "scale-test.runDataClaim" -}}
+{{- default (printf "%s-run-data" (include "scale-test.fullname" .)) .Values.persistence.claimName | trunc 63 | trimSuffix "-" -}}
 {{- end -}}
 
 {{/*

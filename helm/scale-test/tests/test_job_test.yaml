@@ -145,7 +145,7 @@ tests:
       suites.lock.enabled: false
     asserts:
       - failedTemplate:
-          errorMessage: at least one suite must be enabled under suites.<name>.enabled
+          errorMessage: at least one suite must be enabled under suites.<name>.enabled (or journal.enabled)
 
   - it: renders the lock suite with its own binary, anchored tests and namespace
     set:
@@ -178,6 +178,13 @@ tests:
     asserts:
       - failedTemplate:
           errorMessage: unknown suite "bogus"; the known suites are cluster, probe, inventory, history, lock, store and store-transition
+
+  - it: points suites.journal at journal.enabled instead of rejecting it as unknown
+    set:
+      suites.journal.enabled: true
+    asserts:
+      - failedTemplate:
+          errorMessage: enable the journal proof with journal.enabled=true, not suites.journal.enabled
 
   - it: renders the history suite with a ConfigMap capture mount and provenance
     set:
