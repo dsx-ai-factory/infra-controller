@@ -642,6 +642,7 @@ disabled in v2.4.
 | `partition_monitor_max_concurrent_groups` | `NonZeroUsize` | `16` | Maximum number of NMX-C machine groups (chassis or rack) reconciled concurrently per monitor iteration. Each group in flight holds one NMX-C client and at most one database connection, so this bounds the monitor's gRPC fan-out and its share of the pool. Documented range 1 to 256. Larger values are accepted with a startup warning. 0 is rejected. |
 | `partition_monitor_full_check_interval` | `Duration` | `10m` | How often a machine group is fully reconciled against NMX-C even when nothing changed. Between full checks a group whose database inputs are unchanged since its last successful check, and whose instances all have their NVLink config applied, is skipped. GPU health and the `NvlinkUnhealthy` alert on a skipped group refresh at this interval. `0s` disables skipping. |
 | `partition_monitor_unreachable_alert_after` | `NonZeroU32` | `3` | Consecutive partition monitor passes a rack's NMX-C must be unusable before the monitor raises the rack's `NmxcUnreachable` health alert. The first pass that reaches NMX-C clears it. Must be non-zero. |
+| `switch_reachability` | `SwitchReachabilityConfig` | *(default)* | Periodic TCP reachability checks of ready switches that raise debounced `SwitchUnreachable` and `NmxtUnreachable` switch health alerts. Runs whenever `enabled` is `true` unless `switch_reachability.enabled` says otherwise. |
 
 When `enabled` or `nmx_c_certificate_rotation.enabled` is `true`, `nico-api`
 fills in unset NMX-C TLS settings at startup:
@@ -679,6 +680,18 @@ verified against its own host, which for rack endpoints is the switch NVOS IP.
 
 `expiry_warning_window` remains accepted as a deprecated alias for
 `rotate_before_expiry`; its value now controls rotation rather than warning only.
+
+### `SwitchReachabilityConfig`
+
+| Field | Type | Default | Description |
+| ------- | ------ | --------- | ------------- |
+| `enabled` | `Option<bool>` | *(follows `nvlink_config.enabled`)* | Runs the switch reachability monitor. Unset follows `nvlink_config.enabled`; set it to run or stop the monitor independently. |
+| `run_interval` | `Duration` | `60s` | Interval between passes. Each pass probes every switch in the `ready` controller state; switches in other states and switches without an NVOS IP are not probed. |
+| `unreachable_alert_after` | `NonZeroU32` | `3` | Consecutive failed checks of one service before its alert is raised on the switch. The first successful check clears it. Must be non-zero. |
+| `probe_timeout` | `Duration` | `10s` | Timeout for each TCP connection attempt. |
+| `nvos_port` | `u16` | `443` | Port probed on every ready switch's NVOS management address for [`SwitchUnreachable`](../../../../docs/architecture/health/health_probe_ids.md#switchunreachable). |
+| `nmx_t_port` | `u16` | `9352` | Port probed on primary switches, which host NMX-T, for [`NmxtUnreachable`](../../../../docs/architecture/health/health_probe_ids.md#nmxtunreachable). |
+| `max_concurrent_switches` | `NonZeroUsize` | `32` | Maximum number of switches probed at the same time in one pass. Each switch in flight holds at most one open connection attempt, so this bounds the pass's sockets and timeout waiters. 0 and values above the Tokio semaphore limit are rejected. |
 
 Upgrade note: `enabled` previously defaulted to `false`. A site that sets
 `nvlink_config.enabled = true` without this key starts the certificate monitor
