@@ -1233,12 +1233,27 @@ outside the configured range returns `InvalidArgument`. Out-of-range direct
 configured list retain supported rootless VpcPrefix admission outside persisted
 operator roots and the requesting tenant's roots.
 
-When enabling configured ranges on a site with empty-list replicas, stop serving
-requests on those replicas before enforcing the new ranges. Restart them with
-the updated configuration before resuming service. Otherwise, an empty-list
-replica can admit a rootless VpcPrefix outside the new ranges, causing later
-authoritative and listen-only startups with configured roots to fail lineage
-preflight.
+Before enabling configured ranges, inspect the `network_vpc_prefixes` database
+rows whose `site_prefix_id` is NULL, without excluding soft-deleted rows.
+Each remaining row must have exactly one containing operator root after
+reconciliation; account for persisted retiring roots as well as proposed ranges.
+For missing or ambiguous parentage, choose proposed ranges that provide exactly
+one containing root, or drain and delete the VpcPrefix through the API and wait
+for physical removal. Removing a persisted root from configuration only retires
+it; an unparented VpcPrefix still retains every containing retired root.
+
+Remediate existing rows while the API is serving. Then stop serving requests on
+all empty-list replicas and repeat the database inspection before restarting.
+If the final inspection finds missing or ambiguous parentage, restore service
+with the old configuration to remediate it, then repeat the stop and inspection.
+Start authoritative Core with the updated configuration first so reconciliation
+and lineage backfill succeed before restarting other replicas. Resume service
+after every replica has the updated configuration and passes startup preflight.
+Keep requests stopped throughout this final inspection and restart sequence:
+an empty-list replica can otherwise admit another rootless VpcPrefix outside the
+new ranges, causing authoritative and listen-only startups to fail lineage
+preflight. Stopping requests prevents new admissions but does not repair existing
+lineage.
 
 When upgrading from Core binaries without the persisted-coverage checks, finish
 the binary upgrade on every replica before changing fabric-prefix configuration.

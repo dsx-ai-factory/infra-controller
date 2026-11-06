@@ -2360,6 +2360,31 @@ mod tests {
             .await?;
         }
 
+        // A generated prefix follows its tenant-owned VpcPrefix rather than
+        // retaining a geometrically containing operator root as a direct prefix.
+        let tenant_segment_id = carbide_uuid::network::NetworkSegmentId::new();
+        sqlx::query(
+            "INSERT INTO network_segments (id, name, vpc_id, version, network_segment_type, can_stretch)
+             VALUES ($1, $2, $3, $4, $5, false)",
+        )
+        .bind(tenant_segment_id)
+        .bind("tenant-parented-prefix")
+        .bind(vpc_id)
+        .bind(ConfigVersion::initial())
+        .bind(model::network_segment::NetworkSegmentType::Tenant)
+        .execute(&mut *txn)
+        .await?;
+        sqlx::query(
+            "INSERT INTO network_prefixes (segment_id, prefix, vpc_prefix_id, vpc_prefix)
+             VALUES ($1, $2, $3, $4)",
+        )
+        .bind(tenant_segment_id)
+        .bind("192.168.1.0/29".parse::<IpNetwork>()?)
+        .bind(tenant_child_id)
+        .bind("192.168.1.0/24".parse::<IpNetwork>()?)
+        .execute(&mut *txn)
+        .await?;
+
         // Only exact operator ownership should contribute roots at this point.
         let mut retained =
             find_operator_managed_prefixes_with_retained_vpc_prefixes(&mut *txn).await?;
