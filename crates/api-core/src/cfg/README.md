@@ -1233,6 +1233,13 @@ outside the configured range returns `InvalidArgument`. Out-of-range direct
 configured list retain supported rootless VpcPrefix admission outside persisted
 operator roots and the requesting tenant's roots.
 
+When enabling configured ranges on a site with empty-list replicas, stop serving
+requests on those replicas before enforcing the new ranges. Restart them with
+the updated configuration before resuming service. Otherwise, an empty-list
+replica can admit a rootless VpcPrefix outside the new ranges, causing later
+authoritative and listen-only startups with configured roots to fail lineage
+preflight.
+
 When upgrading from Core binaries without the persisted-coverage checks, finish
 the binary upgrade on every replica before changing fabric-prefix configuration.
 An already-running older binary does not enforce these checks.
