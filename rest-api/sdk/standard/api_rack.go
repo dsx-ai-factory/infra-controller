@@ -1511,6 +1511,246 @@ func (a *RackAPIService) GetRackExecute(r ApiGetRackRequest) (*Rack, *http.Respo
 	return localVarReturnValue, localVarHTTPResponse, nil
 }
 
+type ApiGetRackPowerStateRequest struct {
+	ctx        context.Context
+	ApiService *RackAPIService
+	siteId     *string
+	org        string
+	id         string
+}
+
+// ID of the Site that owns the rack.
+func (r ApiGetRackPowerStateRequest) SiteId(siteId string) ApiGetRackPowerStateRequest {
+	r.siteId = &siteId
+	return r
+}
+
+func (r ApiGetRackPowerStateRequest) Execute() (*RackPowerState, *http.Response, error) {
+	return r.ApiService.GetRackPowerStateExecute(r)
+}
+
+/*
+GetRackPowerState Get Rack power state
+
+Read synthesized rack power summaries, each current inventory member's power details, tracked Core actions and outstanding Flow power tasks. Accepts an external inventory rack ID, not a rack name or internal hardware UUID. This passive read does not issue power commands.
+
+Org must have an Infrastructure Provider entity. User must have authorization role with `PROVIDER_ADMIN` suffix in that Org. The Site must belong to that Provider and have the `flow` capability enabled.
+
+Actual and desired summaries preserve the counts supplied by Flow in `coverage`. REST does not recompute these categories from member read errors: for example, a newer state that REST represents as `Unsupported` can count as unavailable in Flow's coverage. Two disagreeing known states produce `Mixed`, even when other members are unavailable. Otherwise unknown or unavailable supported evidence produces `Unknown`. Desired votes come only from enabled `On` and `Off` policies: missing policies, disabled policies and inapplicable policies never vote as `Off`. Unsupported members remain visible in coverage but do not make a summary incomplete. `complete` does not imply that every physical device supports a power read.
+
+Every current, non-deleted inventory member appears in `trays`, including unlinked and unsupported types. Known member types follow the order `Unknown`, `Compute`, `NVSwitch`, `PowerShelf`, `TORSwitch`, `UMS`, `CDU`, with deterministic inventory order within each type rather than sorting by external inventory ID. Future service types displayed as `Unknown` retain their service position. `operations.actions` contains one result per member in exactly the same order: `operations.actions[i]` describes `trays[i]`, even when both IDs are null. This association applies within this response; it is not a stable identifier for an unlinked member across reads. Each action row retains its own read error and successful empty list.
+
+Root `operations.tasks` contains each outstanding power task once, ordered by creation time then task UUID. Each tray's compact task references follow that root ordering and supply its relevance. Root task `relevance` is `Unknown`. Full recorded target selections remain on root tasks, including moved or removed members and empty selections. Unavailable target identities set that task's `rackId` and `targets` to null with `targetsError`, preserving its other metadata. Internal hardware UUIDs are never substituted for external inventory IDs.
+
+All response fields are present. Null indicates unavailable or inapplicable data as documented on each field; successful empty lists are arrays with a null corresponding read error. Missing service sections report `Unsupported`. Hardware, stored policies, Core actions and Flow tasks are collected separately and can reflect different instants. A `Running` task does not establish hardware dispatch or correlate to an `Active` Core action.
+
+More than 256 outstanding power tasks across the rack reports `operations.tasksError: LimitExceeded`. The separate waiting-context limit is 256 nonterminal tasks of all types; exceeding it reports `waitingContext.error: LimitExceeded` while retaining power tasks. Flow also limits the encoded proxy response to 1,991,680 bytes, independently of the HTTP response size. It first replaces nonempty successful waiting-context lists with `LimitExceeded`. Empty contexts and existing context errors remain unchanged. If the result still exceeds this allowance, the request fails with HTTP 429; members, tasks, actions and recorded selections are never truncated to fit.
+
+	@param ctx context.Context - for authentication, logging, cancellation, deadlines, tracing, etc. Passed from http.Request or context.Background().
+	@param org Name of the Org
+	@param id External inventory Rack ID
+	@return ApiGetRackPowerStateRequest
+*/
+func (a *RackAPIService) GetRackPowerState(ctx context.Context, org string, id string) ApiGetRackPowerStateRequest {
+	return ApiGetRackPowerStateRequest{
+		ApiService: a,
+		ctx:        ctx,
+		org:        org,
+		id:         id,
+	}
+}
+
+// Execute executes the request
+//
+//	@return RackPowerState
+func (a *RackAPIService) GetRackPowerStateExecute(r ApiGetRackPowerStateRequest) (*RackPowerState, *http.Response, error) {
+	var (
+		localVarHTTPMethod  = http.MethodGet
+		localVarPostBody    interface{}
+		formFiles           []formFile
+		localVarReturnValue *RackPowerState
+	)
+
+	localBasePath, err := a.client.cfg.ServerURLWithContext(r.ctx, "RackAPIService.GetRackPowerState")
+	if err != nil {
+		return localVarReturnValue, nil, &GenericOpenAPIError{error: err.Error()}
+	}
+
+	localVarPath := localBasePath + "/v2/org/{org}/nico/rack/{id}/power"
+	localVarPath = strings.Replace(localVarPath, "{"+"org"+"}", url.PathEscape(parameterValueToString(r.org, "org")), -1)
+	localVarPath = strings.Replace(localVarPath, "{"+"id"+"}", url.PathEscape(parameterValueToString(r.id, "id")), -1)
+
+	localVarHeaderParams := make(map[string]string)
+	localVarQueryParams := url.Values{}
+	localVarFormParams := url.Values{}
+	if r.siteId == nil {
+		return localVarReturnValue, nil, reportError("siteId is required and must be specified")
+	}
+
+	parameterAddToHeaderOrQuery(localVarQueryParams, "siteId", r.siteId, "form", "")
+	// to determine the Content-Type header
+	localVarHTTPContentTypes := []string{}
+
+	// set Content-Type header
+	localVarHTTPContentType := selectHeaderContentType(localVarHTTPContentTypes)
+	if localVarHTTPContentType != "" {
+		localVarHeaderParams["Content-Type"] = localVarHTTPContentType
+	}
+
+	// to determine the Accept header
+	localVarHTTPHeaderAccepts := []string{"application/json"}
+
+	// set Accept header
+	localVarHTTPHeaderAccept := selectHeaderAccept(localVarHTTPHeaderAccepts)
+	if localVarHTTPHeaderAccept != "" {
+		localVarHeaderParams["Accept"] = localVarHTTPHeaderAccept
+	}
+	req, err := a.client.prepareRequest(r.ctx, localVarPath, localVarHTTPMethod, localVarPostBody, localVarHeaderParams, localVarQueryParams, localVarFormParams, formFiles)
+	if err != nil {
+		return localVarReturnValue, nil, err
+	}
+
+	localVarHTTPResponse, err := a.client.callAPI(req)
+	if err != nil || localVarHTTPResponse == nil {
+		return localVarReturnValue, localVarHTTPResponse, err
+	}
+
+	localVarBody, err := io.ReadAll(localVarHTTPResponse.Body)
+	localVarHTTPResponse.Body.Close()
+	localVarHTTPResponse.Body = io.NopCloser(bytes.NewBuffer(localVarBody))
+	if err != nil {
+		return localVarReturnValue, localVarHTTPResponse, err
+	}
+
+	if localVarHTTPResponse.StatusCode >= 300 {
+		newErr := &GenericOpenAPIError{
+			body:  localVarBody,
+			error: localVarHTTPResponse.Status,
+		}
+		if localVarHTTPResponse.StatusCode == 400 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 403 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 404 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 412 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 429 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 500 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 501 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 502 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 503 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 504 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+		}
+		return localVarReturnValue, localVarHTTPResponse, newErr
+	}
+
+	err = a.client.decode(&localVarReturnValue, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+	if err != nil {
+		newErr := &GenericOpenAPIError{
+			body:  localVarBody,
+			error: err.Error(),
+		}
+		return localVarReturnValue, localVarHTTPResponse, newErr
+	}
+
+	return localVarReturnValue, localVarHTTPResponse, nil
+}
+
 type ApiGetRackTasksRequest struct {
 	ctx           context.Context
 	ApiService    *RackAPIService
@@ -1760,7 +2000,7 @@ Org must have an Infrastructure Provider entity. User must have authorization ro
 
 	@param ctx context.Context - for authentication, logging, cancellation, deadlines, tracing, etc. Passed from http.Request or context.Background().
 	@param org Name of the Org
-	@param id ID of the Rack
+	@param id External inventory Rack ID
 	@return ApiPowerControlRackRequest
 */
 func (a *RackAPIService) PowerControlRack(ctx context.Context, org string, id string) ApiPowerControlRackRequest {

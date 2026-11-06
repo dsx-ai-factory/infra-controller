@@ -4,17 +4,62 @@
 package tui
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"testing/synctest"
+	"time"
 
 	appcli "github.com/NVIDIA/infra-controller/rest-api/cli/pkg"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// contextRoundTripFunc lets the fetch owner end a blocked request without a wall-clock wait.
+type contextRoundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f contextRoundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
+	return f(request)
+}
+
+// TestSession_fetchRacks protects the registered fetch used by rack autocomplete.
+func TestSession_fetchRacks(t *testing.T) {
+	for _, tc := range []struct{ name string }{
+		// The autocomplete deadline must reach HTTP rather than waiting for the shared client timeout.
+		{name: "resolver honors autocomplete deadline"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				ctx, cancel := context.WithTimeout(context.Background(), autocompleteFetchTimeout)
+				defer cancel()
+				client := appcli.NewClient("https://api.example.com", "acme", "token", nil, false)
+				requests := 0
+				client.HTTPClient.Transport = contextRoundTripFunc(func(request *http.Request) (*http.Response, error) {
+					requests++
+					assert.Equal(t, "/v2/org/acme/nico/rack", request.URL.Path)
+					assert.Equal(t, "site-1", request.URL.Query().Get("siteId"))
+					<-request.Context().Done()
+					return nil, request.Context().Err()
+				})
+				session := NewSession(client, "acme", "")
+				session.Scope.SiteID = "site-1"
+				started := time.Now()
+
+				items, err := session.Resolver.Fetch(ctx, "rack")
+
+				require.ErrorIs(t, err, context.DeadlineExceeded)
+				assert.Nil(t, items)
+				assert.Equal(t, 1, requests)
+				assert.Equal(t, autocompleteFetchTimeout, time.Since(started))
+				assert.Nil(t, session.Cache.Get("rack"), "a cancelled fetch must not populate the resolver cache")
+			})
+		})
+	}
+}
 
 func TestSession_fetchAll(t *testing.T) {
 	firstPage := make([]map[string]string, 100)
@@ -64,7 +109,7 @@ func TestSession_fetchAll(t *testing.T) {
 			defer server.Close()
 			session := NewSession(appcli.NewClient(server.URL, "acme", "token", nil, false), "acme", "")
 
-			items, err := session.fetchAll(apiPath(session, "site"), nil)
+			items, err := session.fetchAll(context.Background(), apiPath(session, "site"), nil)
 
 			assert.Equal(t, len(test.pages), requests)
 			if test.wantError != "" {
