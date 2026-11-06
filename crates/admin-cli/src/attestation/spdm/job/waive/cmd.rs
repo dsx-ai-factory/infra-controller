@@ -15,18 +15,23 @@
  * limitations under the License.
  */
 
-use carbide_uuid::machine::MachineId;
-use clap::Parser;
+use eyre::WrapErr;
 
-#[derive(Parser, Debug)]
-#[command(after_long_help = "\
-EXAMPLES:
+use crate::attestation::spdm::job::waive::Args;
+use crate::errors::CarbideCliResult;
+use crate::rpc::ApiClient;
 
-Cancel in-progress SPDM attestation for a machine:
-    $ nico-admin-cli attestation spdm cancel 12345678-1234-5678-90ab-cdef01234567
-
-")]
-pub(crate) struct Args {
-    #[clap(help = "Machine ID")]
-    pub(super) machine_id: MachineId,
+pub(super) async fn waive(args: Args, api_client: &ApiClient) -> CarbideCliResult<()> {
+    // The controller records the waiver after evidence collection cleanup.
+    api_client
+        .0
+        .waive_attestation(::rpc::common::Uuid {
+            value: args.job_id.to_string(),
+        })
+        .await
+        .context("waive the SPDM attestation job")?;
+    println!(
+        "Waiver requested; terminal results count as Waived and unfinished work will resolve after BMC cleanup"
+    );
+    Ok(())
 }

@@ -97,7 +97,7 @@ compatibility parsing does not restore their former behavior.
 | `rack_state_controller` | `RackStateControllerConfig` | *(see below)* | `hardware` | Rack state controller timing, optional automatic rack firmware and switch NVOS updates, and primary-switch mTLS service selection. |
 | `power_shelf_state_controller` | `PowerShelfStateControllerConfig` | *(see below)* | `hardware` | Power shelf state controller timing and optional rack firmware reprovisioning. |
 | `switch_state_controller` | `SwitchStateControllerConfig` | *(see below)* | `hardware` | Switch state controller timing and per-switch mTLS service selection. |
-| `spdm_state_controller` | `SpdmStateControllerConfig` | *(see below)* | `security` | SPDM state controller timing. |
+| `spdm_state_controller` | `SpdmStateControllerConfig` | *(see below)* | `security` | SPDM state controller timing and cancellation timeout (see [SpdmStateControllerConfig](#spdmstatecontrollerconfig)). |
 | `host_models` | `HashMap<String, Firmware>` | `{}` | `machines` | Maps host model identifiers to firmware definitions. |
 | `firmware_global` | `FirmwareGlobal` | *(see below)* | `machines` | Global firmware update settings (see [FirmwareGlobal](#firmwareglobal)). |
 | `machine_updater` | `MachineUpdater` | *(see below)* | `machines` | Machine update policies (see [MachineUpdater](#machineupdater)). |
@@ -802,6 +802,38 @@ TOML section: `[rack_state_controller]`.
 | `controller` | `StateControllerConfig` | *(default)* | Common state controller timing (see [StateControllerConfig](#statecontrollerconfig)). |
 | `nmx_cluster_switch_mtls_services` | `Vec<SwitchMtlsService>` | N/A (ignored) | **Deprecated.** Accepted and ignored. Rack `ConfigureNmxCluster` binds `nvue_api` before RMS V2. RMS V2 binds NMX-C on the selected primary. gNMI requires an explicit `switch_mtls_services` entry; nmx-telemetry uses the effective service list. |
 
+### `SpdmStateControllerConfig`
+
+TOML section: `[spdm_state_controller]`. Changes require an API restart.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `controller` | `StateControllerConfig` | *(default)* | Common state controller timing (see [StateControllerConfig](#statecontrollerconfig)). |
+| `cancellation_timeout` | `Duration` | `2m` | Optional positive duration up to `5m`, such as `30s` or `5m`. Measured from the persisted start of cancellation cleanup across retries and restarts. Operator requests retain their first cleanup start independently of their latest request timestamp. Repeating or switching the target cannot extend cleanup already in progress. While the evidence collection lock is held, the controller attempts BMC task cancellation and polls for completion; without a task ID it waits for this timeout. BMC confirmation or an HTTP 404 or 410 in `WaitForTaskCancellation` releases the lock early. At or after the timeout, the next controller iteration releases the lock without BMC confirmation and finishes as `Waived` for waivers or `Failed` for operator failure and automatic recovery. This grace period spans iterations and is independent of the per-iteration `max_object_handling_time` budget. Zero, negative, malformed, and greater-than-five-minute values fail configuration loading. Omission uses `2m`, including when the section is absent. |
+
+Automatic cleanup requests BMC cancellation when a task is still nonterminal
+after a fixed two-minute grace measured from entry into `PollEvidenceCollection`.
+This includes `New`, `Starting`, `Running`, and unexpected nonterminal states.
+The polling grace is separate from `cancellation_timeout`. If cancellation is
+pending, unsupported, or returns an error, the controller enters
+`WaitForTaskCancellation`, which only polls. An HTTP 404 or 410 in
+`PollEvidenceCollection` also enters `WaitForTaskCancellation`, preserving the
+task ID, retry count, and evidence collection claim.
+
+In `WaitForTaskCancellation`, an HTTP 404 or 410 is treated as a stopped task and
+releases the claim before the cleanup deadline, without an explicit terminal
+task response or cancellation acknowledgement. A stopped task, including one
+inferred from HTTP 404 or 410, permits another collection attempt while the
+existing collection retry budget remains. The cleanup timeout therefore does
+not guarantee that collection attempts cannot overlap. Operator waiver and
+failure requests take precedence over automatic retries or failures, but still
+wait for a stopped-task result or the cleanup deadline.
+
+The two-minute polling check requires a successful task response. Client creation
+errors, task lookup errors other than HTTP 404 or 410, and evidence fetch errors
+retry the existing state without entering automatic cleanup. An operator waiver
+or failure request starts bounded cleanup for such a stuck job.
+
 ### `SwitchStateControllerConfig`
 
 TOML section: `[switch_state_controller]`.
@@ -849,10 +881,17 @@ TOML section: `[observability.per_object_state_metrics]`.
 
 ### `MachineStateControllerConfig`
 
+TOML section: `[machine_state_controller]`.
+
+For `spdm_attester_selection_timeout`, environment values override the site
+override, which overrides the base configuration file. Changes require an API
+restart.
+
 Extends `StateControllerConfig` with:
 
 | Field | Type | Default | Description |
 | ------- | ------ | --------- | ------------- |
+| `spdm_attester_selection_timeout` | `Duration` | `30s` | Optional positive duration up to `3m`, such as `500ms`, `30s` or `3m`. One total budget per managed-host SPDM selection during triggering, terminal-job polling and failed-state recovery, including database/profile lookup, client creation and both Redfish reads. It does not reset between phases. Expiry returns an error, preserves the lifecycle state and job, and permits a later iteration to retry. The enclosing `controller.max_object_handling_time` can expire earlier. Zero, negative, malformed and greater-than-three-minute values fail configuration loading. Omission uses `30s`, including when this section is absent. Read at startup; changes require an API restart. API-triggered attestation and assessment retain their request-supplied timeouts. |
 | `dpu_wait_time` | `Duration` | `5m` | Time before a DPU is considered definitively down. |
 | `power_down_wait` | `Duration` | `2m` | Wait after power-down before powering on. |
 | `failure_retry_time` | `Duration` | `90m` | Time before re-triggering reboot if machine hasn't called back. |

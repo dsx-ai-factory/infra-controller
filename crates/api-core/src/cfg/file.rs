@@ -4153,12 +4153,52 @@ impl SwitchStateControllerConfig {
 }
 
 /// SpdmStateController related config
-#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
-#[serde(deny_unknown_fields)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(default, deny_unknown_fields)]
 pub struct SpdmStateControllerConfig {
     /// Common state controller configs
     #[serde(default = "StateControllerConfig::default")]
     pub controller: StateControllerConfig,
+    /// Maximum wait from the persisted start of cancellation cleanup before releasing an
+    /// evidence collection lock without BMC confirmation. Accepts positive
+    /// durations up to five minutes (e.g. "30s", "5m"); defaults to "2m".
+    /// Covers operator failure, waivers, and automatic recovery.
+    /// The first cleanup start is persisted independently of the latest operator request.
+    /// Repeating or switching targets cannot extend cleanup already in progress.
+    /// Requires an API restart; controller retries do not reset the deadline.
+    #[serde(
+        deserialize_with = "SpdmStateControllerConfig::deserialize_cancellation_timeout",
+        serialize_with = "as_duration"
+    )]
+    pub cancellation_timeout: chrono::Duration,
+}
+
+impl SpdmStateControllerConfig {
+    // Bound how long an unresponsive BMC can hold a job's collection lock during cleanup.
+    const MAX_CANCELLATION_TIMEOUT: Duration = Duration::minutes(5);
+
+    fn deserialize_cancellation_timeout<'de, D>(deserializer: D) -> Result<Duration, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let timeout = deserialize_duration_chrono(deserializer)?;
+        if timeout <= Duration::zero() || timeout > Self::MAX_CANCELLATION_TIMEOUT {
+            return Err(serde::de::Error::custom(
+                "spdm_state_controller.cancellation_timeout must be greater than 0s and at most 5m",
+            ));
+        }
+        Ok(timeout)
+    }
+}
+
+impl Default for SpdmStateControllerConfig {
+    fn default() -> Self {
+        // Preserve the cancellation grace period when the section or field is omitted.
+        Self {
+            controller: StateControllerConfig::default(),
+            cancellation_timeout: Duration::minutes(2),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -6386,6 +6426,7 @@ path = "credentials.yaml"
                 metric_emission_interval: std::time::Duration::from_secs(60),
                 metric_hold_time: std::time::Duration::from_secs(5 * 60),
             },
+            spdm_attester_selection_timeout: std::time::Duration::from_secs(45),
             dpu_wait_time: Duration::minutes(20),
             power_down_wait: Duration::seconds(10),
             failure_retry_time: Duration::minutes(90),
@@ -6418,6 +6459,7 @@ path = "credentials.yaml"
         let config = r#"{"dpu_wait_time": "20m","power_down_wait":"10s",
         "failure_retry_time":"1h30m", "dpu_up_threshold": "1w",
         "boot_interface_observation_interval": "2h",
+        "spdm_attester_selection_timeout": "3m",
         "controller": {"iteration_time": "33s", "max_object_handling_time": "63s", "max_concurrency": 13}}"#;
         let config: MachineStateControllerConfig = serde_json::from_str(config).unwrap();
 
@@ -6435,6 +6477,7 @@ path = "credentials.yaml"
                         metric_hold_time: std::time::Duration::from_secs(5 * 60),
                     }
                 },
+                spdm_attester_selection_timeout: std::time::Duration::from_secs(180),
                 dpu_wait_time: Duration::minutes(20),
                 power_down_wait: Duration::seconds(10),
                 failure_retry_time: Duration::minutes(90),
@@ -6460,6 +6503,7 @@ path = "credentials.yaml"
             config,
             MachineStateControllerConfig {
                 controller: StateControllerConfig::default(),
+                spdm_attester_selection_timeout: std::time::Duration::from_secs(30),
                 dpu_wait_time: Duration::minutes(5),
                 power_down_wait: Duration::seconds(10),
                 failure_retry_time: Duration::minutes(90),
@@ -6495,6 +6539,30 @@ path = "credentials.yaml"
                 "boot_interface_observation_interval={invalid_interval} must be rejected",
             );
         }
+    }
+
+    #[test]
+    fn reject_invalid_spdm_attester_selection_timeouts() {
+        use carbide_test_support::Outcome::Fails;
+        use carbide_test_support::scenarios;
+
+        // These values must fail configuration loading before any selection can run.
+        scenarios!(
+            run = |timeout: &str| {
+                let config_json = format!(r#"{{"spdm_attester_selection_timeout":"{timeout}"}}"#);
+                serde_json::from_str::<MachineStateControllerConfig>(&config_json).map_err(drop)
+            };
+            "a timeout must be positive" {
+                "0s" => Fails,
+                "-1s" => Fails,
+            }
+            "a timeout must stay within the hard maximum" {
+                "180001ms" => Fails,
+            }
+            "a timeout must be a duration" {
+                "invalid" => Fails,
+            }
+        );
     }
 
     #[test]

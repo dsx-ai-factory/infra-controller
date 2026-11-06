@@ -15,27 +15,19 @@
  * limitations under the License.
  */
 
-use carbide_uuid::machine::MachineId;
-use clap::{Parser, ValueEnum};
+pub(super) mod args;
+mod cmd;
+#[cfg(test)]
+mod tests;
 
-#[derive(Parser, Debug)]
-#[command(after_long_help = "\
-EXAMPLES:
+use args::Args;
 
-List all SPDM attestations recorded for a machine:
-    $ nico-admin-cli attestation spdm list 12345678-1234-5678-90ab-cdef01234567
+use crate::cfg::run::Run;
+use crate::cfg::runtime::RuntimeContext;
+use crate::errors::CarbideCliResult;
 
-")]
-pub(crate) struct Args {
-    #[clap(long, help = "Machine ID", conflicts_with = "selector")]
-    pub(super) machine_id: Option<MachineId>,
-    #[clap(long, value_enum, help = "Filter attestation machines by selector")]
-    pub(super) selector: Option<Selector>,
-}
-
-#[derive(Clone, Debug, ValueEnum)]
-#[clap(rename_all = "kebab_case")]
-pub(super) enum Selector {
-    InProgress,
-    Unsuccessful,
+impl Run for args::Args {
+    async fn run(self, ctx: &mut RuntimeContext) -> CarbideCliResult<()> {
+        cmd::waive(self, &ctx.api_client).await
+    }
 }

@@ -10,8 +10,8 @@ the site has and what would attest each
 ## SYNOPSIS
 
 ```text
-nico-admin-cli attestation spdm coverage [--extended]
-[--sort-by] [-h|--help]
+nico-admin-cli attestation spdm coverage [--sort-by]
+[-h|--help]
 ```
 
 ## DESCRIPTION
@@ -19,14 +19,6 @@ nico-admin-cli attestation spdm coverage [--extended]
 Show which hardware classes the site has and what would attest each
 
 ## OPTIONS
-
-`--extended`
-
-Extended result output.
-
-This is used by measured boot, where basic output contains just what you
-probably care about, and "extended" output also dumps out all the
-internal UUIDs that are used to associate instances.
 
 `--sort-by <SORT_BY> [default: primary-id]`
 
