@@ -44,19 +44,19 @@ type Config struct {
 	// URL is the query base URL, its path prefix included: /api/v1/query is
 	// appended. http://prometheus:9090, or a /select/0/prometheus prefix for a
 	// VictoriaMetrics cluster tenant.
-	URL string `json:"url"`
+	URL string `json:"url" yaml:"url"`
 	// BearerTokenFile is a mounted file with the bearer token, read again
 	// at most every minute.
-	BearerTokenFile *string `json:"bearerTokenFile"`
+	BearerTokenFile *string `json:"bearerTokenFile" yaml:"bearerTokenFile"`
 	// CAFile is a mounted PEM file of the CAs that sign the store's
 	// certificate. When set, only these CAs are trusted.
-	CAFile *string `json:"caFile"`
+	CAFile *string `json:"caFile" yaml:"caFile"`
 	// Headers go with every query, such as a tenant: X-Scope-OrgID for
 	// Mimir. Never Authorization: a token comes from BearerTokenFile.
-	Headers map[string]string `json:"headers,omitempty"`
+	Headers map[string]string `json:"headers,omitempty" yaml:"headers"`
 	// IngestionDelaySeconds is the longest time from a scrape's timestamp until
 	// every sample is queryable. 0 for a Prometheus that scrapes the probe itself.
-	IngestionDelaySeconds uint64 `json:"ingestionDelaySeconds,omitempty"`
+	IngestionDelaySeconds uint64 `json:"ingestionDelaySeconds,omitempty" yaml:"ingestionDelaySeconds"`
 }
 
 func (Config) JSONClosed() {}

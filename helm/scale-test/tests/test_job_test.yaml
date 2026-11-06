@@ -138,6 +138,14 @@ tests:
           path: spec.template.spec.containers[0].args
           content: "-test.timeout=900s"
 
+  - it: admits a runner-only install with no acceptance Job
+    set:
+      suites.cluster.enabled: false
+      runner.enabled: true
+    asserts:
+      - hasDocuments:
+          count: 0
+
   - it: fails when no suite is enabled
     set:
       suites.cluster.enabled: false
@@ -177,7 +185,7 @@ tests:
       suites.bogus.enabled: true
     asserts:
       - failedTemplate:
-          errorMessage: unknown suite "bogus"; the known suites are cluster, probe, inventory, history, lock, store, store-transition and result
+          errorMessage: unknown suite "bogus"; the known suites are cluster, probe, inventory, history, lock, store, store-transition, result and fleetup
 
   - it: points suites.journal at journal.enabled instead of rejecting it as unknown
     set:
@@ -276,7 +284,7 @@ tests:
       suites.store.enabled: true
       probeUrl: http://probe.scale-test.svc:8080
       store.url: http://prometheus.monitoring.svc:9090
-      store.ingestionDelaySeconds: 30
+      store.ingestionDelaySeconds: 44
       store.tokenSecret: store-bearer
     asserts:
       - equal:
@@ -304,7 +312,7 @@ tests:
           path: spec.template.spec.containers[0].env
           content:
             name: SCALE_TEST_STORE_INGESTION_DELAY
-            value: "30"
+            value: "44"
           any: true
       - contains:
           path: spec.template.spec.containers[0].env
@@ -420,13 +428,13 @@ tests:
 
   # Each rejection fails the whole render, so only the bad value is set; the
   # leading-zero and overflow forms would pass a digit check fed to Sprig int.
-  - it: rejects a store ingestion delay over 60
+  - it: rejects a store ingestion delay over 44
     set:
       suites.store.enabled: true
-      store.ingestionDelaySeconds: 61
+      store.ingestionDelaySeconds: 45
     asserts:
       - failedTemplate:
-          errorMessage: store.ingestionDelaySeconds must be a whole number of seconds from 0 to 60, got "61"
+          errorMessage: store.ingestionDelaySeconds must be a whole number of seconds from 0 to 44, got "45"
 
   - it: rejects a negative store ingestion delay
     set:
@@ -434,7 +442,7 @@ tests:
       store.ingestionDelaySeconds: -1
     asserts:
       - failedTemplate:
-          errorMessage: store.ingestionDelaySeconds must be a whole number of seconds from 0 to 60, got "-1"
+          errorMessage: store.ingestionDelaySeconds must be a whole number of seconds from 0 to 44, got "-1"
 
   - it: rejects a fractional store ingestion delay
     set:
@@ -442,7 +450,7 @@ tests:
       store.ingestionDelaySeconds: 0.5
     asserts:
       - failedTemplate:
-          errorMessage: store.ingestionDelaySeconds must be a whole number of seconds from 0 to 60, got "0.5"
+          errorMessage: store.ingestionDelaySeconds must be a whole number of seconds from 0 to 44, got "0.5"
 
   - it: rejects a leading-zero store ingestion delay
     set:
@@ -450,7 +458,7 @@ tests:
       store.ingestionDelaySeconds: "08"
     asserts:
       - failedTemplate:
-          errorMessage: store.ingestionDelaySeconds must be a whole number of seconds from 0 to 60, got "08"
+          errorMessage: store.ingestionDelaySeconds must be a whole number of seconds from 0 to 44, got "08"
 
   - it: rejects a store ingestion delay that overflows an integer
     set:
@@ -458,7 +466,7 @@ tests:
       store.ingestionDelaySeconds: "9223372036854775808"
     asserts:
       - failedTemplate:
-          errorMessage: store.ingestionDelaySeconds must be a whole number of seconds from 0 to 60, got "9223372036854775808"
+          errorMessage: store.ingestionDelaySeconds must be a whole number of seconds from 0 to 44, got "9223372036854775808"
 
   - it: fails when the image repository is missing
     set:
@@ -668,7 +676,7 @@ tests:
       inventory.clientSecret: nico-cert
     asserts:
       - failedTemplate:
-          errorMessage: inventory.namespace is required when the inventory suite is enabled
+          errorMessage: inventory.namespace is required when the inventory or fleetup suite is enabled
 
   - it: fails when the inventory suite lacks its client Secret
     set:
@@ -677,4 +685,79 @@ tests:
       inventory.namespace: mat-ns
     asserts:
       - failedTemplate:
-          errorMessage: inventory.clientSecret is required when the inventory suite is enabled
+          errorMessage: inventory.clientSecret is required when the inventory or fleetup suite is enabled
+
+  - it: renders the fleetup suite with the site, store and probe values and the cert and token mounts
+    set:
+      suites.cluster.enabled: false
+      suites.fleetup.enabled: true
+      probeUrl: http://probe.mat-ns.svc:9010
+      store.url: http://prometheus.monitoring.svc:9090
+      store.tokenSecret: store-bearer
+      inventory.namespace: mat-ns
+      inventory.clientSecret: nico-cert
+      runner.controlPlane:
+        - namespace: nico
+          labelSelector: app=nico-api
+    asserts:
+      - hasDocuments:
+          count: 1
+      - equal:
+          path: metadata.annotations["helm.sh/hook-weight"]
+          value: "9"
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: SCALE_TEST_CONTROL_PLANE
+            value: '[{"labelSelector":"app=nico-api","namespace":"nico"}]'
+          any: true
+      - equal:
+          path: spec.template.spec.containers[0].command
+          value: ["/tests/fleetup.test"]
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: "-test.run=^TestAgainstARealSite$"
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: SCALE_TEST_NAMESPACE
+            value: mat-ns
+          any: true
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: SCALE_TEST_CERT_DIR
+            value: /var/run/secrets/spiffe.io
+          any: true
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: SCALE_TEST_STORE_URL
+            value: http://prometheus.monitoring.svc:9090
+          any: true
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: SCALE_TEST_PROBE_URL
+            value: http://probe.mat-ns.svc:9010
+          any: true
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: SCALE_TEST_EXPECTED_HOSTS
+            value: ""
+          any: true
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: nico-client-cert
+            secret:
+              secretName: nico-cert
+          any: true
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: store-token
+            secret:
+              secretName: store-bearer
+          any: true

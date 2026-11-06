@@ -4,6 +4,7 @@
 package result
 
 import (
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -35,6 +36,8 @@ type RunResult struct {
 	// Result is where this record was persisted on the journal PVC. Claim is
 	// empty when the file could not be written.
 	Result ResultRef `json:"result"`
+	// Detail is the test's own findings, such as the fleet-up readiness checks. Only result.json holds it.
+	Detail json.RawMessage `json:"detail,omitempty"`
 }
 
 // RunClock is the run's wall times. Deadline is the end of the test window, null when none.

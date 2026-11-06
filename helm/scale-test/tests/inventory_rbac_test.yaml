@@ -122,9 +122,25 @@ tests:
           pattern: -inv-a82b84e604$
         documentIndex: 1
 
+  - it: grants the same reads to the fleetup suite
+    set:
+      suites.fleetup.enabled: true
+      inventory.namespace: mat-ns
+    asserts:
+      - hasDocuments:
+          count: 2
+      - equal:
+          path: metadata.namespace
+          value: mat-ns
+        documentIndex: 0
+      - equal:
+          path: rules[0].verbs
+          value: ["get", "list"]
+        documentIndex: 0
+
   - it: fails when enabled without a target namespace
     set:
       suites.inventory.enabled: true
     asserts:
       - failedTemplate:
-          errorMessage: inventory.namespace is required when the inventory suite is enabled
+          errorMessage: inventory.namespace is required when the inventory or fleetup suite is enabled

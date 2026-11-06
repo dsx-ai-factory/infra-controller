@@ -34,6 +34,9 @@ tests:
       - equal:
           path: metadata.labels["app.kubernetes.io/component"]
           value: run-data
+      # Only the runner keeps the claim on uninstall.
+      - notExists:
+          path: metadata.annotations
 
   - it: creates the shared claim on its own for a later suite to reuse
     set:
@@ -56,7 +59,7 @@ tests:
       journal.enabled: true
     asserts:
       - failedTemplate:
-          errorMessage: persistence.storageClass is required when the run-data claim is created (journal.enabled or persistence.create)
+          errorMessage: persistence.storageClass is required when the run-data claim is created (journal.enabled, persistence.create or runner.enabled)
 
   - it: fails when the claim size is missing
     set:
