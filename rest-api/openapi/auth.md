@@ -202,7 +202,7 @@ issuers:
         audiences: ["tenant-client-a", "tenant-client-b"]
 ```
 
-For `automation-org`, the token must contain `automation-client-a`. For `tenant-org`, either `tenant-client-a` or `tenant-client-b` is sufficient. The service-account mapping requires disconnected mode.
+For `automation-org`, the token must contain `automation-client-a`. For `tenant-org`, either `tenant-client-a` or `tenant-client-b` is sufficient. In disconnected mode, this is the only service-account mapping allowed.
 
 When issuer-level and mapping audiences are both configured, they are independent gates:
 
@@ -404,6 +404,7 @@ keycloak:
   clientID: nico-cloud
   clientSecretPath: /var/secrets/keycloak/client-secret
   serviceAccount: true
+  serviceAccountOrgs: [ncx]
 ```
 
 Key fields:
@@ -414,7 +415,10 @@ Key fields:
 - `realm` is the Keycloak realm.
 - `clientID` is the OAuth client ID.
 - `clientSecretPath` is the file path where the client secret is mounted.
-- `serviceAccount` enables service account features.
+- `serviceAccount` enables service account features. When set to `true`, a `client_credentials` token that holds both `PROVIDER_ADMIN` and `TENANT_ADMIN` in an org listed in `serviceAccountOrgs` is accepted as a service account for that org. When set to `false`, no token is treated as a service account. Defaults to `false`.
+- `serviceAccountOrgs` lists the only orgs whose clients can be service accounts, compared in lowercase. A client holding both roles in an org that isn't listed is not a service account. It is required when `serviceAccount` is `true`, otherwise the API fails to start. In disconnected mode it must list exactly one org, since a disconnected deployment has a single Site that only one org can claim.
+
+Any client in the realm can use `client_credentials` tokens. Like a user token, each one needs a role in the requested org, and its roles decide what it can do. Only the service account described above is set up as its org's own Provider and Tenant.
 
 Create the client secret in Kubernetes before enabling Keycloak:
 
@@ -443,7 +447,7 @@ Use these rules when reviewing a configuration before rollout:
 - The same issuer URL can only appear once.
 - Static `orgName` values must be unique across all issuers.
 - Static mappings require `orgDisplayName`.
-- Service account mappings are limited to one total in disconnected mode, or one per issuer URL in connected mode.
+- In disconnected mode, only one service account mapping is allowed across all issuers.
 - Dynamic organization mappings are limited to one across all issuers.
 - Dynamic organizations cannot claim statically configured organization names.
 - Roles must be `TENANT_ADMIN`, `PROVIDER_ADMIN`, or both.

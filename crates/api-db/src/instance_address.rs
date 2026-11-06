@@ -1075,6 +1075,7 @@ mod tests {
             interfaces,
             auto_config: None,
             service_interfaces: vec![],
+            vpc_local_interfaces: vec![],
         }
     }
 
