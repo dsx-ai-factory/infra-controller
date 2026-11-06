@@ -46,6 +46,7 @@
   - [DeleteComponentRequest](#v1-DeleteComponentRequest)
   - [DeleteComponentResponse](#v1-DeleteComponentResponse)
   - [DeleteEventRuleBindingRequest](#v1-DeleteEventRuleBindingRequest)
+  - [DeleteEventRuleOverrideRequest](#v1-DeleteEventRuleOverrideRequest)
   - [DeleteEventRuleRequest](#v1-DeleteEventRuleRequest)
   - [DeleteOperationRuleRequest](#v1-DeleteOperationRuleRequest)
   - [DeleteRackRequest](#v1-DeleteRackRequest)
@@ -58,6 +59,8 @@
   - [DisassociateRuleFromRackRequest](#v1-DisassociateRuleFromRackRequest)
   - [EnableEventRuleRequest](#v1-EnableEventRuleRequest)
   - [EqualOperationRunPhases](#v1-EqualOperationRunPhases)
+  - [EventHandling](#v1-EventHandling)
+  - [EventHandlingTask](#v1-EventHandlingTask)
   - [EventRule](#v1-EventRule)
   - [EventRuleAction](#v1-EventRuleAction)
   - [EventRuleActionCondition](#v1-EventRuleActionCondition)
@@ -65,7 +68,9 @@
   - [EventRuleBinding](#v1-EventRuleBinding)
   - [EventRuleMetadataUpdate](#v1-EventRuleMetadataUpdate)
   - [EventRuleNoopAction](#v1-EventRuleNoopAction)
+  - [EventRulePolicy](#v1-EventRulePolicy)
   - [EventRuleScope](#v1-EventRuleScope)
+  - [EventRuleScopeSelector](#v1-EventRuleScopeSelector)
   - [EventRuleSendAlertAction](#v1-EventRuleSendAlertAction)
   - [EventRuleSubmitTaskAction](#v1-EventRuleSubmitTaskAction)
   - [ExternalRef](#v1-ExternalRef)
@@ -78,7 +83,10 @@
   - [GetComponentInfoResponse](#v1-GetComponentInfoResponse)
   - [GetComponentsRequest](#v1-GetComponentsRequest)
   - [GetComponentsResponse](#v1-GetComponentsResponse)
+  - [GetEffectiveEventRuleForScopeRequest](#v1-GetEffectiveEventRuleForScopeRequest)
   - [GetEffectiveEventRuleRequest](#v1-GetEffectiveEventRuleRequest)
+  - [GetEventHandlingRequest](#v1-GetEventHandlingRequest)
+  - [GetEventHandlingResponse](#v1-GetEventHandlingResponse)
   - [GetEventRuleBindingRequest](#v1-GetEventRuleBindingRequest)
   - [GetEventRuleRequest](#v1-GetEventRuleRequest)
   - [GetListOfNVLDomainsRequest](#v1-GetListOfNVLDomainsRequest)
@@ -119,6 +127,8 @@
   - [ListOperationRunsResponse](#v1-ListOperationRunsResponse)
   - [ListRackRuleAssociationsRequest](#v1-ListRackRuleAssociationsRequest)
   - [ListRackRuleAssociationsResponse](#v1-ListRackRuleAssociationsResponse)
+  - [ListScopedEventRulesRequest](#v1-ListScopedEventRulesRequest)
+  - [ListScopedEventRulesResponse](#v1-ListScopedEventRulesResponse)
   - [ListTaskScheduleScopesRequest](#v1-ListTaskScheduleScopesRequest)
   - [ListTaskScheduleScopesResponse](#v1-ListTaskScheduleScopesResponse)
   - [ListTaskSchedulesRequest](#v1-ListTaskSchedulesRequest)
@@ -199,6 +209,8 @@
   - [ScheduleConfig](#v1-ScheduleConfig)
   - [ScheduleSpec](#v1-ScheduleSpec)
   - [ScheduledOperation](#v1-ScheduledOperation)
+  - [ScopedEventRule](#v1-ScopedEventRule)
+  - [SetEventRuleOverrideRequest](#v1-SetEventRuleOverrideRequest)
   - [SetRuleAsDefaultRequest](#v1-SetRuleAsDefaultRequest)
   - [StringQueryInfo](#v1-StringQueryInfo)
   - [SubmitTaskResponse](#v1-SubmitTaskResponse)
@@ -226,6 +238,9 @@
   - [ComponentType](#v1-ComponentType)
   - [ConflictStrategy](#v1-ConflictStrategy)
   - [DiffType](#v1-DiffType)
+  - [EventHandlingReason](#v1-EventHandlingReason)
+  - [EventHandlingStatus](#v1-EventHandlingStatus)
+  - [EventResourceType](#v1-EventResourceType)
   - [EventRuleConflictStrategy](#v1-EventRuleConflictStrategy)
   - [EventRuleScopeType](#v1-EventRuleScopeType)
   - [EventRuleSeverity](#v1-EventRuleSeverity)
@@ -707,6 +722,15 @@ DeleteComponent - soft-delete a single component by UUID
 | event_type | [string](#string) |  | Required. Identifies the event-family resolution slot to clear. Must be registered by Flow. Supported value: &#34;hardware.leak.detected&#34;. |
 | scope | [EventRuleScope](#v1-EventRuleScope) |  | Required. Must exactly match the site or rack scope of the binding. |
 
+<a name="v1-DeleteEventRuleOverrideRequest"></a>
+
+### DeleteEventRuleOverrideRequest
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| event_type | [string](#string) |  | Required. Must be an event type registered by Flow. |
+| scope | [EventRuleScopeSelector](#v1-EventRuleScopeSelector) |  | Required Site or Rack policy slot to clear. An empty slot succeeds. |
+
 <a name="v1-DeleteEventRuleRequest"></a>
 
 ### DeleteEventRuleRequest
@@ -812,6 +836,37 @@ scope entries. In-flight tasks are not cancelled.
 | ----- | ---- | ----- | ----------- |
 | phase_count | [int32](#int32) |  | Required. Example: 10 means ten roughly equal phases. |
 
+<a name="v1-EventHandling"></a>
+
+### EventHandling
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| id | [UUID](#v1-UUID) |  | Stable UUID for the source event that caused this handling decision. |
+| event_type | [string](#string) |  | Registered event type handled by the rule. |
+| resource_id | [string](#string) |  | Current public identifier of the resource whose event was handled. |
+| resource_type | [EventResourceType](#v1-EventResourceType) |  | Kind of inventory resource identified by resource_id. |
+| tasks | [EventHandlingTask](#v1-EventHandlingTask) | repeated | Tasks created by event-rule actions, ordered by creation time then UUID ascending. Empty when handling created no Tasks. |
+| handled_at | [google.protobuf.Timestamp](https://protobuf.dev/reference/protobuf/google.protobuf/) |  | Time Flow first applied an event rule for this source event. |
+| event_summary | [string](#string) |  | Summary captured when Flow first handled the source event. |
+| applied_policy | [EventRulePolicy](#v1-EventRulePolicy) |  | Required. Immutable effective policy captured for this event, including only actions whose conditions matched. Never resolved from the current rule. |
+| event_first_observed_at | [google.protobuf.Timestamp](https://protobuf.dev/reference/protobuf/google.protobuf/) |  | Source observation timestamp captured when the event was first accepted. Absent for older records or sources without an observation timestamp. Duplicate observations do not change this time. This is not the actual beginning of the underlying condition and can differ from handled_at. |
+| handling_status | [EventHandlingStatus](#v1-EventHandlingStatus) |  | Authoritative aggregate of the captured actions, executions, and Tasks. Failed &gt; Retrying &gt; Starting &gt; Unspecified &gt; Running &gt; Skipped &gt; Completed &gt; NoAction. Missing execution/task information is Unspecified. |
+| reason | [EventHandlingReason](#v1-EventHandlingReason) |  | Bounded diagnostic for the aggregate result; unspecified when unnecessary. |
+| message | [string](#string) |  | Curated handling summary. Never contains raw backend error messages. |
+
+<a name="v1-EventHandlingTask"></a>
+
+### EventHandlingTask
+
+EventHandlingTask summarizes a Task created by one event-rule action.
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| id | [UUID](#v1-UUID) |  | Stable Flow Task UUID. |
+| status | [TaskStatus](#v1-TaskStatus) |  | Current Task lifecycle status. |
+| created_at | [google.protobuf.Timestamp](https://protobuf.dev/reference/protobuf/google.protobuf/) |  | Time Flow created the Task. |
+
 <a name="v1-EventRule"></a>
 
 ### EventRule
@@ -885,6 +940,16 @@ scope entries. In-flight tasks are not cancelled.
 | ----- | ---- | ----- | ----------- |
 | reason | [string](#string) |  |  |
 
+<a name="v1-EventRulePolicy"></a>
+
+### EventRulePolicy
+
+EventRulePolicy contains the actions selected when an event was handled.
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| actions | [EventRuleAction](#v1-EventRuleAction) | repeated | Historical action snapshot, independent of subsequent rule edits or deletion. Empty when none of the selected rule&#39;s actions applied to the event. |
+
 <a name="v1-EventRuleScope"></a>
 
 ### EventRuleScope
@@ -893,6 +958,22 @@ scope entries. In-flight tasks are not cancelled.
 | ----- | ---- | ----- | ----------- |
 | type | [EventRuleScopeType](#v1-EventRuleScopeType) |  |  |
 | id | [UUID](#v1-UUID) |  | Required for rack scope and omitted for site scope. |
+
+<a name="v1-EventRuleScopeSelector"></a>
+
+### EventRuleScopeSelector
+
+EventRuleScopeSelector identifies a Site scope or a Rack scope. Site
+selectors must omit rack_identifier; Rack selectors must set exactly one
+canonical Flow UUID or external inventory ID. Flow resolves external Rack IDs
+before calling the event rule manager, whose scope representation always uses
+canonical UUIDs.
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| type | [EventRuleScopeType](#v1-EventRuleScopeType) |  | Required. SITE or RACK. |
+| rack_id | [UUID](#v1-UUID) |  | Canonical Flow Rack UUID. Valid only for RACK. |
+| rack_external_id | [string](#string) |  | External inventory Rack ID resolved by Flow. Valid only for RACK. |
 
 <a name="v1-EventRuleSendAlertAction"></a>
 
@@ -1022,6 +1103,15 @@ GetComponents - retrieves components from local database
 | components | [Component](#v1-Component) | repeated |  |
 | total | [int32](#int32) |  |  |
 
+<a name="v1-GetEffectiveEventRuleForScopeRequest"></a>
+
+### GetEffectiveEventRuleForScopeRequest
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| event_type | [string](#string) |  | Required. Must be an event type registered by Flow. |
+| scope | [EventRuleScopeSelector](#v1-EventRuleScopeSelector) |  | Required Site or Rack scope at which to resolve inheritance. |
+
 <a name="v1-GetEffectiveEventRuleRequest"></a>
 
 ### GetEffectiveEventRuleRequest
@@ -1031,6 +1121,27 @@ GetComponents - retrieves components from local database
 | event_type | [string](#string) |  | Required. Must be registered by Flow. Supported value: &#34;hardware.leak.detected&#34;. |
 | rack_id | [UUID](#v1-UUID) |  |  |
 | component_id | [UUID](#v1-UUID) |  |  |
+
+<a name="v1-GetEventHandlingRequest"></a>
+
+### GetEventHandlingRequest
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| event_type | [string](#string) |  | Required. Must be an event type registered by Flow. |
+| resource_type | [EventResourceType](#v1-EventResourceType) |  | Required kind of resource whose handling history is requested. |
+| resource_id | [string](#string) |  | Required current public identifier of the resource. |
+| offset | [int32](#int32) |  | Number of matching records to skip. Must be nonnegative; defaults to zero. |
+| limit | [int32](#int32) |  | Maximum records to return. Zero defaults to one; accepted range is 1-100. |
+
+<a name="v1-GetEventHandlingResponse"></a>
+
+### GetEventHandlingResponse
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| handlings | [EventHandling](#v1-EventHandling) | repeated | Handling records in descending handled_at and event UUID order. |
+| total_count | [int32](#int32) |  | Number of matching records before pagination, including when the page is empty. |
 
 <a name="v1-GetEventRuleBindingRequest"></a>
 
@@ -1415,6 +1526,24 @@ then UUID descending.
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | associations | [RackRuleAssociation](#v1-RackRuleAssociation) | repeated |  |
+
+<a name="v1-ListScopedEventRulesRequest"></a>
+
+### ListScopedEventRulesRequest
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| event_type | [string](#string) |  | Required registered event type. |
+| pagination | [Pagination](#v1-Pagination) |  | Optional. Omit for offset 0 and limit 100. When present, offset must be nonnegative and limit must be between 1 and 100. Offset includes the Site default row. |
+
+<a name="v1-ListScopedEventRulesResponse"></a>
+
+### ListScopedEventRulesResponse
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| policies | [ScopedEventRule](#v1-ScopedEventRule) | repeated | One page in the documented scope and Rack order; empty beyond the last row. |
+| total | [int64](#int64) |  | Matching rows before pagination, including the effective Site default. |
 
 <a name="v1-ListTaskScheduleScopesRequest"></a>
 
@@ -2314,6 +2443,28 @@ form &#34;&lt;schedule name&gt; — &lt;RFC3339 timestamp&gt;&#34;.
 | upgrade_firmware | [UpgradeFirmwareRequest](#v1-UpgradeFirmwareRequest) |  |  |
 | ingest | [IngestRackRequest](#v1-IngestRackRequest) |  |  |
 
+<a name="v1-ScopedEventRule"></a>
+
+### ScopedEventRule
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| rule | [EventRule](#v1-EventRule) |  | Enabled policy selected for this scope; Site may use a read-only built-in. |
+| scope_type | [EventRuleScopeType](#v1-EventRuleScopeType) |  | SITE denotes the effective default; RACK denotes an explicit override. |
+| rack_id | [string](#string) | optional | Public Rack identifier. Absent for SITE, or when inventory is unavailable. |
+
+<a name="v1-SetEventRuleOverrideRequest"></a>
+
+### SetEventRuleOverrideRequest
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| event_type | [string](#string) |  | Required. Must be an event type registered by Flow. |
+| scope | [EventRuleScopeSelector](#v1-EventRuleScopeSelector) |  | Required Site or Rack policy slot to replace. |
+| name | [string](#string) |  | Required rule name. |
+| description | [string](#string) |  | Optional human-readable rule description. |
+| actions | [EventRuleAction](#v1-EventRuleAction) | repeated | Required event-rule actions. Event-specific validation applies. |
+
 <a name="v1-SetRuleAsDefaultRequest"></a>
 
 ### SetRuleAsDefaultRequest
@@ -2682,6 +2833,54 @@ ConflictStrategy controls how a task behaves when a conflict is detected.
 | DIFF_TYPE_UNEXPECTED | 2 | Found in the component manager service but not expected by Flow |
 | DIFF_TYPE_MISMATCH | 3 | In both but with field differences |
 
+<a name="v1-EventHandlingReason"></a>
+
+### EventHandlingReason
+
+EventHandlingReason explains the aggregate handling result.
+
+| Name | Number | Description |
+| ---- | ------ | ----------- |
+| EVENT_HANDLING_REASON_UNSPECIFIED | 0 |  |
+| EVENT_HANDLING_REASON_NO_TARGETS | 1 |  |
+| EVENT_HANDLING_REASON_ATTEMPT_FAILED | 2 |  |
+| EVENT_HANDLING_REASON_ATTEMPT_INTERRUPTED | 3 |  |
+| EVENT_HANDLING_REASON_RETRY_SCHEDULED | 4 |  |
+| EVENT_HANDLING_REASON_ACTION_FAILED | 5 |  |
+| EVENT_HANDLING_REASON_TASK_FAILED | 6 |  |
+| EVENT_HANDLING_REASON_INCOMPLETE_STATE | 7 |  |
+
+<a name="v1-EventHandlingStatus"></a>
+
+### EventHandlingStatus
+
+EventHandlingStatus reports progress across all applicable actions and Tasks.
+Completed includes Task completion, not only successful dispatch. NoAction
+means no actions applied or all applicable actions completed as no-ops.
+
+| Name | Number | Description |
+| ---- | ------ | ----------- |
+| EVENT_HANDLING_STATUS_UNSPECIFIED | 0 |  |
+| EVENT_HANDLING_STATUS_NO_ACTION | 1 |  |
+| EVENT_HANDLING_STATUS_STARTING | 2 |  |
+| EVENT_HANDLING_STATUS_RETRYING | 3 |  |
+| EVENT_HANDLING_STATUS_RUNNING | 4 |  |
+| EVENT_HANDLING_STATUS_COMPLETED | 5 |  |
+| EVENT_HANDLING_STATUS_SKIPPED | 6 |  |
+| EVENT_HANDLING_STATUS_FAILED | 7 |  |
+
+<a name="v1-EventResourceType"></a>
+
+### EventResourceType
+
+EventResourceType identifies the inventory resource that emitted an event.
+
+| Name | Number | Description |
+| ---- | ------ | ----------- |
+| EVENT_RESOURCE_TYPE_UNSPECIFIED | 0 |  |
+| EVENT_RESOURCE_TYPE_COMPONENT | 1 |  |
+| EVENT_RESOURCE_TYPE_RACK | 2 |  |
+
 <a name="v1-EventRuleConflictStrategy"></a>
 
 ### EventRuleConflictStrategy
@@ -2720,9 +2919,10 @@ ConflictStrategy controls how a task behaves when a conflict is detected.
 | Name | Number | Description |
 | ---- | ------ | ----------- |
 | EVENT_RULE_TARGET_STRATEGY_UNSPECIFIED | 0 |  |
-| EVENT_RULE_TARGET_STRATEGY_COMPONENT | 1 |  |
-| EVENT_RULE_TARGET_STRATEGY_RACK | 2 |  |
-| EVENT_RULE_TARGET_STRATEGY_AFFECTED_COMPONENTS | 3 |  |
+| EVENT_RULE_TARGET_STRATEGY_COMPONENT | 1 | Legacy name for SOURCE. Kept first so existing ProtoJSON enum names remain readable by older clients; new clients should use SOURCE. |
+| EVENT_RULE_TARGET_STRATEGY_SOURCE | 1 | The resource that produced the event: one component for a component event, or the event rack (expanded to its components) for a rack event. |
+| EVENT_RULE_TARGET_STRATEGY_RACK | 2 | All components in the event rack or the event component&#39;s owning rack. |
+| EVENT_RULE_TARGET_STRATEGY_AFFECTED_COMPONENTS | 3 | Event-type-specific impact selection. |
 
 <a name="v1-FirmwareControlOperation"></a>
 
@@ -3081,6 +3281,7 @@ Task kinds include rack lifecycle work not represented by OperationType.
 | GetEventRule | [GetEventRuleRequest](#v1-GetEventRuleRequest) | [EventRule](#v1-EventRule) |  |
 | GetEffectiveEventRule | [GetEffectiveEventRuleRequest](#v1-GetEffectiveEventRuleRequest) | [EventRule](#v1-EventRule) |  |
 | ListEventRules | [ListEventRulesRequest](#v1-ListEventRulesRequest) | [ListEventRulesResponse](#v1-ListEventRulesResponse) | Returns matching persisted rules followed by built-in rules, with each group ordered by ascending rule ID. Filters are applied before pagination. When pagination is omitted, offset defaults to 0 and limit defaults to 100. |
+| ListScopedEventRules | [ListScopedEventRulesRequest](#v1-ListScopedEventRulesRequest) | [ListScopedEventRulesResponse](#v1-ListScopedEventRulesResponse) | Lists the effective Site default once, followed by enabled Rack overrides. Unbound and disabled rules are excluded. Rows are ordered before slicing: Site first, then public Rack ID ascending (unavailable IDs last), then canonical Rack UUID ascending. Shared rules appear once per Rack binding. |
 | UpdateEventRule | [UpdateEventRuleRequest](#v1-UpdateEventRuleRequest) | [EventRule](#v1-EventRule) |  |
 | EnableEventRule | [EnableEventRuleRequest](#v1-EnableEventRuleRequest) | [EventRule](#v1-EventRule) |  |
 | DisableEventRule | [DisableEventRuleRequest](#v1-DisableEventRuleRequest) | [EventRule](#v1-EventRule) |  |
@@ -3088,6 +3289,10 @@ Task kinds include rack lifecycle work not represented by OperationType.
 | CreateEventRuleBinding | [CreateEventRuleBindingRequest](#v1-CreateEventRuleBindingRequest) | [EventRuleBinding](#v1-EventRuleBinding) | Event-rule bindings |
 | GetEventRuleBinding | [GetEventRuleBindingRequest](#v1-GetEventRuleBindingRequest) | [EventRuleBinding](#v1-EventRuleBinding) |  |
 | DeleteEventRuleBinding | [DeleteEventRuleBindingRequest](#v1-DeleteEventRuleBindingRequest) | [.google.protobuf.Empty](https://protobuf.dev/reference/protobuf/google.protobuf/) |  |
+| SetEventRuleOverride | [SetEventRuleOverrideRequest](#v1-SetEventRuleOverrideRequest) | [EventRule](#v1-EventRule) | Atomically creates or replaces the override in one event-type and scope slot, regardless of which client or API created the existing rule. |
+| GetEffectiveEventRuleForScope | [GetEffectiveEventRuleForScopeRequest](#v1-GetEffectiveEventRuleForScopeRequest) | [EventRule](#v1-EventRule) | Returns the effective enabled rule for one Site or Rack scope. |
+| DeleteEventRuleOverride | [DeleteEventRuleOverrideRequest](#v1-DeleteEventRuleOverrideRequest) | [.google.protobuf.Empty](https://protobuf.dev/reference/protobuf/google.protobuf/) | Idempotently removes the override in one event-type and scope slot. |
+| GetEventHandling | [GetEventHandlingRequest](#v1-GetEventHandlingRequest) | [GetEventHandlingResponse](#v1-GetEventHandlingResponse) | Returns event-rule handling records for one resource and event type. Results are ordered by handling time then event ID, descending, and use offset-based pagination. Offset defaults to zero; limit defaults to one. |
 | AssociateRuleWithRack | [AssociateRuleWithRackRequest](#v1-AssociateRuleWithRackRequest) | [.google.protobuf.Empty](https://protobuf.dev/reference/protobuf/google.protobuf/) | Rack-rule associations |
 | DisassociateRuleFromRack | [DisassociateRuleFromRackRequest](#v1-DisassociateRuleFromRackRequest) | [.google.protobuf.Empty](https://protobuf.dev/reference/protobuf/google.protobuf/) |  |
 | GetRackRuleAssociation | [GetRackRuleAssociationRequest](#v1-GetRackRuleAssociationRequest) | [GetRackRuleAssociationResponse](#v1-GetRackRuleAssociationResponse) |  |

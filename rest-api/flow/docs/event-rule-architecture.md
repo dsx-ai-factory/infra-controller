@@ -194,7 +194,10 @@ site-wide or reused by several racks, but it cannot do both.
 
 The durable event identity is `(source_name, source_key)`. An event records its
 canonical resource, selected rule UUID, effective-policy snapshot, observation
-count, and timestamps.
+count, and timestamps. The nullable `first_observed_at` captures the source timestamp
+from the first accepted observation independently of store-owned `created_at`
+and `last_observed_at`. Repeated observations preserve `first_observed_at`; older
+records and sources without a timestamp leave it null.
 
 Each applicable action produces one execution keyed by `(event_id,
 action_name)`. The execution stores an immutable typed plan alongside mutable
@@ -278,7 +281,8 @@ hardcoded strategies:
 
 | Strategy | Component event | Rack event |
 |---|---|---|
-| `COMPONENT` | Selects only the component that produced the event. | Rejected because the event does not identify one component. |
+| `SOURCE` | Selects the component that produced the event. | Selects the event rack, then materializes every component known in that rack. |
+| `COMPONENT` | Deprecated gRPC alias for `SOURCE`; selects the event component. | Deprecated gRPC alias for `SOURCE`; selects the event rack and its known components. |
 | `RACK` | Selects the component's owning rack, then materializes every component currently known in that rack. | Selects the event rack, then materializes every component currently known in that rack. |
 | `AFFECTED_COMPONENTS` | Uses the resolver selected for the event type. The generic resolver selects only the event component. | Uses the resolver selected for the event type. The generic resolver selects the event rack and materializes every component currently known in it. |
 
@@ -289,9 +293,10 @@ For each task action, Flow chooses exactly one resolver in this order:
    the strategy.
 
 An event-specific registration changes only that event type and strategy; all
-other event types continue to use the generic resolver. Currently, the only
-event-specific registration is `hardware.leak.detected` with
-`AFFECTED_COMPONENTS`.
+other event types continue to use the generic resolver. The leakage integration
+registers an event-specific resolver for `hardware.leak.detected` with
+`AFFECTED_COMPONENTS`. See [source strategy compatibility](event-rules-guide.md#source-strategy-compatibility)
+for the `SOURCE` wire value, REST mapping, and reader upgrade requirements.
 
 ### Leakage affected components
 

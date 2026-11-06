@@ -317,6 +317,14 @@ func TestDetectPrimaryResource(t *testing.T) {
 			want: "allocation",
 		},
 		{
+			name: "equal count and length use lexical order",
+			opIDs: []string{
+				"get-tray", "delete-tray",
+				"get-rack", "delete-rack",
+			},
+			want: "rack",
+		},
+		{
 			name: "instance wins with more operations",
 			opIDs: []string{
 				"get-all-instance", "create-instance", "get-instance", "update-instance", "delete-instance",
@@ -2363,6 +2371,7 @@ func testNewApp_MachineValidationReadCommandsExecuteRESTRequests(t *testing.T) {
 	}
 }
 
+// TestNewApp covers the generated command tree and its REST requests.
 func TestNewApp(t *testing.T) {
 	clearAllNicoEnv(t)
 	previousConfigPath := configOverridePath
@@ -2389,7 +2398,7 @@ func TestNewApp(t *testing.T) {
 		{name: "site bootstrap command", run: testNewAppIncludesSiteBootstrapCommand},
 		{name: "preserves repeated query flags", run: testNewAppPreservesRepeatedQueryFlags},
 		{name: "preserves repeated filters across pages", run: testNewAppListAllPreservesRepeatedFilters},
-		{name: "power commands", run: testNewAppPowerCommands},
+		{name: "power and leakage requests", run: testNewAppPowerAndLeakageRequests},
 	}
 
 	for _, tt := range tests {
@@ -2397,7 +2406,7 @@ func TestNewApp(t *testing.T) {
 	}
 }
 
-func testNewAppPowerCommands(t *testing.T) {
+func testNewAppPowerAndLeakageRequests(t *testing.T) {
 	const siteID = "550e8400-e29b-41d4-a716-446655440000"
 	const trayID = "aa:bb:cc:dd:ee:ff"
 	tests := []struct {
@@ -2405,6 +2414,7 @@ func testNewAppPowerCommands(t *testing.T) {
 		command   []string
 		args      []string
 		method    string
+		wantPath  string
 		wantQuery string
 		wantBody  string
 	}{
@@ -2415,6 +2425,7 @@ func testNewAppPowerCommands(t *testing.T) {
 			command:   []string{"tray", "power-state", "get"},
 			args:      []string{"--site-id", siteID, trayID},
 			method:    http.MethodGet,
+			wantPath:  "/tray/" + trayID + "/power",
 			wantQuery: "siteId=" + siteID,
 		},
 		{
@@ -2424,7 +2435,39 @@ func testNewAppPowerCommands(t *testing.T) {
 			command:  []string{"tray", "power"},
 			args:     []string{"--site-id", siteID, "--state", "On", trayID},
 			method:   http.MethodPatch,
+			wantPath: "/tray/" + trayID + "/power",
 			wantBody: `{"siteId":"550e8400-e29b-41d4-a716-446655440000","state":"On"}`,
+		},
+		{
+			name: "list leakage policies", command: []string{"leakage", "policy", "list"},
+			args: []string{"--site-id", siteID}, method: http.MethodGet,
+			wantPath: "/leakage/policy", wantQuery: "siteId=" + siteID,
+		},
+		{
+			name: "read default leakage policy", command: []string{"leakage", "policy", "default", "get"},
+			args: []string{"--site-id", siteID}, method: http.MethodGet,
+			wantPath: "/leakage/policy/default", wantQuery: "siteId=" + siteID,
+		},
+		{
+			name: "delete default override", command: []string{"leakage", "policy", "default", "override", "delete"},
+			args: []string{"--site-id", siteID}, method: http.MethodDelete,
+			wantPath: "/leakage/policy/default/override", wantQuery: "siteId=" + siteID,
+		},
+		{
+			name:     "site leakage policy body scope",
+			command:  []string{"leakage", "policy", "default", "override", "put"},
+			args:     []string{"--site-id", siteID, "--action", "ForcePowerOff", "--target-strategy", "LeakingSource", "--on-conflict", "Queue"},
+			method:   http.MethodPut,
+			wantPath: "/leakage/policy/default/override",
+			wantBody: `{"siteId":"550e8400-e29b-41d4-a716-446655440000","action":"ForcePowerOff","targetStrategy":"LeakingSource","onConflict":"Queue"}`,
+		},
+		{
+			name:     "rack leakage policy body scope and path ID",
+			command:  []string{"leakage", "put", "put-rack-leakage-policy"},
+			args:     []string{"--site-id", siteID, "--action", "ForcePowerOff", "--target-strategy", "LeakingRack", "--on-conflict", "Reject", "rack-17"},
+			method:   http.MethodPut,
+			wantPath: "/rack/rack-17/leakage/policy",
+			wantBody: `{"siteId":"550e8400-e29b-41d4-a716-446655440000","action":"ForcePowerOff","targetStrategy":"LeakingRack","onConflict":"Reject"}`,
 		},
 	}
 
@@ -2433,7 +2476,7 @@ func testNewAppPowerCommands(t *testing.T) {
 			var requestCount atomic.Int32
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
 				assert.Equal(t, test.method, request.Method)
-				assert.Equal(t, "/v2/org/test-org/nico/tray/"+trayID+"/power", request.URL.Path)
+				assert.Equal(t, "/v2/org/test-org/nico"+test.wantPath, request.URL.Path)
 				assert.Equal(t, test.wantQuery, request.URL.RawQuery)
 				body, err := io.ReadAll(request.Body)
 				assert.NoError(t, err)
@@ -2444,7 +2487,13 @@ func testNewAppPowerCommands(t *testing.T) {
 				}
 				requestCount.Add(1)
 				w.Header().Set("Content-Type", "application/json")
-				_, err = w.Write([]byte(`{}`))
+				if test.method == http.MethodDelete {
+					w.WriteHeader(http.StatusNoContent)
+				} else if test.wantPath == "/leakage/policy" {
+					_, err = w.Write([]byte(`[]`))
+				} else {
+					_, err = w.Write([]byte(`{}`))
+				}
 				assert.NoError(t, err)
 			}))
 			t.Cleanup(server.Close)

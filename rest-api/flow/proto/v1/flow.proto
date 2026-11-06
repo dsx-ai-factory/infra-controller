@@ -95,6 +95,11 @@ service Flow {
     // group ordered by ascending rule ID. Filters are applied before pagination.
     // When pagination is omitted, offset defaults to 0 and limit defaults to 100.
     rpc ListEventRules(ListEventRulesRequest) returns (ListEventRulesResponse);
+    // Lists the effective Site default once, followed by enabled Rack overrides.
+    // Unbound and disabled rules are excluded. Rows are ordered before slicing:
+    // Site first, then public Rack ID ascending (unavailable IDs last), then
+    // canonical Rack UUID ascending. Shared rules appear once per Rack binding.
+    rpc ListScopedEventRules(ListScopedEventRulesRequest) returns (ListScopedEventRulesResponse);
     rpc UpdateEventRule(UpdateEventRuleRequest) returns (EventRule);
     rpc EnableEventRule(EnableEventRuleRequest) returns (EventRule);
     rpc DisableEventRule(DisableEventRuleRequest) returns (EventRule);
@@ -104,6 +109,19 @@ service Flow {
     rpc CreateEventRuleBinding(CreateEventRuleBindingRequest) returns (EventRuleBinding);
     rpc GetEventRuleBinding(GetEventRuleBindingRequest) returns (EventRuleBinding);
     rpc DeleteEventRuleBinding(DeleteEventRuleBindingRequest) returns (google.protobuf.Empty);
+
+    // Atomically creates or replaces the override in one event-type and scope
+    // slot, regardless of which client or API created the existing rule.
+    rpc SetEventRuleOverride(SetEventRuleOverrideRequest) returns (EventRule);
+    // Returns the effective enabled rule for one Site or Rack scope.
+    rpc GetEffectiveEventRuleForScope(GetEffectiveEventRuleForScopeRequest) returns (EventRule);
+    // Idempotently removes the override in one event-type and scope slot.
+    rpc DeleteEventRuleOverride(DeleteEventRuleOverrideRequest) returns (google.protobuf.Empty);
+
+    // Returns event-rule handling records for one resource and event type.
+    // Results are ordered by handling time then event ID, descending, and use
+    // offset-based pagination. Offset defaults to zero; limit defaults to one.
+    rpc GetEventHandling(GetEventHandlingRequest) returns (GetEventHandlingResponse);
 
     // Rack-rule associations
     rpc AssociateRuleWithRack(AssociateRuleWithRackRequest) returns (google.protobuf.Empty);
@@ -1069,9 +1087,17 @@ enum EventRuleSeverity {
 }
 
 enum EventRuleTargetStrategy {
+    option allow_alias = true;
     EVENT_RULE_TARGET_STRATEGY_UNSPECIFIED = 0;
-    EVENT_RULE_TARGET_STRATEGY_COMPONENT = 1;
+    // Legacy name for SOURCE. Kept first so existing ProtoJSON enum names remain
+    // readable by older clients; new clients should use SOURCE.
+    EVENT_RULE_TARGET_STRATEGY_COMPONENT = 1 [deprecated = true];
+    // The resource that produced the event: one component for a component event,
+    // or the event rack (expanded to its components) for a rack event.
+    EVENT_RULE_TARGET_STRATEGY_SOURCE = 1;
+    // All components in the event rack or the event component's owning rack.
     EVENT_RULE_TARGET_STRATEGY_RACK = 2;
+    // Event-type-specific impact selection.
     EVENT_RULE_TARGET_STRATEGY_AFFECTED_COMPONENTS = 3;
 }
 
@@ -1181,6 +1207,31 @@ message ListEventRulesResponse {
     int64 total = 2;
 }
 
+message ListScopedEventRulesRequest {
+    // Required registered event type.
+    string event_type = 1;
+    // Optional. Omit for offset 0 and limit 100. When present, offset must be
+    // nonnegative and limit must be between 1 and 100. Offset includes the
+    // Site default row.
+    Pagination pagination = 2;
+}
+
+message ScopedEventRule {
+    // Enabled policy selected for this scope; Site may use a read-only built-in.
+    EventRule rule = 1;
+    // SITE denotes the effective default; RACK denotes an explicit override.
+    EventRuleScopeType scope_type = 2;
+    // Public Rack identifier. Absent for SITE, or when inventory is unavailable.
+    optional string rack_id = 3;
+}
+
+message ListScopedEventRulesResponse {
+    // One page in the documented scope and Rack order; empty beyond the last row.
+    repeated ScopedEventRule policies = 1;
+    // Matching rows before pagination, including the effective Site default.
+    int64 total = 2;
+}
+
 message EventRuleMetadataUpdate {
     string name = 1;
     string description = 2;
@@ -1214,6 +1265,22 @@ message EventRuleScope {
     EventRuleScopeType type = 1;
     // Required for rack scope and omitted for site scope.
     UUID id = 2;
+}
+
+// EventRuleScopeSelector identifies a Site scope or a Rack scope. Site
+// selectors must omit rack_identifier; Rack selectors must set exactly one
+// canonical Flow UUID or external inventory ID. Flow resolves external Rack IDs
+// before calling the event rule manager, whose scope representation always uses
+// canonical UUIDs.
+message EventRuleScopeSelector {
+    // Required. SITE or RACK.
+    EventRuleScopeType type = 1;
+    oneof rack_identifier {
+        // Canonical Flow Rack UUID. Valid only for RACK.
+        UUID rack_id = 2;
+        // External inventory Rack ID resolved by Flow. Valid only for RACK.
+        string rack_external_id = 3;
+    }
 }
 
 message EventRuleBinding {
@@ -2183,4 +2250,135 @@ enum TaskKind {
     TASK_KIND_DECOMMISSION = 4;
     // Installing expected inventory for a rack.
     TASK_KIND_INJECT_EXPECTATION = 5;
+}
+
+message SetEventRuleOverrideRequest {
+    // Required. Must be an event type registered by Flow.
+    string event_type = 1;
+    // Required Site or Rack policy slot to replace.
+    EventRuleScopeSelector scope = 2;
+    // Required rule name.
+    string name = 3;
+    // Optional human-readable rule description.
+    string description = 4;
+    // Required event-rule actions. Event-specific validation applies.
+    repeated EventRuleAction actions = 5;
+}
+
+message GetEffectiveEventRuleForScopeRequest {
+    // Required. Must be an event type registered by Flow.
+    string event_type = 1;
+    // Required Site or Rack scope at which to resolve inheritance.
+    EventRuleScopeSelector scope = 2;
+}
+
+message DeleteEventRuleOverrideRequest {
+    // Required. Must be an event type registered by Flow.
+    string event_type = 1;
+    // Required Site or Rack policy slot to clear. An empty slot succeeds.
+    EventRuleScopeSelector scope = 2;
+}
+
+// EventResourceType identifies the inventory resource that emitted an event.
+enum EventResourceType {
+    EVENT_RESOURCE_TYPE_UNSPECIFIED = 0;
+    EVENT_RESOURCE_TYPE_COMPONENT = 1;
+    EVENT_RESOURCE_TYPE_RACK = 2;
+}
+
+// EventHandlingTask summarizes a Task created by one event-rule action.
+message EventHandlingTask {
+    // Stable Flow Task UUID.
+    UUID id = 1;
+    // Current Task lifecycle status.
+    TaskStatus status = 2;
+    // Time Flow created the Task.
+    google.protobuf.Timestamp created_at = 3;
+}
+
+message EventHandling {
+    // Stable UUID for the source event that caused this handling decision.
+    UUID id = 1;
+    // Registered event type handled by the rule.
+    string event_type = 2;
+    // Current public identifier of the resource whose event was handled.
+    string resource_id = 3;
+    // Kind of inventory resource identified by resource_id.
+    EventResourceType resource_type = 4;
+    // Tasks created by event-rule actions, ordered by creation time then UUID
+    // ascending. Empty when handling created no Tasks.
+    repeated EventHandlingTask tasks = 5;
+    // Time Flow first applied an event rule for this source event.
+    google.protobuf.Timestamp handled_at = 6;
+    // Summary captured when Flow first handled the source event.
+    string event_summary = 7;
+    // Required. Immutable effective policy captured for this event, including
+    // only actions whose conditions matched. Never resolved from the current rule.
+    EventRulePolicy applied_policy = 8;
+    // Source observation timestamp captured when the event was first accepted.
+    // Absent for older records or sources without an observation timestamp.
+    // Duplicate observations do not change this time. This is not the actual
+    // beginning of the underlying condition and can differ from handled_at.
+    google.protobuf.Timestamp event_first_observed_at = 9;
+    // Authoritative aggregate of the captured actions, executions, and Tasks.
+    // Failed > Retrying > Starting > Unspecified > Running > Skipped > Completed
+    // > NoAction. Missing execution/task information is Unspecified.
+    EventHandlingStatus handling_status = 10;
+    // Bounded diagnostic for the aggregate result; unspecified when unnecessary.
+    EventHandlingReason reason = 11;
+    // Curated handling summary. Never contains raw backend error messages.
+    string message = 12;
+}
+
+message GetEventHandlingRequest {
+    // Required. Must be an event type registered by Flow.
+    string event_type = 1;
+    // Required kind of resource whose handling history is requested.
+    EventResourceType resource_type = 2;
+    // Required current public identifier of the resource.
+    string resource_id = 3;
+    // Number of matching records to skip. Must be nonnegative; defaults to zero.
+    int32 offset = 4;
+    // Maximum records to return. Zero defaults to one; accepted range is 1-100.
+    int32 limit = 5;
+}
+
+message GetEventHandlingResponse {
+    // Handling records in descending handled_at and event UUID order.
+    repeated EventHandling handlings = 1;
+    // Number of matching records before pagination, including when the page is empty.
+    int32 total_count = 2;
+}
+
+// EventRulePolicy contains the actions selected when an event was handled.
+message EventRulePolicy {
+    // Historical action snapshot, independent of subsequent rule edits or deletion.
+    // Empty when none of the selected rule's actions applied to the event.
+    repeated EventRuleAction actions = 1;
+}
+
+// EventHandlingStatus reports progress across all applicable actions and Tasks.
+// Completed includes Task completion, not only successful dispatch. NoAction
+// means no actions applied or all applicable actions completed as no-ops.
+enum EventHandlingStatus {
+    EVENT_HANDLING_STATUS_UNSPECIFIED = 0;
+    EVENT_HANDLING_STATUS_NO_ACTION = 1;
+    EVENT_HANDLING_STATUS_STARTING = 2;
+    EVENT_HANDLING_STATUS_RETRYING = 3;
+    EVENT_HANDLING_STATUS_RUNNING = 4;
+    EVENT_HANDLING_STATUS_COMPLETED = 5;
+    EVENT_HANDLING_STATUS_SKIPPED = 6;
+    EVENT_HANDLING_STATUS_FAILED = 7;
+}
+
+// EventHandlingReason explains the aggregate handling result.
+enum EventHandlingReason {
+    EVENT_HANDLING_REASON_UNSPECIFIED = 0;
+    EVENT_HANDLING_REASON_NO_TARGETS = 1;
+    EVENT_HANDLING_REASON_ATTEMPT_FAILED = 2;
+    EVENT_HANDLING_REASON_ATTEMPT_INTERRUPTED = 3;
+    EVENT_HANDLING_REASON_RETRY_SCHEDULED = 4;
+    EVENT_HANDLING_REASON_ACTION_FAILED = 5;
+    EVENT_HANDLING_REASON_TASK_FAILED = 6;
+    EVENT_HANDLING_REASON_INCOMPLETE_STATE = 7;
 }

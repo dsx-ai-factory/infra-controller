@@ -23,83 +23,88 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	Flow_Version_FullMethodName                  = "/v1.Flow/Version"
-	Flow_CreateTaskSchedule_FullMethodName       = "/v1.Flow/CreateTaskSchedule"
-	Flow_GetTaskSchedule_FullMethodName          = "/v1.Flow/GetTaskSchedule"
-	Flow_ListTaskSchedules_FullMethodName        = "/v1.Flow/ListTaskSchedules"
-	Flow_UpdateTaskSchedule_FullMethodName       = "/v1.Flow/UpdateTaskSchedule"
-	Flow_PauseTaskSchedule_FullMethodName        = "/v1.Flow/PauseTaskSchedule"
-	Flow_ResumeTaskSchedule_FullMethodName       = "/v1.Flow/ResumeTaskSchedule"
-	Flow_DeleteTaskSchedule_FullMethodName       = "/v1.Flow/DeleteTaskSchedule"
-	Flow_TriggerTaskSchedule_FullMethodName      = "/v1.Flow/TriggerTaskSchedule"
-	Flow_AddTaskScheduleScope_FullMethodName     = "/v1.Flow/AddTaskScheduleScope"
-	Flow_RemoveTaskScheduleScope_FullMethodName  = "/v1.Flow/RemoveTaskScheduleScope"
-	Flow_UpdateTaskScheduleScope_FullMethodName  = "/v1.Flow/UpdateTaskScheduleScope"
-	Flow_ListTaskScheduleScopes_FullMethodName   = "/v1.Flow/ListTaskScheduleScopes"
-	Flow_CheckScheduleConflicts_FullMethodName   = "/v1.Flow/CheckScheduleConflicts"
-	Flow_CreateExpectedRack_FullMethodName       = "/v1.Flow/CreateExpectedRack"
-	Flow_GetRackInfoByID_FullMethodName          = "/v1.Flow/GetRackInfoByID"
-	Flow_GetRackInfoBySerial_FullMethodName      = "/v1.Flow/GetRackInfoBySerial"
-	Flow_GetListOfRacks_FullMethodName           = "/v1.Flow/GetListOfRacks"
-	Flow_PatchRack_FullMethodName                = "/v1.Flow/PatchRack"
-	Flow_DeleteRack_FullMethodName               = "/v1.Flow/DeleteRack"
-	Flow_PurgeRack_FullMethodName                = "/v1.Flow/PurgeRack"
-	Flow_UpgradeFirmware_FullMethodName          = "/v1.Flow/UpgradeFirmware"
-	Flow_BringUpRack_FullMethodName              = "/v1.Flow/BringUpRack"
-	Flow_IngestRack_FullMethodName               = "/v1.Flow/IngestRack"
-	Flow_DecommissionRack_FullMethodName         = "/v1.Flow/DecommissionRack"
-	Flow_PowerOnRack_FullMethodName              = "/v1.Flow/PowerOnRack"
-	Flow_PowerOffRack_FullMethodName             = "/v1.Flow/PowerOffRack"
-	Flow_PowerResetRack_FullMethodName           = "/v1.Flow/PowerResetRack"
-	Flow_ACPowerCycleRack_FullMethodName         = "/v1.Flow/ACPowerCycleRack"
-	Flow_GetComponentInfoByID_FullMethodName     = "/v1.Flow/GetComponentInfoByID"
-	Flow_GetComponentInfoBySerial_FullMethodName = "/v1.Flow/GetComponentInfoBySerial"
-	Flow_GetComponents_FullMethodName            = "/v1.Flow/GetComponents"
-	Flow_ValidateComponents_FullMethodName       = "/v1.Flow/ValidateComponents"
-	Flow_AddComponent_FullMethodName             = "/v1.Flow/AddComponent"
-	Flow_PatchComponent_FullMethodName           = "/v1.Flow/PatchComponent"
-	Flow_DeleteComponent_FullMethodName          = "/v1.Flow/DeleteComponent"
-	Flow_PurgeComponent_FullMethodName           = "/v1.Flow/PurgeComponent"
-	Flow_CreateNVLDomain_FullMethodName          = "/v1.Flow/CreateNVLDomain"
-	Flow_AttachRacksToNVLDomain_FullMethodName   = "/v1.Flow/AttachRacksToNVLDomain"
-	Flow_DetachRacksFromNVLDomain_FullMethodName = "/v1.Flow/DetachRacksFromNVLDomain"
-	Flow_GetListOfNVLDomains_FullMethodName      = "/v1.Flow/GetListOfNVLDomains"
-	Flow_GetRacksForNVLDomain_FullMethodName     = "/v1.Flow/GetRacksForNVLDomain"
-	Flow_GetNVLinkDomain_FullMethodName          = "/v1.Flow/GetNVLinkDomain"
-	Flow_GetListOfNVLinkDomains_FullMethodName   = "/v1.Flow/GetListOfNVLinkDomains"
-	Flow_ListTasks_FullMethodName                = "/v1.Flow/ListTasks"
-	Flow_GetTasksByIDs_FullMethodName            = "/v1.Flow/GetTasksByIDs"
-	Flow_CancelTask_FullMethodName               = "/v1.Flow/CancelTask"
-	Flow_CreateOperationRule_FullMethodName      = "/v1.Flow/CreateOperationRule"
-	Flow_UpdateOperationRule_FullMethodName      = "/v1.Flow/UpdateOperationRule"
-	Flow_DeleteOperationRule_FullMethodName      = "/v1.Flow/DeleteOperationRule"
-	Flow_GetOperationRule_FullMethodName         = "/v1.Flow/GetOperationRule"
-	Flow_ListOperationRules_FullMethodName       = "/v1.Flow/ListOperationRules"
-	Flow_SetRuleAsDefault_FullMethodName         = "/v1.Flow/SetRuleAsDefault"
-	Flow_CreateEventRule_FullMethodName          = "/v1.Flow/CreateEventRule"
-	Flow_GetEventRule_FullMethodName             = "/v1.Flow/GetEventRule"
-	Flow_GetEffectiveEventRule_FullMethodName    = "/v1.Flow/GetEffectiveEventRule"
-	Flow_ListEventRules_FullMethodName           = "/v1.Flow/ListEventRules"
-	Flow_UpdateEventRule_FullMethodName          = "/v1.Flow/UpdateEventRule"
-	Flow_EnableEventRule_FullMethodName          = "/v1.Flow/EnableEventRule"
-	Flow_DisableEventRule_FullMethodName         = "/v1.Flow/DisableEventRule"
-	Flow_DeleteEventRule_FullMethodName          = "/v1.Flow/DeleteEventRule"
-	Flow_CreateEventRuleBinding_FullMethodName   = "/v1.Flow/CreateEventRuleBinding"
-	Flow_GetEventRuleBinding_FullMethodName      = "/v1.Flow/GetEventRuleBinding"
-	Flow_DeleteEventRuleBinding_FullMethodName   = "/v1.Flow/DeleteEventRuleBinding"
-	Flow_AssociateRuleWithRack_FullMethodName    = "/v1.Flow/AssociateRuleWithRack"
-	Flow_DisassociateRuleFromRack_FullMethodName = "/v1.Flow/DisassociateRuleFromRack"
-	Flow_GetRackRuleAssociation_FullMethodName   = "/v1.Flow/GetRackRuleAssociation"
-	Flow_ListRackRuleAssociations_FullMethodName = "/v1.Flow/ListRackRuleAssociations"
-	Flow_CreateOperationRun_FullMethodName       = "/v1.Flow/CreateOperationRun"
-	Flow_GetOperationRun_FullMethodName          = "/v1.Flow/GetOperationRun"
-	Flow_ListOperationRuns_FullMethodName        = "/v1.Flow/ListOperationRuns"
-	Flow_ListOperationRunTargets_FullMethodName  = "/v1.Flow/ListOperationRunTargets"
-	Flow_PauseOperationRun_FullMethodName        = "/v1.Flow/PauseOperationRun"
-	Flow_ResumeOperationRun_FullMethodName       = "/v1.Flow/ResumeOperationRun"
-	Flow_AdvanceOperationRunPhase_FullMethodName = "/v1.Flow/AdvanceOperationRunPhase"
-	Flow_CancelOperationRun_FullMethodName       = "/v1.Flow/CancelOperationRun"
-	Flow_GetTrayPowerDetails_FullMethodName      = "/v1.Flow/GetTrayPowerDetails"
+	Flow_Version_FullMethodName                       = "/v1.Flow/Version"
+	Flow_CreateTaskSchedule_FullMethodName            = "/v1.Flow/CreateTaskSchedule"
+	Flow_GetTaskSchedule_FullMethodName               = "/v1.Flow/GetTaskSchedule"
+	Flow_ListTaskSchedules_FullMethodName             = "/v1.Flow/ListTaskSchedules"
+	Flow_UpdateTaskSchedule_FullMethodName            = "/v1.Flow/UpdateTaskSchedule"
+	Flow_PauseTaskSchedule_FullMethodName             = "/v1.Flow/PauseTaskSchedule"
+	Flow_ResumeTaskSchedule_FullMethodName            = "/v1.Flow/ResumeTaskSchedule"
+	Flow_DeleteTaskSchedule_FullMethodName            = "/v1.Flow/DeleteTaskSchedule"
+	Flow_TriggerTaskSchedule_FullMethodName           = "/v1.Flow/TriggerTaskSchedule"
+	Flow_AddTaskScheduleScope_FullMethodName          = "/v1.Flow/AddTaskScheduleScope"
+	Flow_RemoveTaskScheduleScope_FullMethodName       = "/v1.Flow/RemoveTaskScheduleScope"
+	Flow_UpdateTaskScheduleScope_FullMethodName       = "/v1.Flow/UpdateTaskScheduleScope"
+	Flow_ListTaskScheduleScopes_FullMethodName        = "/v1.Flow/ListTaskScheduleScopes"
+	Flow_CheckScheduleConflicts_FullMethodName        = "/v1.Flow/CheckScheduleConflicts"
+	Flow_CreateExpectedRack_FullMethodName            = "/v1.Flow/CreateExpectedRack"
+	Flow_GetRackInfoByID_FullMethodName               = "/v1.Flow/GetRackInfoByID"
+	Flow_GetRackInfoBySerial_FullMethodName           = "/v1.Flow/GetRackInfoBySerial"
+	Flow_GetListOfRacks_FullMethodName                = "/v1.Flow/GetListOfRacks"
+	Flow_PatchRack_FullMethodName                     = "/v1.Flow/PatchRack"
+	Flow_DeleteRack_FullMethodName                    = "/v1.Flow/DeleteRack"
+	Flow_PurgeRack_FullMethodName                     = "/v1.Flow/PurgeRack"
+	Flow_UpgradeFirmware_FullMethodName               = "/v1.Flow/UpgradeFirmware"
+	Flow_BringUpRack_FullMethodName                   = "/v1.Flow/BringUpRack"
+	Flow_IngestRack_FullMethodName                    = "/v1.Flow/IngestRack"
+	Flow_DecommissionRack_FullMethodName              = "/v1.Flow/DecommissionRack"
+	Flow_PowerOnRack_FullMethodName                   = "/v1.Flow/PowerOnRack"
+	Flow_PowerOffRack_FullMethodName                  = "/v1.Flow/PowerOffRack"
+	Flow_PowerResetRack_FullMethodName                = "/v1.Flow/PowerResetRack"
+	Flow_ACPowerCycleRack_FullMethodName              = "/v1.Flow/ACPowerCycleRack"
+	Flow_GetComponentInfoByID_FullMethodName          = "/v1.Flow/GetComponentInfoByID"
+	Flow_GetComponentInfoBySerial_FullMethodName      = "/v1.Flow/GetComponentInfoBySerial"
+	Flow_GetComponents_FullMethodName                 = "/v1.Flow/GetComponents"
+	Flow_ValidateComponents_FullMethodName            = "/v1.Flow/ValidateComponents"
+	Flow_AddComponent_FullMethodName                  = "/v1.Flow/AddComponent"
+	Flow_PatchComponent_FullMethodName                = "/v1.Flow/PatchComponent"
+	Flow_DeleteComponent_FullMethodName               = "/v1.Flow/DeleteComponent"
+	Flow_PurgeComponent_FullMethodName                = "/v1.Flow/PurgeComponent"
+	Flow_CreateNVLDomain_FullMethodName               = "/v1.Flow/CreateNVLDomain"
+	Flow_AttachRacksToNVLDomain_FullMethodName        = "/v1.Flow/AttachRacksToNVLDomain"
+	Flow_DetachRacksFromNVLDomain_FullMethodName      = "/v1.Flow/DetachRacksFromNVLDomain"
+	Flow_GetListOfNVLDomains_FullMethodName           = "/v1.Flow/GetListOfNVLDomains"
+	Flow_GetRacksForNVLDomain_FullMethodName          = "/v1.Flow/GetRacksForNVLDomain"
+	Flow_GetNVLinkDomain_FullMethodName               = "/v1.Flow/GetNVLinkDomain"
+	Flow_GetListOfNVLinkDomains_FullMethodName        = "/v1.Flow/GetListOfNVLinkDomains"
+	Flow_ListTasks_FullMethodName                     = "/v1.Flow/ListTasks"
+	Flow_GetTasksByIDs_FullMethodName                 = "/v1.Flow/GetTasksByIDs"
+	Flow_CancelTask_FullMethodName                    = "/v1.Flow/CancelTask"
+	Flow_CreateOperationRule_FullMethodName           = "/v1.Flow/CreateOperationRule"
+	Flow_UpdateOperationRule_FullMethodName           = "/v1.Flow/UpdateOperationRule"
+	Flow_DeleteOperationRule_FullMethodName           = "/v1.Flow/DeleteOperationRule"
+	Flow_GetOperationRule_FullMethodName              = "/v1.Flow/GetOperationRule"
+	Flow_ListOperationRules_FullMethodName            = "/v1.Flow/ListOperationRules"
+	Flow_SetRuleAsDefault_FullMethodName              = "/v1.Flow/SetRuleAsDefault"
+	Flow_CreateEventRule_FullMethodName               = "/v1.Flow/CreateEventRule"
+	Flow_GetEventRule_FullMethodName                  = "/v1.Flow/GetEventRule"
+	Flow_GetEffectiveEventRule_FullMethodName         = "/v1.Flow/GetEffectiveEventRule"
+	Flow_ListEventRules_FullMethodName                = "/v1.Flow/ListEventRules"
+	Flow_ListScopedEventRules_FullMethodName          = "/v1.Flow/ListScopedEventRules"
+	Flow_UpdateEventRule_FullMethodName               = "/v1.Flow/UpdateEventRule"
+	Flow_EnableEventRule_FullMethodName               = "/v1.Flow/EnableEventRule"
+	Flow_DisableEventRule_FullMethodName              = "/v1.Flow/DisableEventRule"
+	Flow_DeleteEventRule_FullMethodName               = "/v1.Flow/DeleteEventRule"
+	Flow_CreateEventRuleBinding_FullMethodName        = "/v1.Flow/CreateEventRuleBinding"
+	Flow_GetEventRuleBinding_FullMethodName           = "/v1.Flow/GetEventRuleBinding"
+	Flow_DeleteEventRuleBinding_FullMethodName        = "/v1.Flow/DeleteEventRuleBinding"
+	Flow_SetEventRuleOverride_FullMethodName          = "/v1.Flow/SetEventRuleOverride"
+	Flow_GetEffectiveEventRuleForScope_FullMethodName = "/v1.Flow/GetEffectiveEventRuleForScope"
+	Flow_DeleteEventRuleOverride_FullMethodName       = "/v1.Flow/DeleteEventRuleOverride"
+	Flow_GetEventHandling_FullMethodName              = "/v1.Flow/GetEventHandling"
+	Flow_AssociateRuleWithRack_FullMethodName         = "/v1.Flow/AssociateRuleWithRack"
+	Flow_DisassociateRuleFromRack_FullMethodName      = "/v1.Flow/DisassociateRuleFromRack"
+	Flow_GetRackRuleAssociation_FullMethodName        = "/v1.Flow/GetRackRuleAssociation"
+	Flow_ListRackRuleAssociations_FullMethodName      = "/v1.Flow/ListRackRuleAssociations"
+	Flow_CreateOperationRun_FullMethodName            = "/v1.Flow/CreateOperationRun"
+	Flow_GetOperationRun_FullMethodName               = "/v1.Flow/GetOperationRun"
+	Flow_ListOperationRuns_FullMethodName             = "/v1.Flow/ListOperationRuns"
+	Flow_ListOperationRunTargets_FullMethodName       = "/v1.Flow/ListOperationRunTargets"
+	Flow_PauseOperationRun_FullMethodName             = "/v1.Flow/PauseOperationRun"
+	Flow_ResumeOperationRun_FullMethodName            = "/v1.Flow/ResumeOperationRun"
+	Flow_AdvanceOperationRunPhase_FullMethodName      = "/v1.Flow/AdvanceOperationRunPhase"
+	Flow_CancelOperationRun_FullMethodName            = "/v1.Flow/CancelOperationRun"
+	Flow_GetTrayPowerDetails_FullMethodName           = "/v1.Flow/GetTrayPowerDetails"
 )
 
 // FlowClient is the client API for Flow service.
@@ -178,6 +183,11 @@ type FlowClient interface {
 	// group ordered by ascending rule ID. Filters are applied before pagination.
 	// When pagination is omitted, offset defaults to 0 and limit defaults to 100.
 	ListEventRules(ctx context.Context, in *ListEventRulesRequest, opts ...grpc.CallOption) (*ListEventRulesResponse, error)
+	// Lists the effective Site default once, followed by enabled Rack overrides.
+	// Unbound and disabled rules are excluded. Rows are ordered before slicing:
+	// Site first, then public Rack ID ascending (unavailable IDs last), then
+	// canonical Rack UUID ascending. Shared rules appear once per Rack binding.
+	ListScopedEventRules(ctx context.Context, in *ListScopedEventRulesRequest, opts ...grpc.CallOption) (*ListScopedEventRulesResponse, error)
 	UpdateEventRule(ctx context.Context, in *UpdateEventRuleRequest, opts ...grpc.CallOption) (*EventRule, error)
 	EnableEventRule(ctx context.Context, in *EnableEventRuleRequest, opts ...grpc.CallOption) (*EventRule, error)
 	DisableEventRule(ctx context.Context, in *DisableEventRuleRequest, opts ...grpc.CallOption) (*EventRule, error)
@@ -186,6 +196,17 @@ type FlowClient interface {
 	CreateEventRuleBinding(ctx context.Context, in *CreateEventRuleBindingRequest, opts ...grpc.CallOption) (*EventRuleBinding, error)
 	GetEventRuleBinding(ctx context.Context, in *GetEventRuleBindingRequest, opts ...grpc.CallOption) (*EventRuleBinding, error)
 	DeleteEventRuleBinding(ctx context.Context, in *DeleteEventRuleBindingRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
+	// Atomically creates or replaces the override in one event-type and scope
+	// slot, regardless of which client or API created the existing rule.
+	SetEventRuleOverride(ctx context.Context, in *SetEventRuleOverrideRequest, opts ...grpc.CallOption) (*EventRule, error)
+	// Returns the effective enabled rule for one Site or Rack scope.
+	GetEffectiveEventRuleForScope(ctx context.Context, in *GetEffectiveEventRuleForScopeRequest, opts ...grpc.CallOption) (*EventRule, error)
+	// Idempotently removes the override in one event-type and scope slot.
+	DeleteEventRuleOverride(ctx context.Context, in *DeleteEventRuleOverrideRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
+	// Returns event-rule handling records for one resource and event type.
+	// Results are ordered by handling time then event ID, descending, and use
+	// offset-based pagination. Offset defaults to zero; limit defaults to one.
+	GetEventHandling(ctx context.Context, in *GetEventHandlingRequest, opts ...grpc.CallOption) (*GetEventHandlingResponse, error)
 	// Rack-rule associations
 	AssociateRuleWithRack(ctx context.Context, in *AssociateRuleWithRackRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	DisassociateRuleFromRack(ctx context.Context, in *DisassociateRuleFromRackRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
@@ -784,6 +805,16 @@ func (c *flowClient) ListEventRules(ctx context.Context, in *ListEventRulesReque
 	return out, nil
 }
 
+func (c *flowClient) ListScopedEventRules(ctx context.Context, in *ListScopedEventRulesRequest, opts ...grpc.CallOption) (*ListScopedEventRulesResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListScopedEventRulesResponse)
+	err := c.cc.Invoke(ctx, Flow_ListScopedEventRules_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *flowClient) UpdateEventRule(ctx context.Context, in *UpdateEventRuleRequest, opts ...grpc.CallOption) (*EventRule, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(EventRule)
@@ -848,6 +879,46 @@ func (c *flowClient) DeleteEventRuleBinding(ctx context.Context, in *DeleteEvent
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(emptypb.Empty)
 	err := c.cc.Invoke(ctx, Flow_DeleteEventRuleBinding_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *flowClient) SetEventRuleOverride(ctx context.Context, in *SetEventRuleOverrideRequest, opts ...grpc.CallOption) (*EventRule, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(EventRule)
+	err := c.cc.Invoke(ctx, Flow_SetEventRuleOverride_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *flowClient) GetEffectiveEventRuleForScope(ctx context.Context, in *GetEffectiveEventRuleForScopeRequest, opts ...grpc.CallOption) (*EventRule, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(EventRule)
+	err := c.cc.Invoke(ctx, Flow_GetEffectiveEventRuleForScope_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *flowClient) DeleteEventRuleOverride(ctx context.Context, in *DeleteEventRuleOverrideRequest, opts ...grpc.CallOption) (*emptypb.Empty, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(emptypb.Empty)
+	err := c.cc.Invoke(ctx, Flow_DeleteEventRuleOverride_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *flowClient) GetEventHandling(ctx context.Context, in *GetEventHandlingRequest, opts ...grpc.CallOption) (*GetEventHandlingResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetEventHandlingResponse)
+	err := c.cc.Invoke(ctx, Flow_GetEventHandling_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -1060,6 +1131,11 @@ type FlowServer interface {
 	// group ordered by ascending rule ID. Filters are applied before pagination.
 	// When pagination is omitted, offset defaults to 0 and limit defaults to 100.
 	ListEventRules(context.Context, *ListEventRulesRequest) (*ListEventRulesResponse, error)
+	// Lists the effective Site default once, followed by enabled Rack overrides.
+	// Unbound and disabled rules are excluded. Rows are ordered before slicing:
+	// Site first, then public Rack ID ascending (unavailable IDs last), then
+	// canonical Rack UUID ascending. Shared rules appear once per Rack binding.
+	ListScopedEventRules(context.Context, *ListScopedEventRulesRequest) (*ListScopedEventRulesResponse, error)
 	UpdateEventRule(context.Context, *UpdateEventRuleRequest) (*EventRule, error)
 	EnableEventRule(context.Context, *EnableEventRuleRequest) (*EventRule, error)
 	DisableEventRule(context.Context, *DisableEventRuleRequest) (*EventRule, error)
@@ -1068,6 +1144,17 @@ type FlowServer interface {
 	CreateEventRuleBinding(context.Context, *CreateEventRuleBindingRequest) (*EventRuleBinding, error)
 	GetEventRuleBinding(context.Context, *GetEventRuleBindingRequest) (*EventRuleBinding, error)
 	DeleteEventRuleBinding(context.Context, *DeleteEventRuleBindingRequest) (*emptypb.Empty, error)
+	// Atomically creates or replaces the override in one event-type and scope
+	// slot, regardless of which client or API created the existing rule.
+	SetEventRuleOverride(context.Context, *SetEventRuleOverrideRequest) (*EventRule, error)
+	// Returns the effective enabled rule for one Site or Rack scope.
+	GetEffectiveEventRuleForScope(context.Context, *GetEffectiveEventRuleForScopeRequest) (*EventRule, error)
+	// Idempotently removes the override in one event-type and scope slot.
+	DeleteEventRuleOverride(context.Context, *DeleteEventRuleOverrideRequest) (*emptypb.Empty, error)
+	// Returns event-rule handling records for one resource and event type.
+	// Results are ordered by handling time then event ID, descending, and use
+	// offset-based pagination. Offset defaults to zero; limit defaults to one.
+	GetEventHandling(context.Context, *GetEventHandlingRequest) (*GetEventHandlingResponse, error)
 	// Rack-rule associations
 	AssociateRuleWithRack(context.Context, *AssociateRuleWithRackRequest) (*emptypb.Empty, error)
 	DisassociateRuleFromRack(context.Context, *DisassociateRuleFromRackRequest) (*emptypb.Empty, error)
@@ -1266,6 +1353,9 @@ func (UnimplementedFlowServer) GetEffectiveEventRule(context.Context, *GetEffect
 func (UnimplementedFlowServer) ListEventRules(context.Context, *ListEventRulesRequest) (*ListEventRulesResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ListEventRules not implemented")
 }
+func (UnimplementedFlowServer) ListScopedEventRules(context.Context, *ListScopedEventRulesRequest) (*ListScopedEventRulesResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListScopedEventRules not implemented")
+}
 func (UnimplementedFlowServer) UpdateEventRule(context.Context, *UpdateEventRuleRequest) (*EventRule, error) {
 	return nil, status.Error(codes.Unimplemented, "method UpdateEventRule not implemented")
 }
@@ -1286,6 +1376,18 @@ func (UnimplementedFlowServer) GetEventRuleBinding(context.Context, *GetEventRul
 }
 func (UnimplementedFlowServer) DeleteEventRuleBinding(context.Context, *DeleteEventRuleBindingRequest) (*emptypb.Empty, error) {
 	return nil, status.Error(codes.Unimplemented, "method DeleteEventRuleBinding not implemented")
+}
+func (UnimplementedFlowServer) SetEventRuleOverride(context.Context, *SetEventRuleOverrideRequest) (*EventRule, error) {
+	return nil, status.Error(codes.Unimplemented, "method SetEventRuleOverride not implemented")
+}
+func (UnimplementedFlowServer) GetEffectiveEventRuleForScope(context.Context, *GetEffectiveEventRuleForScopeRequest) (*EventRule, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetEffectiveEventRuleForScope not implemented")
+}
+func (UnimplementedFlowServer) DeleteEventRuleOverride(context.Context, *DeleteEventRuleOverrideRequest) (*emptypb.Empty, error) {
+	return nil, status.Error(codes.Unimplemented, "method DeleteEventRuleOverride not implemented")
+}
+func (UnimplementedFlowServer) GetEventHandling(context.Context, *GetEventHandlingRequest) (*GetEventHandlingResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetEventHandling not implemented")
 }
 func (UnimplementedFlowServer) AssociateRuleWithRack(context.Context, *AssociateRuleWithRackRequest) (*emptypb.Empty, error) {
 	return nil, status.Error(codes.Unimplemented, "method AssociateRuleWithRack not implemented")
@@ -2372,6 +2474,24 @@ func _Flow_ListEventRules_Handler(srv interface{}, ctx context.Context, dec func
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Flow_ListScopedEventRules_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListScopedEventRulesRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(FlowServer).ListScopedEventRules(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Flow_ListScopedEventRules_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(FlowServer).ListScopedEventRules(ctx, req.(*ListScopedEventRulesRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _Flow_UpdateEventRule_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(UpdateEventRuleRequest)
 	if err := dec(in); err != nil {
@@ -2494,6 +2614,78 @@ func _Flow_DeleteEventRuleBinding_Handler(srv interface{}, ctx context.Context, 
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(FlowServer).DeleteEventRuleBinding(ctx, req.(*DeleteEventRuleBindingRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Flow_SetEventRuleOverride_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SetEventRuleOverrideRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(FlowServer).SetEventRuleOverride(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Flow_SetEventRuleOverride_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(FlowServer).SetEventRuleOverride(ctx, req.(*SetEventRuleOverrideRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Flow_GetEffectiveEventRuleForScope_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetEffectiveEventRuleForScopeRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(FlowServer).GetEffectiveEventRuleForScope(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Flow_GetEffectiveEventRuleForScope_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(FlowServer).GetEffectiveEventRuleForScope(ctx, req.(*GetEffectiveEventRuleForScopeRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Flow_DeleteEventRuleOverride_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(DeleteEventRuleOverrideRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(FlowServer).DeleteEventRuleOverride(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Flow_DeleteEventRuleOverride_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(FlowServer).DeleteEventRuleOverride(ctx, req.(*DeleteEventRuleOverrideRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Flow_GetEventHandling_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetEventHandlingRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(FlowServer).GetEventHandling(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Flow_GetEventHandling_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(FlowServer).GetEventHandling(ctx, req.(*GetEventHandlingRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -2968,6 +3160,10 @@ var Flow_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _Flow_ListEventRules_Handler,
 		},
 		{
+			MethodName: "ListScopedEventRules",
+			Handler:    _Flow_ListScopedEventRules_Handler,
+		},
+		{
 			MethodName: "UpdateEventRule",
 			Handler:    _Flow_UpdateEventRule_Handler,
 		},
@@ -2994,6 +3190,22 @@ var Flow_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "DeleteEventRuleBinding",
 			Handler:    _Flow_DeleteEventRuleBinding_Handler,
+		},
+		{
+			MethodName: "SetEventRuleOverride",
+			Handler:    _Flow_SetEventRuleOverride_Handler,
+		},
+		{
+			MethodName: "GetEffectiveEventRuleForScope",
+			Handler:    _Flow_GetEffectiveEventRuleForScope_Handler,
+		},
+		{
+			MethodName: "DeleteEventRuleOverride",
+			Handler:    _Flow_DeleteEventRuleOverride_Handler,
+		},
+		{
+			MethodName: "GetEventHandling",
+			Handler:    _Flow_GetEventHandling_Handler,
 		},
 		{
 			MethodName: "AssociateRuleWithRack",

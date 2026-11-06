@@ -174,6 +174,17 @@ func (s Scope) Validate() error {
 	return nil
 }
 
+// MaxScopedPolicyPageSize bounds the number of scoped policies returned per request.
+const MaxScopedPolicyPageSize = 100
+
+// ScopedPolicy associates an enabled policy with its configuration scope.
+// RackID is the current public Rack identifier, or nil when unavailable.
+type ScopedPolicy struct {
+	Rule   *Rule
+	Scope  Scope
+	RackID *string
+}
+
 // Binding associates a persisted rule with an event-rule scope.
 type Binding struct {
 	ID        uuid.UUID

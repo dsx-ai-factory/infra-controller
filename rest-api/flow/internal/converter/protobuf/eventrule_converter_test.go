@@ -10,9 +10,12 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/operations"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/protobuf/encoding/protojson"
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/eventrule"
+	taskcommon "github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/common"
 	pb "github.com/NVIDIA/infra-controller/rest-api/flow/pkg/proto/v1"
 )
 
@@ -95,31 +98,111 @@ func TestEventRuleTo(t *testing.T) {
 		UpdatedAt:   now,
 	}
 
-	converted, err := EventRuleTo(rule)
-	require.NoError(t, err)
-	require.Equal(t, rule.ID.String(), converted.GetId().GetId())
-	require.False(t, converted.GetReadOnly())
-	require.Len(t, converted.GetActions(), 3)
-	submitTask := converted.GetActions()[0].GetSubmitTask()
-	require.NotNil(t, submitTask)
-	require.Equal(
-		t,
-		pb.PowerControlOperation_POWER_CONTROL_OPERATION_FORCE_POWER_OFF,
-		submitTask.GetOperation().GetPowerControl().GetOperation(),
-	)
-	require.NotNil(t, converted.GetActions()[1].GetSendAlert())
-	require.NotNil(t, converted.GetActions()[2].GetNoop())
-	require.Equal(t, now, converted.GetCreatedAt().AsTime())
+	tests := []struct {
+		name         string
+		origin       eventrule.RuleOrigin
+		wantReadOnly bool
+	}{
+		{name: "persisted", origin: eventrule.RuleOriginPersisted},
+		{name: "built in", origin: eventrule.RuleOriginBuiltIn, wantReadOnly: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			inputRule := rule.Clone()
+			inputRule.Origin = test.origin
+			if test.wantReadOnly {
+				inputRule.CreatedAt, inputRule.UpdatedAt = time.Time{}, time.Time{}
+			}
+			converted, err := EventRuleTo(&inputRule)
+			require.NoError(t, err)
+			require.Equal(t, rule.ID.String(), converted.GetId().GetId())
+			require.Equal(t, test.wantReadOnly, converted.GetReadOnly())
+			require.Len(t, converted.GetActions(), 3)
+			submitTask := converted.GetActions()[0].GetSubmitTask()
+			require.NotNil(t, submitTask)
+			require.Equal(t, pb.PowerControlOperation_POWER_CONTROL_OPERATION_FORCE_POWER_OFF, submitTask.GetOperation().GetPowerControl().GetOperation())
+			require.NotNil(t, converted.GetActions()[1].GetSendAlert())
+			require.NotNil(t, converted.GetActions()[2].GetNoop())
+			if test.wantReadOnly {
+				require.Nil(t, converted.GetCreatedAt())
+				require.Nil(t, converted.GetUpdatedAt())
+			} else {
+				require.Equal(t, now, converted.GetCreatedAt().AsTime())
+				require.Equal(t, now, converted.GetUpdatedAt().AsTime())
+			}
+		})
+	}
 
-	builtIn := rule.Clone()
-	builtIn.Origin = eventrule.RuleOriginBuiltIn
-	builtIn.CreatedAt = time.Time{}
-	builtIn.UpdatedAt = time.Time{}
-	converted, err = EventRuleTo(&builtIn)
-	require.NoError(t, err)
-	require.True(t, converted.GetReadOnly())
-	require.Nil(t, converted.GetCreatedAt())
-	require.Nil(t, converted.GetUpdatedAt())
+}
+
+func TestEventHandlingTo(t *testing.T) {
+	eventID, taskID := uuid.New(), uuid.New()
+	handledAt := time.Date(2026, 10, 26, 16, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name            string
+		kind            eventrule.ResourceKind
+		wantKind        pb.EventResourceType
+		policy          eventrule.Policy
+		executions      []eventrule.HandlingExecution
+		firstObservedAt time.Time
+		wantStatus      pb.EventHandlingStatus
+		wantReason      pb.EventHandlingReason
+		wantMessage     string
+		wantError       bool
+	}{
+		{name: "component snapshot", wantStatus: pb.EventHandlingStatus_EVENT_HANDLING_STATUS_RETRYING, wantReason: pb.EventHandlingReason_EVENT_HANDLING_REASON_ATTEMPT_FAILED, wantMessage: "A handling action failed; another attempt is scheduled.", firstObservedAt: handledAt.Add(-time.Minute), executions: []eventrule.HandlingExecution{{ID: eventID, ActionName: "record", Status: eventrule.ExecutionStatusDeferred, Reason: eventrule.ExecutionReasonAttemptFailed}}, kind: eventrule.ResourceKindComponent, wantKind: pb.EventResourceType_EVENT_RESOURCE_TYPE_COMPONENT, policy: eventrule.Policy{Actions: []eventrule.Action{{Name: "record", Spec: &eventrule.Noop{Reason: "record leakage"}}}}},
+		{name: "rack empty snapshot", wantStatus: pb.EventHandlingStatus_EVENT_HANDLING_STATUS_NO_ACTION, wantMessage: "No action was required by the applied policy.", executions: []eventrule.HandlingExecution{{ID: eventID, ActionName: "failed", Status: eventrule.ExecutionStatusFailed}}, kind: eventrule.ResourceKindRack, wantKind: pb.EventResourceType_EVENT_RESOURCE_TYPE_RACK},
+		{name: "unknown resource", wantStatus: pb.EventHandlingStatus_EVENT_HANDLING_STATUS_NO_ACTION, wantMessage: "No action was required by the applied policy.", kind: "unknown", wantKind: pb.EventResourceType_EVENT_RESOURCE_TYPE_UNSPECIFIED},
+		{name: "invalid policy", policy: eventrule.Policy{Actions: []eventrule.Action{{Name: "invalid", Spec: &eventrule.SubmitTask{}}}}, wantError: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			item := eventrule.Handling{
+				ID:              eventID,
+				EventType:       eventrule.Type("hardware.temperature.high"),
+				EventSummary:    "Temperature exceeded threshold",
+				FirstObservedAt: test.firstObservedAt,
+				AppliedPolicy:   test.policy,
+				Executions:      test.executions,
+				ResourceID:      "source-17",
+				ResourceType:    test.kind,
+				Tasks:           []eventrule.HandlingTask{{ID: taskID, Status: taskcommon.TaskStatusCompleted, CreatedAt: handledAt}},
+				HandledAt:       handledAt,
+			}
+			converted, err := EventHandlingTo(item)
+			if test.wantError {
+				require.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, eventID.String(), converted.GetId().GetId())
+			require.Equal(t, string(item.EventType), converted.GetEventType())
+			require.Equal(t, item.EventSummary, converted.GetEventSummary())
+			require.Equal(t, test.wantStatus, converted.GetHandlingStatus())
+			require.Equal(t, test.wantReason, converted.GetReason())
+			require.Equal(t, test.wantMessage, converted.GetMessage())
+
+			if test.firstObservedAt.IsZero() {
+				require.Nil(t, converted.GetEventFirstObservedAt())
+			} else {
+				require.Equal(t, test.firstObservedAt, converted.GetEventFirstObservedAt().AsTime())
+			}
+			require.NotNil(t, converted.GetAppliedPolicy())
+			actions, err := EventRuleActionsFrom(converted.GetAppliedPolicy().GetActions())
+			require.NoError(t, err)
+			if len(test.policy.Actions) == 0 {
+				require.Empty(t, actions)
+			} else {
+				require.Equal(t, test.policy.Actions, actions)
+			}
+			require.Equal(t, item.ResourceID, converted.GetResourceId())
+			require.Equal(t, test.wantKind, converted.GetResourceType())
+			require.Equal(t, taskID.String(), converted.GetTasks()[0].GetId().GetId())
+			require.Equal(t, pb.TaskStatus_TASK_STATUS_COMPLETED, converted.GetTasks()[0].GetStatus())
+			require.Equal(t, handledAt, converted.GetTasks()[0].GetCreatedAt().AsTime())
+			require.Equal(t, handledAt, converted.GetHandledAt().AsTime())
+		})
+	}
 }
 
 func TestEventRuleListRequestFrom(t *testing.T) {
@@ -510,4 +593,48 @@ func powerTaskOperation(operation pb.PowerControlOperation) *pb.TaskOperation {
 			PowerControl: &pb.PowerControlTaskOperation{Operation: operation},
 		},
 	}
+}
+
+func TestEventRuleTargetStrategyFrom(t *testing.T) {
+	tests := []struct {
+		name       string
+		wire       []byte
+		want       eventrule.TargetStrategy
+		wantNumber int32
+	}{
+		{name: "source retains the legacy component wire number", wire: []byte{0x20, 0x01}, want: eventrule.TargetStrategySource, wantNumber: 1},
+		{name: "legacy rack retains field and enum numbers", wire: []byte{0x20, 0x02}, want: eventrule.TargetStrategyRack, wantNumber: 2},
+		{name: "legacy affected retains field and enum numbers", wire: []byte{0x20, 0x03}, want: eventrule.TargetStrategyAffectedComponents, wantNumber: 3},
+		{name: "unknown future strategy", wire: []byte{0x20, 0x63}, wantNumber: 99},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var action pb.EventRuleSubmitTaskAction
+			require.NoError(t, proto.Unmarshal(test.wire, &action))
+			require.Equal(t, test.wantNumber, int32(action.GetTargetStrategy()))
+			strategy, err := eventRuleTargetStrategyFrom(action.GetTargetStrategy())
+			if test.want == "" {
+				require.ErrorContains(t, err, "unknown event rule target strategy")
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, test.want, strategy)
+			encoded, err := proto.Marshal(&pb.EventRuleSubmitTaskAction{TargetStrategy: eventRuleTargetStrategyTo(strategy)})
+			require.NoError(t, err)
+			require.Equal(t, test.wire, encoded)
+		})
+	}
+	for _, name := range []string{"EVENT_RULE_TARGET_STRATEGY_COMPONENT", "EVENT_RULE_TARGET_STRATEGY_SOURCE"} {
+		t.Run(name, func(t *testing.T) {
+			var action pb.EventRuleSubmitTaskAction
+			require.NoError(t, protojson.Unmarshal([]byte(`{"targetStrategy":"`+name+`"}`), &action))
+			strategy, err := eventRuleTargetStrategyFrom(action.GetTargetStrategy())
+			require.NoError(t, err)
+			require.Equal(t, eventrule.TargetStrategySource, strategy)
+			encoded, err := protojson.Marshal(&pb.EventRuleSubmitTaskAction{TargetStrategy: eventRuleTargetStrategyTo(strategy)})
+			require.NoError(t, err)
+			require.JSONEq(t, `{"targetStrategy":"EVENT_RULE_TARGET_STRATEGY_COMPONENT"}`, string(encoded))
+		})
+	}
+
 }

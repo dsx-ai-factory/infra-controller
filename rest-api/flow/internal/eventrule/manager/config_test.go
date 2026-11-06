@@ -7,6 +7,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/eventrule"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/operation"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
@@ -54,6 +55,12 @@ func TestConfig_Validate(t *testing.T) {
 			},
 			wantErr: "task manager is required",
 		},
+		"missing event handling reader": {
+			mutate: func(config *Config) {
+				config.HandlingReader = nil
+			},
+			wantErr: "event handling reader is required",
+		},
 	}
 
 	for name, test := range tests {
@@ -75,6 +82,19 @@ func TestConfig_Validate(t *testing.T) {
 }
 
 type configTaskManager struct{}
+
+type configHandlingReader struct{}
+
+func (configHandlingReader) GetEventHandling(
+	context.Context,
+	eventrule.Type,
+	eventrule.ResourceKind,
+	uuid.UUID,
+	int,
+	int,
+) ([]eventrule.Handling, int, error) {
+	return nil, 0, nil
+}
 
 func (configTaskManager) SubmitTask(
 	context.Context,

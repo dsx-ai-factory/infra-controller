@@ -4,6 +4,7 @@
 package codec_test
 
 import (
+	"bytes"
 	"os"
 	"testing"
 
@@ -17,10 +18,20 @@ import (
 func TestPolicyV1Fixture(t *testing.T) {
 	data, err := os.ReadFile("testdata/policy_v1_all_actions.json")
 	require.NoError(t, err)
-
-	policy, err := codec.UnmarshalPolicy(data)
-	require.NoError(t, err)
-	require.Equal(t, fullPolicy(), policy)
+	tests := []struct {
+		name string
+		data []byte
+	}{
+		{name: "legacy component token", data: data},
+		{name: "source token", data: bytes.ReplaceAll(data, []byte(`"targetStrategy": "component"`), []byte(`"targetStrategy": "source"`))},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			policy, err := codec.UnmarshalPolicy(test.data)
+			require.NoError(t, err)
+			require.Equal(t, fullPolicy(), policy)
+		})
+	}
 }
 
 func TestPolicyV1NoopFixture(t *testing.T) {
@@ -42,6 +53,9 @@ func TestPolicyRoundTrip(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			encoded, err := codec.MarshalPolicy(policy)
 			require.NoError(t, err)
+			if len(policy.Actions) > 0 {
+				require.Contains(t, string(encoded), `"targetStrategy":"component"`)
+			}
 			roundTripped, err := codec.UnmarshalPolicy(encoded)
 			require.NoError(t, err)
 			require.Equal(t, policy, roundTripped)
@@ -87,7 +101,7 @@ func fullPolicy() eventrule.Policy {
 					Operation: &operations.PowerControlTaskInfo{
 						Operation: operations.PowerOperationForcePowerOff,
 					},
-					TargetStrategy:   eventrule.TargetStrategyComponent,
+					TargetStrategy:   eventrule.TargetStrategySource,
 					ConflictStrategy: eventrule.ConflictStrategyQueue,
 					Description:      "power off",
 				},

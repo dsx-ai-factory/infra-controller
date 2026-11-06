@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/eventrule"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/deviceinfo"
@@ -65,9 +66,10 @@ func TestPrepare(t *testing.T) {
 			envelope := test.envelope
 			if test.wantResolved {
 				envelope = eventrule.Envelope{
-					Key:      eventrule.EventKey{SourceName: "test", SourceKey: "event-1"},
-					Type:     "test.event",
-					Resource: eventrule.Resource{Kind: eventrule.ResourceKindRack, ID: rackID},
+					Key:        eventrule.EventKey{SourceName: "test", SourceKey: "event-1"},
+					Type:       "test.event",
+					Resource:   eventrule.Resource{Kind: eventrule.ResourceKindRack, ID: rackID},
+					ObservedAt: time.Date(2026, 11, 4, 12, 0, 0, 0, time.UTC),
 				}
 			}
 
@@ -110,6 +112,7 @@ func TestPrepare(t *testing.T) {
 				require.Equal(t, rackID, result.Event.Resource.ID)
 				require.Equal(t, eventrule.ResourceKindRack, result.Event.Resource.Kind)
 				require.Equal(t, test.rule.ID, result.Event.AppliedRuleID)
+				require.Equal(t, envelope.ObservedAt, result.Event.FirstObservedAt)
 				require.Equal(t, uuid.Nil, result.Event.ID)
 				require.Zero(t, result.Event.Observations)
 				require.True(t, result.Event.CreatedAt.IsZero())
