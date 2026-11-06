@@ -15,7 +15,7 @@
  * limitations under the License.
  */
 
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::{MachineId, MachineType};
 use config_version::ConfigVersion;
 use itertools::Itertools;
 use model::attestation::spdm::{
@@ -450,12 +450,15 @@ pub struct MachineAttestationSummary {
 /// jobs do not contribute. An omitted status filter includes machines without a
 /// retained controller job; a supplied status excludes them. Only IDs strictly
 /// after `after_machine_id` are considered, or all IDs when it is absent.
+/// `machine_type` restricts results to that exact type; `None` includes every type.
+/// Selecting `MachineType::Host` excludes temporary predicted-host records.
 /// Returns at most `page_size + 1` matching rows, including a lookahead row so the
 /// caller can detect another page. Filtering happens before this limit.
 pub async fn find_machine_attestation_statuses(
     txn: &mut PgConnection,
     after_machine_id: Option<MachineId>,
     status: Option<SpdmAttestationStatus>,
+    machine_type: Option<MachineType>,
     page_size: u32,
 ) -> DatabaseResult<Vec<MachineAttestationSummary>> {
     let status = status.map(|status| match status {
@@ -494,6 +497,7 @@ pub async fn find_machine_attestation_statuses(
         ) prediction ON true
         WHERE ($1::varchar IS NULL OR m.id > $1)
             AND ($2::text IS NULL OR prediction.attestation_status = $2)
+            AND ($4::text IS NULL OR starts_with(m.id, $4))
         ORDER BY m.id
         LIMIT $3
     "#,
@@ -503,6 +507,8 @@ pub async fn find_machine_attestation_statuses(
         .bind(after_machine_id)
         .bind(status)
         .bind(i64::from(page_size) + 1)
+        // Apply the machine type before pagination, including its lookahead row.
+        .bind(machine_type.map(MachineType::id_prefix))
         .fetch_all(txn)
         .await
         .map_err(|error| DatabaseError::query(query, error))?;
@@ -1362,7 +1368,7 @@ mod tests {
                     };
                     list_selectors_match[index] = statuses == expected;
                     // One job can span machines whose own aggregates differ.
-                    let predicted = find_machine_attestation_statuses(&mut txn, None, Some(selector), 100)
+                    let predicted = find_machine_attestation_statuses(&mut txn, None, Some(selector), None, 100)
                         .await.map_err(|error| error.to_string())?;
                     let expected = machine_ids.iter().copied().filter(|id| {
                         let status = if *id == machine_id {
@@ -1400,8 +1406,15 @@ mod tests {
                 MachineType::Host,
             )
         });
+        let non_hosts = [MachineType::Dpu, MachineType::PredictedHost].map(|machine_type| {
+            MachineId::new(
+                MachineIdSource::ProductBoardChassisSerial,
+                [0x85; 32],
+                machine_type,
+            )
+        });
         let mut txn = pool.begin().await?;
-        for id in machines {
+        for id in machines.into_iter().chain(non_hosts) {
             sqlx::query("INSERT INTO machines (id, dpf) VALUES ($1, '{}'::jsonb)")
                 .bind(id)
                 .execute(&mut *txn)
@@ -1478,14 +1491,27 @@ mod tests {
             (machines[3], None),
         ];
         expected.sort_by_key(|row| row.0);
-        let predictions = find_machine_attestation_statuses(&mut txn, None, None, 100).await?;
-        assert_eq!(
-            predictions
-                .into_iter()
-                .map(|row| (row.machine_id, row.attestation_status))
-                .collect::<Vec<_>>(),
-            expected
-        );
+        let mut all_expected = expected.clone();
+        all_expected.extend(non_hosts.map(|id| (id, None)));
+        all_expected.sort_by_key(|row| row.0);
+        let dpu_expected = vec![(non_hosts[0], None)];
+        // Type selection preserves unknown results and selects the exact inventory type.
+        for (scenario, machine_type, expected_rows) in [
+            ("all machine types", None, &all_expected),
+            ("discovered hosts only", Some(MachineType::Host), &expected),
+            ("DPUs only", Some(MachineType::Dpu), &dpu_expected),
+        ] {
+            let predictions =
+                find_machine_attestation_statuses(&mut txn, None, None, machine_type, 100).await?;
+            assert_eq!(
+                predictions
+                    .into_iter()
+                    .map(|row| (row.machine_id, row.attestation_status))
+                    .collect::<Vec<_>>(),
+                *expected_rows,
+                "{scenario}"
+            );
+        }
 
         // Lookahead includes one extra row, and continuation excludes the cursor itself.
         for (scenario, cursor, expected_ids) in [
@@ -1498,7 +1524,14 @@ mod tests {
             ("last page", Some(expected[2].0), &expected[3..]),
             ("past the last ID", Some(expected[3].0), &expected[4..]),
         ] {
-            let predictions = find_machine_attestation_statuses(&mut txn, cursor, None, 1).await?;
+            let predictions = find_machine_attestation_statuses(
+                &mut txn,
+                cursor,
+                None,
+                Some(MachineType::Host),
+                1,
+            )
+            .await?;
             assert_eq!(
                 predictions
                     .into_iter()

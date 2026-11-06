@@ -1856,7 +1856,10 @@ pub(in crate::tests) mod tests {
         use base64::Engine;
         use base64::engine::general_purpose::URL_SAFE_NO_PAD;
         use carbide_uuid::machine::{MachineIdSource, MachineType};
-        use rpc::forge::SpdmMachineAttestationFleetRequest;
+        use rpc::forge::{MachineType as RpcMachineType, SpdmMachineAttestationFleetRequest};
+
+        let host_type = Some(RpcMachineType::Host as i32);
+        let dpu_type = Some(RpcMachineType::Dpu as i32);
 
         let fleet_request = |request| ListMachineAttestationStatusesRequest {
             target: Some(Target::Fleet(request)),
@@ -1879,6 +1882,15 @@ pub(in crate::tests) mod tests {
             )
         });
         machines.sort();
+        let dpu = MachineId::new(
+            MachineIdSource::ProductBoardChassisSerial,
+            [0x96; 32],
+            MachineType::Dpu,
+        );
+        sqlx::query("INSERT INTO machines (id, dpf) VALUES ($1, '{}'::jsonb)")
+            .bind(dpu)
+            .execute(&env.pool)
+            .await?;
         let job_id = uuid::Uuid::new_v4();
         for (index, id) in machines.iter().enumerate() {
             sqlx::query("INSERT INTO machines (id, dpf) VALUES ($1, '{}'::jsonb)")
@@ -1899,6 +1911,56 @@ pub(in crate::tests) mod tests {
         // Fleet listing remains available without a BMC client or enabled SPDM controller.
         env.redfish_sim
             .set_create_client_error("fleet listing must not contact BMCs");
+        // Omitting the type filter preserves all-machine membership.
+        let all_machines = env
+            .api
+            .list_machine_attestation_statuses(Request::new(fleet_request(
+                SpdmMachineAttestationFleetRequest::default(),
+            )))
+            .await?
+            .into_inner();
+        assert_eq!(all_machines.statuses[0].machine_id, Some(dpu));
+        assert!(all_machines.statuses[0].attestation_status.is_none());
+        // All-machine tokens keep the encoding accepted by older servers.
+        let all_token: serde_json::Value =
+            serde_json::from_slice(&URL_SAFE_NO_PAD.decode(&all_machines.next_page_token)?)?;
+        assert!(all_token.get("machine_type").is_none());
+        // Existing tokens without a machine type still resume an all-machine search.
+        let legacy_page = env
+            .api
+            .list_machine_attestation_statuses(Request::new(fleet_request(
+                SpdmMachineAttestationFleetRequest {
+                    page_token: URL_SAFE_NO_PAD.encode(serde_json::to_vec(&serde_json::json!({
+                        "version": 1, "after_machine_id": dpu, "attestation_status": null,
+                    }))?),
+                    ..Default::default()
+                },
+            )))
+            .await?
+            .into_inner();
+        assert_eq!(
+            legacy_page
+                .statuses
+                .iter()
+                .map(|row| row.machine_id.unwrap())
+                .collect::<Vec<_>>(),
+            machines[..2]
+        );
+        // Selecting DPUs exercises the second supported type through the public RPC.
+        let dpu_page = env
+            .api
+            .list_machine_attestation_statuses(Request::new(fleet_request(
+                SpdmMachineAttestationFleetRequest {
+                    machine_type: dpu_type,
+                    ..Default::default()
+                },
+            )))
+            .await?
+            .into_inner();
+        assert_eq!(dpu_page.statuses.len(), 1);
+        assert_eq!(dpu_page.statuses[0].machine_id, Some(dpu));
+        assert!(dpu_page.statuses[0].attestation_status.is_none());
+        assert!(dpu_page.next_page_token.is_empty());
         let mut statuses = Vec::new();
         let mut page_token = String::new();
         // Zero uses the configured cap, oversized values are capped, and continuation
@@ -1911,6 +1973,7 @@ pub(in crate::tests) mod tests {
                         attestation_status: None,
                         page_size,
                         page_token,
+                        machine_type: host_type,
                     },
                 )))
                 .await?
@@ -1946,6 +2009,7 @@ pub(in crate::tests) mod tests {
                     attestation_status: passed,
                     page_size: 1,
                     page_token: String::new(),
+                    machine_type: host_type,
                 },
             )))
             .await?
@@ -1959,6 +2023,7 @@ pub(in crate::tests) mod tests {
                     attestation_status: passed,
                     page_size: 2,
                     page_token: first.next_page_token.clone(),
+                    machine_type: host_type,
                 },
             )))
             .await?
@@ -1996,33 +2061,40 @@ pub(in crate::tests) mod tests {
         assert_eq!(error.code(), tonic::Code::InvalidArgument);
 
         // Reject malformed encodings and changed search semantics at the RPC boundary.
-        let invalid_tokens = [
-            ("invalid enum", Some(-1), String::new()),
-            ("invalid base64", None, "%%%".to_string()),
-            ("invalid token payload", None, URL_SAFE_NO_PAD.encode(b"{}")),
-            ("changed filter", None, first.next_page_token),
+        let invalid_requests = [
+            ("invalid status", host_type, Some(-1), String::new()),
+            ("invalid base64", host_type, None, "%%%".to_string()),
+            ("invalid token payload", host_type, None, URL_SAFE_NO_PAD.encode(b"{}")),
+            ("changed status", host_type, None, first.next_page_token.clone()),
+            ("changed machine type", dpu_type, passed, first.next_page_token),
+            ("unknown machine type", Some(RpcMachineType::Unknown as i32), None, String::new()),
+            ("unsupported machine type", Some(RpcMachineType::PowerShelf as i32), None, String::new()),
+            ("invalid machine type", Some(-1), None, String::new()),
             (
                 "unsupported token version",
+                host_type,
                 passed,
                 URL_SAFE_NO_PAD.encode(serde_json::to_vec(&serde_json::json!({
-                    "version": 2, "after_machine_id": machines[0], "attestation_status": passed,
+                    "version": 2, "after_machine_id": machines[0], "attestation_status": passed, "machine_type": host_type,
                 }))?),
             ),
             (
                 "invalid machine cursor",
+                host_type,
                 passed,
                 URL_SAFE_NO_PAD.encode(serde_json::to_vec(&serde_json::json!({
-                    "version": 1, "after_machine_id": "invalid", "attestation_status": passed,
+                    "version": 1, "after_machine_id": "invalid", "attestation_status": passed, "machine_type": host_type,
                 }))?),
             ),
         ];
-        for (scenario, attestation_status, page_token) in invalid_tokens {
+        for (scenario, machine_type, attestation_status, page_token) in invalid_requests {
             let error = env
                 .api
                 .list_machine_attestation_statuses(Request::new(fleet_request(
                     SpdmMachineAttestationFleetRequest {
                         attestation_status,
                         page_token,
+                        machine_type,
                         ..Default::default()
                     },
                 )))

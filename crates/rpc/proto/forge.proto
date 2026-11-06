@@ -12986,16 +12986,20 @@ message ListMachineAttestationStatusesRequest {
 // Each page is ordered by ascending machine ID. Inventory and externally triggered jobs
 // are not consulted. Pages are separate reads: concurrent changes can affect membership.
 message SpdmMachineAttestationFleetRequest {
-  // Omission includes all machines, including those without a retained controller job.
+  // Omission includes all machines of the selected type, including those without a retained controller job.
   // A supplied status excludes machines without such a job. Unknown enum values are rejected.
   optional SpdmAttestationStatus attestation_status = 1;
   // Maximum matching records to return. Zero uses RuntimeConfig.max_find_by_ids;
   // larger values are capped at that setting. This setting defaults to 100.
   uint32 page_size = 2;
   // Empty for the first page; otherwise copy the preceding response's next_page_token.
-  // Tokens are opaque and bound to the status filter; keep the filter unchanged.
-  // Malformed tokens or a changed filter return INVALID_ARGUMENT. Page size may change.
+  // Tokens are opaque and bound to the status and machine_type filters; keep both unchanged.
+  // Malformed tokens or changed filters return INVALID_ARGUMENT. Page size may change.
   string page_token = 3;
+  // Omission includes every machine type. HOST selects discovered hosts, excluding predicted hosts;
+  // DPU selects DPUs. UNKNOWN, POWER_SHELF and unrecognised values return INVALID_ARGUMENT.
+  // Applied before pagination and combined with attestation_status.
+  optional MachineType machine_type = 4;
 }
 
 message SpdmMachineAttestationMachineRequest {

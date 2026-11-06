@@ -32,30 +32,42 @@ fn parse(args: &[&str]) -> Result<Args, clap::Error> {
 #[test]
 fn machine_list_selectors() {
     scenarios!(
-        run = |args: &[&str]| parse(args).map(|args| (args.passed, args.failed, args.waived, args.in_progress)).map_err(|error| error.kind());
+        run = |args: &[&str]| parse(args).map(|args| (args.passed, args.failed, args.waived, args.in_progress, args.machine_type)).map_err(|error| error.kind());
         "all machines by default" {
-            &["attestation", "spdm", "machines", "list"][..] => Yields((false, false, false, false)),
+            &["attestation", "spdm", "machines", "list"][..] => Yields((false, false, false, false, None)),
         }
         "passed selector through att alias" {
-            &["att", "spdm", "machines", "list", "--passed"][..] => Yields((true, false, false, false)),
+            &["att", "spdm", "machines", "list", "--passed"][..] => Yields((true, false, false, false, None)),
         }
         "failed selector" {
-            &["att", "spdm", "machines", "list", "--failed"][..] => Yields((false, true, false, false)),
+            &["att", "spdm", "machines", "list", "--failed"][..] => Yields((false, true, false, false, None)),
         }
         "waived selector" {
-            &["att", "spdm", "machines", "list", "--waived"][..] => Yields((false, false, true, false)),
+            &["att", "spdm", "machines", "list", "--waived"][..] => Yields((false, false, true, false, None)),
         }
         "in-progress selector" {
-            &["att", "spdm", "machines", "list", "--in-progress"][..] => Yields((false, false, false, true)),
+            &["att", "spdm", "machines", "list", "--in-progress"][..] => Yields((false, false, false, true, None)),
         }
         "single machine has no fleet selector" {
-            &["att", "spdm", "machines", "list", "--machine-id", "fm100hsag07peffp850l14kvmhrqjf9h6jslilfahaknhvb6sq786c0g3jg"][..] => Yields((false, false, false, false)),
+            &["att", "spdm", "machines", "list", "--machine-id", "fm100hsag07peffp850l14kvmhrqjf9h6jslilfahaknhvb6sq786c0g3jg"][..] => Yields((false, false, false, false, None)),
+        }
+        "host type with a status selector" {
+            &["att", "spdm", "machines", "list", "--machine-type", "host", "--failed"][..] => Yields((false, true, false, false, Some(MachineTypeFilter::Host))),
+        }
+        "DPU type selection" {
+            &["att", "spdm", "machines", "list", "--machine-type", "dpu"][..] => Yields((false, false, false, false, Some(MachineTypeFilter::Dpu))),
+        }
+        "unsupported machine type" {
+            &["att", "spdm", "machines", "list", "--machine-type", "gpu"][..] => FailsWith(ErrorKind::InvalidValue),
         }
         "timeout needs a machine" {
             &["att", "spdm", "machines", "list", "--redfish-timeout-secs", "60"][..] => FailsWith(ErrorKind::MissingRequiredArgument),
         }
         "zero timeout is invalid" {
             &["att", "spdm", "machines", "list", "--machine-id", "fm100hsag07peffp850l14kvmhrqjf9h6jslilfahaknhvb6sq786c0g3jg", "--redfish-timeout-secs", "0"][..] => FailsWith(ErrorKind::ValueValidation),
+        }
+        "machine mode excludes machine type" {
+            &["att", "spdm", "machines", "list", "--machine-id", "fm100hsag07peffp850l14kvmhrqjf9h6jslilfahaknhvb6sq786c0g3jg", "--machine-type", "host"][..] => FailsWith(ErrorKind::ArgumentConflict),
         }
         "machine mode excludes fleet filters" {
             &["att", "spdm", "machines", "list", "--machine-id", "fm100hsag07peffp850l14kvmhrqjf9h6jslilfahaknhvb6sq786c0g3jg", "--passed"][..] => FailsWith(ErrorKind::ArgumentConflict),
@@ -163,7 +175,12 @@ async fn machine_table_follows_pages_and_prints_populated_and_empty_cells() {
         selector: None,
         requests: RefCell::default(),
     };
-    let (output, warning) = execute(&client, OutputFormat::AsciiTable, &[]).await;
+    let (output, warning) = execute(
+        &client,
+        OutputFormat::AsciiTable,
+        &["--machine-type", "host"],
+    )
+    .await;
     let rows = output
         .lines()
         .filter(|line| line.starts_with('|'))
@@ -184,6 +201,11 @@ async fn machine_table_follows_pages_and_prints_populated_and_empty_cells() {
         ]
     );
     assert_eq!(client.requests.borrow().len(), 2);
+    // Every page must carry the same machine type alongside the opaque continuation token.
+    assert!(client.requests.borrow().iter().all(|request| matches!(
+        &request.target,
+        Some(Target::Fleet(fleet)) if fleet.machine_type == Some(rpc::forge::MachineType::Host as i32)
+    )));
     assert_eq!(
         warning,
         "Predicted attestation status, for definitive attestation status use \"attestation spdm machines list --machine-id <your machine id>\"\n"
@@ -274,6 +296,10 @@ async fn machine_json_keeps_unknown_fields_and_warning_separate() {
         requests: RefCell::default(),
     };
     let (output, warning) = execute(&client, OutputFormat::Json, &[]).await;
+    assert!(matches!(
+        &client.requests.borrow()[0].target,
+        Some(Target::Fleet(fleet)) if fleet.machine_type.is_none()
+    ));
     assert_eq!(
         serde_json::from_str::<serde_json::Value>(&output).unwrap(),
         serde_json::json!([
@@ -309,20 +335,40 @@ async fn machine_json_keeps_unknown_fields_and_warning_separate() {
 
 #[tokio::test]
 async fn status_filters_reach_rpc_and_empty_results_still_warn() {
-    for (flag, status) in [
-        ("--passed", SpdmAttestationStatus::SpdmAttPassed),
-        ("--failed", SpdmAttestationStatus::SpdmAttFailed),
-        ("--waived", SpdmAttestationStatus::SpdmAttWaived),
-        ("--in-progress", SpdmAttestationStatus::SpdmAttInProgress),
+    for (flags, status, machine_type) in [
+        (
+            &["--passed"][..],
+            SpdmAttestationStatus::SpdmAttPassed,
+            None,
+        ),
+        (
+            &["--machine-type", "dpu", "--failed"][..],
+            SpdmAttestationStatus::SpdmAttFailed,
+            Some(rpc::forge::MachineType::Dpu as i32),
+        ),
+        (
+            &["--waived"][..],
+            SpdmAttestationStatus::SpdmAttWaived,
+            None,
+        ),
+        (
+            &["--in-progress"][..],
+            SpdmAttestationStatus::SpdmAttInProgress,
+            None,
+        ),
     ] {
         let client = FakeClient {
             statuses: Vec::new(),
             selector: Some(status.into()),
             requests: RefCell::default(),
         };
-        let (output, warning) = execute(&client, OutputFormat::Json, &[flag]).await;
-        assert_eq!(output.trim(), "[]", "{flag}");
-        assert_eq!(warning, format!("{PREDICTION_WARNING}\n"), "{flag}");
-        assert_eq!(client.requests.borrow().len(), 1, "{flag}");
+        let (output, warning) = execute(&client, OutputFormat::Json, flags).await;
+        assert_eq!(output.trim(), "[]", "{flags:?}");
+        assert_eq!(warning, format!("{PREDICTION_WARNING}\n"), "{flags:?}");
+        assert_eq!(client.requests.borrow().len(), 1, "{flags:?}");
+        assert!(matches!(
+            &client.requests.borrow()[0].target,
+            Some(Target::Fleet(fleet)) if fleet.machine_type == machine_type
+        ));
     }
 }

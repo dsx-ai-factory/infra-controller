@@ -26,6 +26,15 @@ mod tests;
 
 const PREDICTION_WARNING: &str = "Predicted attestation status, for definitive attestation status use \"attestation spdm machines list --machine-id <your machine id>\"";
 
+// Expose only the inventory types supported by the fleet query as CLI values.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, clap::ValueEnum)]
+enum MachineTypeFilter {
+    #[value(help = "Discovered hosts, excluding predicted hosts")]
+    Host,
+    #[value(help = "DPUs")]
+    Dpu,
+}
+
 #[derive(Parser, Debug)]
 #[command(group(clap::ArgGroup::new("status").args(["passed", "failed", "waived", "in_progress"])))]
 #[command(long_about = "List SPDM attestation statuses in machine-ID order.\n\n\
@@ -33,7 +42,9 @@ const PREDICTION_WARNING: &str = "Predicted attestation status, for definitive a
     descending start time and then descending job ID. External and older jobs are ignored; BMCs are not contacted. \
     Terminal results use the latest operator cancellation target when present. \
     Unfinished devices take precedence over failures, waivers, then all-passed. \
-    Without a status flag, lists all machines; machines without a controller job show unknown \
+    By default, includes every machine type. --machine-type host selects discovered hosts, excluding predicted hosts; \
+    --machine-type dpu selects DPUs. Either can be combined with a status flag. \
+    Without a status flag, machines without a controller job show unknown \
     (JSON/YAML: null). Such machines are excluded by every status flag. \
     Only one status flag may be supplied. \
     A partially collected job is in progress even if a device has failed. \
@@ -45,18 +56,24 @@ const PREDICTION_WARNING: &str = "Predicted attestation status, for definitive a
     attester_selection_status field. Empty or disabled selections have no verdict (table: not assessed; \
     JSON/YAML: null), with the reason in attester selection status. Partial selection reports the \
     selected subset's status and warns on stderr. Machine lookup, BMC and timeout failures return errors. \
-    --machine-id conflicts with all status flags. Supports table, JSON, and YAML output; CSV is unsupported.")]
+    --machine-id conflicts with --machine-type and all status flags. Supports table, JSON, and YAML output; CSV is unsupported.")]
 #[command(after_long_help = "\
 EXAMPLES:
 
 List all machine attestation predictions:
     $ nico-admin-cli attestation spdm machines list
 
+List discovered hosts only:
+    $ nico-admin-cli attestation spdm machines list --machine-type host
+
+List DPUs only:
+    $ nico-admin-cli attestation spdm machines list --machine-type dpu
+
 List machines predicted to have passed:
     $ nico-admin-cli attestation spdm machines list --passed
 
-List machines predicted to have failed:
-    $ nico-admin-cli attestation spdm machines list --failed
+List hosts predicted to have failed:
+    $ nico-admin-cli attestation spdm machines list --machine-type host --failed
 
 List machines predicted to have been waived:
     $ nico-admin-cli attestation spdm machines list --waived
@@ -79,6 +96,13 @@ pub(crate) struct Args {
     #[arg(long, requires = "machine_id", value_parser = clap::value_parser!(u32).range(1..),
         help = "Timeout in seconds for the entire single-machine assessment; defaults to 30; requires --machine-id")]
     redfish_timeout_secs: Option<u32>,
+    #[arg(
+        long,
+        value_enum,
+        conflicts_with = "machine_id",
+        help = "Filter fleet by machine type; omission includes every type; may be combined with a status flag"
+    )]
+    machine_type: Option<MachineTypeFilter>,
     #[arg(
         long,
         help = "Only machines whose latest controller job passed for every device"
@@ -163,6 +187,11 @@ impl Args {
         } else {
             None
         };
+        // Keep the selected type unchanged across every page of this search.
+        let machine_type = self.machine_type.map(|machine_type| match machine_type {
+            MachineTypeFilter::Host => rpc::forge::MachineType::Host as i32,
+            MachineTypeFilter::Dpu => rpc::forge::MachineType::Dpu as i32,
+        });
         let single_machine = self.machine_id.is_some();
         let mut page_token = String::new();
         let mut views = Vec::new();
@@ -178,6 +207,7 @@ impl Args {
                     attestation_status: selector,
                     page_size,
                     page_token,
+                    machine_type,
                 })
             };
             let response = client

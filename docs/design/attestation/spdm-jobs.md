@@ -129,6 +129,11 @@ replace the job the managed-host controller is waiting for.
 `--machine-id`, it predicts fleet statuses from each machine's latest retained
 controller-triggered job, ignoring external jobs and making no BMC calls.
 Machines without a controller job have unknown status.
+The default includes every machine type. Use `--machine-type host` to select
+discovered hosts, excluding predicted hosts, or `--machine-type dpu` to select
+DPUs. Either filter can be combined with a status flag such as `--failed`;
+machines without a retained controller job remain unknown when no status flag
+is supplied. `--machine-type` cannot be combined with `--machine-id`.
 
 With `--machine-id`, it uses the current profile and, when needed, live BMC
 inventory to select devices. It checks each selected device's latest result

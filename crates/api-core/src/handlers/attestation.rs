@@ -20,7 +20,7 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use carbide_machine_controller::handler::attestation::{
     SchedulingOutcome, select_machine_attesters, trigger_attestation,
 };
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::{MachineId, MachineType};
 use db::ObjectFilter;
 use itertools::Itertools;
 use model::attestation::spdm as model_spdm;
@@ -253,7 +253,7 @@ pub(crate) async fn list_attestation(
     Ok(response)
 }
 
-// The token carries only the cursor and filter, so page sizes can change without
+// The token carries only the cursor and filters, so page sizes can change without
 // keeping server-side state. Versioning lets us reject incompatible encodings.
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -261,6 +261,9 @@ struct MachineAttestationPageToken {
     version: u8,
     after_machine_id: MachineId,
     attestation_status: Option<i32>,
+    // Tokens without a machine type retain their original all-machine membership.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    machine_type: Option<i32>,
 }
 
 pub(crate) async fn list_machine_attestation_statuses(
@@ -498,6 +501,17 @@ async fn list_machine_predictions(
                 .map_err(|_| Status::invalid_argument("invalid attestation status"))
         })
         .transpose()?;
+    // Machine inventory supports hosts and DPUs; other RPC machine types have no rows here.
+    let machine_type = request
+        .machine_type
+        .map(|value| match rpc::MachineType::try_from(value) {
+            Ok(rpc::MachineType::Host) => Ok(MachineType::Host),
+            Ok(rpc::MachineType::Dpu) => Ok(MachineType::Dpu),
+            _ => Err(CarbideError::InvalidArgument(
+                "machine_type must be HOST or DPU".to_string(),
+            )),
+        })
+        .transpose()?;
     let cap = api.runtime_config.max_find_by_ids;
     if cap == 0 {
         return Err(Status::internal(
@@ -518,7 +532,10 @@ async fn list_machine_predictions(
             .map_err(|_| Status::invalid_argument("invalid machine attestation page token"))?;
         let token: MachineAttestationPageToken = serde_json::from_slice(&bytes)
             .map_err(|_| Status::invalid_argument("invalid machine attestation page token"))?;
-        if token.version != 1 || token.attestation_status != request.attestation_status {
+        if token.version != 1
+            || token.attestation_status != request.attestation_status
+            || token.machine_type != request.machine_type
+        {
             return Err(Status::invalid_argument(
                 "machine attestation page token is incompatible with this search",
             ));
@@ -531,6 +548,7 @@ async fn list_machine_predictions(
         &mut txn,
         after_machine_id,
         status,
+        machine_type,
         page_size,
     )
     .await?;
@@ -542,6 +560,7 @@ async fn list_machine_predictions(
             version: 1,
             after_machine_id: last.machine_id,
             attestation_status: request.attestation_status,
+            machine_type: request.machine_type,
         };
         let bytes = serde_json::to_vec(&token).map_err(|error| {
             tracing::error!(%error, "failed to encode machine attestation page token");
