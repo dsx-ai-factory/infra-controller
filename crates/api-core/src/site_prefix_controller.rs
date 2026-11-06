@@ -16,7 +16,7 @@
  */
 
 //! Makes tenant SitePrefixes usable after the required DPUs apply protection,
-//! and retires SitePrefixes after their retained children have been physically removed.
+//! and retires SitePrefixes after their children drain or transfer operator coverage.
 
 use carbide_uuid::site_prefix::SitePrefixId;
 use chrono::{DateTime, Utc};
@@ -265,7 +265,7 @@ impl StateHandler for SitePrefixReadiness {
                 .await?
                 {
                     return Ok(StateHandlerOutcome::wait(
-                        "waiting for retained VPC prefixes and direct network prefixes to be physically removed".to_string(),
+                        "waiting for retained VPC prefixes or direct network prefixes without ready operator coverage".to_string(),
                     )
                     .with_txn(txn));
                 }

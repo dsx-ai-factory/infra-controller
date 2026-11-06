@@ -52,7 +52,7 @@ compatibility parsing does not restore their former behavior.
 | `enable_route_servers` | `bool` | `false` | `networking` | Enables route server injection into DPU FRR configs for L2VPN. |
 | `deny_prefixes` | `Vec<IpNetwork>` | `[]` | `networking` | IPv4 and IPv6 CIDR prefixes that tenant instances are blocked from reaching. FNN generates family-specific NVUE ACL policies; all non-FNN virtualizers apply the IPv4 prefixes only. |
 | `site_fabric_prefixes` | `Vec<IpNetwork>` | `[]` | `networking` | IPv4 and IPv6 prefixes assigned for tenant use within this site. With `mutual_isolation`, ETV enforces the IPv4 prefixes with an isolation ACL only when the rendered DPU configuration has no NSG. An NSG replaces that ACL. With `open`, that ACL is not installed. On upgrade, authoritative Core scans persisted Ready and Deleting operator-managed SitePrefixes even when this list is empty. It assigns an unparented legacy VpcPrefix when exactly one operator root contains it; ambiguous parentage blocks startup. With a nonempty list, missing parentage also blocks startup. Listen-only replicas require an authoritative Core to assign unresolved lineage first. See [SitePrefix retirement and admission](#siteprefix-retirement-and-admission) for cleanup and request rules. |
-| `site_fabric_null_routes` | `Option<Vec<IpNetwork>>` | Inherited roots | `networking` | IPv4 and IPv6 prefixes installed by FNN as blackhole routes under `mutual_isolation`. Omission combines `site_fabric_prefixes`, every retained tenant-managed SitePrefix, and removed operator-managed roots retained by an exact VpcPrefix reference, a contained VpcPrefix without parentage, or a contained VPC-attached direct NetworkPrefix, reducing them to their minimal exact union. Soft-deleted children retain operator coverage until their VpcPrefix or segment is hard-deleted. An explicit list is authoritative: each CIDR uses its network address and exact duplicates are removed, but parent, child, and adjacent entries are not aggregated. Under mutual isolation, new tenant roots require an equal or broader explicit route; startup rejects an override that leaves any retained tenant root uncovered. An empty list (`[]`) installs no null routes and cannot support tenant roots under mutual isolation. Routes use administrative distance 250, so an authorized import wins only when it is at least as specific as the applicable blackhole. An effective `/0` null route and `leak_default_route_from_underlay = true` for the same address family are unsupported because the imported default wins the equal-prefix distance comparison. With `open`, the routes are not installed and tenant coverage is not required. Refer to [SitePrefix isolation rules](#siteprefix-isolation-rules) and [overlap checks](#tenant-prefix-overlap-checks). |
+| `site_fabric_null_routes` | `Option<Vec<IpNetwork>>` | Inherited roots | `networking` | IPv4 and IPv6 prefixes installed by FNN as blackhole routes under `mutual_isolation`. Omission combines `site_fabric_prefixes`, every retained tenant-managed SitePrefix, and removed operator-managed roots retained by an exact VpcPrefix reference, a contained VpcPrefix without parentage, or a contained VPC-attached direct NetworkPrefix, reducing them to their minimal exact union. Direct prefixes release retiring roots when a Ready operator root fully covers them; otherwise their coverage remains until the segment is hard-deleted. VpcPrefix references remain until hard deletion. An explicit list is authoritative: each CIDR uses its network address and exact duplicates are removed, but parent, child, and adjacent entries are not aggregated. Under mutual isolation, new tenant roots require an equal or broader explicit route; startup rejects an override that leaves any retained tenant root uncovered. An empty list (`[]`) installs no null routes and cannot support tenant roots under mutual isolation. Routes use administrative distance 250, so an authorized import wins only when it is at least as specific as the applicable blackhole. An effective `/0` null route and `leak_default_route_from_underlay = true` for the same address family are unsupported because the imported default wins the equal-prefix distance comparison. With `open`, the routes are not installed and tenant coverage is not required. Refer to [SitePrefix isolation rules](#siteprefix-isolation-rules) and [overlap checks](#tenant-prefix-overlap-checks). |
 | `tenant_prefix_overlap_enabled` | `bool` | `false` | `networking` | Site opt-in for [tenant prefix overlap checks](#tenant-prefix-overlap-checks). Keep disabled through the [database cutover](#prefix-overlap-database-cutover). Enablement also requires DPU readiness and [site qualification](https://github.com/dsx-ai-factory/infra-controller/issues/3902). |
 | `max_site_prefixes_per_tenant` | `u32` | `8` | `networking` | Maximum tenant-managed SitePrefixes retained for one tenant at this site. Prefixes awaiting removal still count against this limit and keep their CIDR reserved. |
 | `max_site_prefix_isolation_rules` | `u32` | `64` | `networking` | Maximum compacted legacy DPU site-prefix input for new tenant-root admission under mutual isolation; accepts `0` through `64`. Open isolation does not enforce this limit. This is not an FNN route-capacity limit. Refer to [SitePrefix isolation rules](#siteprefix-isolation-rules). |
@@ -1180,10 +1180,16 @@ Deploy the supporting Core version before allowing clients to submit `vni_self`.
 
 Authoritative Core reconciles `site_fabric_prefixes` at startup. Removing a
 configured operator root marks it `Deleting`. The SitePrefix controller physically
-removes that root after its retained VpcPrefixes and VPC-attached direct
-NetworkPrefixes are gone. Exact VpcPrefix parentage takes precedence over
-containment; a legacy VpcPrefix without parentage retains every containing
-operator root. Soft-deleted VpcPrefixes and draining segments still retain roots.
+removes that root after no child requires its coverage. Exact VpcPrefix parentage
+takes precedence over containment; a legacy VpcPrefix without parentage retains every containing
+operator root, including through soft deletion until hard deletion.
+A VPC-attached direct NetworkPrefix retains every containing retiring operator
+root unless a `Ready` operator root fully contains that prefix. Ready replacement
+coverage lets the old root retire while the direct segment remains usable.
+If the replacement later retires without another Ready covering operator root,
+the direct prefix retains it until the segment is hard-deleted, including while
+draining. Tenant-managed roots and roots covering only part of the direct prefix
+cannot substitute for operator coverage.
 
 Re-adding a root before physical removal restores its existing ID to `Ready`.
 Re-adding it afterward creates a new ID. Consumers that store SitePrefix IDs must
@@ -1195,7 +1201,8 @@ Site Config importer consumes CIDRs rather than Core SitePrefix IDs.
 A VpcPrefix request omitting `site_prefix_id` selects a unique containing operator
 root, which must be `Ready`. Retiring roots still participate in that selection,
 so overlapping retained roots remain ambiguous. Once an unused retired root is
-removed, it no longer prevents selection of its replacement roots. An explicit
+removed, it no longer prevents selection of its replacement roots. Direct segments
+covered by Ready replacement roots do not delay that removal. An explicit
 `site_prefix_id` selects its parent directly and still requires `Ready`, containment,
 and the applicable tenant-ownership and VPC-virtualization checks. An omitted ID
 prefers a unique containing operator root even when the tenant also owns a
@@ -1248,7 +1255,9 @@ FNN uses the separate `site_fabric_null_routes` response field. When the setting
 is omitted, Core includes configured roots, every retained tenant root, and
 retiring operator roots retained by exact VpcPrefix references, contained
 VpcPrefixes without parentage, or contained VPC-attached direct NetworkPrefixes.
-Soft deletion does not end operator-root retention.
+Direct prefixes release retiring roots once a Ready operator root fully covers
+them; otherwise their coverage remains until the segment is hard-deleted.
+Soft deletion alone does not end operator-root retention.
 These routes are reduced to their minimal exact union and sorted by CIDR string.
 The anonymous `Version` RPC keeps its existing operator-route output: configured
 and retained operator roots, without tenant-managed SitePrefixes. Its
@@ -1361,7 +1370,8 @@ an existing site from `open` to `mutual_isolation` is not supported and does not
 restart readiness for prefixes already marked `Ready`.
 
 Retiring operator roots are excluded from the legacy input but remain in inherited
-FNN null routes until their children are hard-deleted.
+FNN null routes while their children require their coverage, following the
+[retention rules](#siteprefix-retirement-and-admission).
 
 Before starting an API with this readiness controller, every API process serving
 DPU configurations must include the tenant-prefix rendering added in

@@ -120,6 +120,150 @@ async fn retired_operator_prefix_does_not_block_split_ranges(pool: sqlx::PgPool)
 }
 
 #[crate::sqlx_test]
+async fn retired_operator_prefix_releases_direct_segment_to_ready_replacement(pool: sqlx::PgPool) {
+    let left: IpNetwork = "198.51.100.0/25".parse().unwrap();
+    let right: IpNetwork = "198.51.100.128/25".parse().unwrap();
+    let mut config = get_config();
+    // Model a replica that has already removed the right half from its config:
+    // persisted coverage must protect the segment throughout both retirements.
+    config.site_fabric_prefixes = vec![left];
+    config.site_fabric_null_routes = None;
+    let env = create_test_env_with_overrides(
+        pool,
+        TestEnvOverrides {
+            site_prefixes: Some(vec![left, right]),
+            network_segments_drain_period: Some(chrono::Duration::zero()),
+            ..TestEnvOverrides::with_config(config).with_fnn_config(None)
+        },
+    )
+    .await;
+    create_fixture_tenant(&env, FIXTURE_TENANT_ORG_ID)
+        .await
+        .unwrap();
+    let vpc_id = env
+        .api
+        .create_vpc(
+            VpcCreationRequest::builder(FIXTURE_TENANT_ORG_ID)
+                .network_virtualization_type(rpc::forge::VpcVirtualizationType::Fnn)
+                .tonic_request(),
+        )
+        .await
+        .unwrap()
+        .into_inner()
+        .id
+        .unwrap();
+    let retired = persist_configured_site_prefix(&env, "198.51.100.0/24").await;
+    let mut txn = env.pool.begin().await.unwrap();
+    db::site_prefix::reconcile_configured(&mut txn, &[left, right])
+        .await
+        .unwrap();
+    txn.commit().await.unwrap();
+    let replacement_id = db::site_prefix::find_ids(
+        &env.pool,
+        model::site_prefix::SitePrefixSearchFilter {
+            authority: Some(SitePrefixAuthority::OperatorManaged),
+            prefix_match: Some(model::site_prefix::PrefixMatch::Exact(right)),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap()[0];
+
+    // Public direct admission can win the race with the old root's first
+    // cleanup iteration. It must not pin that root under Ready coverage.
+    let segment =
+        NetworkSegmentHelper::new_with_tenant_prefix("198.51.100.128/26", "198.51.100.129", vpc_id)
+            .create_with_api(&env.api)
+            .await
+            .unwrap();
+    let segment_id = segment.id.unwrap();
+    env.run_network_segment_controller_iteration().await;
+    env.run_network_segment_controller_iteration().await;
+    controller(&env).run_single_iteration_ext(false).await;
+    assert!(
+        db::site_prefix::find_by_ids(&env.pool, &[retired.id])
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let replacement = db::site_prefix::find_by_ids(&env.pool, &[replacement_id])
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    assert_eq!(
+        replacement.status.lifecycle_state,
+        SitePrefixLifecycleState::Ready
+    );
+    assert_eq!(
+        runtime_config_null_routes(&env).await,
+        vec!["198.51.100.0/24"],
+        "configured and persisted replacement coverage must retain the exact union",
+    );
+    let child = env
+        .api
+        .create_vpc_prefix(Request::new(rpc::forge::VpcPrefixCreationRequest {
+            vpc_id: Some(vpc_id),
+            config: Some(rpc::forge::VpcPrefixConfig {
+                prefix: "198.51.100.0/29".to_string(),
+            }),
+            metadata: Some(rpc_metadata("replacement child")),
+            ..Default::default()
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(child.site_prefix_id.is_some());
+
+    // Retiring the replacement cannot withdraw its coverage while the direct
+    // segment remains, including during soft deletion and draining.
+    let mut txn = env.pool.begin().await.unwrap();
+    db::site_prefix::reconcile_configured(&mut txn, &[left])
+        .await
+        .unwrap();
+    txn.commit().await.unwrap();
+    assert_operator_retirement_waits(&env, replacement_id).await;
+    env.api
+        .delete_network_segment(Request::new(NetworkSegmentDeletionRequest {
+            id: Some(segment_id),
+        }))
+        .await
+        .unwrap();
+    assert_operator_retirement_waits(&env, replacement_id).await;
+    assert_eq!(
+        runtime_config_null_routes(&env).await,
+        vec!["198.51.100.0/24"]
+    );
+    for _ in 0..3 {
+        env.run_network_segment_controller_iteration().await;
+    }
+    assert!(
+        env.api
+            .find_network_segments_by_ids(Request::new(NetworkSegmentsByIdsRequest {
+                network_segments_ids: vec![segment_id],
+                include_history: false,
+                include_num_free_ips: false,
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .network_segments
+            .is_empty()
+    );
+    controller(&env).run_single_iteration_ext(false).await;
+    assert!(
+        db::site_prefix::find_by_ids(&env.pool, &[replacement_id])
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        runtime_config_null_routes(&env).await,
+        vec![left.to_string()]
+    );
+}
+
+#[crate::sqlx_test]
 async fn retired_operator_roots_do_not_reopen_stale_config_admission(pool: sqlx::PgPool) {
     let original: Vec<IpNetwork> = ["203.0.113.0/24", "198.51.100.0/24"]
         .into_iter()

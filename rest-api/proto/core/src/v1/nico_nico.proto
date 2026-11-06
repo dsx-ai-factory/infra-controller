@@ -2152,8 +2152,10 @@ message RuntimeConfig {
   // site_fabric_null_routes is omitted from site configuration, this includes
   // site_fabric_prefixes and removed operator-managed roots retained by an exact
   // VpcPrefix reference, a contained VpcPrefix without parentage, or a contained
-  // VPC-attached direct NetworkPrefix. Soft-deleted children retain coverage until
-  // their VpcPrefix or segment is hard-deleted. Tenant-managed roots are
+  // VPC-attached direct NetworkPrefix. A direct prefix releases retiring roots
+  // when a Ready operator root fully covers it; otherwise coverage remains until
+  // its segment is hard-deleted. VpcPrefix references remain until hard deletion.
+  // Tenant-managed roots are
   // not added here; this is not a complete audit of DPU isolation routes. Use
   // GetManagedHostNetworkConfig for the tenant-inclusive FNN response, with RBAC
   // enforced. An explicit list is returned without checking tenant coverage.

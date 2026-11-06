@@ -699,10 +699,11 @@ pub async fn operator_managed_prefixes_exist(db: impl DbReader<'_>) -> DatabaseR
 /// Configured-root reconciliation retains removed roots in `Deleting` while
 /// their children drain. Soft-deleted VpcPrefixes may remain referenced by
 /// generated segments, while VPC-attached direct NetworkPrefixes remain until
-/// their segment is hard-deleted. Callers preserve routing isolation until the
-/// last child of either kind is physically removed. Legacy rows without exact
-/// lineage conservatively retain every containing operator root rather than
-/// guessing between nested roots.
+/// their segment is hard-deleted. A direct prefix retains Ready containing
+/// operator roots, or every containing retiring operator root when no Ready
+/// operator root fully covers it. Legacy VpcPrefixes without exact lineage
+/// conservatively retain every containing operator root rather than guessing
+/// between nested roots.
 pub async fn find_operator_managed_prefixes_with_retained_vpc_prefixes(
     db: impl DbReader<'_>,
 ) -> DatabaseResult<Vec<IpNetwork>> {
@@ -769,11 +770,30 @@ async fn find_retained_operator_prefixes(
                   WHERE network_prefix.vpc_prefix_id IS NULL
                     AND network_segment.vpc_id IS NOT NULL
                     AND site_prefix.prefix >>= network_prefix.prefix
+                    -- Ready operator coverage can replace a retired root for a
+                    -- direct prefix, which has no exact parent to preserve.
+                    AND (site_prefix.lifecycle_state = "#,
+    );
+    query
+        .push_bind(SitePrefixLifecycleState::Ready)
+        .push(
+            r#"
+                        OR NOT EXISTS (
+                            SELECT 1 FROM site_prefixes AS ready_root
+                            WHERE ready_root.authority = site_prefix.authority
+                              AND ready_root.lifecycle_state = "#,
+        )
+        .push_bind(SitePrefixLifecycleState::Ready)
+        .push(
+            r#"
+                              AND ready_root.prefix >>= network_prefix.prefix
+                        )
+                    )
               )
           )
         ORDER BY site_prefix.prefix
         "#,
-    );
+        );
     query
         .build_query_scalar()
         .fetch_all(db)
@@ -966,7 +986,7 @@ pub async fn retire_tenant_managed(
     Ok(site_prefix)
 }
 
-/// Physically removes a retired root after its retained children are gone.
+/// Physically removes a retired root after no child requires its coverage.
 ///
 /// The caller holds the routing and parent row locks, verifies that the root is
 /// Deleting, and checks its authority-specific retention rules. The child foreign
@@ -2175,6 +2195,87 @@ mod tests {
         );
         assert!(operator_managed_prefixes_exist(&mut *txn).await?);
 
+        txn.commit().await?;
+        Ok(())
+    }
+
+    /// Direct prefixes transfer operator coverage only to a Ready root that
+    /// contains the entire prefix, even if a tenant root also covers it.
+    #[crate::sqlx_test]
+    async fn direct_prefix_retention_uses_ready_operator_coverage(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        create_tenant(&pool, "tenant-a").await?;
+        let broad: IpNetwork = "10.0.2.0/24".parse()?;
+        let replacement: IpNetwork = "10.0.2.128/25".parse()?;
+        let partial: IpNetwork = "10.0.2.128/27".parse()?;
+        let mut txn = pool.begin().await?;
+        reconcile_configured(&mut txn, &[broad, replacement, partial]).await?;
+        let tenant_root =
+            create_tenant_managed(tenant_managed("10.0.2.0/24", "tenant-a"), 8, &mut txn)
+                .await?
+                .site_prefix;
+        sqlx::query("UPDATE site_prefixes SET lifecycle_state = $1 WHERE id = $2")
+            .bind(SitePrefixLifecycleState::Ready)
+            .bind(tenant_root.id)
+            .execute(&mut *txn)
+            .await?;
+        let vpc_id = carbide_uuid::vpc::VpcId::new();
+        sqlx::query(
+            "INSERT INTO vpcs (id, name, organization_id, version) VALUES ($1, $2, $3, $4)",
+        )
+        .bind(vpc_id)
+        .bind("direct-prefix-retention")
+        .bind("tenant-a")
+        .bind(ConfigVersion::initial())
+        .execute(&mut *txn)
+        .await?;
+        let segment_id = carbide_uuid::network::NetworkSegmentId::new();
+        sqlx::query(
+            "INSERT INTO network_segments (id, name, vpc_id, version, network_segment_type, can_stretch)
+             VALUES ($1, $2, $3, $4, $5, false)",
+        )
+        .bind(segment_id)
+        .bind("direct-prefix-retention")
+        .bind(vpc_id)
+        .bind(ConfigVersion::initial())
+        .bind(model::network_segment::NetworkSegmentType::Tenant)
+        .execute(&mut *txn).await?;
+        sqlx::query("INSERT INTO network_prefixes (segment_id, prefix) VALUES ($1, $2)")
+            .bind(segment_id)
+            .bind("10.0.2.128/26".parse::<IpNetwork>()?)
+            .execute(&mut *txn)
+            .await?;
+
+        for (scenario, configured, expected) in [
+            (
+                "ready roots retain coverage",
+                vec![broad, replacement],
+                vec![broad, replacement],
+            ),
+            (
+                "ready replacement releases retired root",
+                vec![replacement],
+                vec![replacement],
+            ),
+            (
+                "partial coverage cannot release retired roots",
+                vec![partial],
+                vec![broad, replacement],
+            ),
+            (
+                "ready tenant coverage cannot replace operator coverage",
+                vec![],
+                vec![broad, replacement],
+            ),
+        ] {
+            reconcile_configured(&mut txn, &configured).await?;
+            assert_eq!(
+                find_operator_managed_prefixes_with_retained_vpc_prefixes(&mut *txn).await?,
+                expected,
+                "{scenario}",
+            );
+        }
         txn.commit().await?;
         Ok(())
     }
