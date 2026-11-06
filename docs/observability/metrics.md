@@ -498,8 +498,8 @@ max by (object_type, object_id, reason)
     (time() - carbide_object_state_entered_timestamp_seconds{object_type="machine"})
     > 3600
 )
-  * on(object_type, object_id) group_left(rack, sku)
-    max by (object_type, object_id, rack, sku)
+  * on(object_type, object_id) group_left(rack_id, sku)
+    max by (object_type, object_id, rack_id, sku)
         (carbide_object_info)
 ```
 

@@ -243,8 +243,8 @@ Use `carbide_object_info` to add context (rack, SKU, vendor, model) to alerts:
     max by (object_type, object_id, state, substate)
         (carbide_object_state_sla_seconds)
 )
-  * on(object_type, object_id) group_left(rack, sku, vendor, model)
-    max by (object_type, object_id, rack, sku, vendor, model)
+  * on(object_type, object_id) group_left(rack_id, sku, vendor, model)
+    max by (object_type, object_id, rack_id, sku, vendor, model)
         (carbide_object_info)
 ```
 
