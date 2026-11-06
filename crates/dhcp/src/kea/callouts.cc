@@ -18,6 +18,7 @@
 #include "callouts.h"
 #include "carbide_rust.h"
 #include <algorithm>
+#include <dhcp/libdhcp++.h>
 #include <dhcp/option6_ia.h>
 #include <dhcp/option6_iaaddr.h>
 #include <dhcp/option6_status_code.h>
@@ -78,6 +79,13 @@ void add_or_replace_option6(Pkt6Ptr response6_ptr, uint16_t code,
   }
 
   OptionBuffer payload = guard.optionBuffer();
+  if (code == D6O_NTP_SERVER) {
+    // Kea 3 splits option 56 by parsed suboptions before packing. An opaque
+    // payload has no suboptions and would be silently removed from the reply.
+    response6_ptr->addOption(LibDHCP::D6O_NTP_SERVER_DEF().optionFactory(
+        Option::V6, code, payload));
+    return;
+  }
   response6_ptr->addOption(OptionPtr(new Option(Option::V6, code, payload)));
 }
 
@@ -463,7 +471,7 @@ void set_options_v6(CalloutHandle &handle, Pkt6Ptr query6_ptr,
                            machine_get_domain_search_ipv6(machine));
 
     // NTP servers: Rust returns RFC 5908 suboption TLVs for option 56.
-    add_or_replace_option6(response6_ptr, 56,
+    add_or_replace_option6(response6_ptr, D6O_NTP_SERVER,
                            machine_get_ntp_servers_ipv6(machine));
 
     DhcpByteBufferGuard nico_pxe_service_url(hook_get_config_nico_pxe_service_url());
@@ -530,6 +538,8 @@ void set_options_v6(CalloutHandle &handle, Pkt6Ptr query6_ptr,
     }
 
     if (advertise_nico_pxe_service_url) {
+      // Match Kea 3's post-callout normalization before measuring the wire size.
+      LibDHCP::splitNtpServerOptions6(response6_ptr->options_);
       // Measure actual bytes, including relay headers and every reply option; len() can wrap.
       response6_ptr->pack();
       if (response6_ptr->getBuffer().getLength() >

@@ -6,7 +6,10 @@
       "type": "object",
       "properties": {
         "port": {
-          "type": ["integer", "string"],
+          "type": [
+            "integer",
+            "string"
+          ],
           "minimum": 1,
           "maximum": 65535,
           "pattern": "^([1-9][0-9]{0,3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5])$"
@@ -79,6 +82,35 @@
       "properties": {
         "enabled": {
           "type": "boolean"
+        }
+      }
+    },
+    "config": {
+      "type": "object",
+      "properties": {
+        "kea": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "properties": {
+            "subnet4": {
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 4294967294
+                  }
+                }
+              }
+            }
+          }
         }
       }
     }
