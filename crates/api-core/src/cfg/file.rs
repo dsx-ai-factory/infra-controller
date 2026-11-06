@@ -6559,6 +6559,18 @@ path = "credentials.yaml"
                 );
             }
         }
+        for (field, max, above_max) in [
+            ("bios_apply_settle_timeout", "60m", "61m"),
+            ("dpu_first_restart_delay", "30m", "31m"),
+        ] {
+            let parse = |value: &str| {
+                serde_json::from_str::<MachineStateControllerConfig>(&format!(
+                    r#"{{"{field}": "{value}"}}"#
+                ))
+            };
+            assert!(parse(max).is_ok(), "{field}={max} must be accepted");
+            assert!(parse(above_max).is_err(), "{field}={above_max} must be rejected");
+        }
     }
 
     #[test]
