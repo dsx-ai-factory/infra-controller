@@ -13603,6 +13603,8 @@ paths:
                       serialNumber: SN-RACK-001
                       description: Primary compute rack
                       operationStatus: Ready
+                      operationStatusDetails:
+                        trayCounts: {ready: 1, inUse: 0, initializing: 0, error: 0, deleting: 0, unknown: 0}
                       nvLinkDomainIds:
                         - 59202b81-65fb-45ec-b3b8-91ab0ad3f34a
                       taskStats:
@@ -13695,6 +13697,8 @@ paths:
                     serialNumber: SN-RACK-001
                     description: Primary compute rack
                     operationStatus: Ready
+                    operationStatusDetails:
+                      trayCounts: {ready: 1, inUse: 0, initializing: 0, error: 0, deleting: 0, unknown: 0}
                     nvLinkDomainIds:
                       - 59202b81-65fb-45ec-b3b8-91ab0ad3f34a
                     taskStats:
@@ -27048,6 +27052,8 @@ components:
           serialNumber: SN-RACK-001
           description: Primary compute rack
           operationStatus: Ready
+          operationStatusDetails:
+            trayCounts: {ready: 1, inUse: 0, initializing: 0, error: 0, deleting: 0, unknown: 0}
           nvLinkDomainIds:
             - 59202b81-65fb-45ec-b3b8-91ab0ad3f34a
           taskStats:
