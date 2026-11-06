@@ -613,6 +613,15 @@ siteConfig:
 dpf:
   rbacCreate: false
   operatorNamespace: dpf-operator-system
+  # DPUCluster names in operatorNamespace whose service chains NICo may observe.
+  # Each entry creates a DPUServiceCredentialRequest and, with rbacCreate=true,
+  # grants NICo get access to that request and its named kubeconfig Secret.
+  # DPF creates and rotates the remote nico-service-vpc-observer ServiceAccount's
+  # credentials; the nico-dpu-agent chart grants its remote read permissions.
+  # Empty disables credential provisioning. Service VPC observation requires
+  # these credentials; NICo must never fall back to admin credentials.
+  # Example: ["carbide-dpf-cluster"]. Entries must be distinct DPUCluster names.
+  serviceVpcObserverClusters: []
 
 ## NICo Web UI hostname (always created as ConfigMap)
 hostname: "nico.local"
