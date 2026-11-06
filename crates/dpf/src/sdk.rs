@@ -304,8 +304,8 @@ where
     /// credential does not exist yet. When a refresh interval is configured the
     /// initial read is therefore best-effort: initialization continues without
     /// the Secret, and the refresh task writes it as soon as the credential
-    /// appears — no restart needed. New DPUDevice registration remains blocked
-    /// until the shared credential has been accepted and published.
+    /// appears — no restart needed. Registration without a per-device credential reference
+    /// remains blocked until the shared credential has been accepted and published.
     ///
     /// Authoritative local ownership is the exception: local version 0 must be
     /// present before startup. This value-based activation criterion is safe

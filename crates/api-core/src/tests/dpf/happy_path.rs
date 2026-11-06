@@ -32,6 +32,64 @@ use tonic::Request;
 
 const TEST_TIMEOUT: Duration = Duration::from_secs(30);
 
+#[crate::sqlx_test]
+async fn service_account_rotation_respects_cached_dpf_gate(pool: sqlx::PgPool) {
+    use carbide_secrets::credentials::{BmcCredentialType, CredentialKey, CredentialReader};
+    use db::credential_rotation::{CredentialRotationType, current_target_version};
+
+    let enabled = Arc::new(AtomicBool::new(true));
+    let mut mock = MockDpfOperations::new();
+    let gate = enabled.clone();
+    mock.expect_supports_per_dpu_bmc_credentials()
+        .returning(move || gate.load(Ordering::Relaxed));
+    let env = create_test_env_with_overrides(
+        pool.clone(),
+        TestEnvOverrides::default().with_dpf_sdk(Arc::new(mock)),
+    )
+    .await;
+    let request = || {
+        Request::new(rpc::RotateCredentialRequest {
+            credential_type: rpc::RotationCredentialType::RotationDpuBmcService as i32,
+            ..Default::default()
+        })
+    };
+    let error = env.api.rotate_credential(request()).await.unwrap_err();
+    assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+    let mut conn = pool.acquire().await.unwrap();
+    assert_eq!(
+        current_target_version(&mut conn, CredentialRotationType::DpuBmcService)
+            .await
+            .unwrap(),
+        Some(0)
+    );
+    let key = CredentialKey::BmcCredentials {
+        credential_type: BmcCredentialType::SiteWideDpuBmcServiceVersioned { version: 1 },
+    };
+    assert!(
+        env.test_credential_manager
+            .get_credentials(&key)
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    enabled.store(false, Ordering::Relaxed);
+    env.api.rotate_credential(request()).await.unwrap();
+    assert_eq!(
+        current_target_version(&mut conn, CredentialRotationType::DpuBmcService)
+            .await
+            .unwrap(),
+        Some(1)
+    );
+    assert!(
+        env.test_credential_manager
+            .get_credentials(&key)
+            .await
+            .unwrap()
+            .is_some()
+    );
+}
+
 use super::{bf4_deployment_config, dpf_config, expect_dpf_service_inventory, phase_observation};
 use crate::tests::common::api_fixtures::{
     TestEnvOverrides, create_managed_host_with_dpf, create_managed_host_with_dpf_bf4,

@@ -82,6 +82,8 @@ pub struct MachineStateHandlerServices {
     /// `RotatingBmc` state as BMC root (a single root-authenticated Redfish call
     /// with no host-power impact), so this gate only decides *entry*.
     pub dpu_bmc_service_rotation_gate: RotationGate,
+    /// Startup-cached DPF capability; DPF owns BF4 service-account passwords when true.
+    pub dpf_per_dpu_bmc_credentials: bool,
     /// Short-TTL cache of the site-wide NIC lockdown IKM rotation aggregate,
     /// shared across this replica's per-object ticks. Family-scoped to
     /// `lockdown_ikm` and keyed by each NIC's MAC.

@@ -122,6 +122,7 @@ pub struct BmcEndpointExplorer {
     mode: SiteExplorerExploreMode,
     /// Whether nv-redfish reports include drive firmware inventory entries.
     explore_drive_firmware: bool,
+    dpf_per_dpu_bmc_credentials: AtomicBool,
     /// Used to record per-device BMC rotation convergence at the moment the
     /// device is moved onto the site-wide BMC root (see
     /// [`Self::set_bmc_root_credentials`]). `None` only for the standalone
@@ -143,6 +144,7 @@ impl BmcEndpointExplorer {
             rotate_switch_nvos_credentials,
             mode,
             explore_drive_firmware: false,
+            dpf_per_dpu_bmc_credentials: AtomicBool::new(false),
             database_connection,
         }
     }
@@ -152,6 +154,13 @@ impl BmcEndpointExplorer {
     pub fn with_drive_firmware(mut self, explore_drive_firmware: bool) -> Self {
         self.explore_drive_firmware = explore_drive_firmware;
         self
+    }
+
+    /// Set the startup-cached DPF capability before exploration starts. When enabled, DPF
+    /// owns BF4 service-account passwords and ingestion leaves that account unchanged.
+    pub fn set_dpf_per_dpu_bmc_credentials(&self, enabled: bool) {
+        self.dpf_per_dpu_bmc_credentials
+            .store(enabled, Ordering::Relaxed);
     }
 
     async fn get_sitewide_bmc_password(
@@ -926,7 +935,7 @@ impl EndpointExplorer for BmcEndpointExplorer {
                     Err(e) => return Err(e),
                 };
 
-                if is_bf4_dpu {
+                if is_bf4_dpu && !self.dpf_per_dpu_bmc_credentials.load(Ordering::Relaxed) {
                     self.rotate_dpu_service_password_from_factory_defaults(
                         bmc_ip_address,
                         bmc_mac_address,
@@ -2380,6 +2389,7 @@ mod tests {
 
     async fn prepare_reingestion_fixture(
         generation: DpuGeneration,
+        per_dpu_credentials: bool,
     ) -> Result<ReingestionFixture, String> {
         // Start with model-specific factory credentials and no MAC-specific credential record.
         // This makes the first exploration follow the initial-ingestion path.
@@ -2422,6 +2432,8 @@ mod tests {
         let bmc_mac_address: MacAddress = "02:00:00:00:00:01".parse().expect("valid test BMC MAC");
         let interface = MachineInterfaceSnapshot::mock_with_mac(bmc_mac_address);
         let per_bmc_credential_key = get_bmc_root_credential_key(bmc_mac_address);
+
+        explorer.set_dpf_per_dpu_bmc_credentials(per_dpu_credentials);
 
         // Run initial ingestion to establish the state that exists before deletion.
         // It must rotate the DPU password and record the site-wide credential by MAC address.
@@ -2466,10 +2478,38 @@ mod tests {
         })
     }
 
+    #[tokio::test]
+    async fn bf4_ingestion_defers_service_password_to_dpf_only_when_supported() {
+        let _metrics_window = MetricsCapture::start();
+        for enabled in [false, true] {
+            let fixture = prepare_reingestion_fixture(
+                DpuGeneration {
+                    product: "BlueField-4",
+                    username: "admin",
+                },
+                enabled,
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                fixture.sim.user_password("service").as_deref() == Some("factory-service-password"),
+                enabled,
+            );
+            let service = fixture
+                .credential_manager
+                .get_credentials(&CredentialKey::BmcCredentials {
+                    credential_type: BmcCredentialType::SiteWideDpuBmcService,
+                })
+                .await
+                .unwrap();
+            assert_eq!(service.is_none(), enabled);
+        }
+    }
+
     async fn reingest_with_sitewide_password(
         generation: DpuGeneration,
     ) -> Result<Credentials, String> {
-        let fixture = prepare_reingestion_fixture(generation).await?;
+        let fixture = prepare_reingestion_fixture(generation, false).await?;
 
         // Keep the site-wide password on the DPU while its MAC-specific record is absent.
         // This tests recovery through the site-wide credential after factory auth fails.
@@ -2541,10 +2581,13 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn recovered_lenovo_credentials_require_ipmi_repair_before_storage() {
         let _metrics_window = MetricsCapture::start();
-        let fixture = prepare_reingestion_fixture(DpuGeneration {
-            product: "BlueField-3 DPU",
-            username: "root",
-        })
+        let fixture = prepare_reingestion_fixture(
+            DpuGeneration {
+                product: "BlueField-3 DPU",
+                username: "root",
+            },
+            false,
+        )
         .await
         .unwrap();
         // Model a Lenovo whose password changed before the IPMI repair completed.
@@ -2597,10 +2640,13 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn reingested_dpu_rejects_stale_sitewide_password() {
         let _metrics_window = MetricsCapture::start();
-        let fixture = prepare_reingestion_fixture(DpuGeneration {
-            product: "BlueField-4 DPU",
-            username: "admin",
-        })
+        let fixture = prepare_reingestion_fixture(
+            DpuGeneration {
+                product: "BlueField-4 DPU",
+                username: "admin",
+            },
+            false,
+        )
         .await
         .expect("prepare a previously ingested DPU");
 

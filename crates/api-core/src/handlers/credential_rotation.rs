@@ -144,6 +144,18 @@ pub(crate) async fn rotate_credential(
     let credential_type = req.credential_type;
     let rotation_type = to_rotation_type(credential_type)?;
 
+    if rotation_type == RotationType::DpuBmcService
+        && api
+            .dpf_sdk
+            .as_ref()
+            .is_some_and(|sdk| sdk.supports_per_dpu_bmc_credentials())
+    {
+        return Err(CarbideError::FailedPrecondition(
+            "DPF manages DPU BMC service-account credentials".to_string(),
+        )
+        .into());
+    }
+
     // Check if the backend supports NVOS password rotation.
     if rotation_type == RotationType::Nvos {
         let Some(component_manager) = api.component_manager.as_ref() else {

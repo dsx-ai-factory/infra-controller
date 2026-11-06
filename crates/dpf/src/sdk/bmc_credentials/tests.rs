@@ -83,17 +83,20 @@ fn secret_path(name: &str) -> String {
     format!("/api/v1/namespaces/{NS}/secrets/{name}")
 }
 
-fn secret(revision: u32, password: &str) -> Value {
+fn secret(version: Option<u32>, password: &str) -> Value {
     serde_json::to_value(Secret {
         metadata: ObjectMeta {
-            name: Some(bmc_credential_secret_name(DEVICE, revision)),
+            name: Some(bmc_credential_secret_name(DEVICE, version)),
             namespace: Some(NS.to_string()),
             uid: Some("secret-uid".to_string()),
             resource_version: Some("9".to_string()),
-            labels: Some(BTreeMap::from([(
-                DEVICE_LABEL.to_string(),
-                DEVICE.to_string(),
-            )])),
+            labels: Some(BTreeMap::from([
+                (DEVICE_LABEL.to_string(), DEVICE.to_string()),
+                (
+                    VERSION_LABEL.to_string(),
+                    version.map_or_else(|| "initial".to_string(), |v| v.to_string()),
+                ),
+            ])),
             finalizers: Some(vec![
                 "provisioning.dpu.nvidia.com/bmc-credential".to_string(),
             ]),
@@ -131,13 +134,17 @@ fn device(
 
 #[test]
 fn bmc_credential_names_are_stable_and_distinguish_device_and_revision() {
-    let name = bmc_credential_secret_name(DEVICE, u32::MAX);
+    let name = bmc_credential_secret_name(DEVICE, Some(u32::MAX));
     assert_eq!(name, "01-02-03-04-05-06-v4294967295");
     assert_ne!(
         name,
-        bmc_credential_secret_name("01-02-03-04-05-07", u32::MAX)
+        bmc_credential_secret_name("01-02-03-04-05-07", Some(u32::MAX))
     );
-    assert_ne!(name, bmc_credential_secret_name(DEVICE, 0));
+    assert_ne!(name, bmc_credential_secret_name(DEVICE, Some(0)));
+    assert_eq!(
+        bmc_credential_secret_name(DEVICE, None),
+        format!("{DEVICE}-initial")
+    );
     assert!(name.len() <= 63);
     assert!(
         name.bytes()
@@ -147,54 +154,58 @@ fn bmc_credential_names_are_stable_and_distinguish_device_and_revision() {
 
 #[tokio::test]
 async fn bmc_credential_secret_is_created_immutable_and_retries_without_overwrite() {
-    let (sdk, mut handle) = fixture();
-    let name = bmc_credential_secret_name(DEVICE, 1);
-    let stored = secret(1, "new-password");
-    let operation = async {
-        assert_eq!(
-            sdk.ensure_bmc_credential_secret(DEVICE, 1, "new-password")
+    for version in [Some(3), None] {
+        let (sdk, mut handle) = fixture();
+        let name = bmc_credential_secret_name(DEVICE, version);
+        let stored = secret(version, "new-password");
+        let operation = async {
+            assert_eq!(
+                sdk.ensure_bmc_credential_secret(DEVICE, version, "new-password")
+                    .await
+                    .unwrap(),
+                name
+            );
+            assert_eq!(
+                sdk.ensure_bmc_credential_secret(DEVICE, version, "new-password")
+                    .await
+                    .unwrap(),
+                name
+            );
+            let error = sdk
+                .ensure_bmc_credential_secret(DEVICE, version, "different-password")
                 .await
-                .unwrap(),
-            name
-        );
-        assert_eq!(
-            sdk.ensure_bmc_credential_secret(DEVICE, 1, "new-password")
-                .await
-                .unwrap(),
-            name
-        );
-        let error = sdk
-            .ensure_bmc_credential_secret(DEVICE, 1, "different-password")
-            .await
-            .unwrap_err();
-        assert!(!format!("{error:?}").contains("different-password"));
-    };
-    let server = async {
-        let path = secret_path(&name);
-        exchange(&mut handle, "GET", &path, 404, missing()).await;
-        let created = exchange(
-            &mut handle,
-            "POST",
-            "/api/v1/namespaces/test-ns/secrets",
-            201,
-            stored.clone(),
-        )
-        .await;
-        assert_eq!(created["immutable"], true);
-        assert_eq!(created["metadata"]["name"], name);
-        assert_eq!(created["metadata"]["namespace"], NS);
-        assert_eq!(created["data"], stored["data"]);
-        for _ in 0..3 {
-            exchange(&mut handle, "GET", &path, 200, stored.clone()).await;
-        }
-    };
-    together(operation, server).await;
+                .unwrap_err();
+            assert!(!format!("{error:?}").contains("different-password"));
+        };
+        let server = async {
+            let path = secret_path(&name);
+            exchange(&mut handle, "GET", &path, 404, missing()).await;
+            let created = exchange(
+                &mut handle,
+                "POST",
+                "/api/v1/namespaces/test-ns/secrets",
+                201,
+                stored.clone(),
+            )
+            .await;
+            assert_eq!(created["immutable"], true);
+            assert_eq!(created["metadata"]["name"], name);
+            assert_eq!(created["metadata"]["namespace"], NS);
+            assert_eq!(created["data"], stored["data"]);
+            assert_eq!(created["metadata"]["labels"], stored["metadata"]["labels"]);
+            for _ in 0..3 {
+                exchange(&mut handle, "GET", &path, 200, stored.clone()).await;
+            }
+        };
+        together(operation, server).await;
+    }
 }
 
 #[tokio::test]
 async fn bmc_credential_create_race_validates_the_winning_secret() {
     for (scenario, password, mutable, success) in [
         ("identical concurrent create", "new-password", false, true),
+        ("wrong version label", "new-password", false, false),
         (
             "different credential at the same revision",
             "other-password",
@@ -215,14 +226,17 @@ async fn bmc_credential_create_race_validates_the_winning_secret() {
         ),
     ] {
         let (sdk, mut handle) = fixture();
-        let mut stored = secret(1, password);
+        let mut stored = secret(Some(1), password);
         stored["immutable"] = json!(!mutable);
         if scenario == "different Secret type cannot be adopted" {
             stored["type"] = json!("kubernetes.io/basic-auth");
         }
-        let operation = sdk.ensure_bmc_credential_secret(DEVICE, 1, "new-password");
+        if scenario == "wrong version label" {
+            stored["metadata"]["labels"][VERSION_LABEL] = json!("2");
+        }
+        let operation = sdk.ensure_bmc_credential_secret(DEVICE, Some(1), "new-password");
         let server = async {
-            let path = secret_path(&bmc_credential_secret_name(DEVICE, 1));
+            let path = secret_path(&bmc_credential_secret_name(DEVICE, Some(1)));
             exchange(&mut handle, "GET", &path, 404, missing()).await;
             exchange(&mut handle, "POST", "/api/v1/namespaces/test-ns/secrets", 409,
                 json!({"status": "Failure", "reason": "AlreadyExists", "message": "already exists", "code": 409})).await;
@@ -358,6 +372,7 @@ async fn bmc_credential_reference_patch_is_fenced_and_conflict_is_observable() {
 #[tokio::test]
 async fn registration_with_a_credential_never_changes_an_existing_reference() {
     let (sdk, mut handle) = fixture();
+    let name = bmc_credential_secret_name(DEVICE, Some(3));
     let info = DpuDeviceInfo {
         device_id: DEVICE.to_string(),
         dpu_bmc_ip: "192.0.2.1".parse().unwrap(),
@@ -367,10 +382,23 @@ async fn registration_with_a_credential_never_changes_an_existing_reference() {
         is_primary: true,
     };
     let operation = async {
-        sdk.register_dpu_device_with_credential(info.clone(), None, "new")
+        let secret = sdk
+            .ensure_bmc_credential_secret(DEVICE, Some(3), "established-password")
             .await
             .unwrap();
-        sdk.register_dpu_device_with_credential(info.clone(), None, "new")
+        assert!(
+            sdk.register_dpu_device_with_credential(info.clone(), None, &secret)
+                .await
+                .is_err()
+        );
+        let secret = sdk
+            .ensure_bmc_credential_secret(DEVICE, Some(3), "established-password")
+            .await
+            .unwrap();
+        sdk.register_dpu_device_with_credential(info.clone(), None, &secret)
+            .await
+            .unwrap();
+        sdk.register_dpu_device_with_credential(info.clone(), None, &secret)
             .await
             .unwrap();
         assert!(
@@ -380,7 +408,23 @@ async fn registration_with_a_credential_never_changes_an_existing_reference() {
         );
     };
     let server = async {
-        let created = device(Some("new"), None, "Unknown", "Reconciling");
+        let stored = secret(Some(3), "established-password");
+        let path = secret_path(&name);
+        exchange(&mut handle, "GET", &path, 404, missing()).await;
+        exchange(
+            &mut handle,
+            "POST",
+            "/api/v1/namespaces/test-ns/secrets",
+            201,
+            stored.clone(),
+        )
+        .await;
+        exchange(&mut handle, "GET", &path, 200, stored.clone()).await;
+        exchange(&mut handle, "GET", DEVICE_PATH, 404, missing()).await;
+        exchange(&mut handle, "POST", "/apis/provisioning.dpu.nvidia.com/v1alpha1/namespaces/test-ns/dpudevices", 503,
+            json!({"status": "Failure", "reason": "ServiceUnavailable", "message": "retry", "code": 503})).await;
+        exchange(&mut handle, "GET", &path, 200, stored).await;
+        let created = device(Some(&name), None, "Unknown", "Reconciling");
         exchange(&mut handle, "GET", DEVICE_PATH, 404, missing()).await;
         let request = exchange(
             &mut handle,
@@ -390,7 +434,7 @@ async fn registration_with_a_credential_never_changes_an_existing_reference() {
             created.clone(),
         )
         .await;
-        assert_eq!(request["spec"]["bmcCredentialSecretName"], "new");
+        assert_eq!(request["spec"]["bmcCredentialSecretName"], name);
         for _ in 0..2 {
             exchange(&mut handle, "GET", DEVICE_PATH, 200, created.clone()).await;
         }
@@ -433,8 +477,8 @@ async fn old_bmc_credential_cleanup_preserves_active_foreign_and_replaced_secret
         "already missing",
     ] {
         let (sdk, mut handle) = fixture();
-        let old_name = bmc_credential_secret_name(DEVICE, 0);
-        let new_name = bmc_credential_secret_name(DEVICE, 1);
+        let old_name = bmc_credential_secret_name(DEVICE, Some(0));
+        let new_name = bmc_credential_secret_name(DEVICE, Some(1));
         let operation = sdk.delete_old_bmc_credential_secret(DEVICE, &old_name, &new_name);
         let server = async {
             let current = device(
@@ -455,7 +499,7 @@ async fn old_bmc_credential_cleanup_preserves_active_foreign_and_replaced_secret
                 exchange(&mut handle, "GET", &secret_path(&old_name), 404, missing()).await;
                 return;
             }
-            let mut old_secret = secret(0, "old-password");
+            let mut old_secret = secret(Some(0), "old-password");
             if scenario == "foreign" {
                 old_secret["metadata"]["labels"] = json!({});
             }
