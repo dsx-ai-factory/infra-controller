@@ -220,7 +220,7 @@ The existing gates need explicit backend-aware equivalents:
 | --- | --- | --- |
 | Mandatory pool startup checks | Integrated and unbound pools require free local inventory. A saved remote binding requires an accepted definition; pending growth does not hide an earlier accepted revision. Shared remote registration also checks provider protocol, identity, and value domain. Consumer-specific remote readiness follows with caller adoption | [Shared startup](https://github.com/dsx-ai-factory/infra-controller/issues/8297), P11, v2.5 pool enablement |
 | Optional IPv6 allocation and backfill | An absent binding means unconfigured; a configured exhausted pool remains an allocation error | v2.5 loopback enablement |
-| ASN backfill | Preserve absent/full skipping using backend status; unknown capacity requires a visible retry or unsupported result | v2.5 ASN enablement |
+| ASN backfill | Integrated retains its absent/full inventory gate and batch. Remote attempts use the saved binding and accepted definition; per-DPU failure does not block later rows, and Stats is not an admission gate | v2.5 ASN enablement |
 | VPC routing-profile transition | Check destination presence and complete effective internal/external VNI membership for overlap, including manual and allocated values | P08, P12 |
 | Metrics, list, and IP finder | Inspect the selected backend or durable assignment records appropriate to the query; preserve unknown and unavailable states | P09, P10 |
 
@@ -347,7 +347,8 @@ Apply those authority rules to every allocation caller:
 | API create or VPC routing-profile mutation | Active foreground attempt with deadline; mutation also fences the existing entity version and selected pool |
 | Configured initial VPC creation | Active foreground attempt with deadline; recheck the configured name under a transaction lock before attachment, and skip names already committed |
 | DPU IPv4 discovery, Site Explorer creation, or repair | Active foreground attempt with deadline; recheck the captured machine lifetime and deletion state, attach with the machine writes, and cancel abandoned preparation |
-| ASN or IPv6 backfill | Persisted desire for the existing machine slot; revalidate machine existence, generation, and deletion state |
+| ASN backfill | Active foreground attempt with deadline; revalidate the captured machine lifetime and deletion state, and cancel unused attempts before another generation |
+| IPv6 backfill | Integrated reservation and conditional machine write in one transaction; remote IPv6 caller adoption remains separate |
 | VPC-DPU loopback | Persisted VPC/DPU slot desire; [P20](https://github.com/dsx-ai-factory/infra-controller/issues/7141) and v2.5 P21 prepare the assignment before network-config rendering |
 
 DPU IPv4 discovery and Site Explorer creation use foreground preparation through `PreparedDpuLoopback`. They save no separate creation desire for allocator recovery to finish after a restart. A later discovery attempt rechecks the machine and its attached allocation; an earlier unattached attempt must finish cancellation before the same slot can be allocated again. Configured VPC startup likewise starts a new foreground attempt for each missing name. Allocator recovery cleans up abandoned foreground attempts.

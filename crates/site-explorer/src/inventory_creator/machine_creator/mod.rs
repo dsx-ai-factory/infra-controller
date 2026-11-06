@@ -57,6 +57,7 @@ use tokio_util::sync::CancellationToken;
 use super::Config;
 use crate::IdentifiedManagedHost;
 use crate::boot_interfaces::reconcile_desired_boot_interface;
+use crate::dpu_asn::PreparedDpuAsn;
 use crate::dpu_loopback::PreparedDpuLoopback;
 use crate::errors::{SiteExplorerError, SiteExplorerResult};
 use crate::explored_endpoint_index::ExploredEndpointIndex;
@@ -306,9 +307,9 @@ impl MachineCreator {
     ///
     /// Returns `true` only when new machines have been created.
     ///
-    /// Prepares missing DPU IPv4 loopbacks through the configured backend before
-    /// the machine transaction, then attaches them with the network config.
-    /// Existing loopback ownership is reused during repair.
+    /// Prepares DPU IPv4 loopbacks and ASNs through the configured allocators
+    /// before the machine transaction, then attaches them after interface writes.
+    /// ASN allocation failures remain nonfatal; existing remote ownership is reused.
     ///
     /// Both creation and reconciliation require a matching `expected_machine` entry.
     pub async fn create_managed_host(
@@ -357,21 +358,36 @@ impl MachineCreator {
         // Resolve siblings together so later provider calls cannot age the
         // first reservation past its attachment deadline. `join_all` drains every
         // result and retains report order for Integrated assignment below.
-        let preparations = join_all(dpu_ids.into_iter().map(|machine_id| {
-            PreparedDpuLoopback::prepare(
-                pool,
-                &self.resource_pool_registry,
-                &self.common_pools,
-                machine_id.into(),
-                &self.preparation_cancel_token,
+        let preparations = join_all(dpu_ids.into_iter().map(|machine_id| async move {
+            tokio::join!(
+                PreparedDpuLoopback::prepare(
+                    pool,
+                    &self.resource_pool_registry,
+                    &self.common_pools,
+                    machine_id.into(),
+                    &self.preparation_cancel_token,
+                ),
+                PreparedDpuAsn::prepare(
+                    pool,
+                    &self.resource_pool_registry,
+                    &self.common_pools,
+                    machine_id.into(),
+                    &self.preparation_cancel_token,
+                ),
             )
         }))
         .await;
         let mut loopbacks = Vec::with_capacity(preparations.len());
+        let mut asns = Vec::with_capacity(preparations.len());
         let mut preparation_error = None;
-        for preparation in preparations {
-            match preparation {
+        for (loopback, asn) in preparations {
+            match loopback {
                 Ok(prepared) => loopbacks.push(prepared),
+                Err(error) if preparation_error.is_none() => preparation_error = Some(error),
+                Err(_) => {}
+            }
+            match asn {
+                Ok(prepared) => asns.push(prepared),
                 Err(error) if preparation_error.is_none() => preparation_error = Some(error),
                 Err(_) => {}
             }
@@ -381,13 +397,14 @@ impl MachineCreator {
             if let Some(error) = preparation_error {
                 return Err(error.into());
             }
-            // Bound admission only while a provider reservation is waiting.
-            // Integrated allocation and repair retain their existing wait.
+            // Remote ASN attempts also need bounded admission after a nonfatal
+            // error, so owning cancellation still stops the caller here.
             let admission_start = Instant::now();
-            let admission: SiteExplorerResult<_> = if !loopbacks
+            let needs_bounded_admission = loopbacks
                 .iter()
                 .any(PreparedDpuLoopback::has_provider_reservation)
-            {
+                || asns.iter().any(PreparedDpuAsn::needs_bounded_admission);
+            let admission: SiteExplorerResult<_> = if !needs_bounded_admission {
                 Ok(db::machine_interface::admin_lock_admission().await)
             } else {
                 match self
@@ -423,6 +440,7 @@ impl MachineCreator {
                     expected_machine,
                     primary_interface_selection,
                     &loopbacks,
+                    &asns,
                 )
                 .await;
             record_creation_stage(
@@ -437,6 +455,11 @@ impl MachineCreator {
         for prepared in &loopbacks {
             if let Err(error) = prepared.cancel(pool).await {
                 tracing::error!(machine_id = %prepared.machine_id(), %error, "Could not save DPU loopback cancellation");
+            }
+        }
+        for prepared in &asns {
+            if let Err(error) = prepared.cancel(pool).await {
+                tracing::error!(machine_id = %prepared.machine_id(), error = %error, "Could not save DPU ASN cancellation");
             }
         }
         let (creation, _admin_admission) = creation?;
@@ -459,6 +482,8 @@ impl MachineCreator {
     /// the DPU-backed branch holding the admin segment locks in allocation
     /// mode. Returns after the commit; the caller runs the admin address
     /// repair.
+    // Keep both resource preparations explicit alongside the existing creation inputs.
+    #[allow(clippy::too_many_arguments)]
     async fn create_managed_host_in_transaction(
         &self,
         pool: &PgPool,
@@ -467,11 +492,15 @@ impl MachineCreator {
         expected_machine: &ExpectedMachine,
         primary_interface_selection: Option<HostPrimaryInterfaceSelection>,
         loopbacks: &[PreparedDpuLoopback<'_>],
+        asns: &[PreparedDpuAsn<'_>],
     ) -> SiteExplorerResult<ManagedHostCreation> {
         let machine_data = Some(&expected_machine.data);
         let mut managed_host = ManagedHost::init(explored_host);
         let mut txn = Transaction::begin(pool).await?;
         for prepared in loopbacks {
+            prepared.check_identity(&mut txn).await?;
+        }
+        for prepared in asns {
             prepared.check_identity(&mut txn).await?;
         }
 
@@ -521,6 +550,9 @@ impl MachineCreator {
             for prepared in loopbacks {
                 prepared.check_identity(&mut txn).await?;
             }
+            for prepared in asns {
+                prepared.check_identity(&mut txn).await?;
+            }
 
             Self::reconcile_existing_dpu_host(
                 &mut txn,
@@ -531,6 +563,9 @@ impl MachineCreator {
 
             for prepared in loopbacks {
                 prepared.attach(&mut txn, false).await?;
+            }
+            for prepared in asns {
+                prepared.attach(&mut txn).await?;
             }
             txn.commit().await?;
             return Ok(ManagedHostCreation::Repaired {
@@ -549,6 +584,9 @@ impl MachineCreator {
             // them exclusively. Recheck after that fence and hold it through
             // creation, so an intervening create/delete cannot become absence.
             for prepared in loopbacks {
+                prepared.check_identity(&mut txn).await?;
+            }
+            for prepared in asns {
                 prepared.check_identity(&mut txn).await?;
             }
         }
@@ -575,6 +613,9 @@ impl MachineCreator {
         // Every host link exists before the machine-group configuration updates.
         for prepared in loopbacks {
             prepared.attach(&mut txn, true).await?;
+        }
+        for prepared in asns {
+            prepared.attach(&mut txn).await?;
         }
 
         // Now since all DPUs are created, update host and DPUs state correctly.
@@ -1039,8 +1080,8 @@ impl MachineCreator {
     // configures it appropriately, returning the new `Machine`.
     // If the DPU already exists in the machines table, this is a no-op and returns `None`.
     //
-    // `db::machine::create` can persist pool-backed defaults on the new row.
-    // The full `network_config` reconciliation and version bump wait until
+    // Prepared resources attach after all interfaces have been written.
+    // Network configuration and its group version bump wait until
     // `attach_dpu_to_host` wires the host link in `machine_interfaces`; only
     // then can `try_update_network_config` observe both siblings and keep their
     // versions equal.
@@ -1129,9 +1170,8 @@ impl MachineCreator {
         Ok(false)
     }
 
-    // create_dpu_machine creates a machine for the DPU as specified by dpu_machine_id. Returns an Optional Machine indicating whether the function created a new machine (returns None if a machine already existed for this DPU).
-    // if an entry exists in the machines table with a machine ID which matches dpu_machine_id, a machine has already been created for this DPU. Returns None.
-    // if an entry doesnt exist in the machine table, the site explorer will add an entry in the machines table for the DPU and update its network config appropriately (allocating a loop ip address etc). Return the newly created machine.
+    // Create only the DPU row here. Prepared loopback and ASN resources attach
+    // after all host interfaces exist; an existing row needs no insertion.
     async fn create_dpu_machine(
         &self,
         txn: &mut PgConnection,
@@ -1145,7 +1185,7 @@ impl MachineCreator {
             Some(_existing_machine) => Ok(None),
             None => match db::machine::create(
                 txn,
-                Some(&self.common_pools),
+                None,
                 dpu_machine_id,
                 ManagedHostState::Created,
                 None,

@@ -86,6 +86,7 @@ mod host_reconciler;
 use host_reconciler::HostReconciler;
 mod boot_order_tracker;
 use boot_order_tracker::BootOrderTracker;
+pub mod dpu_asn;
 pub mod dpu_loopback;
 mod inventory_creator;
 pub use inventory_creator::{

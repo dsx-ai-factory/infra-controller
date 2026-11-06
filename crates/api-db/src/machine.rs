@@ -2379,6 +2379,8 @@ pub async fn clear_failure_details(
 ///
 /// If metadata.name is empty then it is initialized in
 /// stable_machine_id.to_string().
+/// `common_pools` supplies Integrated DPU ASN and optional IPv6 allocation.
+/// Callers using the configured allocator pass `None` and attach resources separately.
 pub async fn create(
     txn: &mut PgConnection,
     common_pools: Option<&CommonPools>,
@@ -4074,6 +4076,67 @@ pub async fn get_lockdown_ikm_credential_rotation_requested(
             },
             e => DatabaseError::new("get_lockdown_ikm_credential_rotation_requested", e),
         })
+}
+
+/// `get_asn` reads a machine's optional ASN, returning an error for a missing row.
+pub async fn get_asn(
+    database: impl DbReader<'_>,
+    machine_id: &MachineId,
+) -> DatabaseResult<Option<u32>> {
+    let query = "SELECT asn FROM machines WHERE id = $1";
+    let asn: Option<i64> = sqlx::query_scalar(query)
+        .bind(machine_id)
+        .fetch_one(database)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))?;
+    asn.map(|asn| u32::try_from(asn).map_err(|error| DatabaseError::internal(error.to_string())))
+        .transpose()
+}
+
+/// The ASN target is missing, replaced, already assigned or marked `ForceDeletion`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MachineAsnNotCurrent;
+
+/// `try_update_asn_for_created` fills only an absent ASN on the captured live row.
+/// Missing, replaced, `ForceDeletion` and already assigned rows return `NotApplied`.
+/// Roll back the associated allocation when this conditional write loses.
+pub async fn try_update_asn_for_created(
+    txn: &mut PgConnection,
+    machine_id: &MachineId,
+    created: DateTime<Utc>,
+    asn: u32,
+) -> DatabaseResult<ConditionalWrite<(), MachineAsnNotCurrent>> {
+    let query = "UPDATE machines SET asn = $1 WHERE id = $2 AND created = $3
+        AND asn IS NULL AND controller_state != $4::jsonb";
+    let updated = sqlx::query(query)
+        .bind(i64::from(asn))
+        .bind(machine_id)
+        .bind(created)
+        .bind(sqlx::types::Json(&ManagedHostState::ForceDeletion))
+        .execute(txn)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))?
+        .rows_affected();
+    Ok(if updated == 0 {
+        ConditionalWrite::NotApplied(MachineAsnNotCurrent)
+    } else {
+        ConditionalWrite::Applied(())
+    })
+}
+
+/// `find_dpu_ids_without_asn` lists the DPU rows eligible for ASN backfill.
+/// A later assignment must recheck the row's lifetime, ASN and deletion state.
+pub async fn find_dpu_ids_without_asn(
+    database: impl DbReader<'_>,
+) -> DatabaseResult<Vec<MachineId>> {
+    let query = "SELECT id FROM machines WHERE starts_with(id, $1) AND asn IS NULL
+        AND controller_state != $2::jsonb ORDER BY id";
+    sqlx::query_as(query)
+        .bind(MachineType::Dpu.id_prefix())
+        .bind(sqlx::types::Json(&ManagedHostState::ForceDeletion))
+        .fetch_all(database)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))
 }
 
 /// `update_dpu_asns` backfills missing DPU ASNs. If an assignment no longer

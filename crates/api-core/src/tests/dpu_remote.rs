@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Exercise DPU loopback callers below the production remote-selection gate.
+//! Exercise DPU pool callers below the production remote-selection gate.
 
 use std::collections::HashSet;
 use std::future::{Future, poll_fn};
@@ -10,12 +10,16 @@ use std::sync::atomic::Ordering;
 use std::task::Poll;
 use std::time::Duration;
 
-use carbide_resource_pool::{PoolDefinitionSource, ResourcePoolBackendError};
+use carbide_instrument::testing::capture_logs_async;
+use carbide_resource_pool::{
+    PoolDefinitionSource, ResourcePoolBackendError, ResourcePoolRegistry, ResourcePoolRegistryError,
+};
 use carbide_site_explorer::config::SiteExplorerConfig;
+use carbide_site_explorer::dpu_asn::{DPU_ASN_SLOT, PreparedDpuAsn, update_dpu_asns};
 use carbide_site_explorer::dpu_loopback::{DPU_IPV4_LOOPBACK_SLOT, PreparedDpuLoopback};
 use carbide_site_explorer::errors::SiteExplorerError;
 use carbide_site_explorer::{MachineCreator, SiteExplorer};
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::{MachineId, MachineIdSource, MachineType};
 use db::resource_pool::remote;
 use model::expected_machine::ExpectedMachine;
 use model::hardware_info::HardwareInfo;
@@ -24,7 +28,7 @@ use model::machine::machine_search_config::MachineSearchConfig;
 use model::machine::{CURRENT_STATE_MODEL_VERSION, ManagedHostState};
 use model::resource_pool::OwnerType;
 use model::resource_pool::allocation::{AllocationSource, AllocationState, ResourcePoolAllocation};
-use model::resource_pool::common::LOOPBACK_IP;
+use model::resource_pool::common::{FNN_ASN, LOOPBACK_IP};
 use model::resource_pool::remote::AllocationResult;
 use model::site_explorer::{EndpointExplorationReport, ExploredDpu, ExploredManagedHost};
 use rpc::forge;
@@ -59,10 +63,11 @@ struct DpuInputs {
 enum AdmissionCase {
     DiscoveryDeadline,
     ExplorerCancellation,
+    ExplorerFailureCancellation,
 }
 
 /// Prepare discovery and exploration inputs without creating a machine. Moving
-/// the unused loopback pool first keeps every reservation on the test provider.
+/// the unused loopback pool first selects the provider for IPv4 reservations.
 async fn fixture(database: PgPool) -> eyre::Result<(RemotePoolFixture, DpuInputs)> {
     fixture_with_dpu_count(database, 1).await
 }
@@ -73,7 +78,15 @@ async fn fixture_with_dpu_count(
     database: PgPool,
     dpu_count: u8,
 ) -> eyre::Result<(RemotePoolFixture, DpuInputs)> {
-    let mut fixture = RemotePoolFixture::start_ipv4(database).await?;
+    let fixture = RemotePoolFixture::start_ipv4(database).await?;
+    inputs_for_fixture(fixture, dpu_count).await
+}
+
+/// Build matching discovery and Site Explorer reports for the selected pool fixture.
+async fn inputs_for_fixture(
+    mut fixture: RemotePoolFixture,
+    dpu_count: u8,
+) -> eyre::Result<(RemotePoolFixture, DpuInputs)> {
     fixture
         .initialize(PoolDefinitionSource::SeedConfiguration)
         .await?;
@@ -163,14 +176,847 @@ async fn receipt(
     fixture: &RemotePoolFixture,
     machine_id: MachineId,
 ) -> eyre::Result<ResourcePoolAllocation> {
-    Ok(remote::latest_for_owner_slot(
+    allocation_receipt(fixture, machine_id, DPU_IPV4_LOOPBACK_SLOT).await
+}
+
+/// Include Pending and terminal ASN requests so cleanup assertions retain identity.
+async fn asn_receipt(
+    fixture: &RemotePoolFixture,
+    machine_id: MachineId,
+) -> eyre::Result<ResourcePoolAllocation> {
+    allocation_receipt(fixture, machine_id, DPU_ASN_SLOT).await
+}
+
+async fn allocation_receipt(
+    fixture: &RemotePoolFixture,
+    machine_id: MachineId,
+    slot: &str,
+) -> eyre::Result<ResourcePoolAllocation> {
+    remote::latest_for_owner_slot(
         &fixture.env.pool,
         OwnerType::Machine,
         &machine_id.to_string(),
-        DPU_IPV4_LOOPBACK_SLOT,
+        slot,
     )
     .await?
-    .expect("saved DPU IPv4 request"))
+    .ok_or_else(|| eyre::eyre!("missing saved request for {machine_id}/{slot}"))
+}
+
+/// Check that the machine ASN exactly matches its attached provider assignment.
+async fn assert_asn_assignment(
+    fixture: &RemotePoolFixture,
+    machine_id: MachineId,
+) -> eyre::Result<()> {
+    let saved = asn_receipt(fixture, machine_id).await?;
+    assert_eq!(saved.state, AllocationState::Attached);
+    let AllocationSource::Remote {
+        result: Some(AllocationResult::Allocated(assignment)),
+        ..
+    } = saved.source
+    else {
+        panic!("attached ASN retains its provider assignment");
+    };
+    let asn = db::machine::get_asn(&fixture.env.pool, &machine_id)
+        .await?
+        .expect("persisted attached ASN");
+    assert_eq!(
+        assignment.value,
+        model::resource_pool::allocation::ResourcePoolValue::Integer(i64::from(asn))
+    );
+    Ok(())
+}
+
+/// Best-effort ASN preparation propagates owning cancellation and retains cleanup.
+#[crate::sqlx_test]
+async fn remote_dpu_asn_preparation_propagates_owning_cancellation(
+    database: PgPool,
+) -> eyre::Result<()> {
+    Box::pin(async move {
+        let mut fixture = RemotePoolFixture::start_asn(database).await?;
+        fixture.initialize(PoolDefinitionSource::SeedConfiguration).await?;
+        let machine_id = "fm100dskla0ihp0pn4tv7v1js2k2mo37sl0jjr8141okqg8pjpdpfihaa80".parse()?;
+        let cancel = CancellationToken::new();
+        fixture.provider.allocate_pause.pause_next.store(true, Ordering::SeqCst);
+        let mut preparation = Box::pin(PreparedDpuAsn::prepare(&fixture.env.pool,
+            &fixture.env.api.resource_pool_registry, &fixture.env.common_pools, machine_id, &cancel));
+        tokio::select! {
+            result = &mut preparation => panic!("ASN preparation passed the provider gate: {}", result.is_ok()),
+            result = wait_for_preparation(&fixture.provider.allocate_pause) => result?,
+        }
+        cancel.cancel();
+        let result = tokio::time::timeout(Duration::from_secs(5), &mut preparation).await?;
+        let error = result.err().expect("owning cancellation stops ASN preparation");
+        assert!(matches!(error, ResourcePoolBackendError::Cancelled { operation: "DPU ASN allocation" }));
+        let cancelled = asn_receipt(&fixture, machine_id).await?;
+        assert_eq!(cancelled.state, AllocationState::CancelRequested);
+        fixture.provider.allocate_pause.resume.notify_one();
+        fixture.remote(FNN_ASN).reconcile(cancelled.allocation_id, &fixture.cancel).await?;
+        assert_eq!(asn_receipt(&fixture, machine_id).await?.state, AllocationState::Cancelled);
+        assert_eq!(fixture.provider.local.provisioned_count(), 0);
+        drop(preparation);
+        fixture.stop().await
+    }).await
+}
+
+/// A competing backfill cannot replace discovery's request while its reply is
+/// uncertain. Later repair and deletion must use that same saved assignment.
+#[crate::sqlx_test]
+async fn remote_dpu_asn_workers_reuse_the_assignment_after_a_lost_reply(
+    database: PgPool,
+) -> eyre::Result<()> {
+    Box::pin(async move {
+        let (fixture, mut inputs) =
+            inputs_for_fixture(RemotePoolFixture::start_asn(database).await?, 1).await?;
+        fixture
+            .provider
+            .stats_unavailable
+            .store(true, Ordering::SeqCst);
+        let mut txn = fixture.env.pool.begin().await?;
+        db::machine::create(
+            &mut txn,
+            None,
+            &inputs.machine_id,
+            ManagedHostState::Created,
+            None,
+            CURRENT_STATE_MODEL_VERSION,
+        )
+        .await?;
+        txn.commit().await?;
+        fixture
+            .provider
+            .allocate_pause
+            .pause_next
+            .store(true, Ordering::SeqCst);
+        fixture
+            .provider
+            .lose_allocate_reply
+            .store(true, Ordering::SeqCst);
+        let api = fixture.env.api.clone();
+        let mut discovery = api.discover_machine(Request::new(inputs.request.clone()));
+        tokio::select! {
+            result = &mut discovery => panic!("discovery passed the provider gate: {result:?}"),
+            result = wait_for_preparation(&fixture.provider.allocate_pause) => result?,
+        }
+        let pending = asn_receipt(&fixture, inputs.machine_id).await?;
+        assert_eq!(pending.state, AllocationState::Pending);
+        let error = update_dpu_asns(
+            &fixture.env.pool,
+            &fixture.env.api.resource_pool_registry,
+            &fixture.env.common_pools,
+            &fixture.cancel,
+        )
+        .await
+        .expect_err("backfill cannot replace discovery's pending request");
+        assert!(matches!(error, ResourcePoolBackendError::Database(db::DatabaseError::FailedPrecondition(ref message))
+            if message.contains("unfinished request") && message.contains(DPU_ASN_SLOT)));
+        assert_eq!(asn_receipt(&fixture, inputs.machine_id).await?, pending);
+        assert_eq!(
+            db::machine::get_asn(&fixture.env.pool, &inputs.machine_id).await?,
+            None
+        );
+        fixture.provider.allocate_pause.resume.notify_one();
+        tokio::time::timeout(Duration::from_secs(10), &mut discovery).await??;
+        let attached = asn_receipt(&fixture, inputs.machine_id).await?;
+        assert_eq!(attached.allocation_id, pending.allocation_id);
+        assert_eq!(attached.state, AllocationState::Attached);
+        let asn = db::machine::get_asn(&fixture.env.pool, &inputs.machine_id)
+            .await?
+            .expect("discovery attached ASN");
+        let AllocationSource::Remote {
+            result: Some(AllocationResult::Allocated(assignment)),
+            ..
+        } = &attached.source
+        else {
+            panic!("attached ASN retains provider assignment");
+        };
+        assert_eq!(
+            assignment.value,
+            model::resource_pool::allocation::ResourcePoolValue::Integer(i64::from(asn))
+        );
+        fixture.env.api.discover_machine(Request::new(inputs.request.clone())).await?;
+        assert_eq!(fixture.provider.allocations.load(Ordering::SeqCst), 1,
+            "a configured ASN must not prepare another provider request");
+
+        // Site Explorer restores a cleared field from the attached assignment.
+        sqlx::query("UPDATE machines SET asn = NULL WHERE id = $1")
+            .bind(inputs.machine_id)
+            .execute(&fixture.env.pool)
+            .await?;
+        assert!(
+            !creator(&fixture)
+                .create_managed_host(
+                    &inputs.explored,
+                    &mut inputs.host_report,
+                    Some(&inputs.expected),
+                    &fixture.env.pool,
+                )
+                .await?
+        );
+        assert_eq!(
+            db::machine::get_asn(&fixture.env.pool, &inputs.machine_id).await?,
+            Some(asn)
+        );
+        assert_eq!(asn_receipt(&fixture, inputs.machine_id).await?, attached);
+        assert_eq!(fixture.provider.allocations.load(Ordering::SeqCst), 1);
+
+        // The force-delete snapshot no longer names the ASN. Saved ownership
+        // still identifies the original handle that recovery must release.
+        sqlx::query("UPDATE machines SET asn = NULL WHERE id = $1")
+            .bind(inputs.machine_id)
+            .execute(&fixture.env.pool)
+            .await?;
+        assert!(
+            fixture
+                .env
+                .api
+                .admin_force_delete_machine(Request::new(forge::AdminForceDeleteMachineRequest {
+                    host_query: inputs.machine_id.to_string(),
+                    ..Default::default()
+                }))
+                .await?
+                .into_inner()
+                .all_done
+        );
+        let released = asn_receipt(&fixture, inputs.machine_id).await?;
+        assert_eq!(released.allocation_id, attached.allocation_id);
+        assert_eq!(released.source, attached.source);
+        assert_eq!(released.state, AllocationState::ReleaseRequested);
+        fixture
+            .remote(FNN_ASN)
+            .reconcile(released.allocation_id, &fixture.cancel)
+            .await?;
+        assert_eq!(
+            asn_receipt(&fixture, inputs.machine_id).await?.state,
+            AllocationState::Released
+        );
+        assert_eq!(fixture.provider.local.provisioned_count(), 0);
+        drop(discovery);
+        fixture.stop().await
+    })
+    .await
+}
+
+/// ASN rejection must still commit Site Explorer's machines. Discovery cannot
+/// replace that attempt until shared cleanup makes it terminal; backfill then
+/// assigns through the provider even though local ASN inventory is empty.
+#[crate::sqlx_test]
+async fn remote_dpu_asn_failure_is_nonfatal_until_backfill_after_cleanup(
+    database: PgPool,
+) -> eyre::Result<()> {
+    Box::pin(async move {
+        let (fixture, mut inputs) =
+            inputs_for_fixture(RemotePoolFixture::start_asn(database).await?, 1).await?;
+        fixture
+            .provider
+            .stats_unavailable
+            .store(true, Ordering::SeqCst);
+        fixture
+            .provider
+            .reject_allocate_call
+            .store(1, Ordering::SeqCst);
+        let creator = creator(&fixture);
+        let (result, logs) = capture_logs_async(creator.create_managed_host(
+            &inputs.explored,
+            &mut inputs.host_report,
+            Some(&inputs.expected),
+            &fixture.env.pool,
+        ))
+        .await;
+        assert!(result?);
+        assert!(
+            logs.iter()
+                .any(|log| log.message == "Failed to allocate ASN for DPU"
+                    && log.field("stable_machine_id")
+                        == Some(inputs.machine_id.to_string().as_str()))
+        );
+        assert_eq!(
+            db::machine::get_asn(&fixture.env.pool, &inputs.machine_id).await?,
+            None
+        );
+        let failed = asn_receipt(&fixture, inputs.machine_id).await?;
+        assert_eq!(failed.state, AllocationState::CancelRequested);
+        fixture
+            .env
+            .api
+            .discover_machine(Request::new(inputs.request.clone()))
+            .await?;
+        assert_eq!(
+            db::machine::get_asn(&fixture.env.pool, &inputs.machine_id).await?,
+            None
+        );
+        assert_eq!(asn_receipt(&fixture, inputs.machine_id).await?, failed);
+        assert_eq!(fixture.provider.allocations.load(Ordering::SeqCst), 1);
+        fixture
+            .remote(FNN_ASN)
+            .reconcile(failed.allocation_id, &fixture.cancel)
+            .await?;
+        assert_eq!(
+            asn_receipt(&fixture, inputs.machine_id).await?.state,
+            AllocationState::Cancelled
+        );
+        fixture
+            .provider
+            .reject_allocate_call
+            .store(0, Ordering::SeqCst);
+        update_dpu_asns(
+            &fixture.env.pool,
+            &fixture.env.api.resource_pool_registry,
+            &fixture.env.common_pools,
+            &fixture.cancel,
+        )
+        .await?;
+        let attached = asn_receipt(&fixture, inputs.machine_id).await?;
+        let AllocationSource::Remote {
+            result: Some(AllocationResult::Allocated(assignment)),
+            ..
+        } = &attached.source
+        else {
+            panic!("backfill retains its exact provider assignment");
+        };
+        let asn = db::machine::get_asn(&fixture.env.pool, &inputs.machine_id)
+            .await?
+            .expect("backfilled ASN");
+        assert_eq!(
+            assignment.value,
+            model::resource_pool::allocation::ResourcePoolValue::Integer(i64::from(asn))
+        );
+        assert_ne!(attached.allocation_id, failed.allocation_id);
+        assert_eq!(attached.state, AllocationState::Attached);
+        assert_eq!(fixture.provider.allocations.load(Ordering::SeqCst), 2);
+        assert_eq!(fixture.provider.local.provisioned_count(), 1);
+        fixture.stop().await
+    })
+    .await
+}
+
+/// A filled ASN needs no row lock; a missing ASN uses nonblocking group locking.
+/// Both losing plans retain cleanup for the exact unused provider reservation.
+#[crate::sqlx_test]
+async fn remote_dpu_asn_attachment_avoids_blocking_cancels_its_provider_reservation(
+    database: PgPool,
+) -> eyre::Result<()> {
+    let mut fixture = RemotePoolFixture::start_asn(database).await?;
+    fixture
+        .initialize(PoolDefinitionSource::SeedConfiguration)
+        .await?;
+    let machine_id = "fm100dskla0ihp0pn4tv7v1js2k2mo37sl0jjr8141okqg8pjpdpfihaa80".parse()?;
+    let mut txn = fixture.env.pool.begin().await?;
+    db::machine::create(
+        &mut txn,
+        None,
+        &machine_id,
+        ManagedHostState::Created,
+        None,
+        CURRENT_STATE_MODEL_VERSION,
+    )
+    .await?;
+    txn.commit().await?;
+    let prepared = PreparedDpuAsn::prepare(
+        &fixture.env.pool,
+        &fixture.env.api.resource_pool_registry,
+        &fixture.env.common_pools,
+        machine_id,
+        &fixture.cancel,
+    )
+    .await?;
+    assert!(prepared.needs_bounded_admission());
+    let pending = asn_receipt(&fixture, machine_id).await?;
+    sqlx::query("UPDATE machines SET asn = 64599 WHERE id = $1")
+        .bind(machine_id)
+        .execute(&fixture.env.pool)
+        .await?;
+    let mut held = fixture.env.pool.begin().await?;
+    db::machine::lock_by_id_for_update(&mut held, &machine_id).await?;
+    let mut txn = fixture.env.pool.begin().await?;
+    tokio::time::timeout(Duration::from_secs(1), prepared.attach(&mut txn)).await??;
+    txn.commit().await?;
+    held.rollback().await?;
+    prepared.cancel(&fixture.env.pool).await?;
+    assert_eq!(
+        db::machine::get_asn(&fixture.env.pool, &machine_id).await?,
+        Some(64599)
+    );
+    let cancelled = asn_receipt(&fixture, machine_id).await?;
+    assert_eq!(cancelled.allocation_id, pending.allocation_id);
+    assert_eq!(cancelled.state, AllocationState::CancelRequested);
+    fixture
+        .remote(FNN_ASN)
+        .reconcile(cancelled.allocation_id, &fixture.cancel)
+        .await?;
+    assert_eq!(
+        asn_receipt(&fixture, machine_id).await?.state,
+        AllocationState::Cancelled
+    );
+    assert_eq!(fixture.provider.local.provisioned_count(), 0);
+    drop(prepared);
+    sqlx::query("UPDATE machines SET asn = NULL WHERE id = $1")
+        .bind(machine_id)
+        .execute(&fixture.env.pool)
+        .await?;
+    let prepared = PreparedDpuAsn::prepare(
+        &fixture.env.pool,
+        &fixture.env.api.resource_pool_registry,
+        &fixture.env.common_pools,
+        machine_id,
+        &fixture.cancel,
+    )
+    .await?;
+    let mut held = fixture.env.pool.begin().await?;
+    db::machine::lock_by_id_for_update(&mut held, &machine_id).await?;
+    let mut txn = fixture.env.pool.begin().await?;
+    let error = tokio::time::timeout(Duration::from_secs(1), prepared.attach(&mut txn))
+        .await?
+        .expect_err("missing ASN must fail promptly on a busy group");
+    assert!(
+        matches!(error, ResourcePoolBackendError::Database(db::DatabaseError::FailedPrecondition(ref message))
+        if message.contains("busy; retry"))
+    );
+    txn.rollback().await?;
+    held.rollback().await?;
+    prepared.cancel(&fixture.env.pool).await?;
+    let cancelled = asn_receipt(&fixture, machine_id).await?;
+    assert_eq!(cancelled.state, AllocationState::CancelRequested);
+    fixture
+        .remote(FNN_ASN)
+        .reconcile(cancelled.allocation_id, &fixture.cancel)
+        .await?;
+    drop(prepared);
+    fixture.stop().await
+}
+
+/// SQL failure must leave creation able to commit, and a value that fails to
+/// parse after allocation must leave no unused native reservation behind.
+#[crate::sqlx_test]
+async fn integrated_dpu_asn_allocation_failures_preserve_creation(
+    database: PgPool,
+) -> eyre::Result<()> {
+    let (fixture, inputs) = fixture(database).await?;
+    sqlx::query("ALTER TABLE resource_pool_allocations ADD CONSTRAINT reject_fnn_asn CHECK (pool_name != 'fnn-asn')")
+        .execute(&fixture.env.pool).await?;
+    let (result, logs) = capture_logs_async(
+        fixture
+            .env
+            .api
+            .discover_machine(Request::new(inputs.request.clone())),
+    )
+    .await;
+    result?;
+    let machine = db::machine::find_one(
+        &fixture.env.pool,
+        &inputs.machine_id,
+        MachineSearchConfig::default(),
+    )
+    .await?
+    .expect("DPU creation committed despite ASN allocation failure");
+    assert_eq!(machine.asn, None);
+    assert!(machine.network_config.loopback_ip.is_some());
+    assert_eq!(
+        db::resource_pool::stats(&fixture.env.pool, FNN_ASN)
+            .await?
+            .used,
+        0
+    );
+    let events = logs
+        .iter()
+        .filter(|log| log.metadata_name == "dpu_asn_allocation_failed")
+        .collect::<Vec<_>>();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].field("failure"), Some("database"));
+    assert_eq!(events[0].field("failure_policy"), Some("best_effort"));
+
+    let (result, logs) = capture_logs_async(
+        fixture
+            .env
+            .api
+            .discover_machine(Request::new(inputs.request.clone())),
+    )
+    .await;
+    result?;
+    assert!(
+        !logs
+            .iter()
+            .any(|log| log.metadata_name == "dpu_asn_allocation_failed"),
+        "Integrated rediscovery must not retry or count another creation failure"
+    );
+    assert!(
+        fixture
+            .env
+            .api
+            .admin_force_delete_machine(Request::new(forge::AdminForceDeleteMachineRequest {
+                host_query: inputs.machine_id.to_string(),
+                ..Default::default()
+            }))
+            .await?
+            .into_inner()
+            .all_done
+    );
+    let loopback = receipt(&fixture, inputs.machine_id).await?;
+    fixture
+        .remote(LOOPBACK_IP)
+        .reconcile(loopback.allocation_id, &fixture.cancel)
+        .await?;
+    sqlx::query("ALTER TABLE resource_pool_allocations DROP CONSTRAINT reject_fnn_asn")
+        .execute(&fixture.env.pool)
+        .await?;
+    sqlx::query(
+        "UPDATE resource_pool SET value = (value::bigint + 4294967296)::text WHERE name = $1",
+    )
+    .bind(FNN_ASN)
+    .execute(&fixture.env.pool)
+    .await?;
+    let (result, logs) = capture_logs_async(
+        fixture
+            .env
+            .api
+            .discover_machine(Request::new(inputs.request)),
+    )
+    .await;
+    result?;
+    assert_eq!(
+        db::machine::get_asn(&fixture.env.pool, &inputs.machine_id).await?,
+        None
+    );
+    assert_eq!(
+        db::resource_pool::stats(&fixture.env.pool, FNN_ASN)
+            .await?
+            .used,
+        0
+    );
+    let events = logs
+        .iter()
+        .filter(|log| log.metadata_name == "dpu_asn_allocation_failed")
+        .collect::<Vec<_>>();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].field("failure"), Some("parse"));
+    fixture.stop().await
+}
+
+/// The shared response validator rejects even a default-valued VPC policy for
+/// ASN. Creation stays optional; backfill reports rejection, and both clean up.
+#[crate::sqlx_test]
+async fn remote_dpu_asn_rejects_present_routing_policy(database: PgPool) -> eyre::Result<()> {
+    let setup = RemotePoolFixture::start_asn_with_policy(
+        database,
+        Some(carbide_resource_pool_api::v1::RouteTargetPolicy::default()),
+    )
+    .await?;
+    let (fixture, mut inputs) = inputs_for_fixture(setup, 1).await?;
+    assert!(
+        creator(&fixture)
+            .create_managed_host(
+                &inputs.explored,
+                &mut inputs.host_report,
+                Some(&inputs.expected),
+                &fixture.env.pool
+            )
+            .await?
+    );
+    assert_eq!(
+        db::machine::get_asn(&fixture.env.pool, &inputs.machine_id).await?,
+        None
+    );
+    let first = asn_receipt(&fixture, inputs.machine_id).await?;
+    assert_eq!(first.state, AllocationState::CancelRequested);
+    fixture
+        .remote(FNN_ASN)
+        .reconcile(first.allocation_id, &fixture.cancel)
+        .await?;
+    let error = update_dpu_asns(
+        &fixture.env.pool,
+        &fixture.env.api.resource_pool_registry,
+        &fixture.env.common_pools,
+        &fixture.cancel,
+    )
+    .await
+    .expect_err("backfill must reject ASN routing instructions");
+    assert!(matches!(
+        error,
+        ResourcePoolBackendError::Remote(
+            carbide_resource_pool::remote::RemoteResourcePoolError::Provider(
+                carbide_resource_pool::grpc::GrpcResourcePoolError::InvalidResponse(
+                    "route target policy requires a VPC owner"
+                )
+            )
+        )
+    ));
+    let second = asn_receipt(&fixture, inputs.machine_id).await?;
+    assert_ne!(second.allocation_id, first.allocation_id);
+    assert_eq!(second.state, AllocationState::CancelRequested);
+    // Rejected replies never become saved assignments. The original request
+    // still identifies exactly which provider operation cancellation must stop.
+    assert!(matches!(
+        second.source,
+        AllocationSource::Remote { result: None, .. }
+    ));
+    assert_eq!(
+        db::machine::get_asn(&fixture.env.pool, &inputs.machine_id).await?,
+        None
+    );
+    fixture
+        .remote(FNN_ASN)
+        .reconcile(second.allocation_id, &fixture.cancel)
+        .await?;
+    assert_eq!(fixture.provider.local.provisioned_count(), 0);
+    fixture.stop().await
+}
+
+/// Force deletion must cancel Pending ASN ownership before a provider reply.
+/// A later valid loopback plan cannot hide an ASN plan's stale captured absence.
+#[crate::sqlx_test]
+async fn remote_dpu_asn_pending_deletion_and_stale_absence_keep_exact_cleanup(
+    database: PgPool,
+) -> eyre::Result<()> {
+    Box::pin(async move {
+        let (fixture, inputs) = inputs_for_fixture(RemotePoolFixture::start_asn(database).await?, 1).await?;
+        let mut txn = fixture.env.pool.begin().await?;
+        db::machine::create(&mut txn, None, &inputs.machine_id, ManagedHostState::Created, None, CURRENT_STATE_MODEL_VERSION).await?;
+        txn.commit().await?;
+
+        // A cache miss cannot turn a saved remote binding into native no-work.
+        // Without its provider runtime, preparation must reject that authority.
+        let unresolved = ResourcePoolRegistry::default();
+        let error = PreparedDpuAsn::prepare(&fixture.env.pool, &unresolved,
+            &fixture.env.common_pools, inputs.machine_id, &fixture.cancel).await
+            .err().expect("saved remote authority must be resolved before the native shortcut");
+        assert!(matches!(error, ResourcePoolBackendError::Registry(
+            ResourcePoolRegistryError::UnsupportedAuthority { ref name }) if name == FNN_ASN));
+        assert_eq!(fixture.provider.allocations.load(Ordering::SeqCst), 0);
+
+        fixture.provider.allocate_pause.pause_next.store(true, Ordering::SeqCst);
+        let api = fixture.env.api.clone();
+        let mut discovery = api.discover_machine(Request::new(inputs.request));
+        tokio::select! {
+            result = &mut discovery => panic!("discovery passed ASN preparation: {result:?}"),
+            result = wait_for_preparation(&fixture.provider.allocate_pause) => result?,
+        }
+        let pending = asn_receipt(&fixture, inputs.machine_id).await?;
+        assert_eq!(pending.state, AllocationState::Pending);
+        assert!(fixture.env.api.admin_force_delete_machine(Request::new(forge::AdminForceDeleteMachineRequest {
+            host_query: inputs.machine_id.to_string(), ..Default::default()
+        })).await?.into_inner().all_done);
+        let cancelled = asn_receipt(&fixture, inputs.machine_id).await?;
+        assert_eq!(cancelled.allocation_id, pending.allocation_id);
+        assert_eq!(cancelled.state, AllocationState::CancelRequested);
+        fixture.provider.allocate_pause.resume.notify_one();
+        let error = tokio::time::timeout(Duration::from_secs(10), &mut discovery).await?
+            .expect_err("force deletion must prevent resurrection");
+        assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+        fixture.remote(FNN_ASN).reconcile(pending.allocation_id, &fixture.cancel).await?;
+        assert_eq!(asn_receipt(&fixture, inputs.machine_id).await?.state, AllocationState::Cancelled);
+        drop(discovery);
+
+        let asn = PreparedDpuAsn::prepare(&fixture.env.pool, &fixture.env.api.resource_pool_registry,
+            &fixture.env.common_pools, inputs.machine_id, &fixture.cancel).await?;
+        let mut txn = fixture.env.pool.begin().await?;
+        db::machine::create(&mut txn, None, &inputs.machine_id, ManagedHostState::Created, None, CURRENT_STATE_MODEL_VERSION).await?;
+        db::machine::force_cleanup(&mut txn, &inputs.machine_id).await?;
+        txn.commit().await?;
+        let loopback = PreparedDpuLoopback::prepare(&fixture.env.pool, &fixture.env.api.resource_pool_registry,
+            &fixture.env.common_pools, inputs.machine_id, &fixture.cancel).await?;
+        let mut txn = fixture.env.pool.begin().await?;
+        loopback.check_identity(&mut txn).await?;
+        assert!(matches!(asn.check_identity(&mut txn).await, Err(db::DatabaseError::FailedPrecondition(ref message))
+            if message.contains("lifetime changed")));
+        txn.rollback().await?;
+        asn.cancel(&fixture.env.pool).await?;
+        let cancelled = asn_receipt(&fixture, inputs.machine_id).await?;
+        assert_eq!(cancelled.state, AllocationState::CancelRequested);
+        fixture.remote(FNN_ASN).reconcile(cancelled.allocation_id, &fixture.cancel).await?;
+        assert_eq!(fixture.provider.local.provisioned_count(), 0);
+        drop(loopback);
+        drop(asn);
+        fixture.stop().await
+    }).await
+}
+
+/// Direct backfill cannot attach across a deletion marker or a replacement row.
+/// Cleanup of each rejected plan permits a later eligible assignment.
+#[crate::sqlx_test]
+async fn remote_dpu_asn_backfill_preserves_deleting_and_replacement_rows(
+    database: PgPool,
+) -> eyre::Result<()> {
+    Box::pin(async move {
+        let mut fixture = RemotePoolFixture::start_asn(database).await?;
+        fixture.initialize(PoolDefinitionSource::SeedConfiguration).await?;
+        let machine_id = MachineId::new(MachineIdSource::ProductBoardChassisSerial, [77; 32], MachineType::Dpu);
+        let mut txn = fixture.env.pool.begin().await?;
+        db::machine::create(&mut txn, None, &machine_id, ManagedHostState::Created, None, CURRENT_STATE_MODEL_VERSION).await?;
+        txn.commit().await?;
+        for replace in [false, true] {
+            let before = db::machine::MachineCreationIdentity::capture(&fixture.env.pool, &machine_id).await?;
+            fixture.provider.allocate_pause.pause_next.store(true, Ordering::SeqCst);
+            let mut backfill = Box::pin(update_dpu_asns(&fixture.env.pool, &fixture.env.api.resource_pool_registry,
+                &fixture.env.common_pools, &fixture.cancel));
+            tokio::select! {
+                result = &mut backfill => panic!("backfill passed provider gate: {result:?}"),
+                result = wait_for_preparation(&fixture.provider.allocate_pause) => result?,
+            }
+            let pending = asn_receipt(&fixture, machine_id).await?;
+            let mut txn = fixture.env.pool.begin().await?;
+            if replace {
+                db::machine::force_cleanup(&mut txn, &machine_id).await?;
+                db::machine::create(&mut txn, None, &machine_id, ManagedHostState::Created, None, CURRENT_STATE_MODEL_VERSION).await?;
+            } else {
+                let machine = db::machine::find_one(txn.as_mut(), &machine_id, MachineSearchConfig::default()).await?.expect("existing DPU");
+                db::machine::advance(&machine, &mut txn, &ManagedHostState::ForceDeletion, None).await?;
+            }
+            txn.commit().await?;
+            fixture.provider.allocate_pause.resume.notify_one();
+            let result = tokio::time::timeout(Duration::from_secs(10), &mut backfill).await?;
+            if replace {
+                assert!(matches!(result, Err(ResourcePoolBackendError::Database(db::DatabaseError::FailedPrecondition(ref message)))
+                    if message.contains("lifetime changed")));
+                assert_ne!(db::machine::MachineCreationIdentity::capture(&fixture.env.pool, &machine_id).await?.created(), before.created());
+            } else {
+                result?;
+                let machine = db::machine::find_one(&fixture.env.pool, &machine_id, MachineSearchConfig::default()).await?.expect("deleting DPU");
+                assert_eq!(machine.state.value, ManagedHostState::ForceDeletion);
+            }
+            assert_eq!(db::machine::get_asn(&fixture.env.pool, &machine_id).await?, None);
+            let cancelled = asn_receipt(&fixture, machine_id).await?;
+            assert_eq!(cancelled.allocation_id, pending.allocation_id);
+            assert_eq!(cancelled.state, AllocationState::CancelRequested);
+            fixture.remote(FNN_ASN).reconcile(cancelled.allocation_id, &fixture.cancel).await?;
+            drop(backfill);
+            if !replace {
+                let mut txn = fixture.env.pool.begin().await?;
+                let machine = db::machine::find_one(txn.as_mut(), &machine_id, MachineSearchConfig::default()).await?.expect("deleting DPU");
+                db::machine::advance(&machine, &mut txn, &ManagedHostState::Created, None).await?;
+                txn.commit().await?;
+            }
+        }
+        update_dpu_asns(&fixture.env.pool, &fixture.env.api.resource_pool_registry, &fixture.env.common_pools, &fixture.cancel).await?;
+        let attached = asn_receipt(&fixture, machine_id).await?;
+        assert_eq!(attached.state, AllocationState::Attached);
+        assert_asn_assignment(&fixture, machine_id).await?;
+        fixture.stop().await
+    }).await
+}
+
+/// A cleanup-pending first slot cannot starve a later DPU. A row removed after
+/// the initial scan must not cause another provider call or request record.
+#[crate::sqlx_test]
+async fn remote_dpu_asn_backfill_continues_and_skips_absent_rows(
+    database: PgPool,
+) -> eyre::Result<()> {
+    Box::pin(async move {
+        let mut fixture = RemotePoolFixture::start_asn(database).await?;
+        fixture.initialize(PoolDefinitionSource::SeedConfiguration).await?;
+        let mut ids = [51, 52, 53].map(|byte| MachineId::new(MachineIdSource::ProductBoardChassisSerial, [byte; 32], MachineType::Dpu));
+        ids.sort();
+        let mut txn = fixture.env.pool.begin().await?;
+        for id in ids { db::machine::create(&mut txn, None, &id, ManagedHostState::Created, None, CURRENT_STATE_MODEL_VERSION).await?; }
+        txn.commit().await?;
+        let first = PreparedDpuAsn::prepare(&fixture.env.pool, &fixture.env.api.resource_pool_registry,
+            &fixture.env.common_pools, ids[0], &fixture.cancel).await?;
+        first.cancel(&fixture.env.pool).await?;
+        let blocked = asn_receipt(&fixture, ids[0]).await?;
+        fixture.provider.allocate_pause.pause_next.store(true, Ordering::SeqCst);
+        let mut backfill = Box::pin(update_dpu_asns(&fixture.env.pool, &fixture.env.api.resource_pool_registry,
+            &fixture.env.common_pools, &fixture.cancel));
+        tokio::select! {
+            result = &mut backfill => panic!("backfill stopped before its eligible DPU: {result:?}"),
+            result = wait_for_preparation(&fixture.provider.allocate_pause) => result?,
+        }
+        let mut txn = fixture.env.pool.begin().await?;
+        db::machine::force_cleanup(&mut txn, &ids[2]).await?;
+        txn.commit().await?;
+        fixture.provider.allocate_pause.resume.notify_one();
+        assert!(matches!(tokio::time::timeout(Duration::from_secs(10), &mut backfill).await?, Err(ResourcePoolBackendError::CleanupPending)));
+        assert_eq!(asn_receipt(&fixture, ids[0]).await?, blocked);
+        let attached = asn_receipt(&fixture, ids[1]).await?;
+        assert_eq!(attached.state, AllocationState::Attached);
+        assert_asn_assignment(&fixture, ids[1]).await?;
+        assert!(remote::latest_for_owner_slot(&fixture.env.pool, OwnerType::Machine, &ids[2].to_string(), DPU_ASN_SLOT).await?.is_none());
+        assert_eq!(fixture.provider.allocations.load(Ordering::SeqCst), 2);
+        fixture.remote(FNN_ASN).reconcile(blocked.allocation_id, &fixture.cancel).await?;
+        drop(backfill);
+        drop(first);
+        fixture.stop().await
+    }).await
+}
+
+/// The selected-backend dispatcher must preserve native whole-batch rollback,
+/// then assign both machines when a later pass has sufficient inventory.
+#[crate::sqlx_test]
+async fn integrated_dpu_asn_dispatcher_keeps_batch_rollback(database: PgPool) -> eyre::Result<()> {
+    let env = api_fixtures::create_test_env(database).await;
+    let ids = [61, 62].map(|byte| {
+        MachineId::new(
+            MachineIdSource::ProductBoardChassisSerial,
+            [byte; 32],
+            MachineType::Dpu,
+        )
+    });
+    let mut txn = env.pool.begin().await?;
+    for id in ids {
+        db::machine::create(
+            &mut txn,
+            None,
+            &id,
+            ManagedHostState::Created,
+            None,
+            CURRENT_STATE_MODEL_VERSION,
+        )
+        .await?;
+    }
+    sqlx::query("DELETE FROM resource_pool WHERE name = $1")
+        .bind(FNN_ASN)
+        .execute(&mut *txn)
+        .await?;
+    db::resource_pool::populate(
+        &env.common_pools.ethernet.pool_fnn_asn,
+        &mut txn,
+        vec![64512],
+        true,
+    )
+    .await?;
+    txn.commit().await?;
+    let error = update_dpu_asns(
+        &env.pool,
+        &env.api.resource_pool_registry,
+        &env.common_pools,
+        &env.api.cancel_token,
+    )
+    .await
+    .expect_err("one native ASN cannot fill two machines atomically");
+    assert!(matches!(
+        error,
+        ResourcePoolBackendError::Database(db::DatabaseError::ResourcePoolError(
+            model::resource_pool::ResourcePoolError::Empty
+        ))
+    ));
+    for id in ids {
+        assert_eq!(db::machine::get_asn(&env.pool, &id).await?, None);
+    }
+    assert_eq!(db::resource_pool::stats(&env.pool, FNN_ASN).await?.used, 0);
+    let mut txn = env.pool.begin().await?;
+    db::resource_pool::populate(
+        &env.common_pools.ethernet.pool_fnn_asn,
+        &mut txn,
+        vec![64513],
+        true,
+    )
+    .await?;
+    txn.commit().await?;
+    update_dpu_asns(
+        &env.pool,
+        &env.api.resource_pool_registry,
+        &env.common_pools,
+        &env.api.cancel_token,
+    )
+    .await?;
+    let mut assigned = Vec::new();
+    for id in ids {
+        assigned.push(
+            db::machine::get_asn(&env.pool, &id)
+                .await?
+                .expect("native backfill assigned ASN"),
+        );
+    }
+    assigned.sort();
+    assert_eq!(assigned, vec![64512, 64513]);
+    Ok(())
 }
 
 /// `wait_for_preparation` observes provider reservation before its reply, while
@@ -400,8 +1246,37 @@ async fn remote_dpu_discovery_and_site_repair_reuse_a_lost_reply(
 async fn remote_dpu_configuration_failures_roll_back_both_callers(
     database: PgPool,
 ) -> eyre::Result<()> {
+    check_configuration_failures(
+        fixture(database).await?,
+        LOOPBACK_IP,
+        DPU_IPV4_LOOPBACK_SLOT,
+    )
+    .await
+}
+
+/// The same real transaction failure must also cancel the ASN producer in each
+/// caller; the successful Site Explorer retry proves its reservation attachment.
+#[crate::sqlx_test]
+async fn remote_dpu_asn_configuration_failures_roll_back_both_callers(
+    database: PgPool,
+) -> eyre::Result<()> {
+    check_configuration_failures(
+        inputs_for_fixture(RemotePoolFixture::start_asn(database).await?, 1).await?,
+        FNN_ASN,
+        DPU_ASN_SLOT,
+    )
+    .await
+}
+
+/// Reject configuration after provider preparation and verify each caller cancels
+/// the unused request before its successful retry.
+async fn check_configuration_failures(
+    setup: (RemotePoolFixture, DpuInputs),
+    pool_name: &str,
+    slot: &str,
+) -> eyre::Result<()> {
     Box::pin(async move {
-        let (fixture, mut inputs) = fixture(database).await?;
+        let (fixture, mut inputs) = setup;
         // Reject the real configuration write after provider preparation, so
         // rollback cannot be mistaken for undoing the external reservation.
         sqlx::query("ALTER TABLE machines ADD CONSTRAINT reject_dpu_loopback CHECK (network_config->>'loopback_ip' IS NULL)")
@@ -409,11 +1284,11 @@ async fn remote_dpu_configuration_failures_roll_back_both_callers(
         fixture.env.api.discover_machine(Request::new(inputs.request.clone())).await
             .expect_err("injected configuration write rejection");
         assert!(db::machine::find_one(&fixture.env.pool, &inputs.machine_id, MachineSearchConfig::default()).await?.is_none());
-        let failed = receipt(&fixture, inputs.machine_id).await?;
+        let failed = allocation_receipt(&fixture, inputs.machine_id, slot).await?;
         assert_eq!(failed.state, AllocationState::CancelRequested);
         assert_eq!(fixture.provider.local.provisioned_count(), 1);
-        fixture.remote(LOOPBACK_IP).reconcile(failed.allocation_id, &fixture.cancel).await?;
-        assert_eq!(receipt(&fixture, inputs.machine_id).await?.state, AllocationState::Cancelled);
+        fixture.remote(pool_name).reconcile(failed.allocation_id, &fixture.cancel).await?;
+        assert_eq!(allocation_receipt(&fixture, inputs.machine_id, slot).await?.state, AllocationState::Cancelled);
 
         // Keep the constraint for a Site Explorer attempt as well. Its own
         // rollback/cancellation path must work before either caller can retry.
@@ -423,12 +1298,12 @@ async fn remote_dpu_configuration_failures_roll_back_both_callers(
         assert!(matches!(site_error, SiteExplorerError::DatabaseError(ref error)
             if error.violates_constraint("reject_dpu_loopback")));
         assert!(db::machine::find_one(&fixture.env.pool, &inputs.machine_id, MachineSearchConfig::default()).await?.is_none());
-        let site_failed = receipt(&fixture, inputs.machine_id).await?;
+        let site_failed = allocation_receipt(&fixture, inputs.machine_id, slot).await?;
         assert_ne!(site_failed.allocation_id, failed.allocation_id);
         assert_eq!(site_failed.state, AllocationState::CancelRequested);
         assert_eq!(fixture.provider.local.provisioned_count(), 1);
-        fixture.remote(LOOPBACK_IP).reconcile(site_failed.allocation_id, &fixture.cancel).await?;
-        assert_eq!(receipt(&fixture, inputs.machine_id).await?.state, AllocationState::Cancelled);
+        fixture.remote(pool_name).reconcile(site_failed.allocation_id, &fixture.cancel).await?;
+        assert_eq!(allocation_receipt(&fixture, inputs.machine_id, slot).await?.state, AllocationState::Cancelled);
         sqlx::query("ALTER TABLE machines DROP CONSTRAINT reject_dpu_loopback").execute(&fixture.env.pool).await?;
 
         // A Site Explorer creation, rather than discovery's retry, must also
@@ -439,15 +1314,22 @@ async fn remote_dpu_configuration_failures_roll_back_both_callers(
         let machine = db::machine::find_one(&fixture.env.pool, &inputs.machine_id, MachineSearchConfig::default())
             .await?.expect("site-created DPU");
         assert!(machine.network_config.loopback_ip.is_some());
-        let attached = receipt(&fixture, inputs.machine_id).await?;
+        let attached = allocation_receipt(&fixture, inputs.machine_id, slot).await?;
         assert_ne!(attached.allocation_id, failed.allocation_id);
         assert_ne!(attached.allocation_id, site_failed.allocation_id);
         assert_eq!(attached.state, AllocationState::Attached);
         assert_eq!(fixture.provider.local.provisioned_count(), 1);
-        fixture.remote(LOOPBACK_IP).reconcile(failed.allocation_id, &fixture.cancel).await?;
-        fixture.remote(LOOPBACK_IP).reconcile(site_failed.allocation_id, &fixture.cancel).await?;
-        assert_eq!(receipt(&fixture, inputs.machine_id).await?, attached);
+        fixture.remote(pool_name).reconcile(failed.allocation_id, &fixture.cancel).await?;
+        fixture.remote(pool_name).reconcile(site_failed.allocation_id, &fixture.cancel).await?;
+        assert_eq!(allocation_receipt(&fixture, inputs.machine_id, slot).await?, attached);
         assert_eq!(fixture.provider.local.provisioned_count(), 1);
+        if pool_name == FNN_ASN {
+            let asn = db::machine::get_asn(&fixture.env.pool, &inputs.machine_id).await?.expect("Site Explorer attached ASN");
+            let AllocationSource::Remote { result: Some(AllocationResult::Allocated(assignment)), .. } = &attached.source else {
+                panic!("Site Explorer retains its ASN assignment");
+            };
+            assert_eq!(assignment.value, model::resource_pool::allocation::ResourcePoolValue::Integer(i64::from(asn)));
+        }
         fixture.stop().await
     }).await
 }
@@ -779,17 +1661,33 @@ async fn remote_dpu_lookup_cancellation_stops_pool_wait(database: PgPool) -> eyr
             .max_connections(1)
             .connect_with(fixture.env.pool.connect_options().as_ref().clone())
             .await?;
-        for deadline in [false, true] {
-            // Exhaust only this pool, so both cases stop before any provider work.
+        for (asn, deadline) in [(false, false), (false, true), (true, true)] {
+            // Exhaust only this pool; every case stops before provider work.
             let held = single.acquire().await?;
             let cancel = CancellationToken::new();
-            let mut preparation = Box::pin(PreparedDpuLoopback::prepare(
-                &single,
-                &fixture.env.api.resource_pool_registry,
-                &fixture.env.common_pools,
-                inputs.machine_id,
-                &cancel,
-            ));
+            let mut preparation = Box::pin(async {
+                if asn {
+                    PreparedDpuAsn::prepare(
+                        &single,
+                        &fixture.env.api.resource_pool_registry,
+                        &fixture.env.common_pools,
+                        inputs.machine_id,
+                        &cancel,
+                    )
+                    .await
+                    .map(drop)
+                } else {
+                    PreparedDpuLoopback::prepare(
+                        &single,
+                        &fixture.env.api.resource_pool_registry,
+                        &fixture.env.common_pools,
+                        inputs.machine_id,
+                        &cancel,
+                    )
+                    .await
+                    .map(drop)
+                }
+            });
             assert!(
                 poll_fn(|cx| Poll::Ready(preparation.as_mut().poll(cx)))
                     .await
@@ -806,22 +1704,32 @@ async fn remote_dpu_lookup_cancellation_stops_pool_wait(database: PgPool) -> eyr
             }
             let error = tokio::time::timeout(Duration::from_secs(1), preparation)
                 .await?
-                .err()
-                .expect("lookup must stop while its only connection remains held");
-            match (deadline, error) {
-                (
-                    false,
-                    ResourcePoolBackendError::Cancelled {
-                        operation: "DPU loopback lookup",
-                    },
-                )
-                | (
-                    true,
+                .expect_err("lookup must stop while its only connection remains held");
+            if asn {
+                assert!(matches!(
+                    error,
                     ResourcePoolBackendError::DeadlineExceeded {
-                        operation: "DPU loopback lookup",
-                    },
-                ) => {}
-                (_, error) => panic!("unexpected lookup failure (deadline={deadline}): {error:?}"),
+                        operation: "DPU ASN lookup"
+                    }
+                ));
+            } else {
+                match (deadline, error) {
+                    (
+                        false,
+                        ResourcePoolBackendError::Cancelled {
+                            operation: "DPU loopback lookup",
+                        },
+                    )
+                    | (
+                        true,
+                        ResourcePoolBackendError::DeadlineExceeded {
+                            operation: "DPU loopback lookup",
+                        },
+                    ) => {}
+                    (_, error) => {
+                        panic!("unexpected lookup failure (deadline={deadline}): {error:?}")
+                    }
+                }
             }
             assert_eq!(fixture.provider.allocations.load(Ordering::SeqCst), 0);
             assert!(
@@ -855,16 +1763,64 @@ async fn remote_dpu_lookup_cancellation_stops_pool_wait(database: PgPool) -> eyr
 async fn remote_dpu_post_preparation_admission_stops_retain_cleanup(
     database: PgPool,
 ) -> eyre::Result<()> {
+    check_admission_stops(
+        fixture(database).await?,
+        LOOPBACK_IP,
+        DPU_IPV4_LOOPBACK_SLOT,
+        &[
+            AdmissionCase::DiscoveryDeadline,
+            AdmissionCase::ExplorerCancellation,
+        ],
+    )
+    .await
+}
+
+/// ASN alone selects bounded admission. A failed optional ASN attempt must also
+/// let the owning task stop while every admission permit remains held.
+#[crate::sqlx_test]
+#[ignore = "run alone: drains process-wide admin admission"]
+async fn remote_dpu_asn_post_preparation_admission_stops_retain_cleanup(
+    database: PgPool,
+) -> eyre::Result<()> {
+    check_admission_stops(
+        inputs_for_fixture(RemotePoolFixture::start_asn(database).await?, 1).await?,
+        FNN_ASN,
+        DPU_ASN_SLOT,
+        &[
+            AdmissionCase::DiscoveryDeadline,
+            AdmissionCase::ExplorerCancellation,
+            AdmissionCase::ExplorerFailureCancellation,
+        ],
+    )
+    .await
+}
+
+/// Hold every admission permit and exercise the selected stop boundaries, keeping
+/// the original provider cleanup request for each failed admission.
+async fn check_admission_stops(
+    setup: (RemotePoolFixture, DpuInputs),
+    pool_name: &str,
+    slot: &str,
+    cases: &[AdmissionCase],
+) -> eyre::Result<()> {
     Box::pin(async move {
-        let (fixture, inputs) = fixture(database).await?;
+        let (fixture, inputs) = setup;
+        let expected_calls = cases.len();
         // One fixture and owner are reused only after the preceding request's
         // cancellation completes. Each phase therefore has its own generation.
         let mut previous_request = None;
-        for case in [AdmissionCase::DiscoveryDeadline, AdmissionCase::ExplorerCancellation] {
-            fixture.provider.allocate_pause.pause_next.store(true, Ordering::SeqCst);
+        for case in cases {
+            let failed_attempt = matches!(case, AdmissionCase::ExplorerFailureCancellation);
+            let preheld_permits = if failed_attempt {
+                fixture.provider.reject_allocate_call.store(fixture.provider.allocations.load(Ordering::SeqCst) + 1, Ordering::SeqCst);
+                Some(exhaust_admin_admission().await?)
+            } else {
+                fixture.provider.allocate_pause.pause_next.store(true, Ordering::SeqCst);
+                None
+            };
             let cancel = CancellationToken::new();
             let mut tasks = JoinSet::new();
-            if matches!(case, AdmissionCase::ExplorerCancellation) {
+            if matches!(case, AdmissionCase::ExplorerCancellation | AdmissionCase::ExplorerFailureCancellation) {
                 owning_site_explorer(&fixture, &inputs).await?
                     .start(&mut tasks, cancel.clone())?;
             }
@@ -878,7 +1834,7 @@ async fn remote_dpu_post_preparation_admission_stops_retain_cleanup(
                         assert_eq!(error.message(), "DPU admin lock admission timed out");
                         assert_eq!(error.metadata().get("nico-error-code").and_then(|value| value.to_str().ok()), Some("NICO-API-504"));
                     }
-                    AdmissionCase::ExplorerCancellation => {
+                    AdmissionCase::ExplorerCancellation | AdmissionCase::ExplorerFailureCancellation => {
                         while let Some(result) = tasks.join_next().await {
                             result?;
                         }
@@ -886,36 +1842,47 @@ async fn remote_dpu_post_preparation_admission_stops_retain_cleanup(
                 }
                 eyre::Ok(())
             });
-            tokio::select! {
-                result = &mut caller => panic!("caller stopped before provider reservation: {result:?}"),
-                result = wait_for_preparation(&fixture.provider.allocate_pause) => result?,
-            }
-            let pending = receipt(&fixture, inputs.machine_id).await?;
+            let pending = if failed_attempt {
+                tokio::select! {
+                    result = &mut caller => panic!("owner bypassed exhausted admission: {result:?}"),
+                    result = tokio::time::timeout(Duration::from_secs(10), async {
+                        loop {
+                            if let Some(saved) = remote::latest_for_owner_slot(&fixture.env.pool,
+                                OwnerType::Machine, &inputs.machine_id.to_string(), slot).await?
+                                && saved.state == AllocationState::CancelRequested
+                                && Some(saved.allocation_id) != previous_request {
+                                break eyre::Ok(saved);
+                            }
+                            tokio::time::sleep(Duration::from_millis(10)).await;
+                        }
+                    }) => result??,
+                }
+            } else {
+                tokio::select! {
+                    result = &mut caller => panic!("caller stopped before provider reservation: {result:?}"),
+                    result = wait_for_preparation(&fixture.provider.allocate_pause) => result?,
+                }
+                allocation_receipt(&fixture, inputs.machine_id, slot).await?
+            };
             assert_ne!(Some(pending.allocation_id), previous_request);
             previous_request = Some(pending.allocation_id);
-            assert_eq!(pending.state, AllocationState::Pending);
-            assert_eq!(fixture.provider.local.provisioned_count(), 1);
+            assert_eq!(pending.state, if failed_attempt { AllocationState::CancelRequested } else { AllocationState::Pending });
+            assert_eq!(fixture.provider.local.provisioned_count(), usize::from(!failed_attempt));
 
             // Core has passed its initial authorization/admission by this gate.
             // Draining the process-wide semaphore is safe only in this ignored
             // test's dedicated process; ordinary parallel tests must not do it.
-            let permits = tokio::time::timeout(Duration::from_secs(2), async {
-                let mut permits = Vec::new();
-                for _ in 0..db::machine_interface::admin_lock_admission_permits() {
-                    permits.push(db::machine_interface::admin_lock_admission().await);
-                }
-                permits
-            }).await?;
-            fixture.provider.allocate_pause.resume.notify_one();
+            let permits = match preheld_permits { Some(permits) => permits, None => exhaust_admin_admission().await? };
+            if !failed_attempt { fixture.provider.allocate_pause.resume.notify_one(); }
 
             // A saved result alone can precede the provider future's return.
             // Its released operation lease proves preparation has finished;
             // the caller can now be stopped specifically at admin admission.
-            let prepared = tokio::select! {
+            let prepared = if failed_attempt { pending.clone() } else { tokio::select! {
                 result = &mut caller => panic!("caller bypassed exhausted admission: {result:?}"),
                 result = tokio::time::timeout(Duration::from_secs(2), async {
                     loop {
-                        let saved = receipt(&fixture, inputs.machine_id).await?;
+                        let saved = allocation_receipt(&fixture, inputs.machine_id, slot).await?;
                         let leased: bool = sqlx::query_scalar(
                             "SELECT EXISTS(SELECT 1 FROM work_locks WHERE work_key = $1)",
                         ).bind(format!("resource-pool:{}", pending.allocation_id))
@@ -928,9 +1895,10 @@ async fn remote_dpu_post_preparation_admission_stops_retain_cleanup(
                         tokio::time::sleep(Duration::from_millis(10)).await;
                     }
                 }) => result??,
+            }
             };
             assert_eq!(prepared.allocation_id, pending.allocation_id);
-            assert_eq!(prepared.state, AllocationState::Pending);
+            assert_eq!(prepared.state, if failed_attempt { AllocationState::CancelRequested } else { AllocationState::Pending });
             assert!(poll_fn(|cx| Poll::Ready(caller.as_mut().poll(cx))).await.is_pending());
             match case {
                 AdmissionCase::DiscoveryDeadline => {
@@ -940,35 +1908,50 @@ async fn remote_dpu_post_preparation_admission_stops_retain_cleanup(
                     tokio::time::advance(Duration::from_secs(6)).await;
                     tokio::time::resume();
                 }
-                AdmissionCase::ExplorerCancellation => cancel.cancel(),
+                AdmissionCase::ExplorerCancellation | AdmissionCase::ExplorerFailureCancellation => cancel.cancel(),
             }
             tokio::time::timeout(Duration::from_secs(5), &mut caller).await??;
             drop(caller);
 
-            let cancelled = receipt(&fixture, inputs.machine_id).await?;
+            let cancelled = allocation_receipt(&fixture, inputs.machine_id, slot).await?;
             assert_eq!(cancelled.allocation_id, prepared.allocation_id);
             assert_eq!(cancelled.state, AllocationState::CancelRequested);
             assert_eq!(cancelled.source, prepared.source);
             assert_eq!(sqlx::query_scalar::<_, i64>("SELECT count(*) FROM machines")
                 .fetch_one(&fixture.env.pool).await?, 0, "no DPU or predicted host may commit");
-            let AllocationSource::Remote { result: Some(AllocationResult::Allocated(assignment)), .. } = &cancelled.source else {
-                panic!("admission cleanup must retain the original provider assignment");
-            };
-            assert!(fixture.provider.local.is_provisioned(&assignment.allocation_id));
-            assert_eq!(fixture.provider.local.provisioned_count(), 1);
+            if !failed_attempt {
+                let AllocationSource::Remote { result: Some(AllocationResult::Allocated(assignment)), .. } = &cancelled.source else {
+                    panic!("admission cleanup retains the original provider assignment");
+                };
+                assert!(fixture.provider.local.is_provisioned(&assignment.allocation_id));
+            }
+            assert_eq!(fixture.provider.local.provisioned_count(), usize::from(!failed_attempt));
 
             // Local cancellation intent must survive until recovery confirms
             // cleanup of this exact assignment, before the next caller retries.
             drop(permits);
-            fixture.remote(LOOPBACK_IP).reconcile(cancelled.allocation_id, &fixture.cancel).await?;
-            let cleaned = receipt(&fixture, inputs.machine_id).await?;
+            fixture.remote(pool_name).reconcile(cancelled.allocation_id, &fixture.cancel).await?;
+            let cleaned = allocation_receipt(&fixture, inputs.machine_id, slot).await?;
             assert_eq!(cleaned.allocation_id, cancelled.allocation_id);
             assert_eq!(cleaned.state, AllocationState::Cancelled);
             assert_eq!(fixture.provider.local.provisioned_count(), 0);
         }
-        assert_eq!(fixture.provider.allocations.load(Ordering::SeqCst), 2);
+        assert_eq!(fixture.provider.allocations.load(Ordering::SeqCst), expected_calls);
         fixture.stop().await
     }).await
+}
+
+/// Hold every admission permit for an isolated test, bounding fixture setup so
+/// an unexpected competing waiter cannot hang the test.
+async fn exhaust_admin_admission() -> eyre::Result<Vec<tokio::sync::OwnedSemaphorePermit>> {
+    Ok(tokio::time::timeout(Duration::from_secs(2), async {
+        let mut permits = Vec::new();
+        for _ in 0..db::machine_interface::admin_lock_admission_permits() {
+            permits.push(db::machine_interface::admin_lock_admission().await);
+        }
+        permits
+    })
+    .await?)
 }
 
 /// The token supplied to the owning Site Explorer task must reach a stalled
@@ -977,8 +1960,36 @@ async fn remote_dpu_post_preparation_admission_stops_retain_cleanup(
 async fn remote_dpu_site_explorer_shutdown_cancels_preparation(
     database: PgPool,
 ) -> eyre::Result<()> {
+    check_owning_shutdown(
+        fixture(database).await?,
+        LOOPBACK_IP,
+        DPU_IPV4_LOOPBACK_SLOT,
+    )
+    .await
+}
+
+/// An ASN-only provider wait must receive the owning Site Explorer shutdown token.
+#[crate::sqlx_test]
+async fn remote_dpu_asn_site_explorer_shutdown_cancels_preparation(
+    database: PgPool,
+) -> eyre::Result<()> {
+    check_owning_shutdown(
+        inputs_for_fixture(RemotePoolFixture::start_asn(database).await?, 1).await?,
+        FNN_ASN,
+        DPU_ASN_SLOT,
+    )
+    .await
+}
+
+/// Stop the real Site Explorer during paused provider preparation and verify
+/// cleanup still identifies the original request.
+async fn check_owning_shutdown(
+    setup: (RemotePoolFixture, DpuInputs),
+    pool_name: &str,
+    slot: &str,
+) -> eyre::Result<()> {
     Box::pin(async move {
-        let (fixture, inputs) = fixture(database).await?;
+        let (fixture, inputs) = setup;
         let site_explorer = owning_site_explorer(&fixture, &inputs).await?;
         fixture
             .provider
@@ -1000,7 +2011,7 @@ async fn remote_dpu_site_explorer_shutdown_cancels_preparation(
             eyre::Ok(())
         })
         .await??;
-        let cancelled = receipt(&fixture, inputs.machine_id).await?;
+        let cancelled = allocation_receipt(&fixture, inputs.machine_id, slot).await?;
         assert_eq!(cancelled.state, AllocationState::CancelRequested);
         assert!(
             db::machine::find_one(
@@ -1019,11 +2030,13 @@ async fn remote_dpu_site_explorer_shutdown_cancels_preparation(
         );
         fixture.provider.allocate_pause.resume.notify_one();
         fixture
-            .remote(LOOPBACK_IP)
+            .remote(pool_name)
             .reconcile(cancelled.allocation_id, &fixture.cancel)
             .await?;
         assert_eq!(
-            receipt(&fixture, inputs.machine_id).await?.state,
+            allocation_receipt(&fixture, inputs.machine_id, slot)
+                .await?
+                .state,
             AllocationState::Cancelled
         );
         assert_eq!(fixture.provider.local.provisioned_count(), 0);

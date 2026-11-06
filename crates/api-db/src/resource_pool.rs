@@ -853,8 +853,8 @@ pub fn is_requested_value_unavailable(error: &ResourcePoolDatabaseError) -> bool
     classify_resource_pool_failure(error) == ResourcePoolFailure::RequestedValueUnavailable
 }
 
-/// Emit the non-fatal diagnostic used when DPU creation cannot allocate an ASN.
-pub(crate) fn emit_best_effort_dpu_asn_allocation_failure(
+/// Emit `dpu_asn_allocation_failed` for a nonfatal Integrated ASN creation failure.
+pub fn emit_best_effort_dpu_asn_allocation_failure(
     value_type: ValueType,
     stable_machine_id: &str,
     error: &ResourcePoolDatabaseError,
