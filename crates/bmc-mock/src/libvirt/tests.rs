@@ -385,7 +385,7 @@ impl StubDomain {
 async fn libvirt_session_runs_its_requests_before_queued_backend_work() {
     let domain = StubDomain::start(false, 0).await;
     let system = domain.state.system_state.primary_system_odata_id().unwrap();
-    let session = domain.callbacks.session().await.unwrap();
+    let mut session = domain.callbacks.session().await.unwrap();
     let output = session.virsh(["domstate", "test-domain"]).await.unwrap();
     assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "running");
     assert_eq!(session.power_state().await.unwrap(), Some(PowerState::On));
@@ -418,7 +418,7 @@ async fn libvirt_session_runs_its_requests_before_queued_backend_work() {
 #[tokio::test]
 async fn libvirt_session_reports_power_command_and_virsh_failures() {
     let domain = StubDomain::start(false, 1).await;
-    let session = domain.callbacks.session().await.unwrap();
+    let mut session = domain.callbacks.session().await.unwrap();
     assert!(matches!(
         session
             .power(ResourceResetType::ForceRestart, SessionBootOrder::Apply)
@@ -446,7 +446,7 @@ async fn restart_consumes_a_one_time_override_only_when_it_loads_the_saved_defin
             )
             .await;
         assert!(status.is_success(), "{status}");
-        let session = domain.callbacks.session().await.unwrap();
+        let mut session = domain.callbacks.session().await.unwrap();
         let before = domain.log().len();
         session
             .power(ResourceResetType::ForceRestart, SessionBootOrder::Apply)
@@ -482,7 +482,16 @@ async fn restart_consumes_a_one_time_override_only_when_it_loads_the_saved_defin
 #[tokio::test]
 async fn session_power_can_keep_the_boot_configuration_it_prepared() {
     let domain = StubDomain::start(true, 0).await;
-    let session = domain.callbacks.session().await.unwrap();
+    let system = domain.state.system_state.primary_system_odata_id().unwrap();
+    let (status, _) = domain
+        .request(
+            "PATCH",
+            &system,
+            r#"{"Boot":{"BootSourceOverrideEnabled":"Once","BootSourceOverrideTarget":"Pxe"}}"#,
+        )
+        .await;
+    assert!(status.is_success(), "{status}");
+    let mut session = domain.callbacks.session().await.unwrap();
     let before = domain.log().len();
     session
         .power(ResourceResetType::ForceRestart, SessionBootOrder::Keep)
@@ -497,6 +506,11 @@ async fn session_power_can_keep_the_boot_configuration_it_prepared() {
     assert!(
         !restart.iter().any(|line| line.starts_with("define")),
         "the session's boot configuration is not replaced: {restart:?}"
+    );
+    let (_, body) = domain.request("GET", &system, "").await;
+    assert_eq!(
+        body["Boot"]["BootSourceOverrideEnabled"], "Once",
+        "a boot that did not use the BMC's boot configuration leaves its one-time override pending"
     );
     domain.stop().await;
 }

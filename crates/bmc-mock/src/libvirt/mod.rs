@@ -225,9 +225,15 @@ enum LibvirtMessage {
 /// behind it in order. Dropping the session ends it. Keep sessions short and do not
 /// await another backend operation, such as a Redfish request to this BMC, while
 /// holding one: that operation waits for the session to end.
+///
+/// Requests take `&mut self`, so a session has at most one request outstanding.
+/// A request future dropped after its request was sent does not cancel it: the
+/// backend finishes the request and discards the reply. The session's channel
+/// holds one request, so at most one more waits behind a request that is still
+/// running.
 #[derive(Debug)]
 pub struct LibvirtSession {
-    requests: mpsc::UnboundedSender<SessionRequest>,
+    requests: mpsc::Sender<SessionRequest>,
 }
 
 #[derive(Debug)]
@@ -252,17 +258,19 @@ pub enum SessionBootOrder {
     /// Apply the effective Redfish boot order when the command loads the saved
     /// definition, as a Redfish `ComputerSystem.Reset` does.
     Apply,
-    /// Leave the domain's boot configuration as the session prepared it.
+    /// Leave the domain's boot configuration as the session prepared it. The
+    /// resulting boot does not use the BMC's boot configuration, so it leaves a
+    /// pending one-time boot override for the next boot that applies it.
     Keep,
 }
 
 impl LibvirtSession {
     async fn request<T>(
-        &self,
+        &mut self,
         request: impl FnOnce(oneshot::Sender<T>) -> SessionRequest,
     ) -> Result<T, ActionError> {
         let (reply, response) = oneshot::channel();
-        self.requests.send(request(reply)).map_err(|error| {
+        self.requests.send(request(reply)).await.map_err(|error| {
             ActionError::Internal(eyre::eyre!("libvirt session closed: {error}"))
         })?;
         response
@@ -274,7 +282,7 @@ impl LibvirtSession {
     /// its output when it exits successfully. The arguments are passed unchanged;
     /// they name the domain themselves.
     pub async fn virsh(
-        &self,
+        &mut self,
         arguments: impl IntoIterator<Item = impl Into<OsString>>,
     ) -> Result<Output, ActionError> {
         let arguments = arguments.into_iter().map(Into::into).collect();
@@ -285,7 +293,7 @@ impl LibvirtSession {
 
     /// Observes the domain's power state, as the backend's polling does. `None`
     /// means the state could not be read or was not recognized.
-    pub async fn power_state(&self) -> Result<Option<PowerState>, ActionError> {
+    pub async fn power_state(&mut self) -> Result<Option<PowerState>, ActionError> {
         self.request(|reply| SessionRequest::PowerState { reply })
             .await
     }
@@ -296,7 +304,7 @@ impl LibvirtSession {
     /// Redfish request, the command is not validated against the published power
     /// state first.
     pub async fn power(
-        &self,
+        &mut self,
         reset_type: ResourceResetType,
         boot_order: SessionBootOrder,
     ) -> Result<(), ActionError> {
@@ -607,6 +615,13 @@ impl LibvirtBackend {
         }
         for command in VirshCommand::power(reset_type)? {
             let boot = match command {
+                // A Keep command boots the configuration its session prepared,
+                // not the BMC's, so it does not consume a one-time override.
+                VirshCommand::Start | VirshCommand::Reset | VirshCommand::Reboot
+                    if boot_order == SessionBootOrder::Keep =>
+                {
+                    Some(BootKind::Warm)
+                }
                 VirshCommand::Start => Some(BootKind::Cold),
                 VirshCommand::Reset | VirshCommand::Reboot if restart_is_cold => {
                     Some(BootKind::Cold)
@@ -763,7 +778,9 @@ impl ActorCallbacks<LibvirtMessage> for LibvirtBackend {
                 ActorResult::Noop
             }
             LibvirtMessage::Session { reply } => {
-                let (requests, mut received) = mpsc::unbounded_channel();
+                // One queued request: the session's `&mut self` requests allow at
+                // most one outstanding, plus one sent after a cancelled request.
+                let (requests, mut received) = mpsc::channel(1);
                 if reply.send(LibvirtSession { requests }).is_ok() {
                     while let Some(request) = received.recv().await {
                         self.session_request(request).await;
