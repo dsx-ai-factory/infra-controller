@@ -504,12 +504,12 @@ func TestManageInstance_UpdateInstancesInDBVpcSelectionInventory(t *testing.T) {
 	require.NotNil(t, updatedDeviceIfc.Device)
 	assert.Equal(t, device, *updatedDeviceIfc.Device)
 
-	reportedProfilePersisted, err := instanceDAO.GetByID(ctx, nil, deviceLessInstance.ID, nil)
+	reportedProfilePersisted, err := instanceDAO.GetByID(ctx, nil, deviceLessInstance.ID, nil, false)
 	require.NoError(t, err)
 	require.NotNil(t, reportedProfilePersisted.PowerProfile)
 	assert.Equal(t, reportedPowerProfile, *reportedProfilePersisted.PowerProfile)
 
-	existingProfileCleared, err := instanceDAO.GetByID(ctx, nil, deviceInstance.ID, nil)
+	existingProfileCleared, err := instanceDAO.GetByID(ctx, nil, deviceInstance.ID, nil, false)
 	require.NoError(t, err)
 	assert.Nil(t, existingProfileCleared.PowerProfile)
 
@@ -524,7 +524,7 @@ func TestManageInstance_UpdateInstancesInDBVpcSelectionInventory(t *testing.T) {
 	assert.Equal(t, cdbm.InterfaceStatusPending, shortStatusUnchanged.Status)
 
 	// An incomplete inventory entry must not panic or clear persisted state.
-	nilConfigUnchanged, err := instanceDAO.GetByID(ctx, nil, nilConfigInstance.ID, nil)
+	nilConfigUnchanged, err := instanceDAO.GetByID(ctx, nil, nilConfigInstance.ID, nil, false)
 	require.NoError(t, err)
 	require.NotNil(t, nilConfigUnchanged.PowerProfile)
 	assert.Equal(t, existingPowerProfile, *nilConfigUnchanged.PowerProfile)
@@ -806,7 +806,7 @@ func TestManageInstance_deleteInstanceFromDB(t *testing.T) {
 	require.NoError(t, readErr)
 	assert.False(t, afterCommit.IsAssigned)
 	assert.Equal(t, cdbm.MachineStatusReady, afterCommit.Status)
-	_, readErr = isd.GetByID(ctx, nil, instance.ID, nil)
+	_, readErr = isd.GetByID(ctx, nil, instance.ID, nil, false)
 	assert.ErrorIs(t, readErr, cdb.ErrDoesNotExist)
 
 	ibis, _, err := ibiDAO.GetAll(ctx, nil, cdbm.InfiniBandInterfaceFilterInput{InstanceIDs: []uuid.UUID{instance.ID}}, cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)}, nil)
@@ -2718,13 +2718,13 @@ func TestManageInstance_UpdateInstancesInDB(t *testing.T) {
 			for _, inst := range tc.nsgPropagationDetailsClearedInstances {
 				// If the VPC should not have propagation details according to the site
 				// make sure the DB agrees.
-				updatedInstance, _ := instanceDAO.GetByID(ctx, nil, inst.ID, nil)
+				updatedInstance, _ := instanceDAO.GetByID(ctx, nil, inst.ID, nil, false)
 				assert.Nil(t, updatedInstance.NetworkSecurityGroupPropagationDetails)
 			}
 
 			if tc.updatedInstance != nil {
 				// Check that Instance status, Instance Subnet status and attributes were updated in DB for Instance 1
-				updatedInstance, err := instanceDAO.GetByID(ctx, nil, tc.updatedInstance.ID, nil)
+				updatedInstance, err := instanceDAO.GetByID(ctx, nil, tc.updatedInstance.ID, nil, false)
 				assert.Nil(t, err)
 				assert.Equal(t, cdbm.InstanceStatusReady, updatedInstance.Status)
 
@@ -2811,7 +2811,7 @@ func TestManageInstance_UpdateInstancesInDB(t *testing.T) {
 
 			if tc.updatedVpcPrefixInstance != nil {
 				// Check that Instance status, Instance VpcPrefix status and attributes were updated in DB for Instance 1
-				updatedVpInstance, err := instanceDAO.GetByID(ctx, nil, tc.updatedVpcPrefixInstance.ID, nil)
+				updatedVpInstance, err := instanceDAO.GetByID(ctx, nil, tc.updatedVpcPrefixInstance.ID, nil, false)
 				assert.Nil(t, err)
 				assert.Equal(t, cdbm.InstanceStatusReady, updatedVpInstance.Status)
 
@@ -2836,7 +2836,7 @@ func TestManageInstance_UpdateInstancesInDB(t *testing.T) {
 
 			if tc.updatedMultiDPUInstance != nil {
 				// Check that Instance status, Instance VpcPrefix status and attributes were updated in DB for Instance 1
-				updatedMultiDPUInstance, err := instanceDAO.GetByID(ctx, nil, tc.updatedMultiDPUInstance.ID, nil)
+				updatedMultiDPUInstance, err := instanceDAO.GetByID(ctx, nil, tc.updatedMultiDPUInstance.ID, nil, false)
 				assert.Nil(t, err)
 				assert.Equal(t, cdbm.InstanceStatusReady, updatedMultiDPUInstance.Status)
 
@@ -2884,7 +2884,7 @@ func TestManageInstance_UpdateInstancesInDB(t *testing.T) {
 			}
 
 			for _, instPropStatus := range tc.instanceInventory.NetworkSecurityGroupPropagations {
-				updatedInstance, _ := instanceDAO.GetByID(ctx, nil, uuid.MustParse(instPropStatus.Id), nil)
+				updatedInstance, _ := instanceDAO.GetByID(ctx, nil, uuid.MustParse(instPropStatus.Id), nil, false)
 
 				// Prop details should not be nil
 				assert.NotNil(t, updatedInstance.NetworkSecurityGroupPropagationDetails)
@@ -2902,20 +2902,20 @@ func TestManageInstance_UpdateInstancesInDB(t *testing.T) {
 
 			if tc.deletingInstance != nil {
 				// Check that Instance 5, which was in Terminating state, DID get its state changed to Ready if Site inventory reports it as Ready
-				ui, serr := instanceDAO.GetByID(ctx, nil, tc.deletingInstance.ID, nil)
+				ui, serr := instanceDAO.GetByID(ctx, nil, tc.deletingInstance.ID, nil, false)
 				assert.NoError(t, serr)
 				assert.Equal(t, cdbm.InstanceStatusReady, ui.Status)
 			}
 
 			for _, instance := range tc.readyInstances {
-				ui, serr := instanceDAO.GetByID(ctx, nil, instance.ID, nil)
+				ui, serr := instanceDAO.GetByID(ctx, nil, instance.ID, nil, false)
 				assert.NoError(t, serr)
 				assert.Equal(t, cdbm.InstanceStatusReady, ui.Status)
 			}
 
 			for _, instance := range tc.deletedInstances {
 				// Check that Instance was deleted as it was in Terminating state and missing from Inventory
-				_, err = instanceDAO.GetByID(ctx, nil, instance.ID, nil)
+				_, err = instanceDAO.GetByID(ctx, nil, instance.ID, nil, false)
 				require.Equal(t, cdb.ErrDoesNotExist, err, fmt.Sprintf("Instance %s was not deleted", instance.Name))
 				// Check Instance Subnets were deleted for Instance 2
 				_, ifcCnt, err := ifcDAO.GetAll(ctx, nil, cdbm.InterfaceFilterInput{InstanceIDs: []uuid.UUID{instance.ID}}, cdbp.PageInput{}, nil)
@@ -2937,7 +2937,7 @@ func TestManageInstance_UpdateInstancesInDB(t *testing.T) {
 
 			for _, instance := range tc.missingInstances {
 				// Check that Instance has missing flag set
-				ui, serr := instanceDAO.GetByID(ctx, nil, instance.ID, nil)
+				ui, serr := instanceDAO.GetByID(ctx, nil, instance.ID, nil, false)
 				assert.Nil(t, serr)
 
 				if ui.ControllerInstanceID != nil {
@@ -2954,7 +2954,7 @@ func TestManageInstance_UpdateInstancesInDB(t *testing.T) {
 
 			if tc.restoredInstance != nil {
 				// Check that Instance status is set to Ready
-				ui, err := instanceDAO.GetByID(ctx, nil, tc.restoredInstance.ID, nil)
+				ui, err := instanceDAO.GetByID(ctx, nil, tc.restoredInstance.ID, nil, false)
 				assert.Nil(t, err)
 				assert.False(t, ui.IsMissingOnSite)
 				assert.Equal(t, cdbm.InstanceStatusReady, ui.Status)
@@ -2962,14 +2962,14 @@ func TestManageInstance_UpdateInstancesInDB(t *testing.T) {
 
 			for _, instance := range tc.unpairedInstances {
 				// Check that Instance has controller ID set
-				ui, serr := instanceDAO.GetByID(ctx, nil, instance.ID, nil)
+				ui, serr := instanceDAO.GetByID(ctx, nil, instance.ID, nil, false)
 				assert.Nil(t, serr)
 				assert.NotNil(t, ui.ControllerInstanceID)
 			}
 
 			for _, instance := range tc.bootCompletedInstances {
 				// Check that Instance power status is set to BootCompleted
-				ui, serr := instanceDAO.GetByID(ctx, nil, instance.ID, nil)
+				ui, serr := instanceDAO.GetByID(ctx, nil, instance.ID, nil, false)
 				assert.Nil(t, serr)
 				assert.Equal(t, cdbm.InstancePowerStatusBootCompleted, *ui.PowerStatus)
 			}
@@ -2977,7 +2977,7 @@ func TestManageInstance_UpdateInstancesInDB(t *testing.T) {
 			for _, instance := range tc.notMissingInstances {
 				// The page carried no ID list, so absence from it is not evidence the Site
 				// dropped the Instance and its state has to survive untouched.
-				ui, serr := instanceDAO.GetByID(ctx, nil, instance.ID, nil)
+				ui, serr := instanceDAO.GetByID(ctx, nil, instance.ID, nil, false)
 				assert.Nil(t, serr)
 				assert.False(t, ui.IsMissingOnSite)
 				assert.NotEqual(t, cdbm.InstanceStatusError, ui.Status)
@@ -3000,7 +3000,7 @@ func TestManageInstance_UpdateInstancesInDB(t *testing.T) {
 
 			if tc.tpmCertificateUpdatedInstance != nil {
 				// Verify that the TPM EK certificate was updated from nil to the base64 encoded value
-				updatedInstance, err := instanceDAO.GetByID(ctx, nil, tc.tpmCertificateUpdatedInstance.ID, nil)
+				updatedInstance, err := instanceDAO.GetByID(ctx, nil, tc.tpmCertificateUpdatedInstance.ID, nil, false)
 				assert.Nil(t, err)
 				assert.NotNil(t, updatedInstance.TpmEkCertificate)
 				assert.Equal(t, tpmEKCertBase64, *updatedInstance.TpmEkCertificate)

@@ -558,7 +558,7 @@ func TestInstanceSQLDAO_GetByID(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.desc, func(t *testing.T) {
-			got, err := isd.GetByID(ctx, nil, tc.id, tc.paramRelations)
+			got, err := isd.GetByID(ctx, nil, tc.id, tc.paramRelations, false)
 			assert.Equal(t, tc.expectedError, err != nil)
 			if tc.expectedError {
 				assert.Equal(t, tc.expectedErrVal, err)
@@ -3203,7 +3203,7 @@ func TestInstanceSQLDAO_Delete(t *testing.T) {
 			err := isd.Delete(ctx, nil, tc.id)
 			assert.Equal(t, tc.expectedError, err != nil)
 			if !tc.expectedError {
-				tmp, err := isd.GetByID(ctx, nil, tc.id, nil)
+				tmp, err := isd.GetByID(ctx, nil, tc.id, nil, false)
 				assert.NotNil(t, err)
 				assert.Nil(t, tmp)
 			}

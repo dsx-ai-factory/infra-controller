@@ -1372,46 +1372,36 @@ func (mi ManageInstance) createOrUpdateDpuExtensionServiceDeploymentFromSite(
 	reported *corev1.InstanceDpuExtensionServiceStatus,
 	status string,
 ) (*cdbm.DpuExtensionServiceDeployment, error) {
-	serviceID, err := uuid.Parse(reported.GetServiceId())
-	if err != nil {
-		return nil, nil
-	}
-	version := reported.GetVersion()
-	if version == "" {
-		return nil, nil
-	}
-
 	logger := log.With().
 		Str("Activity", "UpdateInstancesInDB").
 		Str("Site ID", site.ID.String()).
 		Str("Instance ID", instance.ID.String()).
+		Logger()
+
+	serviceID, err := uuid.Parse(reported.GetServiceId())
+	if err != nil {
+		logger.Warn().Msgf("unable to recover DPU Extension Service Deployment: failed to parse service ID, not a valid UUID %s", reported.GetServiceId())
+		return nil, nil
+	}
+	version := reported.GetVersion()
+	if version == "" {
+		logger.Warn().Str("DPU Extension Service ID", serviceID.String()).
+			Msg("unable to recover DPU Extension Service Deployment: reported version is empty")
+		return nil, nil
+	}
+
+	logger = logger.With().
 		Str("DPU Extension Service ID", serviceID.String()).
 		Str("Version", version).
 		Logger()
 
 	return cdb.WithTxResult(ctx, mi.dbSession, func(tx *cdb.Tx) (*cdbm.DpuExtensionServiceDeployment, error) {
-		lockKey := fmt.Sprintf(
-			"dpu-extension-service-deployment-recovery-%s-%s-%s",
-			instance.ID,
-			serviceID,
-			version,
-		)
-		lockErr := tx.TryAcquireAdvisoryLock(ctx, cdb.GetAdvisoryLockIDFromString(lockKey), nil)
-		if lockErr != nil {
-			return nil, fmt.Errorf("unable to recover DPU Extension Service Deployment: failed to acquire recovery lock, DB error: %w", lockErr)
-		}
-
 		// Instance updates write the Instance before reconciling deployments. Taking
-		// the same row lock prevents inventory recovery from racing an API update.
-		lockedInstance := new(cdbm.Instance)
-		lockErr = cdb.GetIDB(tx, mi.dbSession).
-			NewSelect().
-			Model(lockedInstance).
-			Where("i.id = ?", instance.ID).
-			For("UPDATE").
-			Scan(ctx)
+		// the same row lock prevents inventory recovery from racing an API update,
+		// and serializes recoveries for this Instance.
+		lockedInstance, lockErr := cdbm.NewInstanceDAO(mi.dbSession).GetByID(ctx, tx, instance.ID, nil, true)
 		if lockErr != nil {
-			if lockErr == sql.ErrNoRows {
+			if lockErr == cdb.ErrDoesNotExist {
 				logger.Warn().Msg("unable to recover DPU Extension Service Deployment: Instance was not found")
 				return nil, nil
 			}
@@ -1785,7 +1775,7 @@ func (mi ManageInstance) UpdateInstanceMetadata(ctx context.Context, siteID uuid
 	logger.Info().Msg("starting activity")
 
 	instanceDAO := cdbm.NewInstanceDAO(mi.dbSession)
-	instance, err := instanceDAO.GetByID(ctx, nil, instanceID, nil)
+	instance, err := instanceDAO.GetByID(ctx, nil, instanceID, nil, false)
 	if err != nil {
 		logger.Error().Err(err).Msg("failed to retrieve Instance from DB by ID")
 		return err
