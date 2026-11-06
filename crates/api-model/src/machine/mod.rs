@@ -2982,7 +2982,7 @@ pub struct HostReprovisionRequest {
 }
 
 /// Struct to store information if a managed host reset is requested.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResetRequest {
     pub requested_at: DateTime<Utc>,
     pub initiator: String,

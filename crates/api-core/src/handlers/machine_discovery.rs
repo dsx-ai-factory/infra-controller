@@ -22,6 +22,7 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use ::rpc::forge as rpc;
+use carbide_resource_pool::ResourcePoolBackendError;
 use carbide_site_explorer::dpu_loopback::PreparedDpuLoopback;
 use carbide_utils::none_if_empty::NoneIfEmpty;
 use carbide_uuid::machine::{
@@ -494,7 +495,25 @@ pub(crate) async fn discover_machine(
 
             // Interface rows precede the conditional machine/configuration write.
             if let Some(prepared) = &dpu_loopback {
-                prepared.attach(&mut txn, true).await.map_err(CarbideError::from)?;
+                match prepared.attach(&mut txn, true).await {
+                    Ok(()) => {}
+                    Err(ResourcePoolBackendError::Database(error))
+                        if error.is_lock_not_available() =>
+                    {
+                        // A database lock rejection aborts this transaction.
+                        // Release the whole discovery prefix before retrying.
+                        txn.rollback().await?;
+                        return Err(CarbideError::UnavailableError(format!(
+                            "machine network group for {dpu_machine_id} is busy; retry discovery"
+                        ))
+                        .into());
+                    }
+                    Err(error) => {
+                        // End entity writes before cancelling backend preparation.
+                        txn.rollback().await?;
+                        return Err(CarbideError::from(error).into());
+                    }
+                }
             }
 
             let host_machine_id = if let Some(host_machine_id) = machine_interface.machine_id {
@@ -539,6 +558,27 @@ pub(crate) async fn discover_machine(
                 let host_machine_id =
                     carbide_uuid::machine::HostMachineId::try_from(proactive_machine.id)
                         .map_err(|error| CarbideError::internal(error.to_string()))?;
+                // A new link can reuse an existing predicted host. Its foreign-key
+                // check takes only KEY SHARE, so reject a competing receipt or state
+                // writer before acquiring history and updating the host.
+                if !db::machine::try_lock_by_id_for_no_key_update(&mut txn, &host_machine_id.into())
+                    .await?
+                {
+                    txn.rollback().await?;
+                    return Err(CarbideError::UnavailableError(format!(
+                        "discovery state for host {host_machine_id} is busy or missing; retry discovery"
+                    ))
+                    .into());
+                }
+                if !db::machine::try_lock_machine_state_history(&mut txn, &host_machine_id.into())
+                    .await?
+                {
+                    txn.rollback().await?;
+                    return Err(CarbideError::UnavailableError(format!(
+                        "discovery state history for host {host_machine_id} is busy; retry discovery"
+                    ))
+                    .into());
+                }
                 db::machine::update_state(
                     &mut txn,
                     &host_machine_id,

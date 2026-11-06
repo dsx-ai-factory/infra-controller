@@ -489,6 +489,14 @@ impl From<InvalidMachineType> for DatabaseError {
 }
 
 impl DatabaseError {
+    /// Identifies an unavailable PostgreSQL lock (55P03), including `NOWAIT` failures.
+    /// The caller must roll back the failed transaction before retrying.
+    pub fn is_lock_not_available(&self) -> bool {
+        matches!(self, DatabaseError::Sqlx(error)
+            if error.source.as_database_error().and_then(|error| error.code()).as_deref()
+                == Some("55P03"))
+    }
+
     /// Returns true if the database error wrapps a sqlx::Error::RowNotFound, or if it's our own DatabaseError::NotFoundError
     pub fn is_not_found(&self) -> bool {
         match self {

@@ -27,41 +27,105 @@ use tonic::{Request, Response, Status};
 
 use crate::CarbideError;
 use crate::api::{Api, log_request_data};
-use crate::handlers::utils::convert_and_log_machine_id;
+use crate::handlers::utils::{MachinePreparationDeadline, convert_and_log_machine_id};
+
+async fn lock_host_for_dpf_update(
+    txn: &mut sqlx::PgConnection,
+    machine_id: &HostMachineId,
+) -> Result<(), CarbideError> {
+    if !db::machine::lock_by_id_for_update_if_present(txn, &(*machine_id).into()).await? {
+        return Err(CarbideError::NotFoundError {
+            kind: "snapshot",
+            id: machine_id.to_string(),
+        });
+    }
+    Ok(())
+}
 
 pub(crate) async fn modify_dpf_state(
     api: &Api,
     request: Request<rpc::ModifyDpfStateRequest>,
 ) -> Result<Response<()>, Status> {
+    let deadline = MachinePreparationDeadline::from_request(&request);
     log_request_data(&request);
     let request = request.get_ref();
     let machine_id: HostMachineId = convert_and_log_machine_id(request.machine_id.as_ref())?;
 
-    let mut txn = api.txn_begin().await?;
-    let machine_snapshot = load_snapshot(&mut txn, &machine_id, LoadSnapshotOptions::default())
-        .await?
-        .ok_or_else(|| CarbideError::NotFoundError {
-            kind: "snapshot",
-            id: machine_id.to_string(),
-        })?;
+    deadline
+        .run(|| async {
+            loop {
+                let mut txn = api.txn_begin().await?;
+                lock_host_for_dpf_update(txn.as_mut(), &machine_id).await?;
+                match db::machine::try_lock_host_interfaces(txn.as_mut(), &machine_id).await? {
+                    db::machine::HostInterfaceAdmission::Acquired => {}
+                    db::machine::HostInterfaceAdmission::Contended(interface_id) => {
+                        txn.rollback().await?;
+                        db::machine::wait_for_managed_host_transition_lock(
+                            api.pg_pool(),
+                            &db::machine::ManagedHostTransitionLock::HostInterface(interface_id),
+                        )
+                        .await?;
+                        continue;
+                    }
+                    db::machine::HostInterfaceAdmission::Changed => {
+                        txn.rollback().await?;
+                        continue;
+                    }
+                }
+                let machine_snapshot =
+                    load_snapshot(&mut txn, &machine_id, LoadSnapshotOptions::default())
+                        .await?
+                        .ok_or_else(|| CarbideError::NotFoundError {
+                            kind: "snapshot",
+                            id: machine_id.to_string(),
+                        })?;
 
-    if !request.dpf_enabled && machine_snapshot.host_snapshot.config.dpf.used_for_ingestion {
-        return Err(CarbideError::FailedPrecondition(format!(
-            "cannot disable DPF for host {}: machine was ingested via DPF",
-            machine_id
-        ))
-        .into());
-    }
+                if !request.dpf_enabled
+                    && machine_snapshot.host_snapshot.config.dpf.used_for_ingestion
+                {
+                    return Err(CarbideError::FailedPrecondition(format!(
+                        "cannot disable DPF for host {}: machine was ingested via DPF",
+                        machine_id
+                    ))
+                    .into());
+                }
 
-    db::machine::modify_dpf_state(&mut txn, &machine_id, request.dpf_enabled).await?;
-
-    // Keep DPUs also in sync.
-    for dpu in machine_snapshot.dpu_snapshots {
-        db::machine::modify_dpf_state(&mut txn, &dpu.id, request.dpf_enabled).await?;
-    }
-    txn.commit().await?;
-
-    Ok(Response::new(()))
+                let mut dpu_ids = machine_snapshot
+                    .dpu_snapshots
+                    .iter()
+                    .map(|dpu| dpu.id)
+                    .collect::<Vec<_>>();
+                dpu_ids.sort_unstable();
+                dpu_ids.dedup();
+                // Reports and queued controller writes can own a DPU before
+                // needing the host or its interfaces.
+                let mut contended = None;
+                for dpu_id in &dpu_ids {
+                    if !db::machine::try_lock_by_id_for_no_key_update(
+                        txn.as_mut(),
+                        &(*dpu_id).into(),
+                    )
+                    .await?
+                    {
+                        contended = Some(*dpu_id);
+                        break;
+                    }
+                }
+                if let Some(dpu_id) = contended {
+                    txn.rollback().await?;
+                    db::machine::wait_for_machine_nonkey_update(api.pg_pool(), &dpu_id.into())
+                        .await?;
+                    continue;
+                }
+                db::machine::modify_dpf_state(&mut txn, &machine_id, request.dpf_enabled).await?;
+                for dpu_id in dpu_ids {
+                    db::machine::modify_dpf_state(&mut txn, &dpu_id, request.dpf_enabled).await?;
+                }
+                txn.commit().await?;
+                return Ok(Response::new(()));
+            }
+        })
+        .await
 }
 
 // Since this function sends only a bool with ids, we might not need pagination for this.
@@ -184,4 +248,31 @@ pub(crate) async fn get_dpf_service_versions(
         .collect();
 
     Ok(Response::new(rpc::DpfServiceVersionsResponse { services }))
+}
+
+#[cfg(test)]
+mod tests {
+    use carbide_uuid::machine::{HostMachineId, MachineId, MachineIdSource, MachineType};
+
+    use super::lock_host_for_dpf_update;
+    use crate::CarbideError;
+
+    #[crate::sqlx_test]
+    async fn dpf_host_admission_rejects_missing_host(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let host_id = HostMachineId::try_from(MachineId::new(
+            MachineIdSource::ProductBoardChassisSerial,
+            [53; 32],
+            MachineType::Host,
+        ))?;
+        let mut attempt = pool.begin().await?;
+        let rejected = lock_host_for_dpf_update(attempt.as_mut(), &host_id).await;
+        attempt.rollback().await?;
+        assert!(matches!(
+            rejected,
+            Err(CarbideError::NotFoundError { kind: "snapshot", id }) if id == host_id.to_string()
+        ));
+        Ok(())
+    }
 }

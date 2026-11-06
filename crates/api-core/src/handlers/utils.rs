@@ -16,7 +16,9 @@
  */
 
 use std::borrow::Cow;
+use std::future::Future;
 use std::net::{IpAddr, SocketAddr};
+use std::time::Duration;
 
 use carbide_utils::HostPortPair;
 use carbide_uuid::machine::{HostMachineId, MachineId, MachineIdSubtypeTrait};
@@ -26,6 +28,77 @@ use crate::CarbideError;
 use crate::api::{Api, log_machine_id};
 
 const DEFAULT_BMC_HTTPS_PORT: u16 = 443;
+
+// Match the default Forge RPC client budget without sharing its transport policy.
+const MACHINE_PREPARATION_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// `MachinePreparationDeadline` bounds a handler's Machine database preparation.
+/// Construct it at handler entry, after the listener's authentication and
+/// configured authorization and gRPC admission middleware. The `grpc-timeout`
+/// budget starts here and excludes time in those earlier layers. It accepts one
+/// to eight decimal digits followed by `H` (hours), `M` (minutes), `S` (seconds),
+/// `m` (milliseconds), `u` (microseconds), or `n` (nanoseconds); zero is valid.
+/// A valid shorter timeout reduces the five-minute cap, while missing or malformed
+/// metadata keeps it. This bounds only the enclosed database preparation,
+/// including pool acquisition and retries.
+pub(super) struct MachinePreparationDeadline {
+    deadline: tokio::time::Instant,
+}
+
+impl MachinePreparationDeadline {
+    pub(super) fn from_request<T>(request: &tonic::Request<T>) -> Self {
+        let started_at = tokio::time::Instant::now();
+        let budget = request
+            .metadata()
+            .get("grpc-timeout")
+            .and_then(|value| value.to_str().ok())
+            .and_then(grpc_timeout_duration)
+            .unwrap_or(MACHINE_PREPARATION_TIMEOUT)
+            .min(MACHINE_PREPARATION_TIMEOUT);
+        Self {
+            deadline: started_at + budget,
+        }
+    }
+
+    /// `run` constructs the transaction-owning future only while time remains.
+    /// Expiry drops it; SQLx queues an open transaction's rollback. This does not
+    /// guarantee immediate PostgreSQL cancellation or resolve an in-flight commit.
+    pub(super) async fn run<T, MakeWork, Work>(
+        self,
+        make_work: MakeWork,
+    ) -> Result<T, tonic::Status>
+    where
+        MakeWork: FnOnce() -> Work,
+        Work: Future<Output = Result<T, tonic::Status>>,
+    {
+        let expired = || tonic::Status::from(CarbideError::MachinePreparationDeadlineExceeded);
+        if tokio::time::Instant::now() >= self.deadline {
+            return Err(expired());
+        }
+        tokio::select! {
+            biased;
+            _ = tokio::time::sleep_until(self.deadline) => Err(expired()),
+            result = async move { make_work().await } => result,
+        }
+    }
+}
+
+fn grpc_timeout_duration(value: &str) -> Option<Duration> {
+    let (&unit, digits) = value.as_bytes().split_last()?;
+    if digits.is_empty() || digits.len() > 8 || !digits.iter().all(u8::is_ascii_digit) {
+        return None;
+    }
+    let count = std::str::from_utf8(digits).ok()?.parse::<u64>().ok()?;
+    Some(match unit {
+        b'H' => Duration::from_secs(count * 3600),
+        b'M' => Duration::from_secs(count * 60),
+        b'S' => Duration::from_secs(count),
+        b'm' => Duration::from_millis(count),
+        b'u' => Duration::from_micros(count),
+        b'n' => Duration::from_nanos(count),
+        _ => return None,
+    })
+}
 
 /// `resolve_bmc_address` selects the first address from [`resolve_bmc_addresses`].
 pub(super) async fn resolve_bmc_address(address: &str) -> Result<SocketAddr, tonic::Status> {
@@ -188,6 +261,101 @@ mod tests {
     use carbide_test_support::value_scenarios;
 
     use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn machine_preparation_deadline_uses_the_finite_caller_budget() {
+        value_scenarios!(
+            run = |header: Option<&str>| {
+                let mut request = tonic::Request::new(());
+                if let Some(header) = header {
+                    request.metadata_mut().insert("grpc-timeout", header.parse().unwrap());
+                }
+                MachinePreparationDeadline::from_request(&request)
+                    .deadline.duration_since(tokio::time::Instant::now())
+            };
+            "finite fallback and cap" {
+                None => Duration::from_secs(300),
+                Some("600S") => Duration::from_secs(300),
+                Some("99999999H") => Duration::from_secs(300),
+            }
+            "gRPC timeout units" {
+                Some("1H") => Duration::from_secs(300),
+                Some("1M") => Duration::from_secs(60),
+                Some("1S") => Duration::from_secs(1),
+                Some("1m") => Duration::from_millis(1),
+                Some("1u") => Duration::from_micros(1),
+                Some("1n") => Duration::from_nanos(1),
+                Some("99999999n") => Duration::from_nanos(99_999_999),
+                Some("0n") => Duration::ZERO,
+            }
+            "malformed metadata keeps the finite cap" {
+                Some("S") => Duration::from_secs(300),
+                Some("123456789S") => Duration::from_secs(300),
+                Some("+1S") => Duration::from_secs(300),
+                Some("1s") => Duration::from_secs(300),
+            }
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn expired_machine_preparation_does_not_construct_ready_work() {
+        for (scenario, budget) in [
+            ("zero", Duration::ZERO),
+            ("expired", Duration::from_secs(1)),
+        ] {
+            let mut request = tonic::Request::new(());
+            request.set_timeout(budget);
+            let deadline = MachinePreparationDeadline::from_request(&request);
+            tokio::time::advance(budget).await;
+            let constructed = std::cell::Cell::new(false);
+            let error = deadline
+                .run(|| {
+                    constructed.set(true);
+                    std::future::ready(Ok::<_, tonic::Status>(()))
+                })
+                .await
+                .unwrap_err();
+            assert_eq!(error.code(), tonic::Code::DeadlineExceeded, "{scenario}");
+            assert!(
+                !constructed.get(),
+                "{scenario}: expired work was constructed"
+            );
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn machine_preparation_expiry_precedes_an_already_ready_result() {
+        let mut request = tonic::Request::new(());
+        request.set_timeout(Duration::from_secs(1));
+        let deadline = MachinePreparationDeadline::from_request(&request);
+        let (ready, result) = tokio::sync::oneshot::channel();
+        let work = deadline.run(|| async move {
+            result.await.unwrap();
+            Ok(())
+        });
+        tokio::pin!(work);
+        assert!(futures_util::poll!(&mut work).is_pending());
+        tokio::time::advance(Duration::from_secs(1) + Duration::from_millis(1)).await;
+        ready.send(()).unwrap();
+        let error = work.await.unwrap_err();
+        assert_eq!(error.code(), tonic::Code::DeadlineExceeded);
+        let message = "machine database preparation deadline exceeded";
+        assert_eq!(error.message(), message);
+        assert_eq!(
+            error.metadata().get("nico-error-code").unwrap(),
+            "NICO-API-504"
+        );
+        assert_eq!(error.metadata().get("nico-error-text").unwrap(), message);
+        let source = std::error::Error::source(&error)
+            .unwrap()
+            .downcast_ref::<crate::errors::CarbideErrorWithLocation>()
+            .unwrap();
+        assert!(matches!(
+            &source.error,
+            CarbideError::MachinePreparationDeadlineExceeded
+        ));
+        assert!(source.location.starts_with(concat!(file!(), ":")));
+    }
 
     #[test]
     fn parses_numeric_bmc_addresses_with_the_expected_port() {

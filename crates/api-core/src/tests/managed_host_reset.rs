@@ -49,6 +49,1072 @@ use crate::tests::dpf::phase_observation;
 
 const TEST_TIMEOUT: Duration = Duration::from_secs(30);
 
+mod reset_scout_races {
+    use std::future::Future;
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+
+    use futures_util::future::maybe_done;
+    use model::firmware::FirmwareComponentType;
+    use model::machine::{HostReprovisionState, ManagedHostStateSnapshot, ResetRequest};
+
+    use super::*;
+
+    async fn snapshot(env: &TestEnv, host: &TestManagedHost) -> ManagedHostStateSnapshot {
+        let mut txn = env.db_txn().await;
+        let snapshot = host.snapshot(&mut txn).await;
+        txn.commit().await.unwrap();
+        snapshot
+    }
+
+    async fn prepare(env: &TestEnv, host: &TestManagedHost) -> ManagedHostStateSnapshot {
+        let waiting = ManagedHostState::HostReprovision {
+            reprovision_state: HostReprovisionState::WaitingForScoutUpgrade {
+                upgrade_task_id: "reset-scout-task".into(),
+                firmware_type: FirmwareComponentType::Bmc,
+                final_version: "1.2.3".into(),
+                power_drains_needed: None,
+                started_at: chrono::Utc::now(),
+                deadline: chrono::Utc::now() + chrono::Duration::minutes(60),
+                task_json: String::new(),
+                result: None,
+            },
+            retry_count: 0,
+        };
+        let mut txn = env.db_txn().await;
+        db::machine::update_state(txn.as_mut(), &host.id, &waiting)
+            .await
+            .unwrap();
+        for id in [MachineId::from(host.id), host.dpu_ids[0].into()] {
+            sqlx::query(
+                "UPDATE machines SET reset_requested = NULL, reprovisioning_requested = NULL,
+                     host_reprovisioning_requested = NULL, last_reboot_requested = NULL,
+                     controller_state_outcome = NULL WHERE id = $1",
+            )
+            .bind(id)
+            .execute(txn.as_mut())
+            .await
+            .unwrap();
+        }
+        txn.commit().await.unwrap();
+        host.mark_machine_for_updates().await;
+        network_configured_with_health(env, &host.dpu_ids[0], None).await;
+        env.api
+            .trigger_managed_host_reset(reset_request(host.id.into(), Mode::Set))
+            .await
+            .unwrap();
+        let before = snapshot(env, host).await;
+        assert_eq!(before.managed_state, waiting);
+        assert!(before.instance.is_none());
+        assert!(before.host_snapshot.config.dpf.used_for_ingestion);
+        assert_eq!(
+            before.host_snapshot.status.failure_details.cause,
+            FailureCause::NoError
+        );
+        assert!(before.host_snapshot.status.last_reboot_requested.is_none());
+        assert!(
+            before
+                .host_snapshot
+                .reset_requested
+                .as_ref()
+                .unwrap()
+                .started_at
+                .is_none()
+        );
+        assert!(before.aggregate_health.alerts.iter().any(|alert| {
+            alert.id == *model::machine_update_module::HOST_UPDATE_HEALTH_PROBE_ID
+                && alert
+                    .classifications
+                    .contains(&health_report::HealthAlertClassification::prevent_allocations())
+        }));
+        for dpu in &before.dpu_snapshots {
+            assert!(dpu.reprovision_requested.is_none());
+            assert!(dpu.status.last_reboot_requested.is_none());
+            let observation = dpu.network_status_observation.as_ref().unwrap();
+            assert!(
+                chrono::Utc::now().signed_duration_since(observation.observed_at)
+                    < chrono::Duration::minutes(1)
+            );
+        }
+        before
+    }
+
+    // Observe the actual blocked statement, including history-trigger advisory waits.
+    async fn lock_wait(
+        pool: &sqlx::PgPool,
+        blocker: i32,
+        excluded_pid: Option<i32>,
+    ) -> Result<(i32, String, bool), String> {
+        timeout(TEST_TIMEOUT, async {
+            loop {
+                let waiting = sqlx::query_as(
+                    "SELECT a.pid, a.query,
+                         EXISTS(SELECT 1 FROM pg_locks l WHERE l.pid = a.pid
+                                AND l.locktype = 'advisory' AND NOT l.granted)
+                     FROM pg_stat_activity a
+                     WHERE a.datname = current_database() AND a.wait_event_type = 'Lock'
+                       AND $1 = ANY(pg_blocking_pids(a.pid))
+                       AND ($2::integer IS NULL OR a.pid != $2)
+                     ORDER BY a.pid LIMIT 1",
+                )
+                .bind(blocker)
+                .bind(excluded_pid)
+                .fetch_optional(pool)
+                .await
+                .map_err(|error| format!("observe lock wait: {error:?}"))?;
+                if let Some(waiting) = waiting {
+                    return Ok(waiting);
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .map_err(|error| format!("lock wait missing: {error}"))?
+    }
+
+    async fn host_is_free(txn: &mut sqlx::PgConnection, id: MachineId) -> Result<(), String> {
+        let mut probe = db::Transaction::begin_inner(txn)
+            .await
+            .map_err(|error| format!("probe savepoint: {error:?}"))?;
+        let locked = sqlx::query("SELECT id FROM machines WHERE id = $1 FOR UPDATE NOWAIT")
+            .bind(id)
+            .execute(probe.as_pgconn())
+            .await;
+        let rollback = probe.rollback().await;
+        locked.map_err(|error| format!("history waiter retained H: {error:?}"))?;
+        rollback.map_err(|error| format!("probe rollback: {error:?}"))
+    }
+
+    async fn join_writers(
+        env: &TestEnv,
+        pids: [Option<i32>; 2],
+        joined: impl Future<Output = ()>,
+    ) -> bool {
+        tokio::pin!(joined);
+        if timeout(TEST_TIMEOUT, &mut joined).await.is_ok() {
+            return false;
+        }
+        let mut cancellations = Vec::new();
+        for pid in pids.into_iter().flatten() {
+            cancellations.push((
+                pid,
+                sqlx::query_scalar::<_, bool>("SELECT pg_cancel_backend($1)")
+                    .bind(pid)
+                    .fetch_one(&env.pool)
+                    .await,
+            ));
+        }
+        timeout(TEST_TIMEOUT, &mut joined)
+            .await
+            .unwrap_or_else(|error| {
+                panic!("writer cleanup did not settle: {error}; {cancellations:?}")
+            });
+        true
+    }
+
+    fn check(case: &str, failures: &mut Vec<String>, assertions: impl FnOnce()) {
+        if let Err(panic) = catch_unwind(AssertUnwindSafe(assertions)) {
+            let message = panic
+                .downcast_ref::<String>()
+                .map(String::as_str)
+                .or_else(|| panic.downcast_ref::<&str>().copied())
+                .unwrap_or("assertion failed");
+            failures.push(format!("{case}: {message}"));
+        }
+    }
+
+    fn assert_started(request: &ResetRequest, pending: &ResetRequest) {
+        assert!(request.started_at.is_some());
+        assert_eq!(request.requested_at, pending.requested_at);
+        assert_eq!(request.initiator, pending.initiator);
+        assert_eq!(request.ignore_cleanup, pending.ignore_cleanup);
+    }
+
+    async fn histories(
+        env: &TestEnv,
+        host: &TestManagedHost,
+    ) -> Vec<Vec<(config_version::ConfigVersion, String)>> {
+        let mut txn = env.db_txn().await;
+        let mut histories = Vec::new();
+        for id in [MachineId::from(host.id), host.dpu_ids[0].into()] {
+            histories.push(
+                db::state_history::for_object(
+                    txn.as_mut(),
+                    db::state_history::StateHistoryTableId::Machine,
+                    &id,
+                )
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|record| (record.state_version, record.state))
+                .collect(),
+            );
+        }
+        txn.commit().await.unwrap();
+        histories
+    }
+
+    async fn assert_reset_history(
+        env: &TestEnv,
+        host: &TestManagedHost,
+        since: config_version::ConfigVersion,
+    ) {
+        let state = snapshot(env, host).await;
+        let expected = ManagedHostState::Reset {
+            reset_state: ResetState::DeletingInstance,
+        };
+        assert_eq!(state.managed_state, expected);
+        assert!(matches!(
+            state.host_snapshot.controller_state_outcome,
+            Some(PersistentStateHandlerOutcome::Transition { .. })
+        ));
+        let mut txn = env.db_txn().await;
+        for (id, version) in state
+            .dpu_snapshots
+            .iter()
+            .map(|dpu| (MachineId::from(dpu.id), dpu.state.version))
+            .chain([(host.id.into(), state.host_snapshot.state.version)])
+        {
+            let machine = db::machine::find_one(txn.as_mut(), &id, Default::default())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(machine.current_state(), &expected);
+            let history = db::state_history::for_object(
+                txn.as_mut(),
+                db::state_history::StateHistoryTableId::Machine,
+                &id,
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                history
+                    .iter()
+                    .filter(|record| {
+                        record.state_version.version_nr() > since.version_nr()
+                            && serde_json::from_str::<ManagedHostState>(&record.state).unwrap()
+                                == expected
+                    })
+                    .count(),
+                1
+            );
+            let last = history.last().unwrap();
+            assert_eq!(
+                serde_json::from_str::<ManagedHostState>(&last.state).unwrap(),
+                expected
+            );
+            assert_eq!(last.state_version, version);
+        }
+        txn.commit().await.unwrap();
+    }
+
+    #[crate::sqlx_test]
+    async fn scout_report_and_reset_controller_preserve_history_order(pool: sqlx::PgPool) {
+        Box::pin(async move {
+            let mut mock = provisioning_mock();
+            mock.expect_force_delete_host().times(0);
+            let env = env_with_dpf_mock(pool, mock).await;
+            let host = dpf_ingested_host(&env).await;
+            let mut failures = Vec::new();
+            for (case, scout_first) in [("Scout first", true), ("Reset first", false)] {
+                let before = prepare(&env, &host).await;
+                let pending = before.host_snapshot.reset_requested.clone().unwrap();
+                let upgrade_task_id = match &before.managed_state {
+                    ManagedHostState::HostReprovision {
+                        reprovision_state: HostReprovisionState::WaitingForScoutUpgrade {
+                            upgrade_task_id, ..
+                        }, ..
+                    } => upgrade_task_id.clone(),
+                    other => panic!("waiting fixture changed: {other:?}"),
+                };
+                let mut gate = env.db_txn().await;
+                if scout_first {
+                    sqlx::query("SELECT pg_advisory_xact_lock(\
+                        hashtextextended($1, 'machine_state_history'::regclass::bigint))")
+                        .bind(host.id.to_string()).execute(gate.as_mut()).await.unwrap();
+                } else {
+                    db::machine::lock_by_id_for_update(gate.as_mut(), &host.id.into()).await.unwrap();
+                }
+                let gate_pid = sqlx::query_scalar("SELECT pg_backend_pid()")
+                    .fetch_one(gate.as_mut()).await.unwrap();
+                let checkpoint = env.redfish_sim.timepoint();
+                let clients = env.redfish_sim.create_client_calls();
+                let report = maybe_done(env.api.report_scout_firmware_upgrade_status(Request::new(
+                    rpc::forge::ScoutFirmwareUpgradeStatusRequest {
+                        machine_id: Some(host.id.into()), upgrade_task_id: upgrade_task_id.clone(),
+                        success: true, exit_code: 0, stdout: "completed-task".into(),
+                        stderr: String::new(), error: String::new(),
+                    },
+                )));
+                let controller = maybe_done(env.run_machine_state_controller_iteration_no_requeue());
+                tokio::pin!(report, controller);
+                let mut report_pid = None;
+                let mut controller_pid = None;
+                let mut observations = Vec::new();
+                let readiness = timeout(TEST_TIMEOUT, async {
+                    if scout_first {
+                        let first = tokio::select! {
+                            () = &mut report => return Err("Scout passed history gate".to_string()),
+                            observed = lock_wait(&env.pool, gate_pid, None) => observed?,
+                        };
+                        report_pid = Some(first.0);
+                        observations.push(first);
+                        let second = tokio::select! {
+                            () = &mut report => return Err("Scout passed history gate".to_string()),
+                            () = &mut controller => return Err("reset did not reach admission".to_string()),
+                            observed = lock_wait(&env.pool, gate_pid, report_pid) => observed?,
+                        };
+                        controller_pid = Some(second.0);
+                        observations.push(second);
+                        host_is_free(gate.as_mut(), host.id.into()).await?;
+                    } else {
+                        let first = tokio::select! {
+                            () = &mut controller => return Err("reset passed H gate".to_string()),
+                            observed = lock_wait(&env.pool, gate_pid, None) => observed?,
+                        };
+                        controller_pid = Some(first.0);
+                        observations.push(first);
+                        let second = tokio::select! {
+                            () = &mut controller => return Err("reset passed H gate".to_string()),
+                            () = &mut report => return Err("Scout did not wait for reset".to_string()),
+                            observed = async {
+                                tokio::select! {
+                                    observed = lock_wait(&env.pool, gate_pid, controller_pid) => observed,
+                                    observed = lock_wait(&env.pool, controller_pid.unwrap(), None) => observed,
+                                }
+                            } => observed?,
+                        };
+                        report_pid = Some(second.0);
+                        observations.push(second);
+                    }
+                    Ok::<(), String>(())
+                }).await.unwrap_or_else(|error| Err(format!("readiness timeout: {error}")));
+                let release = gate.commit().await;
+                let timed_out = join_writers(&env, [report_pid, controller_pid], async {
+                    tokio::join!(&mut report, &mut controller);
+                }).await;
+                let report_result = report.as_mut().take_output().unwrap();
+                let intermediate = snapshot(&env, &host).await;
+                let intermediate_request = intermediate.host_snapshot.reset_requested.clone();
+                // The controller runner returns unit; preserve its database outcome too.
+                let diagnostic = format!("{case}: {readiness:?}; waits={observations:?}; \
+                    release={release:?}; timed_out={timed_out}; Scout={report_result:?}; \
+                    state={:?}; outcome={:?}; reset={intermediate_request:?}",
+                    intermediate.managed_state, intermediate.host_snapshot.controller_state_outcome);
+                let retry = scout_first && report_result.is_ok()
+                    && intermediate.managed_state != (ManagedHostState::Reset {
+                        reset_state: ResetState::DeletingInstance,
+                    })
+                    && intermediate_request.as_ref().is_some_and(|request| request.started_at.is_none());
+                if retry {
+                    env.run_machine_state_controller_iteration_no_requeue().await;
+                }
+                let after = snapshot(&env, &host).await;
+                let final_histories = histories(&env, &host).await;
+                check(case, &mut failures, || {
+                    assert!(readiness.is_ok() && release.is_ok() && !timed_out, "{diagnostic}");
+                    assert!(!matches!(intermediate.host_snapshot.controller_state_outcome,
+                        Some(PersistentStateHandlerOutcome::Error { .. })), "{diagnostic}");
+                    if scout_first {
+                        assert!(report_result.is_ok(), "{diagnostic}");
+                        assert!(matches!(&intermediate.managed_state,
+                            ManagedHostState::HostReprovision {
+                                reprovision_state: HostReprovisionState::WaitingForScoutUpgrade {
+                                    result: Some(result), ..
+                                }, ..
+                            } if result.success && result.stdout == "completed-task"), "{diagnostic}");
+                        assert!(retry, "{diagnostic}");
+                        assert!(intermediate_request.as_ref().unwrap().started_at.is_none());
+                    } else {
+                        assert_eq!(report_result.as_ref().unwrap_err().code(), Code::FailedPrecondition,
+                            "{diagnostic}");
+                    }
+                    assert_eq!(after.managed_state, ManagedHostState::Reset {
+                        reset_state: ResetState::DeletingInstance,
+                    }, "{diagnostic}");
+                    assert_started(after.host_snapshot.reset_requested.as_ref().unwrap(), &pending);
+                    for (index, history) in final_histories.iter().enumerate() {
+                        let reports = history.iter().filter(|(version, json)| {
+                            version.version_nr() > before.host_snapshot.state.version.version_nr()
+                                && matches!(serde_json::from_str::<ManagedHostState>(json).unwrap(),
+                                    ManagedHostState::HostReprovision {
+                                        reprovision_state: HostReprovisionState::WaitingForScoutUpgrade {
+                                            result: Some(_), ..
+                                        }, ..
+                                    })
+                        }).count();
+                        assert_eq!(reports, usize::from(scout_first && index == 0),
+                            "Scout reports update only H and cannot restore waiting after Reset");
+                    }
+                    assert_eq!(env.redfish_sim.create_client_calls(), clients);
+                    assert!(env.redfish_sim.actions_since(&checkpoint).all_hosts().is_empty());
+                });
+                if after.managed_state == (ManagedHostState::Reset { reset_state: ResetState::DeletingInstance }) {
+                    assert_reset_history(&env, &host, before.host_snapshot.state.version).await;
+                }
+            }
+            assert!(failures.is_empty(), "{}", failures.join("\n"));
+        }).await;
+    }
+
+    #[crate::sqlx_test]
+    async fn scout_report_releases_history_and_rechecks_replaced_task(pool: sqlx::PgPool) {
+        use db::state_history::{StateHistoryTableId, find_by_object_ids};
+
+        let mut mock = provisioning_mock();
+        mock.expect_force_delete_host().times(0);
+        let env = env_with_dpf_mock(pool, mock).await;
+        let host = dpf_ingested_host(&env).await;
+        let before = prepare(&env, &host).await;
+        let mut replacement_state = before.managed_state.clone();
+        let reported_task = match &mut replacement_state {
+            ManagedHostState::HostReprovision {
+                reprovision_state:
+                    HostReprovisionState::WaitingForScoutUpgrade {
+                        upgrade_task_id,
+                        result,
+                        ..
+                    },
+                ..
+            } => {
+                assert!(result.is_none());
+                let original = upgrade_task_id.clone();
+                *upgrade_task_id = format!("{original}-replacement");
+                original
+            }
+            other => panic!("waiting fixture changed: {other:?}"),
+        };
+        let machine_ids = [MachineId::from(host.id), host.dpu_ids[0].into()];
+        let mut txn = env.db_txn().await;
+        let history_before =
+            find_by_object_ids(txn.as_mut(), StateHistoryTableId::Machine, &machine_ids)
+                .await
+                .unwrap();
+        txn.commit().await.unwrap();
+        let checkpoint = env.redfish_sim.timepoint();
+        let clients = env.redfish_sim.create_client_calls();
+
+        let mut gate = env.db_txn().await;
+        sqlx::query("SELECT id FROM machines WHERE id = $1 FOR NO KEY UPDATE")
+            .bind(host.id)
+            .execute(gate.as_mut())
+            .await
+            .unwrap();
+        let gate_pid = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(gate.as_mut())
+            .await
+            .unwrap();
+        let report = maybe_done(env.api.report_scout_firmware_upgrade_status(Request::new(
+            rpc::forge::ScoutFirmwareUpgradeStatusRequest {
+                machine_id: Some(host.id.into()),
+                upgrade_task_id: reported_task,
+                success: true,
+                exit_code: 0,
+                stdout: "obsolete-task-result".into(),
+                stderr: String::new(),
+                error: String::new(),
+            },
+        )));
+        tokio::pin!(report);
+        let waiting = tokio::select! {
+            () = &mut report => Err("Scout passed the host gate".to_string()),
+            observed = lock_wait(&env.pool, gate_pid, None) => observed,
+        };
+        // Scout must release A(H) before its isolated H wait. Record the probe
+        // before releasing the gate, but join the request before asserting it.
+        let history_available = sqlx::query_scalar::<_, bool>(
+            "SELECT pg_try_advisory_xact_lock(\
+                hashtextextended($1, 'machine_state_history'::regclass::bigint))",
+        )
+        .bind(host.id.to_string())
+        .fetch_one(gate.as_mut())
+        .await;
+        let replacement = async {
+            if !history_available.as_ref().is_ok_and(|available| *available) {
+                return Ok(None);
+            }
+            // Use the real single-host state owner to replace the task. This
+            // gate models a committed writer, not a controller iteration.
+            let machine = db::machine::find_one(gate.as_mut(), &host.id, Default::default())
+                .await?
+                .ok_or_else(|| db::DatabaseError::NotFoundError {
+                    kind: "machine",
+                    id: host.id.to_string(),
+                })?;
+            let advanced =
+                db::machine::advance(&machine, gate.as_mut(), &replacement_state, None).await?;
+            let winner = db::machine::find_one(gate.as_mut(), &host.id, Default::default())
+                .await?
+                .ok_or_else(|| db::DatabaseError::NotFoundError {
+                    kind: "machine",
+                    id: host.id.to_string(),
+                })?;
+            let history =
+                find_by_object_ids(gate.as_mut(), StateHistoryTableId::Machine, &machine_ids)
+                    .await?;
+            Ok::<_, db::DatabaseError>(Some((advanced, winner, history)))
+        }
+        .await;
+        let release = gate.commit().await;
+        let timed_out = join_writers(
+            &env,
+            [waiting.as_ref().ok().map(|wait| wait.0), None],
+            async { (&mut report).await },
+        )
+        .await;
+        let report_result = report.as_mut().take_output().unwrap();
+        let diagnostic = format!(
+            "wait={waiting:?}; history_available={history_available:?}; \
+             replacement={:?}; release={release:?}; timeout={timed_out}; Scout={report_result:?}",
+            replacement.as_ref().map(|winner| winner.is_some()),
+        );
+        let (_, query, advisory_wait) = waiting.expect("Scout must reach its host row wait");
+        assert!(
+            query.contains("FOR NO KEY UPDATE") && !query.contains("NOWAIT") && !advisory_wait,
+            "{diagnostic}"
+        );
+        assert!(history_available.unwrap(), "{diagnostic}");
+        assert!(release.is_ok() && !timed_out, "{diagnostic}");
+        let (advanced, winner, winning_history) = replacement.unwrap().unwrap();
+        assert!(advanced, "{diagnostic}");
+        let error = report_result.expect_err("the original task must not replace the current task");
+        assert_eq!(error.code(), Code::FailedPrecondition, "{diagnostic}");
+        assert_eq!(
+            error.message(),
+            format!(
+                "scout firmware upgrade status task ID mismatch for machine {}",
+                host.id
+            ),
+            "{diagnostic}"
+        );
+
+        let after = snapshot(&env, &host).await;
+        assert_eq!(winner.state.value, replacement_state, "{diagnostic}");
+        assert_eq!(
+            after.host_snapshot.state.value, winner.state.value,
+            "{diagnostic}"
+        );
+        assert_eq!(
+            after.host_snapshot.state.version, winner.state.version,
+            "{diagnostic}"
+        );
+        assert_eq!(
+            winner.state.version.version_nr(),
+            before.host_snapshot.state.version.version_nr() + 1,
+            "{diagnostic}"
+        );
+        assert_eq!(
+            after.host_snapshot.controller_state_outcome,
+            before.host_snapshot.controller_state_outcome
+        );
+        assert_eq!(
+            after.host_snapshot.health_reports,
+            before.host_snapshot.health_reports
+        );
+        assert_eq!(
+            after.host_snapshot.reset_requested,
+            before.host_snapshot.reset_requested
+        );
+        assert!(after.host_snapshot.reprovision_requested.is_none());
+        assert!(after.host_snapshot.host_reprovision_requested.is_none());
+        assert_eq!(after.dpu_snapshots.len(), before.dpu_snapshots.len());
+        for (dpu, original) in after.dpu_snapshots.iter().zip(&before.dpu_snapshots) {
+            assert_eq!(dpu.id, original.id);
+            assert_eq!(dpu.state.value, original.state.value);
+            assert_eq!(dpu.state.version, original.state.version);
+        }
+        let mut txn = env.db_txn().await;
+        let history_after =
+            find_by_object_ids(txn.as_mut(), StateHistoryTableId::Machine, &machine_ids)
+                .await
+                .unwrap();
+        assert_eq!(
+            serde_json::to_value(&history_after).unwrap(),
+            serde_json::to_value(&winning_history).unwrap(),
+            "{diagnostic}: rejected Scout result must add no history"
+        );
+        let host_history = &history_after[&host.id.to_string()];
+        let original_host_history = &history_before[&host.id.to_string()];
+        assert_eq!(host_history.len(), original_host_history.len() + 1);
+        assert_eq!(
+            serde_json::to_value(&host_history[..original_host_history.len()]).unwrap(),
+            serde_json::to_value(original_host_history).unwrap()
+        );
+        let last = host_history.last().unwrap();
+        assert_eq!(last.state_version, winner.state.version);
+        assert_eq!(
+            serde_json::from_str::<ManagedHostState>(&last.state).unwrap(),
+            replacement_state
+        );
+        let dpu_key = host.dpu_ids[0].to_string();
+        assert_eq!(
+            serde_json::to_value(&history_after[&dpu_key]).unwrap(),
+            serde_json::to_value(&history_before[&dpu_key]).unwrap()
+        );
+        txn.commit().await.unwrap();
+        assert_eq!(env.redfish_sim.create_client_calls(), clients);
+        assert!(
+            env.redfish_sim
+                .actions_since(&checkpoint)
+                .all_hosts()
+                .is_empty()
+        );
+    }
+
+    #[crate::sqlx_test]
+    async fn scout_report_deadline_bounds_the_isolated_host_wait(pool: sqlx::PgPool) {
+        let mut mock = provisioning_mock();
+        mock.expect_force_delete_host().times(0);
+        let env = env_with_dpf_mock(pool, mock).await;
+        let host = dpf_ingested_host(&env).await;
+        let before = prepare(&env, &host).await;
+        let history_before = histories(&env, &host).await;
+        let checkpoint = env.redfish_sim.timepoint();
+        let clients = env.redfish_sim.create_client_calls();
+
+        let mut gate = env.db_txn().await;
+        sqlx::query("SELECT id FROM machines WHERE id = $1 FOR NO KEY UPDATE")
+            .bind(host.id)
+            .execute(gate.as_mut())
+            .await
+            .unwrap();
+        let gate_pid = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(gate.as_mut())
+            .await
+            .unwrap();
+        let mut history_gate = env.db_txn().await;
+        let history_gate_pid = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(history_gate.as_mut())
+            .await
+            .unwrap();
+        let budget = Duration::from_secs(60);
+        let mut request = Request::new(rpc::forge::ScoutFirmwareUpgradeStatusRequest {
+            machine_id: Some(host.id.into()),
+            upgrade_task_id: "reset-scout-task".into(),
+            success: true,
+            exit_code: 0,
+            stdout: "must-not-be-recorded-after-deadline".into(),
+            stderr: String::new(),
+            error: String::new(),
+        });
+        request.set_timeout(budget);
+        let report = maybe_done(env.api.report_scout_firmware_upgrade_status(request));
+        tokio::pin!(report);
+        let waiting = tokio::select! {
+            () = &mut report => Err("Scout completed before its isolated host wait".to_string()),
+            observed = lock_wait(&env.pool, gate_pid, None) => observed,
+        };
+        let first_wait_observed_at = tokio::time::Instant::now();
+        // Both advances affect every Tokio timer in this runtime. Keep time
+        // resumed while PostgreSQL establishes each real lock boundary.
+        tokio::time::pause();
+        tokio::time::advance(Duration::from_secs(2)).await;
+        let survived_partial_budget = futures_util::poll!(&mut report).is_pending();
+        tokio::time::resume();
+        // The isolated H wait must have released history. Hold it separately
+        // so Scout's fresh attempt has a second wait within the original budget.
+        let history_acquired = sqlx::query_scalar::<_, bool>(
+            "SELECT pg_try_advisory_xact_lock(\
+                hashtextextended($1, 'machine_state_history'::regclass::bigint)\
+            )",
+        )
+        .bind(host.id.to_string())
+        .fetch_one(history_gate.as_mut())
+        .await;
+        let host_release = gate.commit().await;
+        let history_wait = if matches!(&history_acquired, Ok(true)) {
+            tokio::select! {
+                () = &mut report => Err("Scout completed before its fresh history attempt".to_string()),
+                observed = lock_wait(&env.pool, history_gate_pid, None) => observed,
+            }
+        } else {
+            Err("Scout retained history at its isolated host wait".to_string())
+        };
+        tokio::time::pause();
+        // First-wait time + budget is past the original deadline. Subtract
+        // real I/O time so a fresh budget after the 2s advance cannot expire
+        // during the following 1s probe.
+        let remaining_from_first_wait = budget.checked_sub(first_wait_observed_at.elapsed());
+        tokio::time::advance(
+            remaining_from_first_wait.unwrap_or_default() + Duration::from_millis(100),
+        )
+        .await;
+        let completed_before_release = timeout(Duration::from_secs(1), &mut report).await.is_ok();
+        tokio::time::resume();
+        let history_release = history_gate.rollback().await;
+        let timed_out = join_writers(
+            &env,
+            [
+                waiting.as_ref().ok().map(|wait| wait.0),
+                history_wait.as_ref().ok().map(|wait| wait.0),
+            ],
+            async { (&mut report).await },
+        )
+        .await;
+        let result = report.as_mut().take_output().unwrap();
+        let diagnostic = format!(
+            "first_wait={waiting:?}; survived_partial_budget={survived_partial_budget}; \
+             history_acquired={history_acquired:?}; host_release={host_release:?}; \
+             second_wait={history_wait:?}; remaining_from_first_wait={remaining_from_first_wait:?}; \
+             completed_before_history_release={completed_before_release}; \
+             history_release={history_release:?}; join_timeout={timed_out}; Scout={result:?}"
+        );
+        let (_, query, advisory_wait) = waiting.expect("Scout must reach its isolated host wait");
+        assert!(
+            query.contains("FOR NO KEY UPDATE") && !query.contains("NOWAIT") && !advisory_wait,
+            "{diagnostic}"
+        );
+        let (_, query, advisory_wait) =
+            history_wait.expect("Scout must reach a fresh history attempt");
+        assert!(
+            query.contains("pg_advisory_xact_lock") && advisory_wait,
+            "{diagnostic}"
+        );
+        assert!(
+            survived_partial_budget
+                && remaining_from_first_wait.is_some()
+                && matches!(history_acquired, Ok(true))
+                && host_release.is_ok()
+                && completed_before_release
+                && history_release.is_ok()
+                && !timed_out,
+            "{diagnostic}"
+        );
+        let error = result
+            .expect_err("the original request budget must expire while history remains locked");
+        assert_eq!(error.code(), Code::DeadlineExceeded, "{diagnostic}");
+        assert_eq!(
+            error.message(),
+            "machine database preparation deadline exceeded"
+        );
+
+        let after = snapshot(&env, &host).await;
+        assert_eq!(
+            after.host_snapshot.state.value,
+            before.host_snapshot.state.value
+        );
+        assert_eq!(
+            after.host_snapshot.state.version,
+            before.host_snapshot.state.version
+        );
+        assert_eq!(
+            after.host_snapshot.controller_state_outcome,
+            before.host_snapshot.controller_state_outcome
+        );
+        assert_eq!(
+            after.host_snapshot.health_reports,
+            before.host_snapshot.health_reports
+        );
+        assert_eq!(
+            after.host_snapshot.reset_requested,
+            before.host_snapshot.reset_requested
+        );
+        assert_eq!(
+            after.host_snapshot.reprovision_requested,
+            before.host_snapshot.reprovision_requested
+        );
+        assert_eq!(
+            serde_json::to_value(&after.host_snapshot.host_reprovision_requested).unwrap(),
+            serde_json::to_value(&before.host_snapshot.host_reprovision_requested).unwrap()
+        );
+        assert_eq!(after.dpu_snapshots.len(), before.dpu_snapshots.len());
+        for (dpu, original) in after.dpu_snapshots.iter().zip(&before.dpu_snapshots) {
+            assert_eq!(dpu.id, original.id);
+            assert_eq!(dpu.state.value, original.state.value);
+            assert_eq!(dpu.state.version, original.state.version);
+            assert_eq!(
+                dpu.controller_state_outcome,
+                original.controller_state_outcome
+            );
+        }
+        assert_eq!(histories(&env, &host).await, history_before);
+        assert_eq!(env.redfish_sim.create_client_calls(), clients);
+        assert!(
+            env.redfish_sim
+                .actions_since(&checkpoint)
+                .all_hosts()
+                .is_empty()
+        );
+    }
+
+    #[crate::sqlx_test]
+    async fn scout_report_deadline_includes_pool_acquisition(pool: sqlx::PgPool) {
+        use carbide_uuid::machine::HostMachineId;
+
+        use crate::test_support::builder::TestApiBuilder;
+
+        #[derive(Clone, Copy, Debug)]
+        enum Case {
+            Scout,
+            Dpf,
+            ForceDelete,
+        }
+
+        let env = create_test_env(pool.clone()).await;
+        let limited_pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .acquire_timeout(Duration::from_secs(30))
+            .connect_with(pool.connect_options().as_ref().clone())
+            .await
+            .unwrap();
+        let api = TestApiBuilder::new(
+            limited_pool.clone(),
+            env.common_pools.clone(),
+            env.api.work_lock_manager_handle.clone(),
+        )
+        .build();
+        let host_id: HostMachineId = "fm100htes3rn1npvbtm5qd57dkilaag7ljugl1llmm7rfuq1ov50i0rpl30"
+            .parse()
+            .unwrap();
+        let budget = Duration::from_secs(5);
+        let mut held = Some(limited_pool.acquire().await.unwrap());
+        let mut results = Vec::new();
+        for case in [Case::Scout, Case::Dpf, Case::ForceDelete] {
+            if held.is_none() {
+                held = Some(limited_pool.acquire().await.unwrap());
+            }
+            let call = maybe_done(async {
+                match case {
+                    Case::Scout => {
+                        let mut request =
+                            Request::new(rpc::forge::ScoutFirmwareUpgradeStatusRequest {
+                                machine_id: Some(host_id),
+                                upgrade_task_id: "pool-budget".into(),
+                                ..Default::default()
+                            });
+                        request.set_timeout(budget);
+                        api.report_scout_firmware_upgrade_status(request)
+                            .await
+                            .map(|_| ())
+                    }
+                    Case::Dpf => {
+                        let mut request = Request::new(rpc::forge::ModifyDpfStateRequest {
+                            machine_id: Some(host_id),
+                            dpf_enabled: true,
+                        });
+                        request.set_timeout(budget);
+                        api.modify_dpf_state(request).await.map(|_| ())
+                    }
+                    Case::ForceDelete => {
+                        let mut request =
+                            Request::new(rpc::forge::AdminForceDeleteMachineRequest {
+                                host_query: host_id.to_string(),
+                                ..Default::default()
+                            });
+                        request.set_timeout(budget);
+                        api.admin_force_delete_machine(request).await.map(|_| ())
+                    }
+                }
+            });
+            tokio::pin!(call);
+            // All three RPCs wait for this one held connection. Its acquire
+            // timeout exceeds the caller's budget and cannot supply this result.
+            let acquisition_pending = futures_util::poll!(&mut call).is_pending();
+            tokio::time::pause();
+            tokio::time::advance(budget + Duration::from_millis(1)).await;
+            let completed_before_release = timeout(Duration::from_secs(1), &mut call).await.is_ok();
+            tokio::time::resume();
+            // A failed deadline assertion must still release the pool slot
+            // before joining the real request. Successful rows keep it held.
+            if !completed_before_release {
+                drop(held.take());
+            }
+            let timed_out = join_writers(&env, [None, None], async { (&mut call).await }).await;
+            let result = call.as_mut().take_output().unwrap();
+            results.push((
+                case,
+                acquisition_pending,
+                completed_before_release,
+                timed_out,
+                result,
+            ));
+        }
+        drop(held);
+        limited_pool.close().await;
+        for (case, acquisition_pending, completed_before_release, timed_out, result) in results {
+            assert!(
+                acquisition_pending,
+                "{case:?}: the request must wait for the held pool slot"
+            );
+            assert!(
+                completed_before_release && !timed_out,
+                "{case:?}: {result:?}"
+            );
+            let error = result.expect_err("pool acquisition consumes the preparation budget");
+            assert_eq!(error.code(), Code::DeadlineExceeded, "{case:?}");
+            assert_eq!(
+                error.message(),
+                "machine database preparation deadline exceeded",
+                "{case:?}"
+            );
+        }
+    }
+
+    #[crate::sqlx_test]
+    async fn reset_preemption_rejects_withdrawn_or_replaced_request(pool: sqlx::PgPool) {
+        Box::pin(async move {
+            let mut mock = provisioning_mock();
+            mock.expect_force_delete_host().times(0);
+            let env = env_with_dpf_mock(pool, mock).await;
+            let host = dpf_ingested_host(&env).await;
+            let mut failures = Vec::new();
+            for (case, replace) in [("Clear wins", false), ("replacement wins", true)] {
+                let before = prepare(&env, &host).await;
+                let original = before.host_snapshot.reset_requested.clone().unwrap();
+                let history_before = histories(&env, &host).await;
+                let mut gate = env.db_txn().await;
+                db::machine::lock_by_id_for_update(gate.as_mut(), &host.id.into())
+                    .await
+                    .unwrap();
+                let gate_pid = sqlx::query_scalar("SELECT pg_backend_pid()")
+                    .fetch_one(gate.as_mut())
+                    .await
+                    .unwrap();
+                let checkpoint = env.redfish_sim.timepoint();
+                let clients = env.redfish_sim.create_client_calls();
+                let controller =
+                    maybe_done(env.run_machine_state_controller_iteration_no_requeue());
+                tokio::pin!(controller);
+                let waiting = tokio::select! {
+                    () = &mut controller => Err("reset passed H gate".to_string()),
+                    observed = lock_wait(&env.pool, gate_pid, None) => observed,
+                };
+                // Exercise the same Set/Clear producer on the gate's connection.
+                // The public API's sequential authorization/wiring has retained coverage.
+                let produced = if replace {
+                    db::machine::trigger_managed_host_reset_request(
+                        gate.as_mut(),
+                        "replacement-reset",
+                        &host.id.into(),
+                        true,
+                    )
+                    .await
+                } else {
+                    db::machine::clear_managed_host_reset_request(
+                        gate.as_mut(),
+                        &host.id.into(),
+                        true,
+                    )
+                    .await
+                };
+                let current = db::machine::find_one(gate.as_mut(), &host.id, Default::default())
+                    .await
+                    .and_then(|machine| {
+                        machine.ok_or_else(|| db::DatabaseError::NotFoundError {
+                            kind: "machine",
+                            id: host.id.to_string(),
+                        })
+                    });
+                let current_version = current.as_ref().map(|machine| machine.current_version());
+                let replacement = current
+                    .as_ref()
+                    .ok()
+                    .and_then(|machine| machine.reset_requested.clone());
+                let release = gate.commit().await;
+                let timed_out = join_writers(
+                    &env,
+                    [waiting.as_ref().ok().map(|wait| wait.0), None],
+                    async {
+                        (&mut controller).await;
+                    },
+                )
+                .await;
+                let intermediate = snapshot(&env, &host).await;
+                let history_after = histories(&env, &host).await;
+                let diagnostic = format!(
+                    "{case}: wait={waiting:?}; producer={produced:?}; \
+                    current_version={current_version:?}; replacement={replacement:?}; \
+                    read_error={:?}; release={release:?}; timeout={timed_out}; \
+                    state={:?}; reset={:?}; outcome={:?}",
+                    current.as_ref().err(),
+                    intermediate.managed_state,
+                    intermediate.host_snapshot.reset_requested,
+                    intermediate.host_snapshot.controller_state_outcome
+                );
+                let should_retry = replace
+                    && intermediate.managed_state == before.managed_state
+                    && intermediate
+                        .host_snapshot
+                        .reset_requested
+                        .as_ref()
+                        .is_some_and(|request| request.started_at.is_none());
+                if should_retry {
+                    env.run_machine_state_controller_iteration_no_requeue()
+                        .await;
+                }
+                let after = snapshot(&env, &host).await;
+                check(case, &mut failures, || {
+                    assert!(
+                        waiting.is_ok()
+                            && produced.as_ref().is_ok_and(|matched| *matched)
+                            && release.is_ok()
+                            && !timed_out,
+                        "{diagnostic}"
+                    );
+                    assert_eq!(current_version.unwrap(), before.host_snapshot.state.version);
+                    assert_eq!(
+                        intermediate.managed_state, before.managed_state,
+                        "{diagnostic}"
+                    );
+                    assert_eq!(
+                        intermediate.host_snapshot.state.version,
+                        before.host_snapshot.state.version
+                    );
+                    assert_eq!(
+                        history_after, history_before,
+                        "stale reset must leave no H/D history"
+                    );
+                    assert!(
+                        !matches!(
+                            intermediate.host_snapshot.controller_state_outcome,
+                            Some(PersistentStateHandlerOutcome::Error { .. })
+                        ),
+                        "{diagnostic}"
+                    );
+                    if replace {
+                        let replacement = replacement.as_ref().unwrap();
+                        assert_ne!(replacement.requested_at, original.requested_at);
+                        assert_ne!(replacement.ignore_cleanup, original.ignore_cleanup);
+                        assert_eq!(replacement.initiator, "replacement-reset");
+                        assert!(replacement.started_at.is_none());
+                        let retained = intermediate.host_snapshot.reset_requested.as_ref().unwrap();
+                        assert!(retained.started_at.is_none());
+                        assert_eq!(
+                            serde_json::to_value(retained).unwrap(),
+                            serde_json::to_value(replacement).unwrap()
+                        );
+                        assert!(should_retry, "{diagnostic}");
+                        assert_started(
+                            after.host_snapshot.reset_requested.as_ref().unwrap(),
+                            replacement,
+                        );
+                        assert_eq!(
+                            after.managed_state,
+                            ManagedHostState::Reset {
+                                reset_state: ResetState::DeletingInstance,
+                            }
+                        );
+                    } else {
+                        assert!(intermediate.host_snapshot.reset_requested.is_none());
+                        assert!(after.host_snapshot.reset_requested.is_none());
+                    }
+                    assert_eq!(env.redfish_sim.create_client_calls(), clients);
+                    assert!(
+                        env.redfish_sim
+                            .actions_since(&checkpoint)
+                            .all_hosts()
+                            .is_empty()
+                    );
+                });
+                if should_retry {
+                    assert_reset_history(&env, &host, before.host_snapshot.state.version).await;
+                }
+            }
+            assert!(failures.is_empty(), "{}", failures.join("\n"));
+        })
+        .await;
+    }
+}
+
 /// Expectations for the initial provisioning flow, shared by every env below.
 fn provisioning_mock() -> MockDpfOperations {
     let mut mock = MockDpfOperations::new();
@@ -679,9 +1745,21 @@ async fn reset_set_and_clear_are_refused_once_a_reset_has_started(pool: sqlx::Pg
         .await
         .unwrap();
     let mut txn = env.db_txn().await;
-    db::machine::update_managed_host_reset_start_time(&mut txn, &host_id)
+    let captured = managed_host.host().db_machine(&mut txn).await;
+    assert_eq!(
+        db::machine::try_start_managed_host_reset(
+            &mut txn,
+            &captured.id,
+            captured.state.version,
+            captured
+                .reset_requested
+                .as_ref()
+                .expect("the requested reset is pending"),
+        )
         .await
-        .unwrap();
+        .unwrap(),
+        db::ConditionalWrite::Applied(()),
+    );
     txn.commit().await.unwrap();
 
     let error = env
@@ -732,9 +1810,21 @@ async fn enter_deleting_crs(env: &TestEnv, managed_host: &TestManagedHost) {
         .unwrap();
 
     let mut txn = env.db_txn().await;
-    db::machine::update_managed_host_reset_start_time(&mut txn, &host_id)
+    let captured = managed_host.host().db_machine(&mut txn).await;
+    assert_eq!(
+        db::machine::try_start_managed_host_reset(
+            &mut txn,
+            &captured.id,
+            captured.state.version,
+            captured
+                .reset_requested
+                .as_ref()
+                .expect("the requested reset is pending"),
+        )
         .await
-        .unwrap();
+        .unwrap(),
+        db::ConditionalWrite::Applied(()),
+    );
     let host = managed_host.host().db_machine(&mut txn).await;
     let deleting_crs = ManagedHostState::Reset {
         reset_state: ResetState::DeletingCrs,

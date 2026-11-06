@@ -7441,7 +7441,12 @@ async fn test_service_vpc_coordinator_serializes_with_default_force_delete(
         )))
         .await
     }));
-    wait_for_blocked_query(&env.pool, activation_pid, "SELECT row_to_json(m.*)").await;
+    wait_for_blocked_query(
+        &env.pool,
+        activation_pid,
+        "SELECT id FROM machines WHERE id = $1 FOR UPDATE",
+    )
+    .await;
     activation.commit().await?;
     let error = join_test_task(pending_force_delete, "default force deletion")
         .await
@@ -7543,7 +7548,12 @@ async fn test_service_vpc_coordinator_serializes_with_orphan_force_delete(
         )))
         .await
     }));
-    wait_for_blocked_query(&env.pool, activation_pid, "SELECT row_to_json(m.*)").await;
+    wait_for_blocked_query(
+        &env.pool,
+        activation_pid,
+        "SELECT id FROM machines WHERE id = $1 FOR UPDATE",
+    )
+    .await;
     activation.commit().await?;
     let response = join_test_task(pending_force_delete, "orphan force deletion")
         .await?

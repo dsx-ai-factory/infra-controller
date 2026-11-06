@@ -423,6 +423,16 @@ service Forge {
   //
   // AdminForceDeleteMachine is a lower level admin tool for cases where there is no
   // appropriate customer-facing workflow available or where those workflows fail.
+  //
+  // Machine database preparation (connection-pool and lock waits, retries,
+  // and commit) is capped at 300 seconds from handler entry, or a shorter
+  // valid `grpc-timeout`.
+  // Use 1-8 decimal digits followed by H (hours), M (minutes), S (seconds),
+  // m (milliseconds), u (microseconds), or n (nanoseconds).
+  // Zero expires immediately.
+  // Missing or malformed metadata keeps that cap. Post-commit hardware and
+  // cleanup work is outside it. `DeadlineExceeded` does not prove an in-flight
+  // commit was rolled back.
   rpc AdminForceDeleteMachine(AdminForceDeleteMachineRequest) returns (AdminForceDeleteMachineResponse);
 
   // List the IP addresses of parked reservations that outlived their interface,
@@ -449,7 +459,13 @@ service Forge {
   // Inspects local and remote pools without treating unknown capacity as zero.
   rpc AdminInspectResourcePools(InspectResourcePoolsRequest) returns (InspectResourcePoolsResponse);
 
-  // Add capacity to a resource pool
+  // Add capacity to a resource pool.
+  // Adding IPv6 loopback capacity commits the pool before DPU backfill.
+  // Backfill makes up to three fresh attempts per DPU. If the reported failure
+  // is lock contention, the call returns Unavailable; other backfill failures
+  // retain their existing status. Committed pool growth is retained in either
+  // case. Inspect current capacity and missing loopbacks before retrying the
+  // same growth request.
   rpc AdminGrowResourcePool(GrowResourcePoolRequest) returns (GrowResourcePoolResponse);
 
   // Update the Metadata of a Machine
@@ -519,7 +535,17 @@ service Forge {
   // TODO: Remove when manual upgrade feature is removed
   // Mark host as having completed manual firmware upgrade
   rpc MarkManualFirmwareUpgradeComplete(common.MachineId) returns (google.protobuf.Empty);
-  // Report the result of a scout-based firmware upgrade
+  // Report the result of a scout-based firmware upgrade.
+  //
+  // Machine database preparation (connection-pool and lock waits, retries,
+  // and commit) is capped at 300 seconds from handler entry, or a shorter
+  // valid `grpc-timeout`.
+  // Use 1-8 decimal digits followed by H (hours), M (minutes), S (seconds),
+  // m (milliseconds), u (microseconds), or n (nanoseconds).
+  // Zero expires immediately.
+  // Missing or malformed metadata keeps that cap. The post-commit controller
+  // wakeup is outside it. `DeadlineExceeded` does not prove an in-flight commit
+  // was rolled back.
   rpc ReportScoutFirmwareUpgradeStatus(ScoutFirmwareUpgradeStatusRequest) returns (google.protobuf.Empty);
 
   rpc GetDpuInfoList(GetDpuInfoListRequest) returns (GetDpuInfoListResponse);
@@ -1255,6 +1281,18 @@ service Forge {
 
   rpc NmxcBrowse(NmxcBrowseRequest) returns (NmxcBrowseResponse);
 
+  // Enable or disable DPF for a host and its attached DPUs.
+  // Disabling is rejected after the host was ingested through DPF.
+  //
+  // Machine database preparation (connection-pool and lock waits, retries,
+  // and commit) is capped at 300 seconds from handler entry, or a shorter
+  // valid `grpc-timeout`.
+  // Use 1-8 decimal digits followed by H (hours), M (minutes), S (seconds),
+  // m (milliseconds), u (microseconds), or n (nanoseconds).
+  // Zero expires immediately.
+  // Missing or malformed metadata keeps that cap. It does not bound later
+  // controller reconciliation. `DeadlineExceeded` does not prove an in-flight
+  // commit was rolled back.
   rpc ModifyDPFState(ModifyDPFStateRequest) returns (google.protobuf.Empty);
   rpc GetDPFState(GetDPFStateRequest) returns (DPFStateResponse);
   // Curated snapshot of DPF CRs (DPUNode + DPUDevices + DPUs) for one host.
