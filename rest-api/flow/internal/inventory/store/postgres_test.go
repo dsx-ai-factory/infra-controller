@@ -111,11 +111,15 @@ func TestPostgresStore_GetRackByID(t *testing.T) {
 	assert.Equal(t, *rackDAO.RackProfileID, protobuf.RackTo(byID).GetRackProfileId())
 	assert.Empty(t, byID.Components)
 	assert.Equal(t, types.PhaseInitializing, byID.OperationStatus)
+	wantDetails := &types.RackOperationStatusDetails{TrayCounts: types.TrayStatusCounts{Ready: 1, Initializing: 1}}
+	assert.Equal(t, wantDetails, byID.OperationStatusDetails)
+	assert.Equal(t, wantDetails.ToProto(), protobuf.RackTo(byID).GetOperationStatusDetails())
 
 	byIDWithComponents, err := store.GetRackByID(ctx, rackDAO.ID, true)
 	require.NoError(t, err)
 	require.Len(t, byIDWithComponents.Components, 2)
 	assert.Equal(t, byID.OperationStatus, byIDWithComponents.OperationStatus)
+	assert.Equal(t, wantDetails, byIDWithComponents.OperationStatusDetails)
 
 	listed, total, err := store.GetListOfRacks(
 		ctx,
@@ -132,6 +136,7 @@ func TestPostgresStore_GetRackByID(t *testing.T) {
 	require.Len(t, listed, 1)
 	assert.Empty(t, listed[0].Components)
 	assert.Equal(t, byID.OperationStatus, listed[0].OperationStatus)
+	assert.Equal(t, wantDetails, listed[0].OperationStatusDetails)
 }
 
 func TestPostgresStore_PatchRack(t *testing.T) {
