@@ -21,6 +21,7 @@ use std::fmt;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 
+use bmc_drivers::{Drivers, Rule, Rules};
 use bmc_vendor::BMCVendor;
 use carbide_authn::config::{AllowedCertCriteria, TrustConfig};
 use carbide_dpf::types::{DpfProxyDetails, DpuDeploymentType};
@@ -507,6 +508,12 @@ pub struct CarbideConfig {
     /// SiteExplorer related configuration
     #[serde(default)]
     pub site_explorer: SiteExplorerConfig,
+
+    /// BMC driver selection rules layered over the compiled ones. Each
+    /// outranks every compiled rule, so a site can fix hardware that
+    /// misbehaves before a release adds a rule for it.
+    #[serde(default)]
+    pub bmc_driver_rules: Vec<Rule>,
 
     /// Deprecated compatibility key. This setting no longer affects runtime
     /// behavior; keep accepting it temporarily so existing site files can be
@@ -1419,6 +1426,14 @@ impl Default for TracingConfig {
 }
 
 impl CarbideConfig {
+    /// The compiled BMC driver rules with `bmc_driver_rules` layered over
+    /// them, checked against the compiled drivers.
+    pub fn driver_rules(&self) -> eyre::Result<Rules> {
+        let rules = bmc_drivers::rules_with_overrides(self.bmc_driver_rules.clone())?;
+        Drivers::validate_rules(&rules)?;
+        Ok(rules)
+    }
+
     /// Returns the configured FNN site-fabric null routes, including the legacy fallback.
     pub fn effective_site_fabric_null_routes(&self) -> &[IpNetwork] {
         self.site_fabric_null_routes

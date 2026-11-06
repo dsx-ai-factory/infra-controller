@@ -2933,7 +2933,10 @@ async fn insert_machine_interface(
     Ok(interface_id)
 }
 
-async fn find_by<'a, C: ColumnInfo<'a, TableType = MachineInterfaceSnapshot>>(
+/// Reads interface snapshots matching `filter`, including BMC interfaces.
+/// Addresses and DHCP vendor strings are included; result order is unspecified.
+/// This read performs no refresh or mutation and propagates database failures.
+pub async fn find_by<'a, C: ColumnInfo<'a, TableType = MachineInterfaceSnapshot>>(
     txn: impl DbReader<'_>,
     filter: ObjectColumnFilter<'a, C>,
 ) -> Result<Vec<MachineInterfaceSnapshot>, DatabaseError> {

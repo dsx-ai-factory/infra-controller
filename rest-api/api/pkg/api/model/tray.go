@@ -4,6 +4,7 @@
 package model
 
 import (
+	"encoding/json"
 	"fmt"
 	"maps"
 	"net/url"
@@ -615,26 +616,35 @@ func (atp *APITrayPosition) FromProto(protoPosition *flowv1.RackPosition) {
 	atp.HostID = protoPosition.GetHostId()
 }
 
+// APISwitchNvosPortInfo describes one NVOS management port, including unresolved ports.
+type APISwitchNvosPortInfo struct {
+	MAC         *string        `json:"mac"`
+	ServicePort *uint32        `json:"servicePort"`
+	Addresses   []APIIPAddress `json:"addresses"`
+	IsPrimary   bool           `json:"isPrimary"`
+}
+
 // APITray is the API representation of a Tray (Component) from Flow
 type APITray struct {
-	ID                 string                `json:"id"`
-	Type               string                `json:"type"`
-	Name               string                `json:"name"`
-	Manufacturer       string                `json:"manufacturer"`
-	Model              string                `json:"model"`
-	SerialNumber       string                `json:"serialNumber"`
-	Description        string                `json:"description"`
-	FirmwareVersion    string                `json:"firmwareVersion"`
-	PowerState         string                `json:"powerState"`
-	OperationStatus    string                `json:"operationStatus"`
-	LeakStatus         string                `json:"leakStatus"`
-	LeakHandlingStatus APILeakHandlingStatus `json:"leakHandlingStatus"`
-	Position           *APITrayPosition      `json:"position"`
-	BMCs               []*APIBMC             `json:"bmcs"`
-	RackID             string                `json:"rackId"`
-	NVLinkDomainID     *string               `json:"nvLinkDomainId"`
-	TaskStats          APITaskStats          `json:"taskStats"`
-	Health             *APIAggregateHealth   `json:"health"`
+	ID                 string                  `json:"id"`
+	Type               string                  `json:"type"`
+	Name               string                  `json:"name"`
+	Manufacturer       string                  `json:"manufacturer"`
+	Model              string                  `json:"model"`
+	SerialNumber       string                  `json:"serialNumber"`
+	Description        string                  `json:"description"`
+	FirmwareVersion    string                  `json:"firmwareVersion"`
+	PowerState         string                  `json:"powerState"`
+	OperationStatus    string                  `json:"operationStatus"`
+	LeakStatus         string                  `json:"leakStatus"`
+	LeakHandlingStatus APILeakHandlingStatus   `json:"leakHandlingStatus"`
+	Position           *APITrayPosition        `json:"position"`
+	BMCs               []*APIBMC               `json:"bmcs"`
+	NvosPorts          []APISwitchNvosPortInfo `json:"nvosPorts"`
+	RackID             string                  `json:"rackId"`
+	NVLinkDomainID     *string                 `json:"nvLinkDomainId"`
+	TaskStats          APITaskStats            `json:"taskStats"`
+	Health             *APIAggregateHealth     `json:"health"`
 }
 
 // FromProto converts an Flow protobuf Component to an APITray
@@ -654,6 +664,12 @@ func (at *APITray) FromProto(comp *flowv1.Component) {
 		APILeakHandlingStatusUnknown,
 	)
 	at.ID = comp.GetComponentId()
+	at.Description = comp.GetInfo().GetDescription()
+	at.NvosPorts = nil
+	if comp.GetType() == flowv1.ComponentType_COMPONENT_TYPE_NVSWITCH {
+		at.NvosPorts = []APISwitchNvosPortInfo{}
+		at.extractNvosPorts()
+	}
 	at.TaskStats.FromProto(comp.GetTaskStats())
 	at.Health = nil
 	if comp.GetHealth() != nil {
@@ -670,9 +686,6 @@ func (at *APITray) FromProto(comp *flowv1.Component) {
 			at.Model = *info.Model
 		}
 		at.SerialNumber = info.GetSerialNumber()
-		if info.Description != nil {
-			at.Description = *info.Description
-		}
 	}
 
 	// Get position
@@ -695,6 +708,44 @@ func (at *APITray) FromProto(comp *flowv1.Component) {
 	at.RackID = comp.GetRackExternalId()
 
 	at.NVLinkDomainID = comp.NvlDomainExternalId
+}
+
+// extractNvosPorts moves Flow's port metadata into the typed response field.
+// Unrecognized descriptions are preserved so malformed metadata cannot discard other data.
+func (at *APITray) extractNvosPorts() {
+	var description map[string]json.RawMessage
+	err := json.Unmarshal([]byte(at.Description), &description)
+	if err != nil {
+		return
+	}
+	rawPorts, ok := description["nvos_ports"]
+	if !ok {
+		return
+	}
+	var ports []APISwitchNvosPortInfo
+	err = json.Unmarshal(rawPorts, &ports)
+	if err != nil {
+		return
+	}
+	delete(description, "nvos_ports")
+	data, err := json.Marshal(description)
+	if err != nil {
+		return
+	}
+	if ports == nil {
+		ports = []APISwitchNvosPortInfo{}
+	}
+	for i := range ports {
+		if ports[i].Addresses == nil {
+			ports[i].Addresses = []APIIPAddress{}
+		}
+		for j := range ports[i].Addresses {
+			family := &ports[i].Addresses[j].AddressFamily
+			family.fromCoreName(string(*family))
+		}
+	}
+	at.NvosPorts = ports
+	at.Description = string(data)
 }
 
 // NewAPITray creates an APITray from the Flow protobuf Component

@@ -6,7 +6,7 @@
 //! are frozen separately in controller state. Neither source supplies missing
 //! facts for the other.
 //!
-//! Each entrypoint uses a supplied rack only when its ID matches the member's
+//! Each projector uses a supplied rack only when its ID matches the member's
 //! saved rack ID. It does not discover membership or BMC aliases. Missing or
 //! unrelated rack snapshots cannot supply their job/scope records. Saved
 //! per-device requests and status retain their own association rules.
@@ -28,6 +28,8 @@ use model::rack::{
 };
 use model::site_explorer::EndpointExplorationReport;
 use model::switch::{ReProvisioningState, Switch, SwitchControllerState};
+
+mod context;
 
 #[cfg(test)]
 mod tests;
@@ -475,8 +477,8 @@ fn append_device_request(
 }
 
 /// The actual member supplies identity and Core consumption evidence. A host's
-/// selected BMC is the only MAC available here; #8633 must resolve other attached
-/// BMC aliases in its loader before claiming complete alias coverage.
+/// selected BMC is the only MAC available to these projectors. Additional stored
+/// MACs are retained in context::FirmwareReadContext::bmc_aliases.
 #[derive(Clone, Copy)]
 enum RackMember<'a> {
     Machine(&'a HostMachine),

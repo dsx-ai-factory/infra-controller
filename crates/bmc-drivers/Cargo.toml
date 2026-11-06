@@ -52,14 +52,15 @@ serde_json = { workspace = true }
 strum = { workspace = true }
 thiserror = { workspace = true }
 tokio = { features = ["time"], workspace = true }
-toml = { workspace = true }
 
 [dev-dependencies]
 axum = { workspace = true }
 bmc-mock = { path = "../bmc-mock" }
 carbide-test-support = { path = "../test-support" }
+mac_address = { workspace = true }
 nv-redfish = { features = ["bmc-http"], workspace = true }
 tokio = { features = ["macros", "rt", "test-util"], workspace = true }
+toml = { workspace = true }
 url = { workspace = true }
 
 [lints]

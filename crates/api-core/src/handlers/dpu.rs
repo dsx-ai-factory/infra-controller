@@ -1282,9 +1282,20 @@ pub(crate) async fn get_managed_host_network_config(
     request: Request<rpc::ManagedHostNetworkConfigRequest>,
 ) -> Result<tonic::Response<rpc::ManagedHostNetworkConfigResponse>, tonic::Status> {
     log_request_data(&request);
+    let authenticated_machine_id = crate::auth::authenticated_machine_id(&request)?;
 
     let request = request.into_inner();
     let dpu_machine_id: DpuMachineId = convert_and_log_machine_id(request.dpu_machine_id.as_ref())?;
+
+    // Bind machine credentials to their DPU while RBAC permits administrative and service callers.
+    if authenticated_machine_id
+        .is_some_and(|authenticated| authenticated != MachineId::from(dpu_machine_id))
+    {
+        return Err(CarbideError::PermissionDeniedError(
+            "machine identity does not match the requested DPU".to_string(),
+        )
+        .into());
+    }
 
     let resp = get_managed_host_network_config_inner(api, dpu_machine_id).await?;
 

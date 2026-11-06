@@ -24,7 +24,9 @@ by default too and needs `probeUrl` set to a reachable probe Service. The
 `inventory` suite is off by default; when enabled it reads MAT Pods and
 Services in `inventory.namespace`, mounts the referenced
 `inventory.clientSecret`, and compares the served cohort to
-`inventory.expected`.
+`inventory.expected`. The `result` suite is off by default; when enabled it
+proves the result ConfigMap claim, the compare-and-swap status write and the
+authoritative result.json against the real API server and a mounted directory.
 
 The `journal` suite is off by default and proves the run journal survives on a
 volume. When enabled it creates one ReadWriteOnce run-data claim and renders two
@@ -75,7 +77,10 @@ elsewhere once a multi-arch image exists.
 - The Role grants Lease `get`/`create`/`update`/`delete` in the release
   namespace only. The `inventory` suite adds a namespace-scoped Role/Binding for
   Pod/Service `get`/`list` in `inventory.namespace` only; no ClusterRole, no
-  Secret read. Later suites extend the chart at their first real use.
+  Secret read. The `result` suite adds ConfigMap
+  `get`/`create`/`update`/`delete` in the release namespace only (delete is for
+  fixture cleanup; the production run never removes a result ConfigMap). Later
+  suites extend the chart at their first real use.
 - Jobs never restart, have `backoffLimit: 0`, bounded Job and test deadlines,
   run nonroot with a read-only root filesystem, all capabilities dropped and
   the RuntimeDefault seccomp profile.

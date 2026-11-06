@@ -383,6 +383,37 @@ func ListPowerTasksForRack(
 	return tasks, nil
 }
 
+// ListFirmwareTasksForRack returns Waiting, Pending, and Running firmware tasks
+// for one rack, ordered by creation time then UUID, ascending. Recorded target
+// membership survives inventory removal. Only projection fields are loaded;
+// reports and free-form descriptions/messages are excluded. More than
+// MaxFirmwareTasksPerRack records returns *taskcommon.FirmwareTaskLimitError
+// without a partial list. The bound limits rows, not stored JSON bytes.
+func ListFirmwareTasksForRack(ctx context.Context, idb bun.IDB, rackID uuid.UUID) ([]Task, error) {
+	tasks := make([]Task, 0)
+	query := idb.NewSelect().Model(&tasks).
+		Column("id", "type", "rack_id", "information", "attributes", "status", "created_at", "updated_at", "started_at").
+		Where("rack_id = ?", rackID).
+		Where("type = ?", taskcommon.TaskTypeFirmwareControl).
+		Where("status IN (?)", bun.In(taskcommon.NonTerminalTaskStatuses())).
+		OrderExpr("created_at ASC, id ASC").
+		Limit(taskcommon.MaxFirmwareTasksPerRack + 1)
+	// End query hooks before decoding attributes: an unknown stored component
+	// key can appear in a scan error, and bunotel records hook errors verbatim.
+	rows, err := query.Rows(ctx)
+	if err != nil {
+		return nil, err
+	}
+	err = query.DB().ScanRows(ctx, rows, &tasks)
+	if err != nil {
+		return nil, err
+	}
+	if len(tasks) > taskcommon.MaxFirmwareTasksPerRack {
+		return nil, &taskcommon.FirmwareTaskLimitError{RackID: rackID}
+	}
+	return tasks, nil
+}
+
 // ListTaskContextForRack loads nonterminal metadata in creation/UUID order.
 // No operation payloads or reports are read. Overflow returns no partial list.
 func ListTaskContextForRack(ctx context.Context, idb bun.IDB, rackID uuid.UUID) ([]Task, error) {

@@ -9436,7 +9436,7 @@ impl StateHandler for InstanceStateHandler {
                     .await?;
                     let extension_services_status = &mut extension_services_status;
 
-                    // Reclaim endpoint-free terminated attachments before computing readiness so
+                    // Reclaim record-free terminated attachments before computing readiness so
                     // the returned transaction commits the status entries used by that decision.
                     let txn = if extension_services_status.configs_synced == SyncState::Synced
                         && !extension_services_status
@@ -9603,7 +9603,7 @@ impl StateHandler for InstanceStateHandler {
                             {
                                 let mut txn = ctx.services.db_pool.begin().await?;
                                 // Retain the transaction only when attachment cleanup wrote,
-                                // allowing endpoint-protected tombstones to coexist with Ready work.
+                                // allowing record-protected tombstones to coexist with Ready work.
                                 if cleanup_terminated_extension_services(
                                     instance,
                                     &mut extension_services_status,
@@ -10550,6 +10550,7 @@ async fn handle_instance_network_config_update_request(
             // Legacy pending requests may carry obsolete endpoints. Only live state owns them.
             let mut new_config = update_request.new_config.clone();
             new_config.service_interfaces = current_instance.config.network.service_interfaces;
+            new_config.vpc_local_interfaces = current_instance.config.network.vpc_local_interfaces;
             // Update requested network config and increment version.
             db::instance::update_network_config(
                 txn.as_mut(),
