@@ -963,7 +963,7 @@ func TestFlowServerImpl_GetRackPowerDetails(t *testing.T) {
 				if test.invoke != nil {
 					response, err = test.invoke(t, f, request)
 				} else if test.transport {
-					response, err = powerDetailsRPCClient(t, f.server).GetRackPowerDetails(t.Context(), request)
+					response, err = flowRPCClient(t, f.server).GetRackPowerDetails(t.Context(), request)
 				} else {
 					response, err = f.server.GetRackPowerDetails(t.Context(), request)
 				}
