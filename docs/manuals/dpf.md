@@ -742,6 +742,20 @@ Notes:
 - Nested scalars and arrays replace generated values.
 - Omitted keys keep their generated values.
 
+On OpenShift/RHCOS, DPF mounts the host's `/lib` into the LLDP sidecar, while
+BlueField runtime libraries such as `libudev.so.1` are provided under the host's
+`/usr/lib64`. If the sidecar reports a missing shared library, mount that host
+directory and use it for lookup:
+
+```toml
+[dpf.services.dpu_agent.extra_helm_values.lldpSidecar]
+hostLibraryPath = "/usr/lib64"
+```
+
+The chart mounts it read-only at `/host/lib64` and uses that path as the
+sidecar's `LD_LIBRARY_PATH`. Both settings are opt-in, so deployments that do
+not need host libraries keep their existing behavior.
+
 Set the DPU agent machine identity proxy with a key similar to the following:
 
 ```toml

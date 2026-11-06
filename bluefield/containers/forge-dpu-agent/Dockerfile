@@ -54,6 +54,10 @@ FROM --platform=linux/arm64 ${IMG}:${TAG}-${DISTROLESS_DEBUG_TAG}
 
 # Copy bash binary, libraries, and mft from builder
 COPY --from=builder /lib/aarch64-linux-gnu/libudev.so.1 /lib/aarch64-linux-gnu/libudev.so.1
+# The DPF LLDP sidecar mounts the host's /lib over the image's /lib so it can
+# run the host lldpcli. Keep libudev in a path that mount cannot hide; deployments
+# can opt in to this path when the host does not provide libudev in /lib.
+COPY --from=builder /lib/aarch64-linux-gnu/libudev.so.1 /usr/lib/forge-runtime/libudev.so.1
 COPY --from=builder --chmod=755 /bin/bash /bin/bash
 COPY --from=builder --chmod=755 /extract/usr/bin/ /usr/bin/
 COPY --from=builder /deps/* /lib/

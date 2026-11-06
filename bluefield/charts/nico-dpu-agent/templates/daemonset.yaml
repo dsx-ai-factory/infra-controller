@@ -12,6 +12,11 @@
 {{- $supplementalNetworkConfig := default (dict) .Values.supplementalNetworkConfig -}}
 {{- $supplementalCmName := default "" (get $supplementalNetworkConfig "name") -}}
 {{- $supplementalCmKey := default "supplemental.json" (get $supplementalNetworkConfig "key") -}}
+{{- $lldpHostLibraryPath := default "" .Values.lldpSidecar.hostLibraryPath -}}
+{{- $lldpLibraryPath := default "" .Values.lldpSidecar.ldLibraryPath -}}
+{{- if and (empty $lldpLibraryPath) $lldpHostLibraryPath -}}
+{{- $lldpLibraryPath = "/host/lib64" -}}
+{{- end -}}
 {{- /* The agent's config.toml is needed by any section that sets a key in it. */ -}}
 {{- $prometheusDisabled := eq (toString .Values.prometheusEnabled) "false" -}}
 {{- $fmdsNetworkingConfigured := ne .Values.fmds.networkingAddresses nil -}}
@@ -254,6 +259,11 @@ spec:
           args:
             - sidecar-mode
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- with $lldpLibraryPath }}
+          env:
+            - name: LD_LIBRARY_PATH
+              value: {{ . | quote }}
+          {{- end }}
           {{- with .Values.lldpSidecar.resources }}
           resources:
             {{- toYaml . | nindent 12 }}
@@ -270,6 +280,11 @@ spec:
             - name: host-lib
               mountPath: /lib
               readOnly: true
+            {{- if $lldpHostLibraryPath }}
+            - name: host-library
+              mountPath: /host/lib64
+              readOnly: true
+            {{- end }}
             - name: sys
               mountPath: /host-sys
               readOnly: true
@@ -313,6 +328,12 @@ spec:
           hostPath:
             path: /lib
             type: Directory
+        {{- if $lldpHostLibraryPath }}
+        - name: host-library
+          hostPath:
+            path: {{ $lldpHostLibraryPath | quote }}
+            type: Directory
+        {{- end }}
         - name: sys
           hostPath:
             path: /sys
