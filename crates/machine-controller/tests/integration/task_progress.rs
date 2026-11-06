@@ -20,6 +20,7 @@
 use std::collections::HashMap;
 
 use carbide_test_harness::prelude::*;
+use carbide_test_harness::test_support::fixture_config::FixtureDefault as _;
 use model::controller_outcome::PersistentStateHandlerOutcome;
 use model::firmware::FirmwareComponentType;
 use model::machine::{
