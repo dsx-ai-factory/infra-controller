@@ -31,6 +31,22 @@ clusterApiServer: ""
 ## Vault address uses vaultNamespace above: vault.<vaultNamespace>.svc.cluster.local
 ## ---------------------------------------------------------------------------
 vault:
+  ## Render this chart's Vault resources: the Vault TLS bootstrap Certificates
+  ## (tls.create), the nico-vault-token and nico-vault-approle-tokens Secrets
+  ## (tokenSecret.create, approleSecret.create), the vault-pki-config Job
+  ## (configJob.enabled), the cert-manager Vault ServiceAccount
+  ## (certManager.vaultAuthServiceAccount.create), the vault-nico-issuer
+  ## ClusterIssuer (certManager.vaultIssuer.create), and the vault-cluster-info
+  ## ConfigMap. Each of those finer toggles applies only while this is true.
+  ## `setup.sh --skip-vault` sets it false through
+  ## values/nico-prereqs-dynamic.yaml.gotmpl; direct Helm users set it here. The
+  ## site-root CA, the site-issuer ClusterIssuer, the database ConfigMap, the SSH
+  ## host key, PostgreSQL, and the ESO resources render either way.
+  ## A direct Helm user who sets this false while a running Core still
+  ## references Vault removes resources that Core needs; setup.sh --skip-vault
+  ## keeps them until it has redeployed Core. Neither path uninstalls Vault.
+  ## See README.md, "Installing without Vault".
+  enabled: true
   address: "https://vault.vault.svc.cluster.local:8200"
   ## Optional Vault Enterprise/HCP Vault Dedicated namespace. This is not a Kubernetes namespace.
   namespace: ""
@@ -156,6 +172,17 @@ siteCredentials:
 certManager:
   siteRoot:
     create: true
+  ## site-issuer: CA ClusterIssuer that signs with the site-root Secret. It
+  ## issues the Vault TLS bootstrap certificates and is the NICo certificate
+  ## issuer on a site installed without Vault
+  ## (global.certificate.issuerRef.name=site-issuer on the Core release).
+  ## Rendered when true and, on a Vault site (vault.enabled), only while
+  ## vault.tls.create is also true, which preserves the previous behavior: a
+  ## Vault site that disables the TLS bootstrap and manages its own site-issuer
+  ## keeps it. A Vault-free site renders it whatever vault.tls.create says.
+  siteIssuer:
+    create: true
+  ## Rendered only while vault.enabled is true.
   vaultAuthServiceAccount:
     create: true
   vaultIssuer:
