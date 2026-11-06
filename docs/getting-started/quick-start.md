@@ -749,7 +749,9 @@ any history file that captured them.
 
 Site Explorer requires all three — the site-wide BMC root and both the `host`
 and `dpu` UEFI site defaults. It checks them before contacting any BMC and fails
-each iteration with `MissingCredentials` while any one is missing.
+each iteration with `MissingCredentials` while any one is missing. Site Explorer
+does not require the DPU UEFI site-default password when
+`[site_explorer] dpu_policy = "ignore"`.
 
 When DPF is enabled, the site-wide BMC root credential is also mirrored into the
 DPF `bmc-shared-password` Secret; refer to

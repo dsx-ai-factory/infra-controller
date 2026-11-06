@@ -20,9 +20,16 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+use arc_swap::ArcSwap;
+use carbide_redfish::libredfish::test_support::RedfishSim;
+use carbide_redfish::nv_redfish::NvRedfishClientPool;
+use carbide_secrets::credentials::{
+    BmcCredentialType, CredentialKey, CredentialType, CredentialWriter, Credentials,
+};
+use carbide_secrets::test_support::credentials::TestCredentialManager;
 use carbide_site_explorer::config::SiteExplorerConfig;
 use carbide_site_explorer::test_support::{MockEndpointExplorer, TestSiteExplorer};
-use carbide_site_explorer::{EndpointExplorationService, SiteExplorer};
+use carbide_site_explorer::{AuthenticatedBmcClient, EndpointExplorationService, SiteExplorer};
 use carbide_test_harness::network::segment::TestNetworkSegment;
 use carbide_test_harness::prelude::*;
 use carbide_test_harness::test_support::fixture_config::FixtureDefault as _;
@@ -1076,4 +1083,72 @@ async fn test_zero_dpu_multi_nic_no_declaration_adopts_without_primary_collision
     );
 
     Ok(())
+}
+
+/// A site-wide `ignore` site passes the production credential precheck without
+/// a DPU UEFI site default, so the run completes and is recorded as successful.
+#[sqlx_test]
+async fn ignore_site_runs_without_dpu_uefi_credential(pool: PgPool) {
+    let test_harness = TestHarness::builder(pool.clone()).build().await;
+    let api = test_harness.api();
+    let credential_manager = Arc::new(TestCredentialManager::default());
+    for key in [
+        CredentialKey::BmcCredentials {
+            credential_type: BmcCredentialType::SiteWideRoot,
+        },
+        CredentialKey::HostUefi {
+            credential_type: CredentialType::SiteDefault,
+        },
+    ] {
+        credential_manager
+            .set_credentials(&key, &Credentials::new("", "configured"))
+            .await
+            .unwrap();
+    }
+    let bmc_client = Arc::new(AuthenticatedBmcClient::new(
+        Arc::new(RedfishSim::default()),
+        Arc::new(NvRedfishClientPool::new(Arc::new(ArcSwap::new(Arc::new(
+            None,
+        ))))),
+        None,
+        carbide_ipmi::test_support(),
+        credential_manager.clone(),
+    ));
+    let endpoint_explorer = carbide_site_explorer::new_bmc_explorer(
+        bmc_client.clone(),
+        Arc::new(AtomicBool::new(false)),
+        false,
+        pool.clone(),
+    );
+    let site_explorer = SiteExplorer::new(
+        pool.clone(),
+        SiteExplorerConfig {
+            enabled: Arc::new(true.into()),
+            retained_boot_interface_window: None,
+            dpu_policy: Some(HostDpuPolicy::Ignore),
+            ..Default::default()
+        },
+        test_harness.test_meter.meter(),
+        Arc::new(EndpointExplorationService::new(
+            pool.clone(),
+            endpoint_explorer,
+            Arc::new(api.runtime_config.get_firmware_config()),
+        )),
+        bmc_client,
+        Default::default(),
+        api.common_pools().clone(),
+        api.work_lock_manager_handle(),
+        api.runtime_config.rack_profiles.clone(),
+        None,
+        credential_manager,
+        false,
+    );
+
+    site_explorer.run_single_iteration().await.unwrap();
+
+    let last_run = db::site_explorer_run_status::fetch(&pool)
+        .await
+        .unwrap()
+        .expect("the iteration records its last run");
+    assert!(last_run.success, "{last_run:?}");
 }
