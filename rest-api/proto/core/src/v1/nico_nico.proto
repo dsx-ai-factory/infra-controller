@@ -2150,8 +2150,10 @@ message RuntimeConfig {
 
   // Operator FNN null routes reported by the anonymous Version RPC. When
   // site_fabric_null_routes is omitted from site configuration, this includes
-  // site_fabric_prefixes and removed operator-managed roots while they contain
-  // a VpcPrefix or VPC-attached direct NetworkPrefix. Tenant-managed roots are
+  // site_fabric_prefixes and removed operator-managed roots retained by an exact
+  // VpcPrefix reference, a contained VpcPrefix without parentage, or a contained
+  // VPC-attached direct NetworkPrefix. Soft-deleted children retain coverage until
+  // their VpcPrefix or segment is hard-deleted. Tenant-managed roots are
   // not added here; this is not a complete audit of DPU isolation routes. Use
   // GetManagedHostNetworkConfig for the tenant-inclusive FNN response, with RBAC
   // enforced. An explicit list is returned without checking tenant coverage.
