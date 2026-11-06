@@ -40,7 +40,6 @@ use crate as carbide_rack_controller;
 
 const COMPONENT_ERROR_STATE: &str = "error";
 const MACHINE_FAILED_STATE: &str = "failed";
-const COMPONENT_READY_STATE: &str = "ready";
 
 pub async fn handle_ready(
     id: &RackId,
@@ -133,7 +132,7 @@ pub async fn handle_ready(
 }
 
 /// Returns a cause string if any switch, power shelf, or machine in the rack
-/// is in its terminal failure state, or `None` if every component is healthy.
+/// is in its terminal failure state, or `None` if no terminal component failure remains.
 pub(super) async fn detect_component_failure(
     rack_id: &RackId,
     ctx: &mut StateHandlerContext<'_, RackStateHandlerContextObjects>,
@@ -217,101 +216,4 @@ pub(super) async fn detect_component_failure(
         "component(s) reported terminal failure: {}",
         parts.join("; ")
     )))
-}
-
-/// Returns `true` only when the rack has at least one component registered
-/// and every switch, power shelf, and machine is in its `Ready` state.
-pub(super) async fn all_components_ready(
-    rack_id: &RackId,
-    ctx: &mut StateHandlerContext<'_, RackStateHandlerContextObjects>,
-) -> Result<bool, StateHandlerError> {
-    let mut txn = ctx.services.db_pool.begin().await?;
-
-    let all_switches = db_switch::find_ids(
-        txn.as_mut(),
-        SwitchSearchFilter {
-            rack_id: Some(rack_id.clone()),
-            deleted: DeletedFilter::Exclude,
-            ..Default::default()
-        },
-    )
-    .await?;
-    let ready_switches = db_switch::find_ids(
-        txn.as_mut(),
-        SwitchSearchFilter {
-            rack_id: Some(rack_id.clone()),
-            deleted: DeletedFilter::Exclude,
-            controller_state: Some(COMPONENT_READY_STATE.to_string()),
-            ..Default::default()
-        },
-    )
-    .await?;
-
-    let all_power_shelves = db_power_shelf::find_ids(
-        txn.as_mut(),
-        PowerShelfSearchFilter {
-            rack_id: Some(rack_id.clone()),
-            deleted: DeletedFilter::Exclude,
-            ..Default::default()
-        },
-    )
-    .await?;
-    let ready_power_shelves = db_power_shelf::find_ids(
-        txn.as_mut(),
-        PowerShelfSearchFilter {
-            rack_id: Some(rack_id.clone()),
-            deleted: DeletedFilter::Exclude,
-            controller_state: Some(COMPONENT_READY_STATE.to_string()),
-            ..Default::default()
-        },
-    )
-    .await?;
-
-    let all_machines = db_machine::find_machine_ids::<MachineId>(
-        txn.as_mut(),
-        MachineSearchConfig {
-            rack_id: Some(rack_id.clone()),
-            ..Default::default()
-        },
-    )
-    .await?;
-    let ready_machines = db_machine::find_machine_ids::<MachineId>(
-        txn.as_mut(),
-        MachineSearchConfig {
-            rack_id: Some(rack_id.clone()),
-            controller_state: Some(COMPONENT_READY_STATE.to_string()),
-            ..Default::default()
-        },
-    )
-    .await?;
-
-    txn.commit().await?;
-
-    let total = all_switches.len() + all_power_shelves.len() + all_machines.len();
-    if total == 0 {
-        tracing::debug!(
-            rack_id = %rack_id,
-            "Rack has no components registered; not promoting out of Error",
-        );
-        return Ok(false);
-    }
-
-    let all_ready = ready_switches.len() == all_switches.len()
-        && ready_power_shelves.len() == all_power_shelves.len()
-        && ready_machines.len() == all_machines.len();
-
-    if !all_ready {
-        tracing::debug!(
-            rack_id = %rack_id,
-            ready_switch_count = ready_switches.len(),
-            total_switch_count = all_switches.len(),
-            ready_power_shelf_count = ready_power_shelves.len(),
-            total_power_shelf_count = all_power_shelves.len(),
-            ready_machine_count = ready_machines.len(),
-            total_machine_count = all_machines.len(),
-            "Rack components not yet all Ready: switches, power shelves, machines",
-        );
-    }
-
-    Ok(all_ready)
 }
