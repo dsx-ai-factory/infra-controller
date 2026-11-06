@@ -3702,7 +3702,29 @@ async fn test_ingestion_reconciles_late_compute_firmware_body(
     .await?;
     crate::fixtures::rack::set_rack_controller_state(conn.as_mut(), &rack_id, start).await?;
     drop(conn);
+    set_machine_host_reprovision_state(
+        &pool,
+        &original.host_snapshot.id,
+        model::machine::HostReprovisionState::CheckingFirmware,
+    )
+    .await?;
     queue_ingestion_firmware_batch(&env, "original", &original.host_snapshot.id.to_string()).await;
+    env.run_rack_controller_iteration().await;
+    let empty = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    assert_eq!(empty.controller_state.value, waiting);
+    assert!(empty.firmware_upgrade_job.unwrap().machines.is_empty());
+    assert!(
+        env.rms_sim
+            .submitted_apply_firmware_object_requests()
+            .await
+            .is_empty()
+    );
+    db::machine::update_state(
+        pool.acquire().await?.as_mut(),
+        &original.host_snapshot.id,
+        &model::machine::ManagedHostState::Ready,
+    )
+    .await?;
     env.run_rack_controller_iteration().await;
     let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
     assert_eq!(rack.controller_state.value, waiting);

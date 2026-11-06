@@ -919,6 +919,10 @@ async fn reconcile_ingestion_firmware_machines(
             db_machine::update_rack_fw_details(txn.as_mut(), &machine_id, Some(&status)).await?;
         }
     }
+    if job.job_id.is_none() {
+        job.job_id = additional.job_id.clone();
+        job.firmware_id = additional.firmware_id.clone();
+    }
     job.machines.extend(additional.machines);
     job.batch_job_ids.extend(additional.batch_job_ids);
     job.completed_at = None;
