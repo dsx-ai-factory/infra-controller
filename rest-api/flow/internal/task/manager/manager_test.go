@@ -35,6 +35,7 @@ import (
 
 type submitTaskInventory struct {
 	inventorystore.Store
+	racks        map[uuid.UUID]*rack.Rack
 	rack         *rack.Rack
 	components   map[uuid.UUID]*component.Component
 	getRackCalls int
@@ -42,10 +43,13 @@ type submitTaskInventory struct {
 
 func (s *submitTaskInventory) GetRackByIdentifier(
 	_ context.Context,
-	_ identifier.Identifier,
+	ident identifier.Identifier,
 	_ bool,
 ) (*rack.Rack, error) {
 	s.getRackCalls++
+	if s.racks != nil {
+		return s.racks[ident.ID], nil
+	}
 	return s.rack, nil
 }
 
@@ -57,263 +61,272 @@ func (s *submitTaskInventory) GetComponentByID(
 }
 
 func TestManagerImpl_SubmitTask(t *testing.T) {
-	t.Run("rejects a Compute component target with an NVSwitch-only rack rule", func(t *testing.T) {
-		rackID := uuid.New()
-		componentID := uuid.New()
-		resolvedRack := newTestRack(rackID, "rack-1")
-		compute := newTestComponentWithRackID(
-			componentID,
-			rackID,
-			devicetypes.ComponentTypeCompute,
-			"compute-1",
-		)
-		store := &managerTaskStore{operationRule: &operationrules.OperationRule{
-			ID:   uuid.New(),
-			Name: "NVSwitch-only power rule",
-			RuleDefinition: operationrules.RuleDefinition{Steps: []operationrules.SequenceStep{{
-				ComponentType: devicetypes.ComponentTypeNVSwitch,
-				Stage:         1,
-			}}},
-		}}
-		manager := &ManagerImpl{
-			inventoryStore: &submitTaskInventory{
-				rack:       resolvedRack,
-				components: map[uuid.UUID]*component.Component{componentID: compute},
-			},
-			taskStore:    store,
-			ruleResolver: operationrules.NewResolver(store),
-		}
-
-		taskIDs, err := manager.SubmitTask(context.Background(), &operation.Request{
-			Operation: testPowerControlOperation(t),
-			TargetSpec: operation.TargetSpec{Components: []operation.ComponentTarget{{
-				UUID: componentID,
-			}}},
-		})
-
-		require.Nil(t, taskIDs)
-		require.Equal(t, codes.FailedPrecondition, status.Code(err))
-		require.ErrorContains(t, err, "no step applicable to targeted component types [Compute]")
-		require.Zero(t, store.createTaskCalls)
-	})
-
-	t.Run("rejects unsupported firmware options before creating a task", func(t *testing.T) {
-		rackID := uuid.New()
-		resolvedRack := newTestRack(rackID, "rack-1")
-		resolvedRack.AddComponent(newTestComponent(
-			uuid.New(),
-			rackID,
-			devicetypes.ComponentTypeCompute,
-			"compute-1",
-		))
-		store := &managerTaskStore{}
-		executor := &managerExecutor{
-			validateErr: errors.New("compute firmware sub-target selection is not supported"),
-		}
-		manager := &ManagerImpl{
-			inventoryStore: &submitTaskInventory{rack: resolvedRack},
-			taskStore:      store,
-			ruleResolver:   operationrules.NewResolver(store),
-			executor:       executor,
-		}
-
-		taskIDs, err := manager.SubmitTask(context.Background(), &operation.Request{
-			Operation: testFirmwareControlOperation(t),
-			TargetSpec: operation.TargetSpec{Racks: []operation.RackTarget{{
-				Identifier: identifier.Identifier{ID: rackID},
-			}}},
-		})
-
-		require.Nil(t, taskIDs)
-		require.Equal(t, codes.FailedPrecondition, status.Code(err))
-		require.ErrorContains(t, err, "compute firmware sub-target selection is not supported")
-		require.Equal(t, 1, executor.validateCalls)
-		require.Zero(t, executor.executeCalls)
-		require.Zero(t, store.createTaskCalls)
-	})
-
-	t.Run("rejects an unlinked operation target", func(t *testing.T) {
-		rackID := uuid.New()
-		resolvedRack := newTestRack(rackID, "rack-1")
-		unlinkedID := uuid.New()
-		unlinked := newTestComponent(
-			unlinkedID,
-			rackID,
-			devicetypes.ComponentTypeCompute,
-			"compute-1",
-		)
-		unlinked.ComponentID = ""
-		resolvedRack.AddComponent(unlinked)
-
-		store := &managerTaskStore{}
-		manager := &ManagerImpl{
-			inventoryStore: &submitTaskInventory{rack: resolvedRack},
-			taskStore:      store,
-		}
-
-		_, err := manager.SubmitTask(context.Background(), &operation.Request{
-			Operation: testPowerControlOperation(t),
-			TargetSpec: operation.TargetSpec{
-				Racks: []operation.RackTarget{{
-					Identifier: identifier.Identifier{ID: rackID},
-				}},
-			},
-		})
-
-		require.ErrorContains(t, err, "selected components not linked to actual inventory (1)")
-		require.ErrorContains(t, err, unlinkedID.String())
-		require.Zero(t, store.createTaskCalls)
-	})
-
-	t.Run("returns a scheduled idempotent task before inventory validation", func(t *testing.T) {
-		rackID := uuid.New()
-		taskID := uuid.New()
-		idempotencyKey := "operation-run-target:" + uuid.NewString()
-		store := &managerTaskStore{
-			taskByIdempotencyKey: map[string]*taskdef.Task{
-				idempotencyKey: {
-					ID:             taskID,
-					RackID:         rackID,
-					ExecutionID:    `{"workflow_id":"workflow","run_id":"run"}`,
-					IdempotencyKey: idempotencyKey,
+	tests := []struct {
+		name  string
+		check func(*testing.T)
+	}{
+		{name: "per-rack rejection propagation", check: testSubmitTaskRejections},
+		{name: "rejects a Compute component target with an NVSwitch-only rack rule", check: func(t *testing.T) {
+			rackID := uuid.New()
+			componentID := uuid.New()
+			resolvedRack := newTestRack(rackID, "rack-1")
+			compute := newTestComponentWithRackID(
+				componentID,
+				rackID,
+				devicetypes.ComponentTypeCompute,
+				"compute-1",
+			)
+			store := &managerTaskStore{operationRule: &operationrules.OperationRule{
+				ID:   uuid.New(),
+				Name: "NVSwitch-only power rule",
+				RuleDefinition: operationrules.RuleDefinition{Steps: []operationrules.SequenceStep{{
+					ComponentType: devicetypes.ComponentTypeNVSwitch,
+					Stage:         1,
+				}}},
+			}}
+			manager := &ManagerImpl{
+				inventoryStore: &submitTaskInventory{
+					rack:       resolvedRack,
+					components: map[uuid.UUID]*component.Component{componentID: compute},
 				},
-			},
-		}
-		inventory := &submitTaskInventory{}
-		manager := &ManagerImpl{inventoryStore: inventory, taskStore: store}
+				taskStore:    store,
+				ruleResolver: operationrules.NewResolver(store),
+			}
 
-		taskIDs, err := manager.SubmitTask(context.Background(), &operation.Request{
-			Operation:      testPowerControlOperation(t),
-			RequiredRackID: rackID,
-			IdempotencyKey: idempotencyKey,
-			TargetSpec: operation.TargetSpec{
-				Racks: []operation.RackTarget{{
+			taskIDs, err := manager.SubmitTask(context.Background(), &operation.Request{
+				Operation: testPowerControlOperation(t),
+				TargetSpec: operation.TargetSpec{Components: []operation.ComponentTarget{{
+					UUID: componentID,
+				}}},
+			})
+
+			require.Nil(t, taskIDs)
+			require.Equal(t, codes.FailedPrecondition, status.Code(err))
+			require.ErrorContains(t, err, "no step applicable to targeted component types [Compute]")
+			require.Zero(t, store.createTaskCalls)
+		}},
+
+		{name: "rejects unsupported firmware options before creating a task", check: func(t *testing.T) {
+			rackID := uuid.New()
+			resolvedRack := newTestRack(rackID, "rack-1")
+			resolvedRack.AddComponent(newTestComponent(
+				uuid.New(),
+				rackID,
+				devicetypes.ComponentTypeCompute,
+				"compute-1",
+			))
+			store := &managerTaskStore{}
+			executor := &managerExecutor{
+				validateErr: errors.New("compute firmware sub-target selection is not supported"),
+			}
+			manager := &ManagerImpl{
+				inventoryStore: &submitTaskInventory{rack: resolvedRack},
+				taskStore:      store,
+				ruleResolver:   operationrules.NewResolver(store),
+				executor:       executor,
+			}
+
+			taskIDs, err := manager.SubmitTask(context.Background(), &operation.Request{
+				Operation: testFirmwareControlOperation(t),
+				TargetSpec: operation.TargetSpec{Racks: []operation.RackTarget{{
 					Identifier: identifier.Identifier{ID: rackID},
-				}},
-			},
-		})
+				}}},
+			})
 
-		require.NoError(t, err)
-		require.Equal(t, []uuid.UUID{taskID}, taskIDs)
-		require.Zero(t, inventory.getRackCalls)
-		require.Zero(t, store.createTaskCalls)
-	})
+			require.Nil(t, taskIDs)
+			require.Equal(t, codes.FailedPrecondition, status.Code(err))
+			require.ErrorContains(t, err, "compute firmware sub-target selection is not supported")
+			require.Equal(t, 1, executor.validateCalls)
+			require.Zero(t, executor.executeCalls)
+			require.Zero(t, store.createTaskCalls)
+		}},
 
-	t.Run("returns a waiting idempotent task before inventory validation", func(t *testing.T) {
-		rackID := uuid.New()
-		taskID := uuid.New()
-		idempotencyKey := "operation-run-target:" + uuid.NewString()
-		deadline := time.Now().Add(time.Hour)
-		store := &managerTaskStore{
-			taskByIdempotencyKey: map[string]*taskdef.Task{
-				idempotencyKey: {
-					ID:             taskID,
-					RackID:         rackID,
-					Status:         taskcommon.TaskStatusWaiting,
-					QueueExpiresAt: &deadline,
-					IdempotencyKey: idempotencyKey,
+		{name: "rejects an unlinked operation target", check: func(t *testing.T) {
+			rackID := uuid.New()
+			resolvedRack := newTestRack(rackID, "rack-1")
+			unlinkedID := uuid.New()
+			unlinked := newTestComponent(
+				unlinkedID,
+				rackID,
+				devicetypes.ComponentTypeCompute,
+				"compute-1",
+			)
+			unlinked.ComponentID = ""
+			resolvedRack.AddComponent(unlinked)
+
+			store := &managerTaskStore{}
+			manager := &ManagerImpl{
+				inventoryStore: &submitTaskInventory{rack: resolvedRack},
+				taskStore:      store,
+			}
+
+			_, err := manager.SubmitTask(context.Background(), &operation.Request{
+				Operation: testPowerControlOperation(t),
+				TargetSpec: operation.TargetSpec{
+					Racks: []operation.RackTarget{{
+						Identifier: identifier.Identifier{ID: rackID},
+					}},
 				},
-			},
-		}
-		inventory := &submitTaskInventory{}
-		manager := &ManagerImpl{inventoryStore: inventory, taskStore: store}
+			})
 
-		taskIDs, err := manager.SubmitTask(context.Background(), &operation.Request{
-			Operation:      testPowerControlOperation(t),
-			RequiredRackID: rackID,
-			IdempotencyKey: idempotencyKey,
-			TargetSpec: operation.TargetSpec{
-				Racks: []operation.RackTarget{{
-					Identifier: identifier.Identifier{ID: rackID},
-				}},
-			},
-		})
+			require.ErrorContains(t, err, "selected components not linked to actual inventory (1)")
+			require.ErrorContains(t, err, unlinkedID.String())
+			require.Zero(t, store.createTaskCalls)
+		}},
 
-		require.NoError(t, err)
-		require.Equal(t, []uuid.UUID{taskID}, taskIDs)
-		require.Zero(t, inventory.getRackCalls)
-		require.Zero(t, store.createTaskCalls)
-	})
-
-	t.Run("rejects an idempotency key belonging to another rack", func(t *testing.T) {
-		requestedRackID := uuid.New()
-		existingRackID := uuid.New()
-		idempotencyKey := "operation-run-target:" + uuid.NewString()
-		store := &managerTaskStore{
-			taskByIdempotencyKey: map[string]*taskdef.Task{
-				idempotencyKey: {
-					ID:             uuid.New(),
-					RackID:         existingRackID,
-					ExecutionID:    `{"workflow_id":"workflow","run_id":"run"}`,
-					IdempotencyKey: idempotencyKey,
+		{name: "returns a scheduled idempotent task before inventory validation", check: func(t *testing.T) {
+			rackID := uuid.New()
+			taskID := uuid.New()
+			idempotencyKey := "operation-run-target:" + uuid.NewString()
+			store := &managerTaskStore{
+				taskByIdempotencyKey: map[string]*taskdef.Task{
+					idempotencyKey: {
+						ID:             taskID,
+						RackID:         rackID,
+						ExecutionID:    `{"workflow_id":"workflow","run_id":"run"}`,
+						IdempotencyKey: idempotencyKey,
+					},
 				},
-			},
-		}
-		inventory := &submitTaskInventory{}
-		manager := &ManagerImpl{inventoryStore: inventory, taskStore: store}
+			}
+			inventory := &submitTaskInventory{}
+			manager := &ManagerImpl{inventoryStore: inventory, taskStore: store}
 
-		taskIDs, err := manager.SubmitTask(context.Background(), &operation.Request{
-			Operation:      testPowerControlOperation(t),
-			RequiredRackID: requestedRackID,
-			IdempotencyKey: idempotencyKey,
-			TargetSpec: operation.TargetSpec{
-				Racks: []operation.RackTarget{{
-					Identifier: identifier.Identifier{ID: requestedRackID},
-				}},
-			},
-		})
+			taskIDs, err := manager.SubmitTask(context.Background(), &operation.Request{
+				Operation:      testPowerControlOperation(t),
+				RequiredRackID: rackID,
+				IdempotencyKey: idempotencyKey,
+				TargetSpec: operation.TargetSpec{
+					Racks: []operation.RackTarget{{
+						Identifier: identifier.Identifier{ID: rackID},
+					}},
+				},
+			})
 
-		require.Nil(t, taskIDs)
-		require.ErrorContains(t, err, "idempotency key")
-		require.ErrorContains(t, err, existingRackID.String())
-		require.ErrorContains(t, err, requestedRackID.String())
-		require.Zero(t, inventory.getRackCalls)
-		require.Zero(t, store.createTaskCalls)
-	})
+			require.NoError(t, err)
+			require.Equal(t, []uuid.UUID{taskID}, taskIDs)
+			require.Zero(t, inventory.getRackCalls)
+			require.Zero(t, store.createTaskCalls)
+		}},
 
-	t.Run("rejects unlinked ingest with an actual inventory rule", func(t *testing.T) {
-		rackID := uuid.New()
-		ruleID := uuid.New()
-		resolvedRack := newTestRack(rackID, "rack-1")
-		unlinked := newTestComponent(
-			uuid.New(),
-			rackID,
-			devicetypes.ComponentTypeCompute,
-			"compute-1",
-		)
-		unlinked.ComponentID = ""
-		resolvedRack.AddComponent(unlinked)
+		{name: "returns a waiting idempotent task before inventory validation", check: func(t *testing.T) {
+			rackID := uuid.New()
+			taskID := uuid.New()
+			idempotencyKey := "operation-run-target:" + uuid.NewString()
+			deadline := time.Now().Add(time.Hour)
+			store := &managerTaskStore{
+				taskByIdempotencyKey: map[string]*taskdef.Task{
+					idempotencyKey: {
+						ID:             taskID,
+						RackID:         rackID,
+						Status:         taskcommon.TaskStatusWaiting,
+						QueueExpiresAt: &deadline,
+						IdempotencyKey: idempotencyKey,
+					},
+				},
+			}
+			inventory := &submitTaskInventory{}
+			manager := &ManagerImpl{inventoryStore: inventory, taskStore: store}
 
-		rule := &operationrules.OperationRule{
-			ID:            ruleID,
-			OperationType: taskcommon.TaskTypeBringUp,
-			OperationCode: taskcommon.OpCodeIngest,
-			RuleDefinition: operationrules.RuleDefinition{Steps: []operationrules.SequenceStep{{
-				ComponentType: devicetypes.ComponentTypeCompute,
-				Stage:         1,
-				MainOperation: operationrules.ActionConfig{Name: operationrules.ActionPowerControl},
-			}}},
-		}
-		store := &managerTaskStore{rulesByID: map[uuid.UUID]*operationrules.OperationRule{ruleID: rule}}
-		manager := &ManagerImpl{
-			inventoryStore: &submitTaskInventory{rack: resolvedRack},
-			taskStore:      store,
-			ruleResolver:   operationrules.NewResolver(store),
-		}
+			taskIDs, err := manager.SubmitTask(context.Background(), &operation.Request{
+				Operation:      testPowerControlOperation(t),
+				RequiredRackID: rackID,
+				IdempotencyKey: idempotencyKey,
+				TargetSpec: operation.TargetSpec{
+					Racks: []operation.RackTarget{{
+						Identifier: identifier.Identifier{ID: rackID},
+					}},
+				},
+			})
 
-		_, err := manager.SubmitTask(context.Background(), &operation.Request{
-			Operation: testIngestOperation(t, &ruleID),
-			RuleID:    &ruleID,
-			TargetSpec: operation.TargetSpec{
-				Racks: []operation.RackTarget{{
-					Identifier: identifier.Identifier{ID: rackID},
-				}},
-			},
-		})
+			require.NoError(t, err)
+			require.Equal(t, []uuid.UUID{taskID}, taskIDs)
+			require.Zero(t, inventory.getRackCalls)
+			require.Zero(t, store.createTaskCalls)
+		}},
 
-		require.ErrorContains(t, err, "selected components not linked to actual inventory (1)")
-		require.Zero(t, store.createTaskCalls)
-	})
+		{name: "rejects an idempotency key belonging to another rack", check: func(t *testing.T) {
+			requestedRackID := uuid.New()
+			existingRackID := uuid.New()
+			idempotencyKey := "operation-run-target:" + uuid.NewString()
+			store := &managerTaskStore{
+				taskByIdempotencyKey: map[string]*taskdef.Task{
+					idempotencyKey: {
+						ID:             uuid.New(),
+						RackID:         existingRackID,
+						ExecutionID:    `{"workflow_id":"workflow","run_id":"run"}`,
+						IdempotencyKey: idempotencyKey,
+					},
+				},
+			}
+			inventory := &submitTaskInventory{}
+			manager := &ManagerImpl{inventoryStore: inventory, taskStore: store}
+
+			taskIDs, err := manager.SubmitTask(context.Background(), &operation.Request{
+				Operation:      testPowerControlOperation(t),
+				RequiredRackID: requestedRackID,
+				IdempotencyKey: idempotencyKey,
+				TargetSpec: operation.TargetSpec{
+					Racks: []operation.RackTarget{{
+						Identifier: identifier.Identifier{ID: requestedRackID},
+					}},
+				},
+			})
+
+			require.Nil(t, taskIDs)
+			require.ErrorContains(t, err, "idempotency key")
+			require.ErrorContains(t, err, existingRackID.String())
+			require.ErrorContains(t, err, requestedRackID.String())
+			require.Zero(t, inventory.getRackCalls)
+			require.Zero(t, store.createTaskCalls)
+		}},
+
+		{name: "rejects unlinked ingest with an actual inventory rule", check: func(t *testing.T) {
+			rackID := uuid.New()
+			ruleID := uuid.New()
+			resolvedRack := newTestRack(rackID, "rack-1")
+			unlinked := newTestComponent(
+				uuid.New(),
+				rackID,
+				devicetypes.ComponentTypeCompute,
+				"compute-1",
+			)
+			unlinked.ComponentID = ""
+			resolvedRack.AddComponent(unlinked)
+
+			rule := &operationrules.OperationRule{
+				ID:            ruleID,
+				OperationType: taskcommon.TaskTypeBringUp,
+				OperationCode: taskcommon.OpCodeIngest,
+				RuleDefinition: operationrules.RuleDefinition{Steps: []operationrules.SequenceStep{{
+					ComponentType: devicetypes.ComponentTypeCompute,
+					Stage:         1,
+					MainOperation: operationrules.ActionConfig{Name: operationrules.ActionPowerControl},
+				}}},
+			}
+			store := &managerTaskStore{rulesByID: map[uuid.UUID]*operationrules.OperationRule{ruleID: rule}}
+			manager := &ManagerImpl{
+				inventoryStore: &submitTaskInventory{rack: resolvedRack},
+				taskStore:      store,
+				ruleResolver:   operationrules.NewResolver(store),
+			}
+
+			_, err := manager.SubmitTask(context.Background(), &operation.Request{
+				Operation: testIngestOperation(t, &ruleID),
+				RuleID:    &ruleID,
+				TargetSpec: operation.TargetSpec{
+					Racks: []operation.RackTarget{{
+						Identifier: identifier.Identifier{ID: rackID},
+					}},
+				},
+			})
+
+			require.ErrorContains(t, err, "selected components not linked to actual inventory (1)")
+			require.Zero(t, store.createTaskCalls)
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, tt.check)
+	}
 }
 
 func TestManagerImpl_CancelTask(t *testing.T) {
@@ -1448,6 +1461,8 @@ func testIngestOperation(t *testing.T, ruleID *uuid.UUID) operation.Wrapper {
 }
 
 type managerTaskStore struct {
+	createdTasks                   []taskdef.Task
+	waitingByRack                  map[uuid.UUID]int
 	activeTasksByRack              map[uuid.UUID][]*taskdef.Task
 	taskByIdempotencyKey           map[string]*taskdef.Task
 	listActiveCalls                int
@@ -1518,7 +1533,8 @@ func (s *managerTaskStore) RunInTransaction(
 	return s.transactionCommitErr
 }
 
-func (s *managerTaskStore) CreateTask(_ context.Context, _ *taskdef.Task) error {
+func (s *managerTaskStore) CreateTask(_ context.Context, task *taskdef.Task) error {
+	s.createdTasks = append(s.createdTasks, *task)
 	s.createTaskCalls++
 	return nil
 }
@@ -1616,8 +1632,11 @@ func (s *managerTaskStore) ListWaitingTasksForRack(
 	panic("managerTaskStore.ListWaitingTasksForRack: not implemented")
 }
 
-func (s *managerTaskStore) CountWaitingTasksForRack(_ context.Context, _ uuid.UUID) (int, error) {
+func (s *managerTaskStore) CountWaitingTasksForRack(_ context.Context, id uuid.UUID) (int, error) {
 	s.countWaitingCalls++
+	if s.waitingByRack != nil {
+		return s.waitingByRack[id], nil
+	}
 	return s.waitingCount, nil
 }
 
@@ -1812,4 +1831,57 @@ func (e *managerExecutor) TerminateTask(
 // ListTaskContextForRack fails unexpected context reads in task-manager tests.
 func (s *managerTaskStore) ListTaskContextForRack(_ context.Context, _ uuid.UUID) ([]taskdef.TaskContextMetadata, error) {
 	panic("unexpected task context read")
+}
+
+func testSubmitTaskRejections(t *testing.T) {
+	tests := []struct {
+		name      string
+		strategy  operation.ConflictStrategy
+		partial   bool
+		cause     error
+		wantTasks int
+	}{
+		{name: "all racks conflict", cause: ErrRackConflict},
+		{name: "all queues full", strategy: operation.ConflictStrategyQueue, cause: ErrQueueFull},
+		{name: "partial queue admission", strategy: operation.ConflictStrategyQueue, partial: true, wantTasks: 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			op := testPowerControlOperation(t)
+			inventory := &submitTaskInventory{racks: map[uuid.UUID]*rack.Rack{}}
+			store := &managerTaskStore{activeTasksByRack: map[uuid.UUID][]*taskdef.Task{}, waitingByRack: map[uuid.UUID]int{}, operationRule: &operationrules.OperationRule{ID: uuid.New(), RuleDefinition: operationrules.RuleDefinition{Steps: []operationrules.SequenceStep{{ComponentType: devicetypes.ComponentTypeCompute, Stage: 1}}}}}
+			targets := []operation.RackTarget{}
+			for i := range 2 {
+				id := uuid.New()
+				componentID := uuid.New()
+				r := newTestRack(id, fmt.Sprintf("rack-%d", i))
+				r.AddComponent(newTestComponent(componentID, id, devicetypes.ComponentTypeCompute, "compute"))
+				inventory.racks[id] = r
+				targets = append(targets, operation.RackTarget{Identifier: identifier.Identifier{ID: id}})
+				store.activeTasksByRack[id] = []*taskdef.Task{{ID: uuid.New(), RackID: id, Operation: op, Status: taskcommon.TaskStatusRunning, Attributes: taskcommon.TaskAttributes{ComponentsByType: map[devicetypes.ComponentType][]uuid.UUID{devicetypes.ComponentTypeCompute: {componentID}}}}}
+				store.waitingByRack[id] = 1
+				if tt.partial && i == 1 {
+					store.waitingByRack[id] = 0
+				}
+			}
+			executor := &managerExecutor{}
+			manager := &ManagerImpl{inventoryStore: inventory, taskStore: store, executor: executor, ruleResolver: operationrules.NewResolver(store), conflictResolver: conflict.NewResolver(store), maxWaitingPerRack: 1, defaultQueueTimeout: time.Hour}
+			ids, err := manager.SubmitTask(context.Background(), &operation.Request{Operation: op, TargetSpec: operation.TargetSpec{Racks: targets}, ConflictStrategy: tt.strategy})
+			if tt.cause != nil {
+				require.ErrorIs(t, err, tt.cause)
+				for _, target := range targets {
+					require.ErrorContains(t, err, target.Identifier.ID.String())
+				}
+			} else {
+				require.NoError(t, err)
+			}
+			require.Len(t, ids, tt.wantTasks)
+			require.Equal(t, tt.wantTasks, store.createTaskCalls)
+			require.Zero(t, executor.executeCalls)
+			for _, task := range store.createdTasks {
+				require.Equal(t, taskcommon.TaskStatusWaiting, task.Status)
+				require.Contains(t, ids, task.ID)
+			}
+		})
+	}
 }

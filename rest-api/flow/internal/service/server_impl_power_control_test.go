@@ -5,7 +5,11 @@ package service
 
 import (
 	"context"
+	taskmanager "github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/manager"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
@@ -48,6 +52,7 @@ func TestFlowServerImpl_ACPowerCycleRack(t *testing.T) {
 }
 
 type powerControlTaskManager struct {
+	err     error
 	request *operation.Request
 }
 
@@ -58,6 +63,30 @@ func (m *powerControlTaskManager) SubmitTask(
 	request *operation.Request,
 ) ([]uuid.UUID, error) {
 	m.request = request
+	if m.err != nil {
+		return nil, m.err
+	}
 	return []uuid.UUID{uuid.New()}, nil
 }
 func (*powerControlTaskManager) CancelTask(context.Context, uuid.UUID) error { return nil }
+
+func TestFlowServerImpl_PowerOnRack(t *testing.T) {
+	tests := []struct {
+		name  string
+		cause error
+		code  codes.Code
+	}{
+		{name: "rack conflict", cause: taskmanager.ErrRackConflict, code: codes.FailedPrecondition},
+		{name: "queue full", cause: taskmanager.ErrQueueFull, code: codes.ResourceExhausted},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := flowRPCClient(t, &FlowServerImpl{taskManager: &powerControlTaskManager{err: tt.cause}})
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			response, err := c.PowerOnRack(ctx, &pb.PowerOnRackRequest{TargetSpec: &pb.OperationTargetSpec{Targets: &pb.OperationTargetSpec_Components{Components: &pb.ComponentTargets{Targets: []*pb.ComponentTarget{{Identifier: &pb.ComponentTarget_Id{Id: &pb.UUID{Id: uuid.NewString()}}}}}}}})
+			require.Equal(t, tt.code, status.Code(err))
+			require.Nil(t, response)
+		})
+	}
+}
