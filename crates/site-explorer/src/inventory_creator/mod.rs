@@ -19,18 +19,19 @@ use std::collections::HashSet;
 use std::net::IpAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
+use carbide_resource_pool::ResourcePoolRegistry;
 use component_manager::MachineInfoProvider;
 use mac_address::MacAddress;
 use model::rack_type::RackProfileConfig;
 use model::resource_pool::common::CommonPools;
 use sqlx::PgPool;
 
-use crate::IdentifiedManagedHost;
 use crate::errors::SiteExplorerResult;
 use crate::explored_endpoint_index::ExploredEndpointIndex;
 use crate::metrics::SiteExplorationMetrics;
+use crate::{IdentifiedManagedHost, rack_order};
 
 mod machine_creator;
 mod power_shelf_creator;
@@ -48,6 +49,12 @@ pub struct Config {
     pub create_machines: Arc<AtomicBool>,
     /// Maximum number of machines created in one run.
     pub machines_created_per_run: u64,
+    /// Managed hosts created at the same time within one run, before the
+    /// clamp below the admin-lock admission permits.
+    pub machine_creation_concurrency: u64,
+    /// How often the switch and power shelf pass runs while hosts are still
+    /// being created; zero disables the extra passes.
+    pub switch_and_power_shelf_pass_interval: Duration,
     /// Whether power shelf creation is enabled at runtime.
     pub create_power_shelves: Arc<AtomicBool>,
     /// Maximum number of power shelves created in one run.
@@ -71,9 +78,19 @@ pub(super) struct InventoryCreator {
 }
 
 impl InventoryCreator {
+    /// Stop new provider preparation on Site Explorer shutdown while existing
+    /// exploration and creation transactions retain their normal drain behavior.
+    pub(super) fn set_preparation_cancel_token(
+        &mut self,
+        cancel_token: tokio_util::sync::CancellationToken,
+    ) {
+        self.machine_creator.preparation_cancel_token = cancel_token;
+    }
+
     pub(super) fn new(
         database_connection: PgPool,
         config: Config,
+        resource_pool_registry: ResourcePoolRegistry,
         common_pools: Arc<CommonPools>,
         rack_profiles: Arc<RackProfileConfig>,
         machine_info_provider: Option<Arc<dyn MachineInfoProvider>>,
@@ -83,6 +100,7 @@ impl InventoryCreator {
             machine_creator: MachineCreator::new(
                 database_connection.clone(),
                 config.clone(),
+                resource_pool_registry,
                 common_pools,
                 rack_profiles,
                 machine_info_provider,
@@ -97,8 +115,8 @@ impl InventoryCreator {
         }
     }
 
-    /// Creates machines, power shelves, and switches in their existing order.
-    pub(super) async fn create_inventory(
+    /// Creates or reconciles hosts, with periodic switch and power-shelf passes.
+    pub(super) async fn create_or_reconcile_hosts(
         &self,
         metrics: &mut SiteExplorationMetrics,
         identified_hosts: &mut [IdentifiedManagedHost],
@@ -106,23 +124,66 @@ impl InventoryCreator {
         already_ingested_bmc_ips: &HashSet<IpAddr>,
         explored_this_run: &HashSet<IpAddr>,
         suppressed_bmc_macs: &HashSet<MacAddress>,
-    ) -> SiteExplorerResult<()> {
+    ) {
         if self.config.create_machines.load(Ordering::Relaxed) {
-            let start_create_machines = Instant::now();
-            let create_machines_res = self
-                .machine_creator
-                .create_machines(
-                    metrics,
-                    identified_hosts,
-                    expected_endpoint_index,
-                    already_ingested_bmc_ips,
-                    explored_this_run,
-                )
-                .await;
-            let create_machines_latency = start_create_machines.elapsed();
+            // The identify phase hands the hosts over in hash order. Creating
+            // them in rack order lets each run complete the racks it can.
+            let rack_host_fill = rack_order::order_hosts_by_rack_completion(
+                identified_hosts,
+                |bmc_ip| {
+                    let expected = expected_endpoint_index.matched_expected_machine(bmc_ip)?;
+                    Some((&expected.bmc_mac_address, expected.data.rack_id.as_ref()?))
+                },
+                &expected_endpoint_index.expected_hosts_per_rack(),
+                already_ingested_bmc_ips,
+            );
+            metrics.rack_host_fill = Some(rack_host_fill);
+            tracing::info!(
+                expected_rack_count = rack_host_fill.expected,
+                all_hosts_ingested_rack_count = rack_host_fill.all_hosts_ingested,
+                completable_this_run_rack_count = rack_host_fill.completable_this_run,
+                "Ordered the identified hosts by rack completion"
+            );
+
+            // The switch and power shelf pass runs between host creations
+            // whenever the run pauses for it, so devices that completed
+            // preingestion do not wait for the end of a long creation phase.
+            let mut creation = self.machine_creator.creation_run(
+                identified_hosts,
+                expected_endpoint_index,
+                already_ingested_bmc_ips,
+                explored_this_run,
+            );
+            let mut create_machines_latency = Duration::ZERO;
+            loop {
+                let start_create_hosts = Instant::now();
+                let progress = creation.create_hosts(metrics).await;
+                create_machines_latency += start_create_hosts.elapsed();
+                match progress {
+                    machine_creator::CreationProgress::Done => break,
+                    machine_creator::CreationProgress::PassDue => {
+                        tracing::info!(
+                            created_machine_count = metrics.created_machines,
+                            "Running the switch and power shelf pass between host creations"
+                        );
+                        if let Err(error) = self
+                            .create_switches_and_power_shelves(
+                                metrics,
+                                expected_endpoint_index,
+                                suppressed_bmc_macs,
+                            )
+                            .await
+                        {
+                            tracing::warn!(
+                                %error,
+                                "Switch and power shelf pass between host creations failed; the end-of-run pass retries"
+                            );
+                        }
+                    }
+                }
+            }
             metrics.create_machines_latency = Some(create_machines_latency);
             metrics.record_phase_latency("create_machines", create_machines_latency);
-            create_machines_res?;
         } else {
             // `create_machines` revisits ingested hosts explored this run on
             // its steady-state path; with it off, revisit them here so a
@@ -140,24 +201,25 @@ impl InventoryCreator {
                 reconcile_admin_addresses_start.elapsed(),
             );
         }
+    }
 
-        let reconcile_desired_boot_interfaces_start = Instant::now();
-        let reconcile_desired_boot_interfaces_res = self
-            .machine_creator
-            .reconcile_desired_boot_interfaces()
-            .await;
-        metrics.record_phase_latency(
-            "reconcile_desired_boot_interfaces",
-            reconcile_desired_boot_interfaces_start.elapsed(),
-        );
-        if let Err(error) = reconcile_desired_boot_interfaces_res {
-            tracing::warn!(
-                %error,
-                "Desired boot-interface reconciliation pass failed; a later Site Explorer run will retry"
-            );
-        }
-
-        // Identify and create power shelves
+    /// Identifies and creates the power shelves and switches whose endpoints
+    /// have completed preingestion. Runs once at the end of every run and,
+    /// while hosts are still being created, each time
+    /// `switch_and_power_shelf_pass_interval` has elapsed since the run
+    /// started or since the previous pass and the in-flight host creations
+    /// have finished, so a switch or shelf that completes preingestion during
+    /// a long host creation phase waits about one interval instead of for the
+    /// end of the phase. The interval is checked when a host attempt completes
+    /// and restarts when the pass becomes due, before the pass runs. The
+    /// per-run latency totals and the per-run caps accumulate over the passes
+    /// of one run.
+    pub(super) async fn create_switches_and_power_shelves(
+        &self,
+        metrics: &mut SiteExplorationMetrics,
+        expected_endpoint_index: &ExploredEndpointIndex,
+        suppressed_bmc_macs: &HashSet<MacAddress>,
+    ) -> SiteExplorerResult<()> {
         let identify_power_shelves_to_ingest_start = Instant::now();
         let explored_power_shelves = self
             .power_shelf_creator
@@ -175,7 +237,10 @@ impl InventoryCreator {
                 .create_power_shelves(metrics, explored_power_shelves, expected_endpoint_index)
                 .await;
             let create_power_shelves_latency = start_create_power_shelves.elapsed();
-            metrics.create_power_shelves_latency = Some(create_power_shelves_latency);
+            metrics.create_power_shelves_latency = Some(
+                metrics.create_power_shelves_latency.unwrap_or_default()
+                    + create_power_shelves_latency,
+            );
             metrics.record_phase_latency("create_power_shelves", create_power_shelves_latency);
             create_power_shelves_res?;
         } else if !explored_power_shelves.is_empty() {
@@ -186,7 +251,6 @@ impl InventoryCreator {
             );
         }
 
-        // Identify and create switches
         let identify_switches_to_ingest_start = Instant::now();
         let explored_switches = self
             .switch_creator
@@ -204,7 +268,8 @@ impl InventoryCreator {
                 .create_switches(metrics, &explored_switches, expected_endpoint_index)
                 .await;
             let create_switches_latency = start_create_switches.elapsed();
-            metrics.create_switches_latency = Some(create_switches_latency);
+            metrics.create_switches_latency =
+                Some(metrics.create_switches_latency.unwrap_or_default() + create_switches_latency);
             metrics.record_phase_latency("create_switches", create_switches_latency);
             create_switches_res?;
         } else if !explored_switches.is_empty() {

@@ -20,12 +20,12 @@ import (
 // checks if the TenantAccountUpdateRequest type satisfies the MappedNullable interface at compile time
 var _ MappedNullable = &TenantAccountUpdateRequest{}
 
-// TenantAccountUpdateRequest Request data to update a TenantAccount.  Provider Admins may replace `siteCapabilities` only. Tenant Admins may accept an invite via `tenantContactId` only. Requests containing both fields are rejected with 400.  When `siteCapabilities` is included, the replace payload must contain at least one entry, include exactly one entry with empty or omitted `siteIds`, and must not repeat any `siteId` across entries. Every provided `siteId` must be a valid UUID for a Site owned by the Tenant Account's Infrastructure Provider; otherwise the server rejects the request with 400. Previously configured per-site overrides whose `siteId` is omitted from the replacement payload are cleared.
+// TenantAccountUpdateRequest Request data to update a TenantAccount.  Provider Admins may replace `siteCapabilities` only. Tenant Admins may accept an invite via `tenantContactId` only. Requests containing both fields are rejected with 400.  When `siteCapabilities` is included, the replace payload must contain at least one entry, include exactly one entry with empty or omitted `siteIds`, and must not repeat any `siteId` across entries. Each entry must provide at least one recognized capability. Capabilities included in the account-default entry are replaced independently; omitted capabilities preserve their existing defaults and overrides. Every provided `siteId` must be a valid UUID for a Site owned by the Tenant Account's Infrastructure Provider; otherwise the server rejects the request with 400.
 type TenantAccountUpdateRequest struct {
 	// Tenant Admin invite acceptance; must match the requesting user
 	TenantContactId *string `json:"tenantContactId,omitempty"`
-	// Provider Admin replace payload for TargetedInstanceCreation configuration. Required to be non-empty when sent.  PATCH uses replace semantics: previously configured per-site overrides whose siteId is omitted from the new payload are cleared.  Server validation rules: - must contain at least one entry - must contain exactly one entry with omitted or empty siteIds - must not repeat any siteId across entries - every provided siteId must be a valid Site UUID - every provided siteId must identify a Site owned by the Tenant Account's Infrastructure Provider; otherwise the server rejects the request with 400
-	SiteCapabilities []TenantAccountSiteCapability `json:"siteCapabilities,omitempty"`
+	// Provider Admin replacement payload for Tenant capability configuration. Required to be non-empty when sent.  Server validation rules: - must contain at least one entry - must contain exactly one entry with omitted or empty siteIds - every entry must specify at least one recognized capability - a Site entry may specify only capabilities included in the account-default entry - each capability included in the account-default entry is replaced independently; omitted capabilities remain unchanged - must not repeat any siteId across entries - every provided siteId must be a valid Site UUID - every provided siteId must identify a Site owned by the Tenant Account's Infrastructure Provider; otherwise the server rejects the request with 400
+	SiteCapabilities []TenantAccountSiteCapabilityUpdate `json:"siteCapabilities,omitempty"`
 }
 
 // NewTenantAccountUpdateRequest instantiates a new TenantAccountUpdateRequest object
@@ -78,9 +78,9 @@ func (o *TenantAccountUpdateRequest) SetTenantContactId(v string) {
 }
 
 // GetSiteCapabilities returns the SiteCapabilities field value if set, zero value otherwise.
-func (o *TenantAccountUpdateRequest) GetSiteCapabilities() []TenantAccountSiteCapability {
+func (o *TenantAccountUpdateRequest) GetSiteCapabilities() []TenantAccountSiteCapabilityUpdate {
 	if o == nil || IsNil(o.SiteCapabilities) {
-		var ret []TenantAccountSiteCapability
+		var ret []TenantAccountSiteCapabilityUpdate
 		return ret
 	}
 	return o.SiteCapabilities
@@ -88,7 +88,7 @@ func (o *TenantAccountUpdateRequest) GetSiteCapabilities() []TenantAccountSiteCa
 
 // GetSiteCapabilitiesOk returns a tuple with the SiteCapabilities field value if set, nil otherwise
 // and a boolean to check if the value has been set.
-func (o *TenantAccountUpdateRequest) GetSiteCapabilitiesOk() ([]TenantAccountSiteCapability, bool) {
+func (o *TenantAccountUpdateRequest) GetSiteCapabilitiesOk() ([]TenantAccountSiteCapabilityUpdate, bool) {
 	if o == nil || IsNil(o.SiteCapabilities) {
 		return nil, false
 	}
@@ -104,8 +104,8 @@ func (o *TenantAccountUpdateRequest) HasSiteCapabilities() bool {
 	return false
 }
 
-// SetSiteCapabilities gets a reference to the given []TenantAccountSiteCapability and assigns it to the SiteCapabilities field.
-func (o *TenantAccountUpdateRequest) SetSiteCapabilities(v []TenantAccountSiteCapability) {
+// SetSiteCapabilities gets a reference to the given []TenantAccountSiteCapabilityUpdate and assigns it to the SiteCapabilities field.
+func (o *TenantAccountUpdateRequest) SetSiteCapabilities(v []TenantAccountSiteCapabilityUpdate) {
 	o.SiteCapabilities = v
 }
 

@@ -40,7 +40,14 @@ async fn load_mapping() -> eyre::Result<Vec<LinkMessage>> {
                 .wrap_err_with(|| {
                     format!("reading provisioned xplane netdev mapping {NETDEV_MAPPING_FILE}")
                 })?;
-            decode_mapping(&mapping)
+            let links = decode_mapping(&mapping)?;
+            tracing::info!(
+                mapping_file = NETDEV_MAPPING_FILE,
+                interface_count = links.len(),
+                logical_to_netdev = %mapping.trim(),
+                "spx-maintenance: [dpu-agent] Cached Xplane netdev mappings"
+            );
+            Ok::<_, eyre::Report>(links)
         })
         .await?;
     Ok(links.clone())
@@ -165,7 +172,6 @@ async fn notify_xplane_maintenance_reconcile_links(
     config: &AstraConfig,
     links: eyre::Result<Vec<LinkMessage>>,
 ) -> Vec<AstraMultiplaneInterfaceStatus> {
-    tracing::info!(socket_path = %socket_path.display(), requested_interface_count = config.multiplane_interfaces.len(), discovered_interface_count = ?links.as_ref().map(Vec::len).ok(), "spx-maintenance: [dpu-agent] Validating Xplane maintenance mappings");
     // 1. Validate each request and resolve its logical name to a PF netdev.
     // Keep one status per input, including failures, so Core can show each result.
     let mut statuses: Vec<_> = config

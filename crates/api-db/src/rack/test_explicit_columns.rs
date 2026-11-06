@@ -134,6 +134,7 @@ async fn exercise_rack_queries(
     assert_rack(&found[0], &expected)?;
 
     expected.config = RackConfig {
+        ingestion_in_progress: true,
         reprovision_requested: true,
         topology_changed: true,
         maintenance_requested: Some(MaintenanceScope {

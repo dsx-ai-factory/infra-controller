@@ -1178,6 +1178,7 @@ mod tests {
                     description: Some("BMC firmware".to_string()),
                     version: Some("25.06-2".to_string()),
                     release_date: Some("2026-06-01".to_string()),
+                    drive: None,
                 } => rpc::site_explorer::Inventory {
                     id: "inventory-1".to_string(),
                     description: Some("BMC firmware".to_string()),
@@ -1359,6 +1360,7 @@ mod tests {
                     description: Some("BMC firmware".to_string()),
                     version: Some("25.06-2".to_string()),
                     release_date: Some("2026-06-01".to_string()),
+                    drive: None,
                 }],
             }],
             machine_id: Some(machine_id),

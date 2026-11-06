@@ -43,7 +43,6 @@ use carbide_machine_controller::dpf::DpfOperations;
 use crate::cfg::file::{
     DpfBootstrapCaObjectKind, DpfDpuAgentBootstrapCa, DpfExtraService,
     DpfResolvedMandatoryServicesConfig, DpfServiceConfig, EwEthersConfig, NodeAuthConfig,
-    PartialMultiplane,
 };
 
 /// Default DOCA helm registry (DPUServiceTemplate source.repoURL).
@@ -67,9 +66,9 @@ const DOCA_XPLANE_IMAGE_REGISTRY: &str = "nvcr.io/nvstaging/doca";
 
 /// HBN service Definitions
 pub(crate) const DOCA_HBN_SERVICE_HELM_NAME: &str = "doca-hbn";
-pub(crate) const DOCA_HBN_SERVICE_HELM_VERSION: &str = "3.4.0";
+pub(crate) const DOCA_HBN_SERVICE_HELM_VERSION: &str = "3.5.0";
 pub(crate) const DOCA_HBN_SERVICE_IMAGE_NAME: &str = "doca_hbn";
-pub(crate) const DOCA_HBN_SERVICE_IMAGE_TAG: &str = "3.4.0-doca3.4.0";
+pub(crate) const DOCA_HBN_SERVICE_IMAGE_TAG: &str = "3.5.0-doca3.5.0";
 
 /// DHCP Service Definitions
 pub(crate) const DHCP_SERVER_SERVICE_HELM_NAME: &str = "nico-dhcp-server";
@@ -90,7 +89,7 @@ pub(crate) const PLATFORM_SERVICE_OWNER_VALUE: &str = "service-vpc";
 /// DTS service definitions
 /// (DTS_SERVICE_NAME lives in carbide_dpf::types so the DPF SDK can wire its dependencies.)
 pub(crate) const DTS_SERVICE_HELM_NAME: &str = "doca-telemetry";
-pub(crate) const DTS_SERVICE_HELM_VERSION: &str = "1.25.5";
+pub(crate) const DTS_SERVICE_HELM_VERSION: &str = "1.26.5";
 
 // DPU Agent Service Definitions
 pub(crate) const DPU_AGENT_SERVICE_HELM_NAME: &str = "nico-dpu-agent";
@@ -606,7 +605,6 @@ pub(crate) fn dpu_agent_service(
 ) -> ServiceDefinition {
     ServiceDefinition {
         helm_values: Some(dpu_agent_helm_values(cfg, bootstrap_ca)),
-        apply_node_effect: Some(false),
 
         service_daemon_set_annotations: Some(BTreeMap::new()),
 
@@ -666,7 +664,6 @@ pub(crate) fn dhcp_server_service(
         helm_values: Some(helm_values),
 
         interfaces: dhcp_server_service_interfaces(dpu_interfaces),
-        apply_node_effect: Some(false),
 
         service_daemon_set_annotations: Some(BTreeMap::new()),
 
@@ -971,7 +968,6 @@ pub(crate) fn fmds_service(
         helm_values: Some(helm_values),
 
         interfaces: fmds_service_interfaces(dpu_interfaces),
-        apply_node_effect: Some(false),
 
         service_daemon_set_annotations: Some(BTreeMap::new()),
 
@@ -1003,7 +999,6 @@ pub(crate) fn otelcol_service(cfg: &DpfServiceConfig) -> ServiceDefinition {
     apply_helm_values(&mut helm_values, cfg);
     ServiceDefinition {
         helm_values: Some(helm_values),
-        apply_node_effect: Some(false),
         service_daemon_set_annotations: Some(BTreeMap::new()),
         config_values: Some(serde_json::json!({
             "nico_dpu_agent": "{{ (index .Services \"carbide-dpu-agent\").Name }}",
@@ -1186,20 +1181,16 @@ pub(crate) fn mandatory_services(
     let mut dhcp = dhcp_server_service(&resolved.base.dhcp_server, interfaces);
     service_vpc_slots.append_dhcp_interfaces(&mut dhcp);
 
-    // If Xplane service is enabled, then set the xplaneMaintenance from the
-    // site config's partial-multiplane setting. Apply this
-    // after extra_helm_values so the mounts stay consistent with that setting.
-    // Mounted directories contain the Xplane core socket and provisioned
-    // netdev-to-logical-name mapping.
+    // If xplane service is configured then set the xplaneMaintenance so that the dpu
+    // agent can mount socket and other paths associated with xplane.
+    // Apply this after extra_helm_values so an override cannot remove those mounts.
     let mut agent = dpu_agent_service(&resolved.base.dpu_agent, bootstrap_ca);
     if resolved.extra.contains_key(&DpfExtraService::DocaXplane) {
-        let enabled = ewethers_config
-            .is_none_or(|config| config.partial_multiplane == PartialMultiplane::Enabled);
         agent
             .helm_values
             .as_mut()
             .expect("DPU agent has generated Helm values")["xplaneMaintenance"] =
-            serde_json::json!({ "enabled": enabled });
+            serde_json::json!({ "enabled": true });
     }
     let mut service_vec = vec![
         dts_service(&resolved.base.dts),
@@ -2079,11 +2070,11 @@ mod tests {
                 build_service_configuration(&service, TEST_NS, "", &BTreeMap::new())
                     .spec.upgrade_policy.apply_node_effect
             };
-            "NICo services update without NodeEffect" {
-                dpu_agent_service(&default_dpu_agent_service(), &bootstrap_ca) => Some(false),
-                dhcp_server_service(&default_dhcp_server_service(), &interfaces) => Some(false),
-                fmds_service(&default_fmds_service(), &interfaces, false) => Some(false),
-                otelcol_service(&default_otelcol_service()) => Some(false),
+            "NICo services require the NodeEffect gate" {
+                dpu_agent_service(&default_dpu_agent_service(), &bootstrap_ca) => Some(true),
+                dhcp_server_service(&default_dhcp_server_service(), &interfaces) => Some(true),
+                fmds_service(&default_fmds_service(), &interfaces, false) => Some(true),
+                otelcol_service(&default_otelcol_service()) => Some(true),
             }
             "other services retain the NodeEffect gate" {
                 doca_hbn_service(
@@ -2242,9 +2233,10 @@ mod tests {
                 expected_nads
             );
             for (name, nad) in &rendered_nads {
-                // Verify each NAD retains the bridge and MTU assigned by its service contract.
+                // Match each NAD to its service contract so the slot listener uses its bridge and
+                // jumbo MTU while ordinary DHCP and FMDS remain unchanged.
                 let (expected_bridge, expected_mtu) = match name.as_str() {
-                    "service-vpc-dhcp-slot0" => ("br-svc-0", carbide_dpf::SERVICE_VPC_MTU),
+                    "service-vpc-dhcp-slot0" => ("br-svc-0", SERVICE_VPC_MTU),
                     DHCP_SERVER_SERVICE_NAD_NAME => ("br-sfc", DHCP_SERVER_SERVICE_MTU),
                     FMDS_SERVICE_NAD_NAME => ("br-sfc", FMDS_SERVICE_MTU),
                     _ => unreachable!("rendered NAD names were checked above"),
@@ -2592,6 +2584,45 @@ mod tests {
         );
         assert_eq!(values["image"]["repository"], config.docker_repo_url);
         assert_eq!(values["image"]["tag"], "configured-tag");
+    }
+
+    #[test]
+    fn xplane_agent_mounts_remain_enabled_when_partial_multiplane_initialization_is_disabled() {
+        let mut resolved = DpfResolvedMandatoryServicesConfig {
+            base: serde_json::from_value(serde_json::json!({}))
+                .expect("mandatory services build from their serde defaults"),
+            extra: BTreeMap::from([(DpfExtraService::DocaXplane, default_doca_xplane_service())]),
+        };
+        // Runtime maintenance requires these mounts even if an overlay disables them.
+        resolved.base.dpu_agent.extra_helm_values =
+            serde_json::json!({ "xplaneMaintenance": { "enabled": false } })
+                .as_object()
+                .cloned();
+        let ewethers_config = EwEthersConfig {
+            enabled: true,
+            astra_enabled: true,
+            partial_multiplane: crate::cfg::file::PartialMultiplane::Disabled,
+            ..Default::default()
+        };
+        let service = mandatory_services(
+            &resolved,
+            &DpfDpuAgentBootstrapCa::default(),
+            &[],
+            ServiceVpcSlots::default(),
+            &NodeAuthConfig::default(),
+            Some(&ewethers_config),
+        )
+        .into_iter()
+        .find(|service| service.name == DPU_AGENT_SERVICE_NAME)
+        .expect("mandatory DPU agent service");
+        let template = build_service_template(&service, TEST_NS, "bf4astra");
+        let values = template
+            .spec
+            .helm_chart
+            .values
+            .expect("helmChart values must be set");
+
+        assert_eq!(values["xplaneMaintenance"]["enabled"], true);
     }
 
     // ---- weave services ----

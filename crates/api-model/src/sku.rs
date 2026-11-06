@@ -41,6 +41,22 @@ pub struct Sku {
     pub device_type: Option<String>,
 }
 
+/// `SkuComponentsReplacement` replaces a SKU's hardware definition while preserving
+/// omitted metadata. Supplied metadata, including empty strings, replaces the stored value.
+pub struct SkuComponentsReplacement {
+    /// `id` identifies the existing SKU to replace and must not be empty.
+    pub id: String,
+    /// `components` is the complete replacement hardware definition.
+    pub components: SkuComponents,
+    /// `schema_version` must be the current supported SKU format.
+    pub schema_version: u32,
+    /// `description` replaces the stored description when supplied.
+    pub description: Option<String>,
+    /// `device_type` replaces the stored device type when supplied; omission
+    /// preserves it, including a stored `NULL`.
+    pub device_type: Option<String>,
+}
+
 impl<'r> FromRow<'r, PgRow> for Sku {
     fn from_row(row: &'r PgRow) -> Result<Self, sqlx::Error> {
         let schema_version =
@@ -68,7 +84,9 @@ impl<'r> FromRow<'r, PgRow> for Sku {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+/// `SkuComponents` holds a complete hardware definition. Equality compares every
+/// component field, including collection order.
+#[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
 pub struct SkuComponents {
     pub chassis: SkuComponentChassis,
     pub cpus: Vec<SkuComponentCpu>,
@@ -81,7 +99,7 @@ pub struct SkuComponents {
     pub tpm: Option<SkuComponentTpm>,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, Default)]
+#[derive(Clone, Debug, Deserialize, Serialize, Default, Eq, PartialEq)]
 pub struct SkuComponentChassis {
     pub vendor: String,
     pub model: String,
@@ -384,7 +402,7 @@ pub fn diff_skus(actual_sku: &Sku, expected_sku: &Sku) -> Vec<String> {
 
     if expected_total_memory != actual_total_memory {
         diffs.push(format!(
-            "Actual memory ({expected_total_memory}) differs from expected ({actual_total_memory})"
+            "Actual memory ({actual_total_memory}) differs from expected ({expected_total_memory})"
         ));
     }
 
@@ -730,8 +748,7 @@ mod tests {
         );
 
         // Check the reported totals: wrapping and saturation can change a
-        // value or make different totals compare equal. The memory message
-        // prints expected before actual; preserve its wording here.
+        // value or make different totals compare equal.
         check_values(
             [
                 Check {
@@ -763,7 +780,7 @@ mod tests {
                         component_sku(Vec::new(), vec![memory(u32::MAX, u32::MAX); 3]),
                     ),
                     expect: vec![
-                        "Actual memory (55340232195358851075) differs from expected (36893488130239234050)"
+                        "Actual memory (36893488130239234050) differs from expected (55340232195358851075)"
                             .to_string(),
                     ],
                 },

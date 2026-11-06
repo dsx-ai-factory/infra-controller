@@ -20,9 +20,8 @@
 //! Both answer with a batch whose `job_id` is a parent with one child per
 //! switch, matched or not, which the caller polls through `GetJobStatus`
 //! with its children: it learns a switch's outcome from the job alone, so an
-//! unmatched switch gets a child that fails. A simulated switch keeps no
-//! credentials, and a factory reset clears the one thing the mock holds for
-//! a switch, its fabric primary role, when the switch's job completes.
+//! unmatched switch gets a child that fails. A factory reset restores NVOS
+//! factory credentials and clears the switch's fabric role when its job completes.
 
 use std::sync::Arc;
 
@@ -82,7 +81,18 @@ pub(crate) async fn batch_reset_switch_factory_default(
 ) -> Result<tonic::Response<rms::BatchResetSwitchFactoryDefaultResponse>, tonic::Status> {
     let inventory = mock.inventory.nodes();
     let refs = crate::resolve::resolve_nodes(&inventory, request.get_ref().nodes.as_ref());
-    let batch = mock.jobs.start_batch(&refs, Some(Effect::ResetFabricRole));
+    let batch = mock.jobs.start_batch_with(&refs, |node| {
+        let Some(device) = node.node else {
+            return Ok(None);
+        };
+        let bmc_mac = device.bmc_mac.ok_or_else(|| {
+            format!(
+                "switch {} has no BMC MAC address to reset its NVOS",
+                node.node_id
+            )
+        })?;
+        Ok(Some(Effect::ResetSwitch { bmc_mac }))
+    });
 
     Ok(tonic::Response::new(
         rms::BatchResetSwitchFactoryDefaultResponse {

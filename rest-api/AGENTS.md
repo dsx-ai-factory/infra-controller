@@ -59,6 +59,7 @@ PostgreSQL container. Its defaults are `postgres:14.4-alpine` on port `30432`.
 | `test-api`, `test-auth`, `test-db`, `test-flow`, `test-ipam`, `test-nvswitch-manager`, `test-powershelf-manager`, `test-workflow` | Call `ensure-postgres` before testing their packages |
 | `test-site-agent` | Starts mock Core/Flow gRPC servers; tests only `site-agent/pkg/components/...` with `CGO_ENABLED=1` and `-race` |
 | `test-common`, `test-cert-manager`, `test-site-manager`, `test-site-workflow`, `test-proto`, `test-sdk-simple`, `test-mcp` | Other package targets; see `Makefile` for their scope |
+| `test-cli-commands` | Tests the public CLI commands in `cli/pkg`; the interactive TUI in `cli/tui` is outside this target |
 | `test` | Runs its listed targets, not every package; CLI and the nested standard-SDK module are outside this target |
 
 Without mock servers, site-agent component tests retry on a `40s` backoff until
@@ -107,12 +108,15 @@ make core-proto             # Copy Core protos, format, and generate Go clients
 make core-protogen          # Generate from the existing Core proto copies
 make flow-proto             # Copy Flow protos and generate Go clients
 make flow-protogen          # Generate from the existing Flow proto copies
+make ipam-protogen          # Format, lint, and generate IPAM Go clients
 ```
 
 Core sources are `../crates/rpc/proto/`; Flow sources are `flow/proto/v1/`.
 Change those sources and regenerate instead of editing copies in `proto/`.
+IPAM sources are `ipam/proto/api/v1/`; `ipam-protogen` uses remote buf.build
+plugins and needs network access.
 
-### Local development and hooks
+### Local development
 
 | Command | Purpose |
 | --- | --- |
@@ -121,9 +125,9 @@ Change those sources and regenerate instead of editing copies in `proto/`.
 | `make kind-redeploy`, `make helm-redeploy` | Rebuild and restart for iteration |
 | `make kind-status`, `make kind-logs`, `make kind-verify` | Inspect pods, API logs, and health |
 | `make kind-down` | Tear down the cluster |
-| `make pre-commit-install` | Install pre-commit and TruffleHog hooks |
-| `make pre-commit-run` | Scan all files for secrets |
-| `make pre-commit-update` | Update hook versions |
+
+Secret scanning uses the repository root's pre-commit hook; see
+[Secret Scanning](../CONTRIBUTING.md#secret-scanning).
 
 ## Go authoring conventions
 

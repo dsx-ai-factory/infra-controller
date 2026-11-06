@@ -26,6 +26,7 @@ pub mod metadata;
 pub mod network;
 pub mod network_segment;
 pub mod redfish;
+pub mod switch;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -40,6 +41,7 @@ use tokio_util::sync::CancellationToken;
 pub use crate::api::Api;
 pub use crate::api::metrics::ApiMetricsEmitter;
 pub use crate::logging::setup::dep_log_filter;
+pub use crate::resource_pool::metrics::poll_resource_pool_stats;
 
 pub const MAX_BGP_PASSWORD_LENGTH: usize = crate::handlers::credential::MAX_BGP_PASSWORD_LENGTH;
 

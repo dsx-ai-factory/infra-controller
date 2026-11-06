@@ -25,12 +25,21 @@ use axum::response::Response;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use chrono::Utc;
+use serde::Deserialize;
 use serde_json::json;
 
 use crate::bmc_state::BmcState;
 use crate::json::JsonExt;
 use crate::redfish::ModelExt;
-use crate::{Callbacks, http, redfish};
+use crate::{ActionError, Callbacks, DeviceEffect, http, redfish};
+
+#[cfg(test)]
+#[path = "manager_reset_tests.rs"]
+mod reset_defaults_tests;
+
+#[cfg(test)]
+#[path = "manager_log_tests.rs"]
+mod integrated_event_log_tests;
 
 pub(super) fn collection() -> redfish::Collection<'static> {
     redfish::Collection {
@@ -52,6 +61,13 @@ fn resource<'a>(manager_id: &'a str) -> redfish::Resource<'a> {
 
 pub(super) fn reset_target(manager_id: &str) -> String {
     format!("{}/Actions/Manager.Reset", resource(manager_id).odata_id)
+}
+
+fn reset_defaults_target(manager_id: &str) -> String {
+    format!(
+        "{}/Actions/Manager.ResetToDefaults",
+        resource(manager_id).odata_id
+    )
 }
 
 fn oem_patch(oem: &Oem, manager_id: &str) -> serde_json::Value {
@@ -93,6 +109,7 @@ pub(crate) fn add_routes<C: Callbacks>(r: Router<BmcState<C>>) -> Router<BmcStat
     const MGR_ID: &str = "{manager_id}";
     const ETH_ID: &str = "{ethernet_id}";
     const HOST_IF_ID: &str = "{hostif_id}";
+    const LOG_ID: &str = "{log_service_id}";
     r.route(&collection().odata_id, get(get_manager_collection::<C>))
         .route(
             &resource(MGR_ID).odata_id,
@@ -124,14 +141,41 @@ pub(crate) fn add_routes<C: Callbacks>(r: Router<BmcState<C>>) -> Router<BmcStat
         )
         .route(&reset_target(MGR_ID), post(post_reset_manager::<C>))
         .route(
+            &reset_defaults_target(MGR_ID),
+            post(post_reset_defaults::<C>),
+        )
+        .route(
             &redfish::manager_network_protocol::manager_resource(MGR_ID).odata_id,
             get(get_network_protocol::<C>).patch(patch_network_protocol::<C>),
         )
         .route(
             &redfish::log_service::manager_collection(MGR_ID).odata_id,
-            get(get_log_services),
+            get(get_log_services::<C>),
+        )
+        .route(
+            &redfish::log_service::manager_resource(MGR_ID, LOG_ID, "").odata_id,
+            get(get_log_service::<C>),
+        )
+        .route(
+            &redfish::log_service::manager_clear_log_target(MGR_ID, LOG_ID),
+            post(post_clear_log::<C>),
+        )
+        .route(
+            &redfish::log_service::manager_entries_collection(MGR_ID, LOG_ID).odata_id,
+            get(get_log_entries::<C>),
+        )
+        .route(
+            &format!(
+                "{}/{{entry_id}}",
+                redfish::log_service::manager_entries_collection(MGR_ID, LOG_ID).odata_id
+            ),
+            get(get_log_entry::<C>),
         )
 }
+
+/// HPE iLO's Integrated Event Log: where iLO records host power and reset
+/// events, and where NICo looks for proof that a host restarted.
+const HPE_INTEGRATED_EVENT_LOG: &str = "IEL";
 
 #[derive(Clone, Copy)]
 pub(crate) enum Oem {
@@ -239,8 +283,39 @@ impl ManagerState {
             .map(|manager| resource(manager.id).odata_id.into_owned())
     }
 
+    /// Append an entry to the BMC's own Integrated Event Log, when its
+    /// manager keeps one (HPE iLO). Returns whether an entry was written.
+    pub(crate) fn record_integrated_event(
+        &self,
+        draft: redfish::log_service::LogEntryDraft,
+        created: &str,
+    ) -> bool {
+        self.managers
+            .first()
+            .and_then(|manager| manager.integrated_event_log.as_ref())
+            .map(|log| log.append(draft, created))
+            .is_some()
+    }
+
     pub(crate) fn find(&self, manager_id: &str) -> Option<&SingleManagerState> {
         self.managers.iter().find(|c| c.id == manager_id)
+    }
+
+    pub(crate) fn reset_to_defaults(&self) {
+        for manager in &self.managers {
+            *manager.overrides.lock().expect("mutex poisoned") = json!({});
+            manager
+                .host_interface_overrides
+                .lock()
+                .expect("mutex poisoned")
+                .clear();
+            *manager.ntp.lock().expect("mutex poisoned") = NtpState::default();
+            // The configured simulator endpoint determines the factory IPMI default.
+            manager.ipmi_enabled.store(
+                manager.ipmi_port.lock().expect("mutex poisoned").is_some(),
+                atomic::Ordering::Relaxed,
+            );
+        }
     }
 
     pub fn set_ipmi_endpoint(&self, port: Option<u16>) {
@@ -262,6 +337,8 @@ pub(crate) struct SingleManagerState {
     // PATCHes applied to individual HostInterface resources. Lockdown flows
     // rely on InterfaceEnabled changing persistently across PATCH and GET.
     host_interface_overrides: Mutex<HashMap<String, serde_json::Value>>,
+    // HPE iLO's Integrated Event Log; other managers expose no log service.
+    integrated_event_log: Option<redfish::log_service::EventLog>,
 }
 
 struct NtpState {
@@ -309,7 +386,21 @@ impl SingleManagerState {
             ntp: Mutex::new(NtpState::default()),
             overrides: Arc::new(Mutex::new(json!({}))),
             host_interface_overrides: Mutex::new(HashMap::new()),
+            integrated_event_log: matches!(config.oem, Some(Oem::Hpe)).then(|| {
+                redfish::log_service::EventLog::new(
+                    HPE_INTEGRATED_EVENT_LOG,
+                    redfish::log_service::DEFAULT_MAX_RECORDS,
+                    None,
+                    [],
+                )
+            }),
         }
+    }
+
+    fn log_service(&self, log_service_id: &str) -> Option<&redfish::log_service::EventLog> {
+        self.integrated_event_log
+            .as_ref()
+            .filter(|log| log.id() == log_service_id)
     }
 
     fn network_protocol(&self) -> serde_json::Value {
@@ -466,7 +557,14 @@ async fn get_manager<C: Callbacks>(
     .date_time(Utc::now().format("%Y-%m-%dT%H:%M:%S+00:00").to_string());
     // Bound actions are not emitted by the server schema generator yet.
     let document = model.into_json().patch(json!({
-        "Actions": {"#Manager.Reset": {"target": reset_target(&manager_id)}}
+        "Actions": {
+            "#Manager.Reset": {"target": reset_target(&manager_id)},
+            "#Manager.ResetToDefaults": {
+                "target": reset_defaults_target(&manager_id),
+                "ResetType@Redfish.AllowableValues": ["ResetAll"],
+                "ResetToDefaultsType@Redfish.AllowableValues": ["ResetAll"]
+            }
+        }
     }));
     let document = if let Some(oem) = &config.oem {
         document.patch(oem_patch(oem, &manager_id))
@@ -666,8 +764,166 @@ async fn post_reset_manager<C: Callbacks>(
     json!({}).into_ok_response()
 }
 
-async fn get_log_services() -> Response {
-    not_implemented()
+#[derive(Deserialize)]
+#[serde(untagged, deny_unknown_fields)]
+enum ResetToDefaultsRequest {
+    Standard {
+        #[serde(rename = "ResetType")]
+        value: ResetAll,
+    },
+    Defaults {
+        #[serde(rename = "ResetToDefaultsType")]
+        value: ResetAll,
+    },
+}
+
+#[derive(Deserialize)]
+enum ResetAll {
+    ResetAll,
+}
+
+async fn post_reset_defaults<C: Callbacks>(
+    State(state): State<BmcState<C>>,
+    Path(manager_id): Path<String>,
+    request: Result<Json<ResetToDefaultsRequest>, axum::extract::rejection::JsonRejection>,
+) -> Response {
+    if state.manager.find(&manager_id).is_none() {
+        return http::not_found();
+    }
+    let Ok(Json(request)) = request else {
+        return http::redfish_error(StatusCode::BAD_REQUEST, "invalid ResetAll request");
+    };
+    let ResetAll::ResetAll = match request {
+        ResetToDefaultsRequest::Standard { value } | ResetToDefaultsRequest::Defaults { value } => {
+            value
+        }
+    };
+    let Some(callbacks) = &state.callbacks else {
+        return http::redfish_error(StatusCode::BAD_REQUEST, "BMC reset backend is unavailable");
+    };
+    let update = state.factory_reset_update().await;
+    match callbacks
+        .device_effect(DeviceEffect::ResetBmcToDefaults(update))
+        .await
+    {
+        Ok(()) => {
+            state.record_log(redfish::log_service::LogEntryDraft::manager_resetting(
+                &resource(&manager_id).odata_id,
+                "Manager.ResetToDefaults",
+            ));
+            json!({}).into_ok_response()
+        }
+        Err(ActionError::BadRequest(error)) => {
+            http::redfish_error(StatusCode::BAD_REQUEST, &error.to_string())
+        }
+        Err(ActionError::Internal(error)) => {
+            tracing::error!(%error, "BMC factory reset failed");
+            http::redfish_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "BMC factory reset failed",
+            )
+        }
+    }
+}
+
+async fn get_log_services<C: Callbacks>(
+    State(state): State<BmcState<C>>,
+    Path(manager_id): Path<String>,
+) -> Response {
+    let Some(manager) = state.manager.find(&manager_id) else {
+        return http::not_found();
+    };
+    let Some(log) = manager.integrated_event_log.as_ref() else {
+        return not_implemented();
+    };
+    redfish::log_service::manager_collection(&manager_id)
+        .with_members(&[manager_log_resource(&manager_id, log).entity_ref()])
+        .into_ok_response()
+}
+
+fn manager_log_resource<'a>(
+    manager_id: &str,
+    log: &'a redfish::log_service::EventLog,
+) -> redfish::Resource<'a> {
+    redfish::log_service::manager_resource(manager_id, log.id(), "Integrated Event Log")
+}
+
+async fn get_log_service<C: Callbacks>(
+    State(state): State<BmcState<C>>,
+    Path((manager_id, log_service_id)): Path<(String, String)>,
+) -> Response {
+    state
+        .manager
+        .find(&manager_id)
+        .and_then(|manager| manager.log_service(&log_service_id))
+        .map(|log| {
+            redfish::log_service::builder(&manager_log_resource(&manager_id, log))
+                .entries(
+                    redfish::log_service::manager_entries_collection(&manager_id, log.id())
+                        .odata_id
+                        .as_ref(),
+                )
+                .capacity(
+                    log.capacity(),
+                    &redfish::log_service::manager_clear_log_target(&manager_id, log.id()),
+                )
+                .into_ok_response()
+        })
+        .unwrap_or_else(http::not_found)
+}
+
+async fn post_clear_log<C: Callbacks>(
+    State(state): State<BmcState<C>>,
+    Path((manager_id, log_service_id)): Path<(String, String)>,
+) -> Response {
+    state
+        .manager
+        .find(&manager_id)
+        .and_then(|manager| manager.log_service(&log_service_id))
+        .map(|log| {
+            log.clear();
+            http::ok_no_content()
+        })
+        .unwrap_or_else(http::not_found)
+}
+
+async fn get_log_entries<C: Callbacks>(
+    State(state): State<BmcState<C>>,
+    Path((manager_id, log_service_id)): Path<(String, String)>,
+) -> Response {
+    state
+        .manager
+        .find(&manager_id)
+        .and_then(|manager| manager.log_service(&log_service_id))
+        .map(|log| {
+            let collection =
+                redfish::log_service::manager_entries_collection(&manager_id, log.id());
+            collection
+                .with_members(&log.entries(&collection))
+                .patch(json!({
+                    "Description": "Integrated Event Log entries", // Required by libredfish
+                }))
+                .into_ok_response()
+        })
+        .unwrap_or_else(http::not_found)
+}
+
+async fn get_log_entry<C: Callbacks>(
+    State(state): State<BmcState<C>>,
+    Path((manager_id, log_service_id, entry_id)): Path<(String, String, String)>,
+) -> Response {
+    state
+        .manager
+        .find(&manager_id)
+        .and_then(|manager| manager.log_service(&log_service_id))
+        .and_then(|log| {
+            log.entry(
+                &redfish::log_service::manager_entries_collection(&manager_id, log.id()),
+                &entry_id,
+            )
+        })
+        .map(|entry| entry.into_ok_response())
+        .unwrap_or_else(http::not_found)
 }
 
 fn not_implemented() -> Response {

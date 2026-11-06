@@ -289,7 +289,7 @@ impl BfbRepository for InitializationMock {
         let mut bfb_with_status = bfb.clone();
         bfb_with_status.status = Some(BfbStatus {
             file_name: None,
-            phase: BfbStatusPhase::Ready,
+            phase: Some(BfbStatusPhase::Ready),
             versions: None,
             conditions: None,
             observed_generation: None,
@@ -652,6 +652,10 @@ impl K8sConfigRepository for InitializationMock {
 
 #[async_trait]
 impl DpfOperatorConfigRepository for InitializationMock {
+    async fn get_version(&self, _: &str, _: &str) -> Result<String, DpfError> {
+        Ok(super::helpers::DPF_VERSION.to_string())
+    }
+
     async fn get(
         &self,
         _name: &str,

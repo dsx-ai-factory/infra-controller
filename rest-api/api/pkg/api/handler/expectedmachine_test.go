@@ -38,6 +38,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/uptrace/bun"
 	"github.com/uptrace/bun/extra/bundebug"
+	tclient "go.temporal.io/sdk/client"
 	tmocks "go.temporal.io/sdk/mocks"
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
@@ -70,6 +71,8 @@ func testExpectedMachineInitDB(t *testing.T) *cdb.Session {
 	err = dbSession.DB.ResetModel(ctx, (*cdbm.TenantSite)(nil))
 	assert.Nil(t, err)
 	err = dbSession.DB.ResetModel(ctx, (*cdbm.SKU)(nil))
+	assert.Nil(t, err)
+	err = dbSession.DB.ResetModel(ctx, (*cdbm.PendingExpectedMachine)(nil))
 	assert.Nil(t, err)
 	err = dbSession.DB.ResetModel(ctx, (*cdbm.InstanceType)(nil))
 	assert.Nil(t, err)
@@ -155,12 +158,13 @@ func (h *testExpectedMachineSKULookupFailureHook) BeforeQuery(ctx context.Contex
 func (h *testExpectedMachineSKULookupFailureHook) AfterQuery(context.Context, *bun.QueryEvent) {}
 
 func TestCreateExpectedMachineHandler_Handle(t *testing.T) {
+	t.Run("pending batch identity conflict", func(t *testing.T) { testExpectedMachinePendingOverlap(t, "single create") })
 	scenarios := []struct {
 		name string
 		run  func(*testing.T)
 	}{
 		{name: "complete mutation conflict", run: func(t *testing.T) {
-			testExpectedMachineMutationRejectsCompleteMutationLock(t, "single create")
+			testExpectedMachineMutationRejectsInventoryLock(t, expectedMachineMutationLockCase{mutation: "single create"})
 		}},
 		{name: "SKU recreated on another Site before attachment", run: func(t *testing.T) {
 			testExpectedMachineRejectsRecreatedSKU(t, "single create")
@@ -1615,8 +1619,9 @@ func TestBmcMacUnchanged(t *testing.T) {
 }
 
 func TestUpdateExpectedMachineHandler_Handle(t *testing.T) {
+	t.Run("pending batch identity conflict", func(t *testing.T) { testExpectedMachinePendingOverlap(t, "single update") })
 	t.Run("complete mutation conflict", func(t *testing.T) {
-		testExpectedMachineMutationRejectsCompleteMutationLock(t, "single update")
+		testExpectedMachineMutationRejectsInventoryLock(t, expectedMachineMutationLockCase{mutation: "single update"})
 	})
 	t.Run("SKU recreated on another Site before attachment", func(t *testing.T) {
 		testExpectedMachineRejectsRecreatedSKU(t, "single update")
@@ -2267,8 +2272,9 @@ func testUpdateExpectedMachineBmcIpAddress(t *testing.T) {
 }
 
 func TestDeleteExpectedMachineHandler_Handle(t *testing.T) {
+	t.Run("pending batch identity conflict", func(t *testing.T) { testExpectedMachinePendingOverlap(t, "single delete") })
 	t.Run("complete mutation conflict", func(t *testing.T) {
-		testExpectedMachineMutationRejectsCompleteMutationLock(t, "single delete")
+		testExpectedMachineMutationRejectsInventoryLock(t, expectedMachineMutationLockCase{mutation: "single delete"})
 	})
 
 	// Setup
@@ -2852,12 +2858,45 @@ func TestTenantWithTargetedInstanceCreationCapability(t *testing.T) {
 
 // TestCreateExpectedMachinesHandler_Handle tests the batch create handler
 func TestCreateExpectedMachinesHandler_Handle(t *testing.T) {
-	t.Run("complete mutation conflict", func(t *testing.T) {
-		testExpectedMachineMutationRejectsCompleteMutationLock(t, "batch create")
-	})
-	t.Run("SKU recreated on another Site before attachment", func(t *testing.T) {
-		testExpectedMachineRejectsRecreatedSKU(t, "batch create")
-	})
+	t.Run("default-off legacy batch creation", testExpectedMachineLegacyBatch)
+	t.Run("enabled durable batch recovery", testExpectedMachineBatchRecovery)
+	t.Run("admission failure does not dispatch", testExpectedMachineBatchAdmissionFailure)
+
+	t.Run("pending batch identity conflict", func(t *testing.T) { testExpectedMachinePendingOverlap(t, "batch create") })
+	mutationTests := []struct {
+		name string
+		run  func(*testing.T)
+	}{
+		{name: "complete mutation conflict", run: func(t *testing.T) {
+			testExpectedMachineMutationRejectsInventoryLock(t, expectedMachineMutationLockCase{mutation: "batch create"})
+		}},
+		{name: "SKU recreated on another Site before attachment", run: func(t *testing.T) {
+			testExpectedMachineRejectsRecreatedSKU(t, "batch create")
+		}},
+		{name: "shared inventory lock rejects batch serial admission", run: func(t *testing.T) {
+			testExpectedMachineMutationRejectsInventoryLock(t, expectedMachineMutationLockCase{mutation: "batch create", shared: true})
+		}},
+		{name: "workflow context bounds start and result wait", run: testExpectedMachineBatchCreateWorkflowDeadline},
+		{name: "stored serial differing only in case remains accepted", run: func(t *testing.T) {
+			testExpectedMachineBatchCreateStoredIdentity(t, expectedMachineStoredIdentityCase{
+				bmcMacAddress: "00:11:22:33:44:11", chassisSerialNumber: "ORIGINAL", status: http.StatusCreated,
+			})
+		}},
+		{name: "stored MAC duplicate is rejected", run: func(t *testing.T) {
+			testExpectedMachineBatchCreateStoredIdentity(t, expectedMachineStoredIdentityCase{
+				bmcMacAddress: "00:11:22:33:44:10", chassisSerialNumber: "new-serial", status: http.StatusBadRequest,
+			})
+		}},
+		{name: "serial admission sees batch committed before transaction", run: func(t *testing.T) {
+			testExpectedMachineBatchSerialAdmission(t, expectedMachineSerialAdmissionCase{mutation: "batch create"})
+		}},
+		{name: "serial admission refreshes snapshot after lock retry", run: func(t *testing.T) {
+			testExpectedMachineBatchSerialAdmission(t, expectedMachineSerialAdmissionCase{mutation: "batch create", commitAfterLockFailure: true})
+		}},
+	}
+	for _, test := range mutationTests {
+		t.Run(test.name, test.run)
+	}
 
 	// Setup
 	e := echo.New()
@@ -2866,7 +2905,7 @@ func TestCreateExpectedMachinesHandler_Handle(t *testing.T) {
 	dbSession := testExpectedMachineInitDB(t)
 	defer dbSession.Close()
 
-	cfg := common.GetTestConfig()
+	cfg := expectedMachineBatchRecoveryConfig(t)
 
 	// Prepare client pool for workflow calls
 	tcfg, _ := cfg.GetTemporalConfig()
@@ -2892,7 +2931,7 @@ func TestCreateExpectedMachinesHandler_Handle(t *testing.T) {
 	// Add mock temporal client for the site
 	mockTemporalClient := &tmocks.Client{}
 	mockWorkflowRun := &tmocks.WorkflowRun{}
-	mockWorkflowRun.On("GetID").Return("test-workflow-id")
+	mockWorkflowRun.On("GetRunID").Return("batch-create-run")
 
 	// Track workflow request to generate corresponding results
 	var capturedRequest interface{}
@@ -2906,8 +2945,8 @@ func TestCreateExpectedMachinesHandler_Handle(t *testing.T) {
 		}).
 		Return(mockWorkflowRun, nil)
 
-	// Mock Get to populate results based on captured request
-	mockWorkflowRun.Mock.On("Get", mock.Anything, mock.Anything).
+	// Mock the exact run result based on the captured request
+	mockWorkflowRun.Mock.On("GetWithOptions", mock.Anything, mock.Anything, tclient.WorkflowRunGetOptions{DisableFollowingRuns: true}).
 		Run(func(args mock.Arguments) {
 			// Cast result to BatchExpectedMachineOperationResponse and populate
 			if resultPtr, ok := args.Get(1).(*corev1.BatchExpectedMachineOperationResponse); ok {
@@ -3717,17 +3756,27 @@ func TestExpectedMachineUpdateFields(t *testing.T) {
 }
 
 func TestUpdateExpectedMachinesHandler_Handle(t *testing.T) {
-	t.Run("complete mutation conflict", func(t *testing.T) {
-		testExpectedMachineMutationRejectsCompleteMutationLock(t, "batch update")
-	})
-	t.Run("SKU recreated on another Site before attachment", func(t *testing.T) {
-		testExpectedMachineRejectsRecreatedSKU(t, "batch update")
-	})
-
+	t.Run("pending batch identity conflict", func(t *testing.T) { testExpectedMachinePendingOverlap(t, "batch update") })
 	tests := []struct {
 		name string
 		run  func(*testing.T)
 	}{
+		{name: "complete mutation conflict", run: func(t *testing.T) {
+			testExpectedMachineMutationRejectsInventoryLock(t, expectedMachineMutationLockCase{mutation: "batch update"})
+		}},
+		{name: "SKU recreated on another Site before attachment", run: func(t *testing.T) {
+			testExpectedMachineRejectsRecreatedSKU(t, "batch update")
+		}},
+		{name: "shared inventory lock rejects batch serial admission", run: func(t *testing.T) {
+			testExpectedMachineMutationRejectsInventoryLock(t, expectedMachineMutationLockCase{mutation: "batch update", shared: true})
+		}},
+		{name: "serial admission sees batch committed before transaction", run: func(t *testing.T) {
+			testExpectedMachineBatchSerialAdmission(t, expectedMachineSerialAdmissionCase{mutation: "batch update"})
+		}},
+		{name: "serial admission refreshes snapshot after lock retry", run: func(t *testing.T) {
+			testExpectedMachineBatchSerialAdmission(t, expectedMachineSerialAdmissionCase{mutation: "batch update", commitAfterLockFailure: true})
+		}},
+		{name: "legacy duplicate serial metadata and reassertion", run: testExpectedMachineBatchLegacySerial},
 		{name: "request validation and metadata", run: testUpdateExpectedMachinesRequest},
 		{name: "mixed BMC address presence", run: testUpdateExpectedMachinesBmcIpAddress},
 	}

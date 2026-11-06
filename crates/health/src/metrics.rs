@@ -22,8 +22,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use dashmap::DashMap;
-use http::Response;
-use http::header::CONTENT_TYPE;
+use http::header::{ALLOW, CONTENT_TYPE};
+use http::{Method, Response};
 use hyper::Request;
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
@@ -41,9 +41,11 @@ use crate::sink::MetricSemantics;
 pub type MetricLabel = (Cow<'static, str>, String);
 type BoxedErr = Box<dyn std::error::Error + Send + Sync + 'static>;
 
+/// Finite histogram boundaries in seconds, covering operations up to one hour.
 pub fn operation_duration_buckets_seconds() -> Vec<f64> {
     vec![
-        1.0, 2.0, 5.0, 10.0, 15.0, 20.0, 30.0, 45.0, 60.0, 90.0, 120.0, 180.0, 240.0, 300.0,
+        1.0, 2.0, 5.0, 10.0, 15.0, 20.0, 30.0, 45.0, 60.0, 90.0, 120.0, 180.0, 240.0, 300.0, 450.0,
+        600.0, 900.0, 1_200.0, 1_800.0, 3_600.0,
     ]
 }
 
@@ -721,14 +723,24 @@ fn serve_request<B>(
     req: Request<B>,
     metrics_manager: Arc<MetricsManager>,
 ) -> Result<Response<String>, hyper::Error> {
-    match req.uri().path() {
-        "/livez" => Ok(Response::builder()
+    match (req.method(), req.uri().path()) {
+        (&Method::GET, "/livez") => Ok(Response::builder()
             .status(http::StatusCode::OK)
             .header(CONTENT_TYPE, "text/plain; charset=utf-8")
             .body("ok".to_string())
             .expect("BUG: Response::builder error")),
-        "/metrics" => serve_prometheus(metrics_manager.export_metrics(), "service metrics"),
-        "/telemetry" => serve_prometheus(metrics_manager.export_telemetry(), "telemetry metrics"),
+        (&Method::GET, "/metrics") => {
+            serve_prometheus(metrics_manager.export_metrics(), "service metrics")
+        }
+        (&Method::GET, "/telemetry") => {
+            serve_prometheus(metrics_manager.export_telemetry(), "telemetry metrics")
+        }
+        (_, "/livez" | "/metrics" | "/telemetry") => Ok(Response::builder()
+            .status(http::StatusCode::METHOD_NOT_ALLOWED)
+            .header(ALLOW, "GET")
+            .header(CONTENT_TYPE, "text/plain; charset=utf-8")
+            .body("method not allowed; use GET".to_string())
+            .expect("BUG: Response::builder error")),
         _ => Ok(Response::builder()
             .status(http::StatusCode::NOT_FOUND)
             .header(CONTENT_TYPE, "text/plain; charset=utf-8")
@@ -785,8 +797,42 @@ pub fn sanitize_unit(unit: &str) -> String {
 #[cfg(test)]
 mod tests {
     use carbide_test_support::{Check, check_values};
+    use http::HeaderValue;
 
     use super::*;
+
+    #[test]
+    fn operation_duration_histogram_resolves_slow_collections() {
+        check_values(
+            [
+                Check {
+                    scenario: "routine slow log collection",
+                    input: 400.0,
+                    expect: Some(450.0),
+                },
+                Check {
+                    scenario: "one-hour collection",
+                    input: 3_600.0,
+                    expect: Some(3_600.0),
+                },
+            ],
+            |duration| {
+                let histogram = prometheus::Histogram::with_opts(
+                    HistogramOpts::new("test_operation_duration_seconds", "Operation duration")
+                        .buckets(operation_duration_buckets_seconds()),
+                )
+                .expect("operation duration histogram should initialize");
+                histogram.observe(duration);
+
+                histogram.collect()[0].get_metric()[0]
+                    .get_histogram()
+                    .get_bucket()
+                    .iter()
+                    .find(|bucket| bucket.cumulative_count() == 1)
+                    .map(|bucket| bucket.upper_bound())
+            },
+        );
+    }
 
     #[test]
     fn unknown_metrics_route_returns_not_found() {
@@ -812,6 +858,73 @@ mod tests {
         assert_eq!(
             response.body(),
             "not found; use /metrics, /telemetry, or /livez",
+        );
+    }
+
+    #[test]
+    fn metrics_routes_serve_only_get() {
+        let metrics_manager = Arc::new(
+            MetricsManager::new("test").expect("metrics manager should initialize for test"),
+        );
+
+        check_values(
+            [
+                Check {
+                    scenario: "liveness probe serves GET",
+                    input: (Method::GET, "/livez"),
+                    expect: (http::StatusCode::OK, None),
+                },
+                Check {
+                    scenario: "service metrics serve GET",
+                    input: (Method::GET, "/metrics"),
+                    expect: (http::StatusCode::OK, None),
+                },
+                Check {
+                    scenario: "telemetry metrics serve GET",
+                    input: (Method::GET, "/telemetry"),
+                    expect: (http::StatusCode::OK, None),
+                },
+                Check {
+                    scenario: "liveness probe rejects POST",
+                    input: (Method::POST, "/livez"),
+                    expect: (
+                        http::StatusCode::METHOD_NOT_ALLOWED,
+                        Some(HeaderValue::from_static("GET")),
+                    ),
+                },
+                Check {
+                    scenario: "service metrics reject POST",
+                    input: (Method::POST, "/metrics"),
+                    expect: (
+                        http::StatusCode::METHOD_NOT_ALLOWED,
+                        Some(HeaderValue::from_static("GET")),
+                    ),
+                },
+                Check {
+                    scenario: "telemetry metrics reject POST",
+                    input: (Method::POST, "/telemetry"),
+                    expect: (
+                        http::StatusCode::METHOD_NOT_ALLOWED,
+                        Some(HeaderValue::from_static("GET")),
+                    ),
+                },
+                Check {
+                    scenario: "unknown route stays not found for POST",
+                    input: (Method::POST, "/definitely-not-a-route"),
+                    expect: (http::StatusCode::NOT_FOUND, None),
+                },
+            ],
+            |(method, path)| {
+                let request = Request::builder()
+                    .method(method)
+                    .uri(path)
+                    .body(())
+                    .expect("test request should be valid");
+
+                let response = serve_request(request, metrics_manager.clone())
+                    .expect("request should produce a response");
+                (response.status(), response.headers().get(ALLOW).cloned())
+            },
         );
     }
 

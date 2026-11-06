@@ -101,7 +101,7 @@ spec:
             items:
               - key: {{ .Values.credsManagerCa.key }}
                 path: ca.crt
-        # sitemgr skips its own cert issuance while `args.tlsCertPath` and
+        # Site Manager skips its own cert issuance while `args.tlsCertPath` and
         # `args.tlsKeyPath` are set. Clearing either one sends it back to
         # writing /tmp/mgr.cert, so keep this writable alongside the read-only
         # root filesystem.

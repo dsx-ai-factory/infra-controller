@@ -625,7 +625,7 @@ mod tests {
         let forge = descriptor_set
             .file
             .iter()
-            .find(|file| file.package.as_deref() == Some("forge"))
+            .find(|file| file.name.as_deref() == Some("forge.proto"))
             .unwrap();
         let expected_machine = forge
             .message_type
@@ -1247,7 +1247,7 @@ mod tests {
         let forge = descriptor_set
             .file
             .iter()
-            .find(|file| file.package.as_deref() == Some("forge"))
+            .find(|file| file.name.as_deref() == Some("forge.proto"))
             .unwrap();
         let expected_interface_message = forge
             .message_type

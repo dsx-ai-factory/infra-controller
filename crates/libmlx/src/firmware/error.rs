@@ -39,6 +39,29 @@ pub enum FirmwarePhase {
     ImageVerification,
 }
 
+/// Bounded Core transfer causes that can be saved without runtime credentials.
+#[derive(Clone, Copy, Debug, Error)]
+pub enum CoreTransferFailure {
+    /// Reading the configured root certificate failed with this OS error kind.
+    #[error("root certificate read ({0:?})")]
+    RootCertificate(std::io::ErrorKind),
+    /// The local client certificate or key could not configure the transport.
+    #[error("client certificate configuration")]
+    ClientCertificate,
+    /// The management-VRF resolver could not be configured.
+    #[error("resolver configuration")]
+    Resolver,
+    /// Other local client settings could not configure the transport.
+    #[error("client configuration")]
+    Configuration,
+    /// The authenticated request failed during connection or response headers.
+    #[error("request transport")]
+    Request,
+    /// The response stream failed after its headers were received.
+    #[error("response body")]
+    Body,
+}
+
 /// `FirmwareApplyError` preserves progress when a requested phase fails.
 /// The error does not authorize replay of any completed or uncertain mutation.
 #[derive(Debug, Error)]
@@ -68,6 +91,14 @@ impl From<FirmwareError> for FirmwareApplyError {
 /// device-internal operation stopped.
 #[derive(Debug, Error)]
 pub enum FirmwareError {
+    /// Staged image bytes differ from the immutable update request.
+    #[error("firmware image SHA-256 does not match the requested digest")]
+    ImageDigestMismatch,
+
+    /// Staged configuration bytes differ from the immutable update request.
+    #[error("firmware configuration SHA-256 does not match the requested digest")]
+    ConfigurationDigestMismatch,
+
     /// The operation owner requested cancellation at a phase boundary.
     /// Earlier completed or uncertain mutations still require reconciliation.
     #[error("firmware operation was canceled")]
@@ -109,10 +140,21 @@ pub enum FirmwareError {
     #[error("HTTP download failed: {0}")]
     HttpError(String),
 
+    /// Core transfer failed. Only the bounded category enters the receipt;
+    /// the original source can contain private transport configuration.
+    #[error("core firmware transfer failed during {failure}")]
+    CoreTransfer {
+        /// Nonsecret transfer stage or local setup failure.
+        failure: CoreTransferFailure,
+        /// Original typed cause retained for in-process inspection.
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
+
     /// An artifact's connection, authentication, and response exceeded one deadline.
     #[error("firmware source transfer exceeded its {timeout:?} deadline")]
     SourceTransferTimeout {
-        /// Cumulative network budget for this artifact, excluding disk writes.
+        /// Cumulative network deadline; in-flight local writes are allowed to settle.
         timeout: Duration,
     },
 

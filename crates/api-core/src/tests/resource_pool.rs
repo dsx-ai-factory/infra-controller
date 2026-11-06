@@ -38,6 +38,8 @@ use crate::cfg::file::{AuthConfig, CarbideConfig, ListenMode};
 use crate::cfg::resource_pool::{ResourcePoolBackendConfig, ResourcePoolTlsConfig};
 use crate::tests::common;
 
+mod startup;
+
 // Define an IPv4 pool from a range via the admin grpc
 #[crate::sqlx_test]
 async fn test_define_range(db_pool: sqlx::PgPool) -> Result<(), eyre::Report> {
@@ -599,6 +601,69 @@ async fn startup_rejects_remote_selection_before_pool_effects(
     assert_eq!(
         provider.accept().unwrap_err().kind(),
         std::io::ErrorKind::WouldBlock
+    );
+    Ok(())
+}
+
+/// A saved remote binding cannot activate a provider through an otherwise
+/// unused backend definition, even after its pool selector is removed.
+#[crate::sqlx_test]
+async fn startup_rejects_saved_remote_binding_before_pool_effects(
+    db_pool: sqlx::PgPool,
+) -> eyre::Result<()> {
+    let env = create_test_env(db_pool.clone()).await;
+    // Removing a pool selector leaves its saved binding behind. Seed that
+    // state directly so startup has to check the database, too.
+    let mut txn = db_pool.begin().await?;
+    db::resource_pool::binding::bind_or_verify(
+        &mut txn,
+        &ResourcePoolSelection {
+            pool_name: "removed-remote-pool".to_owned(),
+            value_domain: ResourcePoolValueDomain::Integer,
+            backend_name: Some("unused".to_owned()),
+            backend_kind: ResourcePoolBackendKind::Grpc,
+            authority_id: "remote-authority".to_owned(),
+            remote_pool: "provider-pool".to_owned(),
+        },
+    )
+    .await?;
+    txn.commit().await?;
+    // Any connection would mean startup reached the provider before rejecting
+    // the saved binding.
+    let provider = std::net::TcpListener::bind("127.0.0.1:0")?;
+    provider.set_nonblocking(true)?;
+    let original = pool_database_snapshot(&db_pool).await?;
+    let mut config = pool_startup_config(&env);
+    config.listen_only = false;
+    // A normal seed gets past source validation. The saved remote binding
+    // must still reject startup before this new pool is written.
+    config.pools = Some(HashMap::from([(
+        "new-before-saved-remote".to_owned(),
+        model::resource_pool::ResourcePoolDef {
+            pool_type: model::resource_pool::ResourcePoolType::Ipv4,
+            prefix: Some("192.0.2.0/30".to_owned()),
+            ranges: Vec::new(),
+            delegate_prefix_len: None,
+        }
+        .into(),
+    )]));
+    config.resource_pool_backends.insert(
+        "unused".to_owned(),
+        ResourcePoolBackendConfig::Grpc {
+            endpoint: format!("http://{}", provider.local_addr()?).parse()?,
+            tls: None,
+        },
+    );
+    let error = start_and_stop_runtime(&env, config)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("removed-remote-pool"), "{error}");
+    assert!(error.contains("v2.4 requires integrated"), "{error}");
+    assert_eq!(pool_database_snapshot(&db_pool).await?, original);
+    assert_eq!(
+        provider.accept().unwrap_err().kind(),
+        std::io::ErrorKind::WouldBlock,
     );
     Ok(())
 }

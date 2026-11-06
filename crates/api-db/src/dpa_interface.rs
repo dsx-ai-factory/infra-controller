@@ -1443,6 +1443,7 @@ mod test {
                 "Nvidia BlueField-3 B3140H E-series HHHL SuperNIC".to_string(),
             ),
             part_number: Some("900-9D3D4-00EN-HA0".to_string()),
+            fw_version_running: None,
             fw_version_current: Some("32.43.1014".to_string()),
             pxe_version_current: None,
             uefi_version_current: None,

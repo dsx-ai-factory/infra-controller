@@ -20,15 +20,16 @@ import (
 // checks if the DpuExtensionServiceSummary type satisfies the MappedNullable interface at compile time
 var _ MappedNullable = &DpuExtensionServiceSummary{}
 
-// DpuExtensionServiceSummary DPU Extension Service allows user defined services to run on DPUs of their Instances
+// DpuExtensionServiceSummary DPU Extension Service runs user-defined services on DPUs through instance attachment or baseline deployment
 type DpuExtensionServiceSummary struct {
 	// Unique identifier for the DPU Extension Service
 	Id *string `json:"id,omitempty"`
 	// Name for the DPU Extension Service. Must be unique for a given Tenant
 	Name *string `json:"name,omitempty"`
 	// Type of the DPU Extension Service
-	ServiceType *string `json:"serviceType,omitempty"`
-	// Immutable DPU placement policy for DpfHelmChart services; null for KubernetesPod services
+	ServiceType    *string                            `json:"serviceType,omitempty"`
+	DeploymentType *DpuExtensionServiceDeploymentType `json:"deploymentType,omitempty"`
+	// Immutable host-scoped placement for `DemandDriven` Helm services; null for `Baseline` Helm and KubernetesPod services
 	DpuTarget NullableDpuExtensionServiceDpuTarget `json:"dpuTarget,omitempty"`
 	// Latest version of the DPU Extension Service
 	LatestVersion NullableString `json:"latestVersion,omitempty"`
@@ -42,6 +43,8 @@ type DpuExtensionServiceSummary struct {
 // will change when the set of required properties is changed
 func NewDpuExtensionServiceSummary() *DpuExtensionServiceSummary {
 	this := DpuExtensionServiceSummary{}
+	var deploymentType DpuExtensionServiceDeploymentType = DPUEXTENSIONSERVICEDEPLOYMENTTYPE_DEMAND_DRIVEN
+	this.DeploymentType = &deploymentType
 	return &this
 }
 
@@ -50,6 +53,8 @@ func NewDpuExtensionServiceSummary() *DpuExtensionServiceSummary {
 // but it doesn't guarantee that properties required by API are set
 func NewDpuExtensionServiceSummaryWithDefaults() *DpuExtensionServiceSummary {
 	this := DpuExtensionServiceSummary{}
+	var deploymentType DpuExtensionServiceDeploymentType = DPUEXTENSIONSERVICEDEPLOYMENTTYPE_DEMAND_DRIVEN
+	this.DeploymentType = &deploymentType
 	return &this
 }
 
@@ -147,6 +152,38 @@ func (o *DpuExtensionServiceSummary) HasServiceType() bool {
 // SetServiceType gets a reference to the given string and assigns it to the ServiceType field.
 func (o *DpuExtensionServiceSummary) SetServiceType(v string) {
 	o.ServiceType = &v
+}
+
+// GetDeploymentType returns the DeploymentType field value if set, zero value otherwise.
+func (o *DpuExtensionServiceSummary) GetDeploymentType() DpuExtensionServiceDeploymentType {
+	if o == nil || IsNil(o.DeploymentType) {
+		var ret DpuExtensionServiceDeploymentType
+		return ret
+	}
+	return *o.DeploymentType
+}
+
+// GetDeploymentTypeOk returns a tuple with the DeploymentType field value if set, nil otherwise
+// and a boolean to check if the value has been set.
+func (o *DpuExtensionServiceSummary) GetDeploymentTypeOk() (*DpuExtensionServiceDeploymentType, bool) {
+	if o == nil || IsNil(o.DeploymentType) {
+		return nil, false
+	}
+	return o.DeploymentType, true
+}
+
+// HasDeploymentType returns a boolean if a field has been set.
+func (o *DpuExtensionServiceSummary) HasDeploymentType() bool {
+	if o != nil && !IsNil(o.DeploymentType) {
+		return true
+	}
+
+	return false
+}
+
+// SetDeploymentType gets a reference to the given DpuExtensionServiceDeploymentType and assigns it to the DeploymentType field.
+func (o *DpuExtensionServiceSummary) SetDeploymentType(v DpuExtensionServiceDeploymentType) {
+	o.DeploymentType = &v
 }
 
 // GetDpuTarget returns the DpuTarget field value if set, zero value otherwise (both if not set or set to explicit null).
@@ -285,6 +322,9 @@ func (o DpuExtensionServiceSummary) ToMap() (map[string]interface{}, error) {
 	}
 	if !IsNil(o.ServiceType) {
 		toSerialize["serviceType"] = o.ServiceType
+	}
+	if !IsNil(o.DeploymentType) {
+		toSerialize["deploymentType"] = o.DeploymentType
 	}
 	if o.DpuTarget.IsSet() {
 		toSerialize["dpuTarget"] = o.DpuTarget.Get()

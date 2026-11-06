@@ -207,6 +207,7 @@ fn get_default_ovs_defaults_with_topology(
         });
     }
     service_vpc_slots.append_ovs_bridges(&mut script);
+    append_emsign_g3_distrust(&mut script);
     append_ovn_encap_ip_bootstrap(&mut script);
     script
 }
@@ -233,6 +234,7 @@ fn get_bf4_ovs_defaults_with_topology(
         });
     }
     service_vpc_slots.append_ovs_bridges(&mut script);
+    append_emsign_g3_distrust(&mut script);
     append_ovn_encap_ip_bootstrap(&mut script);
     append_post_ovs_hook(&mut script);
     script
@@ -250,6 +252,19 @@ fn append_post_ovs_hook(script: &mut String) {
     script.push_str(
         "if [ -x /opt/dpf/extra-script-post-ovs.sh ]; then /opt/dpf/extra-script-post-ovs.sh; fi\n",
     );
+}
+
+/// Appends a best-effort distrust of emSign ECC Root CA - G3 (CVE-2026-111943) to the DPU OS store.
+fn append_emsign_g3_distrust(script: &mut String) {
+    // The stock DOCA BFB ships a ca-certificates that still trusts this root. The guard skips
+    // images where the entry is absent or already disabled, so a fixed BFB makes this a no-op.
+    script.push_str(concat!(
+        "# Distrust emSign ECC Root CA - G3 (CVE-2026-111943) in the DPU OS trust store.\n",
+        "if grep -qx 'mozilla/emSign_ECC_Root_CA_-_G3.crt' /etc/ca-certificates.conf 2>/dev/null; then\n",
+        "    (sed -i 's|^mozilla/emSign_ECC_Root_CA_-_G3\\.crt$|!&|' /etc/ca-certificates.conf &&\n",
+        "        update-ca-certificates) || echo 'failed to distrust emSign ECC Root CA - G3' >&2\n",
+        "fi\n",
+    ));
 }
 
 /// Appends the per-DPU OVN address update to provisioning-time OVS configuration.
@@ -644,6 +659,8 @@ fn flavor_bf4_with_topology(
             ..Default::default()
         },
         spec: DpuFlavorSpec {
+            scalable_functions: None,
+            virtual_functions: None,
             dpu_mode: Some(DpuFlavorDpuMode::ZeroTrust),
             dpu_resources: None,
             bfcfg_parameters: Some(bfcfg_parameters),
@@ -731,9 +748,12 @@ pub(crate) fn flavor_bf4_astra_with_topology(
         )?),
         containerd_config: Some(DpuFlavorContainerdConfig {
             registry_endpoint: None,
+            sandbox_image: None,
         }),
         dpu_mode: None,
         dpu_resources: None,
+        scalable_functions: None,
+        virtual_functions: None,
         ew_nic_configurations: Some(bf4_astra_ew_nic_configurations()),
         grub: Some(bf4_astra_grub_params()),
         host_network_interface_configs: None,
@@ -962,6 +982,8 @@ fn default_flavor_with_topology(
         spec: DpuFlavorSpec {
             dpu_mode: Some(DpuFlavorDpuMode::ZeroTrust),
             dpu_resources: None,
+            scalable_functions: None,
+            virtual_functions: None,
             bfcfg_parameters: Some(bfcfg_parameters),
             config_files: Some(get_config_files(
                 proxy,
@@ -1840,7 +1862,7 @@ fn initialize_spx_maintenance_script_raw() -> String {
                 logical="eth_r${rail}_p${plane}"
                 netdev=$(ip -j link show dev "$logical" | jq -er '.[0].ifname')
                 ovs-vsctl --timeout=30 get Interface "$netdev" name >/dev/null
-                args+=(-- set Interface "$netdev" external_ids:spx-arc-maintenance=true)
+                args+=(-- set Interface "$netdev" external_ids:xplane-maintenance=true)
               done
             done
             ovs-vsctl --timeout=30 "${args[@]}"

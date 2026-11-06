@@ -54,14 +54,17 @@ pub(crate) use nmxc_schema_override::{
 };
 pub(crate) use nmxt::NMXT_PORT;
 pub use nmxt::{NmxtCollector, NmxtCollectorConfig};
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) use nvue::gnmi::emit_catalogue_samples;
 pub(crate) use nvue::gnmi::subscriber::{GnmiRetainedCache, spawn_gnmi_collector};
 pub use nvue::rest::collector::{NvueRestCollector, NvueRestCollectorConfig};
 pub(crate) use reachability::{
     COLLECTOR_TYPE as REACHABILITY_COLLECTOR_TYPE, ReachabilityCollector,
     ReachabilityCollectorStartConfig, ReachabilityService, ReachabilityTarget,
 };
+pub(crate) use runtime::CANCELLED_CONNECT_GRACE;
 pub use runtime::{
-    BackoffConfig, Collector, CollectorStartContext, EventStream, ExponentialBackoff,
+    BackoffConfig, CloseReason, Collector, CollectorStartContext, EventStream, ExponentialBackoff,
     IterationResult, PeriodicCollector, StreamMetrics, StreamingCollector,
     StreamingCollectorStartContext, StreamingConnectResult,
 };

@@ -392,7 +392,7 @@ impl<IO: StateControllerIO> MetricsEmitter for CommonMetricsEmitter<IO> {
                     "{object_type}_with_state_handling_errors_per_state"
                 ))
                 .with_description(format!(
-                    "Number of state-handling errors for {object_type} in a given state"
+                    "Number of {object_type} whose most recent state handler run returned an error, by state, substate, and error; the error=any series is the total across all errors for that state and substate, so exclude it when summing over error"
                 ))
                 .with_callback(move |observer| {
                     metrics.if_available(|metrics, attrs| {

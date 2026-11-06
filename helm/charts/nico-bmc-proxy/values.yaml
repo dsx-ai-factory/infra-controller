@@ -68,19 +68,12 @@ command:
     fi
 
 env:
-  VAULT_PKI_ROLE_NAME: "nico-cluster"
   RUST_BACKTRACE: "full"
   RUST_LIB_BACKTRACE: "0"
 
 extraEnv: []
 
 envFrom:
-  vaultApproleTokens:
-    secretName: nico-vault-approle-tokens
-  vaultToken:
-    secretName: nico-vault-token
-  vaultClusterInfo:
-    configMapName: vault-cluster-info
   databaseCredentials:
     secretName: nico-system.nico.nico-pg-cluster.credentials
   databaseConfig:
@@ -157,8 +150,6 @@ switchTls:
   ## of carrying their IPs. Empty checks each switch's certificate against
   ## its IP, whatever name configFiles.nicoBmcProxyConfig gives.
   tlsServerName: ""
-
-vaultClusterInfo: {}
 
 databaseConfig: {}
 

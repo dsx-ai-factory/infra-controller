@@ -98,6 +98,49 @@ func TestAPIErrorUnwrapAndDiagnosis(t *testing.T) {
 	}
 }
 
+func TestAPIError_WithCause(t *testing.T) {
+	cause := errors.New("flow rejected the request")
+	tests := []struct {
+		name string
+		run  func(*testing.T)
+	}{
+		{
+			name: "private cause preserved",
+			run: func(t *testing.T) {
+				apiError := NewAPIError(http.StatusInternalServerError, "Failed to get Rack details", nil).WithCause(cause)
+				assert.Equal(t, cause, apiError.Unwrap())
+				assert.Equal(t, "flow rejected the request", apiError.Diagnosis().Error())
+				assert.True(t, errors.Is(apiError, cause))
+			},
+		},
+		{
+			name: "private cause takes precedence over response data",
+			run: func(t *testing.T) {
+				apiError := NewAPIError(http.StatusInternalServerError, "Failed to get Rack details", errors.New("public error data")).WithCause(cause)
+				assert.Equal(t, cause, apiError.Unwrap())
+				assert.Equal(t, "flow rejected the request", apiError.Diagnosis().Error())
+				assert.True(t, errors.Is(apiError, cause))
+			},
+		},
+		{
+			name: "private cause omitted",
+			run: func(t *testing.T) {
+				apiError := NewAPIError(400, "rejected", nil).WithCause(errors.New("internal details"))
+				rec := httptest.NewRecorder()
+				c := echo.New().NewContext(httptest.NewRequest(http.MethodPost, "/", nil), rec)
+				c.Set(APINameContextKey, "nico")
+				assert.NoError(t, apiError.Send(c))
+				assert.Equal(t, apiError.Code, rec.Code)
+				assert.Equal(t, `{"source":"nico","message":"rejected","data":null}`+"\n", rec.Body.String())
+				assert.Empty(t, apiError.Source, "sending must not mutate the original error")
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, tt.run)
+	}
+}
+
 func TestNewAPIErrorResponseDoesNotExportErrorDetails(t *testing.T) {
 	recorder := tracetest.NewSpanRecorder()
 	provider := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))

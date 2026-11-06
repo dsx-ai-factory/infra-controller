@@ -14,23 +14,20 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use bmc_mock::HostMachineInfo;
 use bmc_mock::mac_address_pool::PoolConfig as MacAddressPoolConfig;
 use futures::future::try_join_all;
-use model::expected_machine::HostDpuPolicy;
-use rpc::forge::{ExpectedInterface, NetworkSegmentType};
 use tokio::sync::mpsc;
 
 use crate::PersistedDevice;
-use crate::api_client::ExpectedRecord;
 use crate::config::MachineATronContext;
 use crate::device_simulator::{
     DeviceSimulator, MachineSimulator, PowerShelfSimulator, SimulatorLifecycle, SwitchSimulator,
 };
-use crate::expected_inventory::{CONCURRENCY, ExpectedInventorySummary, register_all, with_retry};
+use crate::expected_inventory::{
+    ExpectedInventorySummary, ServedRecords, register_served, served_records, with_retry,
+};
 use crate::host_machine::HostMachine;
 use crate::power_shelf_simulator::PowerShelfActor;
 use crate::simulator_registry::SimulatorRegistry;
@@ -39,36 +36,6 @@ use crate::switch_simulator::SwitchActor;
 
 pub struct MachineATron {
     app_context: Arc<MachineATronContext>,
-}
-
-fn expected_interfaces(
-    host_info: &HostMachineInfo,
-    dpu_policy: Option<HostDpuPolicy>,
-) -> Vec<ExpectedInterface> {
-    let mac_addresses = match dpu_policy {
-        Some(HostDpuPolicy::Nic) => host_info
-            .dpus
-            .iter()
-            .map(|dpu| dpu.host_mac_address)
-            .collect::<Vec<_>>(),
-        Some(HostDpuPolicy::Ignore) => host_info.non_dpu_mac_address.into_iter().collect(),
-        _ => Vec::new(),
-    };
-
-    mac_addresses
-        .into_iter()
-        .enumerate()
-        .map(|(index, mac_address)| ExpectedInterface {
-            mac_address: Some(mac_address.to_string()),
-            nic_type: None,
-            fixed_ip: None,
-            fixed_mask: None,
-            fixed_gateway: None,
-            primary: Some(index == 0),
-            network_segment_type: Some(NetworkSegmentType::HostInband as i32),
-            ..Default::default()
-        })
-        .collect()
 }
 
 impl MachineATron {
@@ -84,6 +51,17 @@ impl MachineATron {
         &self,
         paused: bool,
     ) -> eyre::Result<(SimulatorRegistry, ExpectedInventorySummary)> {
+        let (simulators, summary, _) = self.make_devices_with_records(paused).await?;
+        Ok((simulators, summary))
+    }
+
+    /// `make_devices`, also returning the records built from the devices.
+    /// Registration sends exactly these records, so they are what the
+    /// control route serves whether or not registration is enabled.
+    pub async fn make_devices_with_records(
+        &self,
+        paused: bool,
+    ) -> eyre::Result<(SimulatorRegistry, ExpectedInventorySummary, ServedRecords)> {
         let resolved_configs = self.app_context.app_config.resolved_device_configs()?;
 
         for (machine_group, machine) in &resolved_configs.machines {
@@ -259,116 +237,32 @@ impl MachineATron {
                 .collect::<Result<Vec<_>, _>>()?
         };
 
-        if self.app_context.app_config.register_expected_machines {
-            let api_client = self.app_context.api_client();
-            // A group that already declares a rack is used as is.
-            let declared_rack_groups = if resolved_configs.racks.is_empty() {
-                BTreeMap::new()
-            } else {
-                with_retry("expected rack group lookup", || {
-                    api_client.declared_rack_groups()
-                })
-                .await?
-            };
-            let racks = resolved_configs
-                .racks
-                .iter()
-                .map(|rack| rack.expected_record(declared_rack_groups.get(&rack.rack_id)))
-                .collect::<eyre::Result<Vec<_>>>()?;
-            let failed = register_all(racks, CONCURRENCY, |record| {
-                let api_client = api_client.clone();
-                async move { api_client.add_expected_record(record).await }
-            })
-            .await
-            .failed_identifiers;
-            if !failed.is_empty() {
-                eyre::bail!("failed to register expected {}", failed.join(", "));
-            }
-        }
-
         let simulators = SimulatorRegistry::builder()
             .devices(devices)
-            .racks(resolved_configs.racks)
+            .racks(resolved_configs.racks.clone())
             .build()?;
+        let served = served_records(
+            &simulators,
+            &resolved_configs.machines,
+            &resolved_configs.racks,
+        )?;
 
         let summary = if self.app_context.app_config.register_expected_machines {
-            let records = simulators
-                .devices()
-                .iter()
-                .map(|device| {
-                    let machine = device.handle();
-                    let host_info = machine.host_info();
-                    let machine_config = resolved_configs
-                        .machines
-                        .get(machine.machine_config_section())
-                        .expect("machine was constructed from a configured machine group");
-                    let rack_id = machine_config.rack_id.clone();
-                    match device {
-                        DeviceSimulator::PowerShelf(_) => ExpectedRecord::PowerShelf {
-                            bmc_mac_address: host_info.bmc_mac_address.to_string(),
-                            shelf_serial_number: host_info.serial.clone(),
-                            rack_id,
-                        },
-                        DeviceSimulator::Switch(_) => ExpectedRecord::Switch {
-                            bmc_mac_address: host_info.bmc_mac_address.to_string(),
-                            switch_serial_number: host_info
-                                .switch_serial_number
-                                .clone()
-                                .unwrap_or_else(|| host_info.serial.clone()),
-                            nvos_mac_addresses: host_info
-                                .nvos_mac_addresses
-                                .iter()
-                                .map(|mac| mac.to_string())
-                                .collect(),
-                            rack_id,
-                        },
-                        DeviceSimulator::Machine(_) => {
-                            // Derive the expected `dpu_policy` from the machine's
-                            // MachineConfig: zero-DPU hosts declare `Ignore`, hosts
-                            // running their DPUs as NICs declare `Nic`, and
-                            // everything else defers to the default (`Manage`).
-                            // Site-explorer's ingestion gate requires this explicit
-                            // declaration for any host without DPU PCIe devices.
-                            let dpu_policy = if machine_config.dpu_per_host_count == 0 {
-                                Some(HostDpuPolicy::Ignore)
-                            } else if machine_config.dpus_in_nic_mode {
-                                Some(HostDpuPolicy::Nic)
-                            } else {
-                                None
-                            };
-                            ExpectedRecord::Machine {
-                                bmc_mac_address: host_info.bmc_mac_address.to_string(),
-                                chassis_serial_number: host_info.serial.clone(),
-                                rack_id,
-                                dpu_policy,
-                                dpf_enabled: machine_config.dpf_enabled,
-                                interfaces: expected_interfaces(host_info, dpu_policy),
-                            }
-                        }
-                    }
-                })
-                .collect::<Vec<_>>();
-
             let api_client = self.app_context.api_client();
-            let summary = register_all(records, CONCURRENCY, |record| {
-                let api_client = api_client.clone();
-                async move { api_client.add_expected_record(record).await }
-            })
-            .await;
-            summary.log();
-            if !summary.failed_identifiers.is_empty() {
-                let failed = &summary.failed_identifiers;
-                let mut listed = failed.iter().take(20).cloned().collect::<Vec<_>>();
-                if failed.len() > listed.len() {
-                    listed.push(format!("and {} more", failed.len() - listed.len()));
-                }
-                eyre::bail!(
-                    "failed to register {} expected device records: {}",
-                    failed.len(),
-                    listed.join(", ")
-                );
-            }
-            summary
+            register_served(
+                &resolved_configs.racks,
+                &served,
+                || {
+                    with_retry("expected rack group lookup", || {
+                        api_client.declared_rack_groups()
+                    })
+                },
+                |record| {
+                    let api_client = api_client.clone();
+                    async move { api_client.add_expected_record(record).await }
+                },
+            )
+            .await?
         } else {
             tracing::info!(
                 device_count = simulators.devices().len(),
@@ -377,7 +271,7 @@ impl MachineATron {
             ExpectedInventorySummary::default()
         };
 
-        Ok((simulators, summary))
+        Ok((simulators, summary, served))
     }
 
     pub async fn run(
@@ -452,93 +346,171 @@ impl MachineATron {
 
 #[cfg(test)]
 mod tests {
-    use std::str::FromStr;
+    use std::collections::BTreeSet;
+    use std::path::Path;
+    use std::sync::Mutex;
 
-    use bmc_mock::{DpuMachineInfo, DpuSettings, HardwareType};
-    use carbide_test_support::{Check, check_values};
+    use axum::body::{Body, to_bytes};
+    use axum::http::{Request, StatusCode};
+    use bmc_mock::DpuSettings;
+    use bmc_mock::mac_address_pool::{
+        Config as MacAddressConfig, MacAddressPool, RangesConfig as MacAddressRangesConfig,
+    };
     use mac_address::MacAddress;
+    use tower::ServiceExt;
+    use uuid::Uuid;
 
     use super::*;
+    use crate::expected_inventory::{DpuKey, ExpectedRecordsResponse};
+    use crate::machine_state_machine::OsImage;
+    use crate::{ControlState, DeviceStatusConfig, PersistedDpuMachine, append_control_routes};
 
-    fn mac(value: &str) -> MacAddress {
-        MacAddress::from_str(value).unwrap()
+    const INVENTORY_ID: &str = "mat-06:00:00:00:00:00";
+
+    /// Two hosts with one DPU each, registration disabled so nothing calls
+    /// the API, and devices restored from `persist_dir` when it holds a
+    /// snapshot.
+    fn records_context(persist_dir: Option<&Path>) -> Arc<MachineATronContext> {
+        let mut app_context = MachineATronContext::for_test();
+        let context = Arc::get_mut(&mut app_context).expect("a new test context is not shared");
+        context.app_config.register_expected_machines = false;
+        context.app_config.persist_dir = persist_dir.map(Path::to_path_buf);
+        let machine = Arc::make_mut(context.app_config.machines.get_mut("config").unwrap());
+        machine.host_count = 2;
+        machine.dpu_per_host_count = 1;
+        context.mac_address_pool = Arc::new(Mutex::new(MacAddressPool::new(MacAddressConfig {
+            pool: Some(MacAddressPoolConfig::new(MacAddress::new([2, 0, 0, 0, 0, 0]), 24).unwrap()),
+            ranges: Some(
+                MacAddressRangesConfig::new(MacAddress::new([6, 0, 0, 0, 0, 0]), 32, 8).unwrap(),
+            ),
+        })));
+        app_context
     }
 
-    fn host_info(dpu_host_macs: &[MacAddress], non_dpu_mac: Option<MacAddress>) -> HostMachineInfo {
-        HostMachineInfo {
-            hw_type: HardwareType::WiwynnGB200Nvl,
-            rack_placement: None,
-            bmc_mac_address: mac("02:00:00:00:00:f0"),
-            serial: "test-host".to_string(),
-            dpus: dpu_host_macs
-                .iter()
-                .enumerate()
-                .map(|(index, host_mac_address)| DpuMachineInfo {
-                    hw_type: HardwareType::WiwynnGB200Nvl,
-                    bmc_mac_address: mac(&format!("02:00:00:00:10:{index:02x}")),
-                    host_mac_address: *host_mac_address,
-                    oob_mac_address: mac(&format!("02:00:00:00:20:{index:02x}")),
-                    serial: format!("test-dpu-{index}"),
-                    settings: DpuSettings::default(),
-                })
-                .collect(),
-            non_dpu_mac_address: non_dpu_mac,
+    async fn make_devices_with_records(
+        app_context: Arc<MachineATronContext>,
+    ) -> (ExpectedInventorySummary, ServedRecords) {
+        let (simulators, summary, served) = MachineATron::new(app_context)
+            .make_devices_with_records(true)
+            .await
+            .unwrap();
+        for simulator in simulators.devices() {
+            simulator.abort();
+        }
+        (summary, served)
+    }
+
+    fn bmc_macs(served: &ServedRecords) -> BTreeSet<String> {
+        served
+            .devices
+            .iter()
+            .map(|device| device.bmc_mac.clone())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn route_serves_when_registration_disabled() {
+        let app_context = records_context(None);
+        let (simulators, summary, served) = MachineATron::new(app_context.clone())
+            .make_devices_with_records(true)
+            .await
+            .unwrap();
+        assert_eq!(summary, ExpectedInventorySummary::default());
+        assert_eq!((served.devices.len(), served.dpus.len()), (2, 2));
+
+        let response = served.into_response(INVENTORY_ID.to_string(), &app_context.app_config);
+        let router = append_control_routes(
+            None,
+            ControlState::new(
+                simulators.clone(),
+                DeviceStatusConfig::new(1266),
+                INVENTORY_ID.into(),
+            )
+            .with_expected_records(Arc::new(response.clone())),
+        );
+        let reply = router
+            .oneshot(
+                Request::builder()
+                    .uri("/expected-inventory/records")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        for simulator in simulators.devices() {
+            simulator.abort();
+        }
+
+        assert_eq!(reply.status(), StatusCode::OK);
+        let body = to_bytes(reply.into_body(), usize::MAX).await.unwrap();
+        let served: ExpectedRecordsResponse = serde_json::from_slice(&body).unwrap();
+        assert!(!served.register_expected_machines);
+        assert_eq!(served, response);
+    }
+
+    #[tokio::test]
+    async fn restored_identity_records_use_persisted_macs() {
+        let (_, fresh) = make_devices_with_records(records_context(None)).await;
+
+        let persist_dir = tempfile::tempdir().unwrap();
+        let app_context = records_context(Some(persist_dir.path()));
+        let hw_type = app_context.app_config.machines["config"].hw_type;
+        let persisted = |host: u8| PersistedDevice {
+            mat_id: Uuid::new_v4(),
+            machine_config_section: "config".to_string(),
+            hw_type,
+            bmc_mac_address: MacAddress::new([0x0a, 0, 0, 0, host, 1]),
+            serial: format!("persisted-{host}"),
+            dpus: vec![PersistedDpuMachine {
+                mat_id: Uuid::new_v4(),
+                hw_type,
+                bmc_mac_address: MacAddress::new([0x0a, 0, 0, 0, host, 2]),
+                host_mac_address: MacAddress::new([0x0a, 0, 0, 0, host, 3]),
+                oob_mac_address: MacAddress::new([0x0a, 0, 0, 0, host, 4]),
+                serial: format!("persisted-dpu-{host}"),
+                installed_os: OsImage::None,
+                dpu_index: 0,
+                bmc_state: None,
+                settings: DpuSettings::default(),
+            }],
+            non_dpu_mac_address: None,
             nvos_mac_addresses: Vec::new(),
             switch_serial_number: None,
-            hw_mac_addr_pool: MacAddressPoolConfig::new(mac("0a:00:00:00:00:00"), 24).unwrap(),
-            delta_psu_power: None,
-            initial_host_firmware: None,
-            desired_host_firmware: None,
-        }
-    }
+            observed_machine_id: None,
+            installed_os: OsImage::None,
+            tpm_ek_certificate: None,
+            hw_mac_addr_pool: Some(crate::config::MacAddressPoolConfig {
+                base: MacAddress::new([6, 0, 0, 0, host, 0]),
+                host_bits: 8,
+            }),
+            active_host_firmware: None,
+            bmc_state: None,
+            nvos_admin: None,
+        };
+        app_context
+            .app_config
+            .write_persisted_devices(&[persisted(1), persisted(2)])
+            .unwrap();
 
-    fn expected_nic(mac_address: MacAddress, primary: bool) -> ExpectedInterface {
-        ExpectedInterface {
-            mac_address: Some(mac_address.to_string()),
-            nic_type: None,
-            fixed_ip: None,
-            fixed_mask: None,
-            fixed_gateway: None,
-            primary: Some(primary),
-            network_segment_type: Some(NetworkSegmentType::HostInband as i32),
-            ..Default::default()
-        }
-    }
+        let (_, restored) = make_devices_with_records(app_context).await;
 
-    #[test]
-    fn expected_interface_derivation() {
-        let first_dpu_mac = mac("02:00:00:00:00:01");
-        let second_dpu_mac = mac("02:00:00:00:00:02");
-        let integrated_mac = mac("02:00:00:00:00:03");
-
-        check_values(
-            [
-                Check {
-                    scenario: "NIC-mode host declares every host-facing DPU PF",
-                    input: (
-                        host_info(&[first_dpu_mac, second_dpu_mac], None),
-                        Some(HostDpuPolicy::Nic),
-                    ),
-                    expect: vec![
-                        expected_nic(first_dpu_mac, true),
-                        expected_nic(second_dpu_mac, false),
-                    ],
-                },
-                Check {
-                    scenario: "zero-DPU host declares its integrated NIC",
-                    input: (
-                        host_info(&[], Some(integrated_mac)),
-                        Some(HostDpuPolicy::Ignore),
-                    ),
-                    expect: vec![expected_nic(integrated_mac, true)],
-                },
-                Check {
-                    scenario: "managed-DPU host relies on automatic DPU discovery",
-                    input: (host_info(&[first_dpu_mac], None), None),
-                    expect: Vec::new(),
-                },
-            ],
-            |(host_info, dpu_policy)| expected_interfaces(&host_info, dpu_policy),
+        let persisted_macs = [1, 2]
+            .map(|host| MacAddress::new([0x0a, 0, 0, 0, host, 1]).to_string())
+            .into();
+        assert_eq!(bmc_macs(&restored), persisted_macs);
+        assert!(
+            bmc_macs(&fresh).is_disjoint(&persisted_macs),
+            "fresh allocation must differ from the persisted identities"
+        );
+        assert_eq!(
+            restored.dpus,
+            [1, 2]
+                .map(|host| DpuKey {
+                    bmc_mac: MacAddress::new([0x0a, 0, 0, 0, host, 2]).to_string(),
+                    serial: format!("persisted-dpu-{host}"),
+                    parent_bmc_mac: MacAddress::new([0x0a, 0, 0, 0, host, 1]).to_string(),
+                })
+                .to_vec()
         );
     }
 }

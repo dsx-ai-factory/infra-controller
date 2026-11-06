@@ -14,9 +14,11 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 
 use carbide_uuid::DbTable;
+use carbide_uuid::instance::InstanceId;
 use carbide_uuid::machine::DpuMachineId;
 use carbide_uuid::vpc::VpcId;
 use model::resource_pool::OwnerType;
@@ -150,6 +152,42 @@ pub async fn delete_and_deallocate_for_vpcs(
         }
     }
 
+    Ok(())
+}
+
+/// Releases candidate DPU/VPC loopbacks absent from the current service interfaces and supplied
+/// retained host memberships, keeping row deletion and resource-pool release in the caller's
+/// Instance transaction. The caller must hold the Instance row lock and pass the host memberships
+/// that remain after the current network-config update.
+pub async fn release_unretained_instance_loopbacks(
+    common_pools: &model::resource_pool::common::CommonPools,
+    txn: &mut PgConnection,
+    instance_id: InstanceId,
+    candidate_memberships: &HashSet<(DpuMachineId, VpcId)>,
+    retained_host_memberships: &HashSet<(DpuMachineId, VpcId)>,
+) -> Result<(), DatabaseError> {
+    if candidate_memberships.is_empty() {
+        return Ok(());
+    }
+
+    // Read service memberships from the locked Instance so a concurrent service-interface write
+    // cannot follow this loopback-release decision.
+    let retained_memberships =
+        crate::instance::find_service_vpc_memberships(&mut *txn, instance_id)
+            .await?
+            .into_iter()
+            .chain(retained_host_memberships.iter().copied())
+            .collect::<HashSet<_>>();
+    let mut releasable_by_dpu = HashMap::<DpuMachineId, Vec<VpcId>>::new();
+    for &(dpu_id, vpc_id) in candidate_memberships {
+        if !retained_memberships.contains(&(dpu_id, vpc_id)) {
+            releasable_by_dpu.entry(dpu_id).or_default().push(vpc_id);
+        }
+    }
+
+    for (dpu_id, vpc_ids) in releasable_by_dpu {
+        delete_and_deallocate_for_vpcs(common_pools, &dpu_id, &vpc_ids, txn).await?;
+    }
     Ok(())
 }
 

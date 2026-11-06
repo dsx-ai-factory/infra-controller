@@ -40,6 +40,8 @@ use tokio::task::{JoinError, JoinSet};
 use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;
 
+use crate::gate::CallError;
+
 /// Marks a run that ignored cancellation and never returned. The scheduler
 /// keeps reporting it every interval so the outage stays visible on the
 /// timeout counter without stacking more blocked tasks.
@@ -136,6 +138,12 @@ pub(crate) trait Probe: Send + Sync {
     fn interval(&self) -> Duration;
     fn timeout(&self) -> Duration;
     async fn run(&self, recorder: &ObservationRecorder) -> eyre::Result<()>;
+    /// Called when a run ran past its timeout: after the timeout dropped
+    /// it, or when the watchdog gave up on a run blocked in a poll (then
+    /// possibly again from the run's own timeout, so it must be idempotent
+    /// per run). Shutdown cancelling a run does not call it: an interrupted
+    /// run is not a measurement.
+    fn timed_out(&self) {}
 }
 
 /// Consumes results. Delivery is serialized by [`collect`]'s single consumer.
@@ -276,6 +284,7 @@ async fn run_once(probe: &Arc<dyn Probe>, cancel: &CancellationToken) -> Disposi
         }
         () = tokio::time::sleep(probe.timeout() * 2) => {
             tracing::error!(probe = probe.name(), timeout = ?probe.timeout(), "{WEDGED_ERROR}");
+            probe.timed_out();
             // Best effort: an abort only lands once the blocked poll returns,
             // at which point the task ends and the loop stops re-reporting.
             run.abort();
@@ -286,7 +295,13 @@ async fn run_once(probe: &Arc<dyn Probe>, cancel: &CancellationToken) -> Disposi
 
 fn spawn_run(probe: Arc<dyn Probe>, recorder: ObservationRecorder) -> RunHandle {
     let timeout = probe.timeout();
-    tokio::spawn(async move { tokio::time::timeout(timeout, probe.run(&recorder)).await })
+    tokio::spawn(async move {
+        let result = tokio::time::timeout(timeout, probe.run(&recorder)).await;
+        if result.is_err() {
+            probe.timed_out();
+        }
+        result
+    })
 }
 
 fn wedged_result(probe: &dyn Probe) -> ProbeResult {
@@ -320,9 +335,24 @@ fn classify(
     match joined {
         Ok(Ok(Ok(()))) => {}
         Ok(Ok(Err(err))) => {
-            result.outcome = Outcome::Failure;
-            result.error = Some(format!("{err:#}"));
-            tracing::warn!(probe = probe.name(), error = %err, "probe failed");
+            // The full chain: `%err` alone would print only the outermost
+            // context.
+            let detail = format!("{err:#}");
+            if is_call_timeout(&err) {
+                // A gate or server deadline cut one call short of the probe's
+                // own timeout: still a slow API, not a failed one.
+                result.outcome = Outcome::Timeout;
+                tracing::warn!(
+                    probe = probe.name(),
+                    timeout = ?probe.timeout(),
+                    error = %detail,
+                    "probe call timed out"
+                );
+            } else {
+                result.outcome = Outcome::Failure;
+                tracing::warn!(probe = probe.name(), error = %detail, "probe failed");
+            }
+            result.error = Some(detail);
         }
         Ok(Err(_elapsed)) => {
             result.outcome = Outcome::Timeout;
@@ -340,6 +370,13 @@ fn classify(
         }
     }
     result
+}
+
+/// Whether a probe's error carries a call timeout: the gate's call timeout, or
+/// a server DEADLINE_EXCEEDED, which `classify_grpc` maps to the same variant.
+fn is_call_timeout(err: &eyre::Report) -> bool {
+    err.chain()
+        .any(|cause| matches!(cause.downcast_ref::<CallError>(), Some(CallError::Timeout)))
 }
 
 fn panic_message(err: JoinError) -> String {
@@ -367,6 +404,8 @@ mod tests {
         Succeed(Vec<(&'static str, Duration)>),
         /// Record one observation, then fail.
         FailAfterPartial,
+        /// Fail with the error this builds.
+        FailWith(fn() -> eyre::Report),
         /// Record one observation, then sleep past any test timeout.
         SleepPastTimeout,
         /// Panic (a probe bug).
@@ -416,6 +455,7 @@ mod tests {
                     recorder.record("partial", Duration::from_millis(1));
                     Err(eyre!("boom"))
                 }
+                Behavior::FailWith(make) => Err(make()),
                 Behavior::SleepPastTimeout => {
                     recorder.record("before_sleep", Duration::from_millis(1));
                     tokio::time::sleep(self.timeout * 10).await;
@@ -556,6 +596,67 @@ mod tests {
         assert!(
             result.at.is_some(),
             "a cooperative timeout is a completed run"
+        );
+        cancel.cancel();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn call_timeout_in_error_chain_is_a_timeout() {
+        let (probe, _) = fake(
+            "call_timeout_probe",
+            Behavior::FailWith(|| eyre::Report::new(CallError::Timeout).wrap_err("FindMachineIds")),
+        );
+        let cancel = CancellationToken::new();
+        let (mut results, _loops) = start(vec![probe], cancel.clone());
+
+        let result = results.recv().await.expect("result");
+        assert_eq!(result.outcome, Outcome::Timeout);
+        assert_eq!(
+            result.error.as_deref(),
+            Some("FindMachineIds: call timed out"),
+            "the wrapped text is kept"
+        );
+        assert!(!result.panicked);
+        assert!(result.at.is_some(), "the run completed");
+        cancel.cancel();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn error_answer_in_error_chain_stays_a_failure() {
+        let (probe, _) = fake(
+            "error_answer_probe",
+            Behavior::FailWith(|| {
+                eyre::Report::new(CallError::Status("gRPC PermissionDenied".to_string()))
+                    .wrap_err("FindMachineIds")
+            }),
+        );
+        let cancel = CancellationToken::new();
+        let (mut results, _loops) = start(vec![probe], cancel.clone());
+
+        let result = results.recv().await.expect("result");
+        assert_eq!(result.outcome, Outcome::Failure);
+        assert_eq!(
+            result.error.as_deref(),
+            Some("FindMachineIds: gRPC PermissionDenied")
+        );
+        cancel.cancel();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn timeout_text_without_a_typed_error_stays_a_failure() {
+        // Classification is by type, never by message.
+        let (probe, _) = fake(
+            "timeout_text_probe",
+            Behavior::FailWith(|| eyre!("upstream timeout while reading")),
+        );
+        let cancel = CancellationToken::new();
+        let (mut results, _loops) = start(vec![probe], cancel.clone());
+
+        let result = results.recv().await.expect("result");
+        assert_eq!(result.outcome, Outcome::Failure);
+        assert_eq!(
+            result.error.as_deref(),
+            Some("upstream timeout while reading")
         );
         cancel.cancel();
     }

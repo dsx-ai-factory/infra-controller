@@ -418,15 +418,31 @@ waiting for the DPUs, and restoring a database backup does not undo their networ
 changes. For the network-version and migration details, refer to the
 [configuration reference](https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/api-core/src/cfg/README.md#vpc-peering-deletion).
 
+### 2.4 → 2.5: Keycloak service account orgs are required
+
+**Impact:** A deployment with `keycloak.serviceAccount: true` fails to start unless it also lists `keycloak.serviceAccountOrgs`, with exactly one org in disconnected mode. The `helm-prereqs` values already list `ncx`. Before upgrading a deployment that uses its own values file, list each org whose client holds both `PROVIDER_ADMIN` and `TENANT_ADMIN`:
+
+```yaml
+nico-rest-api:
+  config:
+    keycloak:
+      serviceAccount: true
+      serviceAccountOrgs: [ncx]
+```
+
+Only a client in a listed org is a service account, and only for requests to that org. A client credentials token from any other client is now authorized by its roles in the requested org, like a user token. That includes `serviceAccount: false`, where it used to get `401`. A disconnected config with more than one `isServiceAccount: true` claim mapping across custom issuers also fails to start.
+
+In connected mode, `serviceAccountOrgs` can list more than one org. Custom issuer `isServiceAccount` mappings, which used to require disconnected mode, are now accepted in connected mode with no limit on their number.
+
 ### 2.3 → 2.4: Standalone Temporal/Keycloak PostgreSQL deprecated
 
 <Warning>
-The standalone `postgres` StatefulSet for the Temporal and Keycloak databases is deprecated. Support for it will be removed in `2.5`. Sites still on it are highly encouraged to migrate to `nico-pg-cluster`, which already holds the NICo Core and REST databases. Follow the [migration guide](../../helm-prereqs/README.md#migrating-an-existing-sites-data) to move them.
+The standalone `postgres` StatefulSet for the Temporal and Keycloak databases is deprecated. Support for it will be removed in `2.5`. Sites still on it are highly encouraged to migrate to `nico-pg-cluster`, which already holds the NICo Core and REST databases. Follow the [migration guide](https://github.com/dsx-ai-factory/infra-controller/blob/main/helm-prereqs/README.md#migrating-an-existing-sites-data) to move them.
 </Warning>
 
-Before 2.4, `temporal.useHaPostgres` and `keycloak.useHaPostgres` in `helm-prereqs/values.yaml` defaulted to `false`, so every new Site got the StatefulSet. They now default to `auto`. With `auto`, both databases are created in `nico-pg-cluster`, but their location is left unchanged for an existing Site. So an existing Site needs no changes for the upgrade, and a new Site only gets the StatefulSet when a value is set to `false`. With `postgresql.enabled: false`, `nico-pg-cluster` is an external or out-of-band PostgreSQL, so `auto` means `false` unless the databases are already there. Such a Site can move them with `true` once it provisions them, as [Using an external or out-of-band PostgreSQL](../../helm-prereqs/README.md#using-an-external-or-out-of-band-postgresql) describes. Copying existing data from the StatefulSet onto an external or out-of-band PostgreSQL isn't supported in 2.4. Support is tracked in [#7989](https://github.com/dsx-ai-factory/infra-controller/issues/7989). While either database stays on the StatefulSet, preflight warns that it's deprecated, and `setup.sh` repeats the warning at the end of the run.
+Before 2.4, `temporal.useHaPostgres` and `keycloak.useHaPostgres` in `helm-prereqs/values.yaml` defaulted to `false`, so every new Site got the StatefulSet. They now default to `auto`. With `auto`, both databases are created in `nico-pg-cluster`, but their location is left unchanged for an existing Site. So an existing Site needs no changes for the upgrade, and a new Site only gets the StatefulSet when a value is set to `false`. With `postgresql.enabled: false`, `nico-pg-cluster` is an external or out-of-band PostgreSQL, so `auto` means `false` unless the databases are already there. Such a Site can move them with `true` once it provisions them, as [Using an external or out-of-band PostgreSQL](https://github.com/dsx-ai-factory/infra-controller/blob/main/helm-prereqs/README.md#using-an-external-or-out-of-band-postgresql) describes. Copying existing data from the StatefulSet onto an external or out-of-band PostgreSQL isn't supported in 2.4. Support is tracked in [#7989](https://github.com/dsx-ai-factory/infra-controller/issues/7989). While either database stays on the StatefulSet, preflight warns that it's deprecated, and `setup.sh` repeats the warning at the end of the run.
 
-On an existing Site, the new `temporal`, `temporal_visibility`, and `keycloak` databases on `nico-pg-cluster` stay empty and unused until it migrates. To migrate, set `temporal.useHaPostgres`, `keycloak.useHaPostgres`, or both to `true`, because `auto` never moves an existing database. Then run the migration script with the matching `--db temporal`, `--db keycloak`, or `--db both`, as the [migration guide](../../helm-prereqs/README.md#migrating-an-existing-sites-data) describes. `setup.sh` won't move a database off the StatefulSet until the script has copied it. A values file copied from an earlier release may still set `false`. That keeps the databases on the StatefulSet and creates nothing on `nico-pg-cluster`. Once a database is on `nico-pg-cluster`, preflight refuses `false`, because there's no supported way back. After both have moved, `setup.sh` leaves the StatefulSet and its data in place, so remove them as [Removing the standalone StatefulSet](../../helm-prereqs/README.md#removing-the-standalone-statefulset) describes.
+On an existing Site, the new `temporal`, `temporal_visibility`, and `keycloak` databases on `nico-pg-cluster` stay empty and unused until it migrates. To migrate, set `temporal.useHaPostgres`, `keycloak.useHaPostgres`, or both to `true`, because `auto` never moves an existing database. Then run the migration script with the matching `--db temporal`, `--db keycloak`, or `--db both`, as the [migration guide](https://github.com/dsx-ai-factory/infra-controller/blob/main/helm-prereqs/README.md#migrating-an-existing-sites-data) describes. `setup.sh` won't move a database off the StatefulSet until the script has copied it. A values file copied from an earlier release may still set `false`. That keeps the databases on the StatefulSet and creates nothing on `nico-pg-cluster`. Once a database is on `nico-pg-cluster`, preflight refuses `false`, because there's no supported way back. After both have moved, `setup.sh` leaves the StatefulSet and its data in place, so remove them as [Removing the standalone StatefulSet](https://github.com/dsx-ai-factory/infra-controller/blob/main/helm-prereqs/README.md#removing-the-standalone-statefulset) describes.
 
 ### 2.2 → 2.3: Core components are mandatory
 

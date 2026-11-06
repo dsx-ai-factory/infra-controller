@@ -126,7 +126,7 @@ fn firmware_cli_preserves_receipts_and_does_not_replay_mutations() {
         expected_reset: Option<bool>,
         expected_calls: &'static str,
     }
-    for case in [
+    let cases = [
         // Full profile options, including reset level, reach the executor.
         Case {
             name: "profile lifecycle completes",
@@ -178,130 +178,144 @@ fn firmware_cli_preserves_receipts_and_does_not_replay_mutations() {
             expected_reset: Some(true),
             expected_calls: "query\napply\nburn\nreset\nverify\n",
         },
-    ] {
-        let directory = fixture();
-        let fixture = directory.path();
-        if case.failed_phase == "verify" {
-            // Keep the default ten-second retry interval, but exhaust this
-            // operation's budget before a second read. The independent CLI
-            // watchdog still catches a workflow that never reaches terminal.
-            let profile_path = fixture.join("profile.toml");
-            let profile = fs::read_to_string(&profile_path).unwrap();
-            fs::write(
-                profile_path,
-                format!("{profile}post_reset_verify_timeout_seconds = 2\n"),
-            )
-            .unwrap();
-        }
-        let _supervisor = Supervisor::start(fixture, case.failed_phase);
-        let command = || {
-            let mut command = cli(fixture);
-            if case.flash_config {
-                command
-                    .args(["flash-config", DEVICE])
-                    .arg(fixture.join("profile.toml"));
-            } else {
-                command
-                    .args([
-                        "flash",
-                        DEVICE,
-                        "--part-number",
-                        "part",
-                        "--psid",
-                        "PSID",
-                        "--version",
-                        "32.43.1014",
-                    ])
-                    .arg(fixture.join("image/shared.bin"))
-                    .arg("--device-conf-url")
-                    .arg(fixture.join("config/shared.bin"));
-            }
-            command.args(["--operation-id", OPERATION_ID]);
-            command
-        };
-        let output = run_cli(&mut command());
-        let diagnostic = String::from_utf8_lossy(&output.stderr);
-        let operation: FirmwareOperation = serde_json::from_slice(&output.stdout)
-            .unwrap_or_else(|error| panic!("{}: {error}: {diagnostic}", case.name));
-        assert_eq!(operation.operation_id, OPERATION_ID, "{}", case.name);
-        assert_eq!(operation.state, case.expected_state, "{}", case.name);
-        assert_eq!(
-            operation.report.flashed, case.expected_flashed,
-            "{}",
-            case.name
-        );
-        assert_eq!(operation.report.reset, case.expected_reset, "{}", case.name);
-        if case.failed_phase == "verify" {
-            let diagnostic = operation
-                .diagnostic
-                .as_deref()
-                .expect("verification exhaustion retains its last failed read");
-            assert!(
-                diagnostic.contains("post-reset firmware verification exceeded its 2s budget"),
-                "{diagnostic}"
-            );
-            assert!(diagnostic.contains("ImageVerification"), "{diagnostic}");
-            assert!(diagnostic.contains("exit_code=Some(41)"), "{diagnostic}");
-        }
-        assert_eq!(
-            output.status.success(),
-            operation.is_complete(),
-            "{diagnostic}"
-        );
-        assert_eq!(
-            fs::read_to_string(fixture.join("calls")).unwrap(),
-            case.expected_calls
-        );
-
-        // The same request and a separate status command must return the same
-        // durable receipt, even though the fake burn changed the source image.
-        for mut request in [command(), {
-            let mut status = cli(fixture);
-            status.args(["status", DEVICE, OPERATION_ID]);
-            status
-        }] {
-            let reread = run_cli(&mut request);
-            let reread: serde_json::Value = serde_json::from_slice(&reread.stdout).unwrap();
-            assert_eq!(
-                reread,
-                serde_json::to_value(&operation).unwrap(),
-                "{}",
-                case.name
-            );
-            assert_eq!(
-                fs::read_to_string(fixture.join("calls")).unwrap(),
-                case.expected_calls
-            );
-        }
-
-        if case.expected_calls.contains("reset\n") {
-            assert_eq!(
-                fs::read_to_string(fixture.join("reset-args")).unwrap(),
-                format!("--device\n{DEVICE}\n--level\n1\nreset\n-y\n")
-            );
-        }
-        let staged_image = fs::read_to_string(fixture.join("burn-input")).unwrap();
-        let staged_image = std::path::Path::new(staged_image.trim());
-        let staged_config = fs::read_to_string(fixture.join("applied")).unwrap();
-        let staged_config = std::path::Path::new(staged_config.trim());
-        if operation.is_complete() {
-            wait_for_staged_cleanup(staged_image, staged_config);
-        } else {
-            assert_eq!(fs::read(staged_image).unwrap(), b"firmware-image\n");
-            assert_eq!(fs::read(staged_config).unwrap(), b"device-config\n");
-            assert_eq!(operation.report.verified_image, Some(false));
-            assert_eq!(operation.report.verified_version, Some(false));
-            if case.failed_phase == "verify" {
-                // Completed activation does not release exclusion when the
-                // requested verification has exhausted its budget.
-                let claim: serde_json::Value =
-                    serde_json::from_slice(&fs::read(fixture.join("state/mutation.json")).unwrap())
+    ];
+    // Each case owns its processes, environment, socket, and journal. Run the
+    // independent lifecycles together so their CLI polling waits can overlap.
+    std::thread::scope(|scope| {
+        for case in cases {
+            std::thread::Builder::new()
+                .name(case.name.to_string())
+                .spawn_scoped(scope, move || {
+                    let directory = fixture();
+                    let fixture = directory.path();
+                    if case.failed_phase == "verify" {
+                        // Keep the default ten-second retry interval, but exhaust this
+                        // operation's budget before a second read. The independent CLI
+                        // watchdog still catches a workflow that never reaches terminal.
+                        let profile_path = fixture.join("profile.toml");
+                        let profile = fs::read_to_string(&profile_path).unwrap();
+                        fs::write(
+                            profile_path,
+                            format!("{profile}post_reset_verify_timeout_seconds = 2\n"),
+                        )
                         .unwrap();
-                assert_eq!(claim["operation_id"], OPERATION_ID);
-                assert_eq!(claim["device_identity"], "0000:ab:01");
-            }
+                    }
+                    let _supervisor = Supervisor::start(fixture, case.failed_phase);
+                    let command = || {
+                        let mut command = cli(fixture);
+                        if case.flash_config {
+                            command
+                                .args(["flash-config", DEVICE])
+                                .arg(fixture.join("profile.toml"));
+                        } else {
+                            command
+                                .args([
+                                    "flash",
+                                    DEVICE,
+                                    "--part-number",
+                                    "part",
+                                    "--psid",
+                                    "PSID",
+                                    "--version",
+                                    "32.43.1014",
+                                ])
+                                .arg(fixture.join("image/shared.bin"))
+                                .arg("--device-conf-url")
+                                .arg(fixture.join("config/shared.bin"));
+                        }
+                        command.args(["--operation-id", OPERATION_ID]);
+                        command
+                    };
+                    let output = run_cli(&mut command());
+                    let diagnostic = String::from_utf8_lossy(&output.stderr);
+                    let operation: FirmwareOperation = serde_json::from_slice(&output.stdout)
+                        .unwrap_or_else(|error| panic!("{}: {error}: {diagnostic}", case.name));
+                    assert_eq!(operation.operation_id, OPERATION_ID, "{}", case.name);
+                    assert_eq!(operation.state, case.expected_state, "{}", case.name);
+                    assert_eq!(
+                        operation.report.flashed, case.expected_flashed,
+                        "{}",
+                        case.name
+                    );
+                    assert_eq!(operation.report.reset, case.expected_reset, "{}", case.name);
+                    if case.failed_phase == "verify" {
+                        let diagnostic = operation
+                            .diagnostic
+                            .as_deref()
+                            .expect("verification exhaustion retains its last failed read");
+                        assert!(
+                            diagnostic.contains(
+                                "post-reset firmware verification exceeded its 2s budget"
+                            ),
+                            "{diagnostic}"
+                        );
+                        assert!(diagnostic.contains("ImageVerification"), "{diagnostic}");
+                        assert!(diagnostic.contains("exit_code=Some(41)"), "{diagnostic}");
+                    }
+                    assert_eq!(
+                        output.status.success(),
+                        operation.is_complete(),
+                        "{diagnostic}"
+                    );
+                    assert_eq!(
+                        fs::read_to_string(fixture.join("calls")).unwrap(),
+                        case.expected_calls
+                    );
+
+                    // The same request and a separate status command must return the same
+                    // durable receipt, even though the fake burn changed the source image.
+                    for mut request in [command(), {
+                        let mut status = cli(fixture);
+                        status.args(["status", DEVICE, OPERATION_ID]);
+                        status
+                    }] {
+                        let reread = run_cli(&mut request);
+                        let reread: serde_json::Value =
+                            serde_json::from_slice(&reread.stdout).unwrap();
+                        assert_eq!(
+                            reread,
+                            serde_json::to_value(&operation).unwrap(),
+                            "{}",
+                            case.name
+                        );
+                        assert_eq!(
+                            fs::read_to_string(fixture.join("calls")).unwrap(),
+                            case.expected_calls
+                        );
+                    }
+
+                    if case.expected_calls.contains("reset\n") {
+                        assert_eq!(
+                            fs::read_to_string(fixture.join("reset-args")).unwrap(),
+                            format!("--device\n{DEVICE}\n--level\n1\nreset\n-y\n")
+                        );
+                    }
+                    let staged_image = fs::read_to_string(fixture.join("burn-input")).unwrap();
+                    let staged_image = std::path::Path::new(staged_image.trim());
+                    let staged_config = fs::read_to_string(fixture.join("applied")).unwrap();
+                    let staged_config = std::path::Path::new(staged_config.trim());
+                    if operation.is_complete() {
+                        wait_for_staged_cleanup(staged_image, staged_config);
+                    } else {
+                        assert_eq!(fs::read(staged_image).unwrap(), b"firmware-image\n");
+                        assert_eq!(fs::read(staged_config).unwrap(), b"device-config\n");
+                        assert_eq!(operation.report.verified_image, Some(false));
+                        assert_eq!(operation.report.verified_version, Some(false));
+                        if case.failed_phase == "verify" {
+                            // Completed activation does not release exclusion when the
+                            // requested verification has exhausted its budget.
+                            let claim: serde_json::Value = serde_json::from_slice(
+                                &fs::read(fixture.join("state/mutation.json")).unwrap(),
+                            )
+                            .unwrap();
+                            assert_eq!(claim["operation_id"], OPERATION_ID);
+                            assert_eq!(claim["device_identity"], "0000:ab:01");
+                        }
+                    }
+                })
+                .expect("start firmware CLI scenario");
         }
-    }
+    });
 }
 
 /// A reused supervisor must stage the submitting process's local sources even

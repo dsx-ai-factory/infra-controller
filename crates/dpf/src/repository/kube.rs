@@ -26,6 +26,7 @@ use async_trait::async_trait;
 use futures::StreamExt;
 use k8s_openapi::api::core::v1::{ConfigMap, Secret};
 use kube::api::{DeleteParams, ListParams, Patch, PatchParams, PostParams, Preconditions};
+use kube::core::{ApiResource, DynamicObject};
 use kube::runtime::controller::Action;
 use kube::runtime::{Controller, watcher};
 use kube::{Api, Client, Resource};
@@ -878,7 +879,67 @@ impl K8sConfigRepository for KubeRepository {
 }
 
 #[async_trait]
+impl BmcCredentialRepository for KubeRepository {
+    async fn get_bmc_credential_secret(
+        &self,
+        name: &str,
+        namespace: &str,
+    ) -> Result<Option<Secret>, DpfError> {
+        let api: Api<Secret> = self.api(namespace);
+        Ok(api.get_opt(name).await?)
+    }
+
+    async fn create_bmc_credential_secret(&self, secret: &Secret) -> Result<(), DpfError> {
+        let namespace = secret.metadata.namespace.as_deref().ok_or_else(|| {
+            DpfError::InvalidState("BMC credential Secret namespace is missing".to_string())
+        })?;
+        let api: Api<Secret> = self.api(namespace);
+        api.create(&PostParams::default(), secret).await?;
+        Ok(())
+    }
+
+    async fn delete_bmc_credential_secret(
+        &self,
+        name: &str,
+        namespace: &str,
+        preconditions: &DpfDeletePreconditions,
+    ) -> Result<(), DpfError> {
+        let api: Api<Secret> = self.api(namespace);
+        let params = DeleteParams {
+            preconditions: Some(Preconditions {
+                uid: Some(preconditions.uid.clone()),
+                resource_version: Some(preconditions.resource_version.clone()),
+            }),
+            ..Default::default()
+        };
+        match api.delete(name, &params).await {
+            Ok(_) => Ok(()),
+            Err(kube::Error::Api(error)) if error.is_not_found() => Ok(()),
+            Err(error) => Err(error.into()),
+        }
+    }
+}
+
+#[async_trait]
 impl DpfOperatorConfigRepository for KubeRepository {
+    async fn get_version(&self, name: &str, namespace: &str) -> Result<String, DpfError> {
+        // Older operator specs lack fields required by the generated schema.
+        let api: Api<DynamicObject> = Api::namespaced_with(
+            self.client.clone(),
+            namespace,
+            &ApiResource::erase::<DPFOperatorConfig>(&()),
+        );
+        api.get(name)
+            .await?
+            .data
+            .pointer("/status/version")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string)
+            .ok_or_else(|| {
+                DpfError::InvalidState(format!("DPFOperatorConfig {name} has no status.version"))
+            })
+    }
+
     async fn get(
         &self,
         name: &str,

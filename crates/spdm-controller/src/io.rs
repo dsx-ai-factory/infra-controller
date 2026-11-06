@@ -15,7 +15,7 @@
  * limitations under the License.
  */
 
-//! State Controller IO implementation for dpa interfaces
+//! State controller IO for SPDM device attestation jobs.
 
 use config_version::{ConfigVersion, Versioned};
 use db::attestation::spdm::load_snapshot_for_machine_and_device_id;
@@ -29,13 +29,13 @@ use state_controller::io::StateControllerIO;
 use crate::context::SpdmStateHandlerContextObjects;
 use crate::metrics::SpdmMetricsEmitter;
 
-/// State Controller IO implementation for dpa interfaces
+/// Loads and persists SPDM device attestation jobs for the state controller.
 #[derive(Default, Debug)]
 pub struct SpdmStateControllerIO {}
 
 #[async_trait::async_trait]
 impl StateControllerIO for SpdmStateControllerIO {
-    type ObjectId = SpdmObjectId; // tuple of machine id and device id
+    type ObjectId = SpdmObjectId; // tuple of machine ID, device ID, and job ID
     type State = SpdmDeviceAttestation;
     type ControllerState = SpdmAttestationState;
     type MetricsEmitter = SpdmMetricsEmitter;
@@ -60,7 +60,8 @@ impl StateControllerIO for SpdmStateControllerIO {
         object_id: &Self::ObjectId,
     ) -> Result<Option<Self::State>, DatabaseError> {
         Ok(Some(
-            load_snapshot_for_machine_and_device_id(txn, &object_id.0, &object_id.1).await?,
+            load_snapshot_for_machine_and_device_id(txn, &object_id.0, &object_id.1, &object_id.2)
+                .await?,
         ))
     }
 
@@ -124,11 +125,12 @@ impl StateControllerIO for SpdmStateControllerIO {
                 ("triggerevidencecollection", "")
             }
             SpdmAttestationState::PollEvidenceCollection { .. } => ("pollevidencecolletion", ""),
+            SpdmAttestationState::WaitForTaskCancellation { .. } => ("waitfortaskcancellation", ""),
             SpdmAttestationState::NrasVerification => ("nrasverification", ""),
             SpdmAttestationState::ApplyAppraisalPolicy => ("applyappraisalpolicy", ""),
             SpdmAttestationState::Failed(_) => ("failed", ""),
             SpdmAttestationState::Passed => ("passed", ""),
-            SpdmAttestationState::Cancelled => ("cancelled", ""),
+            SpdmAttestationState::Waived => ("cancelled", ""),
         }
     }
 

@@ -84,6 +84,7 @@ jobs:
           path: |
             fern/
             docs/
+            helm-prereqs/
             RELEASE.md
             rest-api/flow/docs/
             rest-api/openapi/

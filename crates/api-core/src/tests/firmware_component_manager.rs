@@ -67,6 +67,7 @@ struct RecordingComputeTrayManager {
     inner: MockComputeTrayManager,
     firmware_update_options: Mutex<Vec<FirmwareUpdateOptions>>,
     target_versions: Mutex<Vec<String>>,
+    submitted_credentials: Mutex<Vec<Credentials>>,
 }
 
 impl RecordingComputeTrayManager {
@@ -98,6 +99,10 @@ impl ComputeTrayManager for RecordingComputeTrayManager {
         endpoints: &[ComputeTrayEndpoint],
         action: PowerAction,
     ) -> Result<Vec<ComputeTrayResult>, ComponentManagerError> {
+        self.submitted_credentials
+            .lock()
+            .unwrap()
+            .extend(endpoints.iter().map(|ep| ep.bmc_credentials.clone()));
         self.inner.power_control(endpoints, action).await
     }
 
@@ -108,6 +113,11 @@ impl ComputeTrayManager for RecordingComputeTrayManager {
         components: &[ComputeTrayComponent],
         options: &FirmwareUpdateOptions,
     ) -> Result<Vec<ComputeTrayResult>, ComponentManagerError> {
+        self.submitted_credentials
+            .lock()
+            .unwrap()
+            .extend(endpoints.iter().map(|ep| ep.bmc_credentials.clone()));
+
         self.firmware_update_options
             .lock()
             .unwrap()
@@ -140,6 +150,7 @@ struct RecordingNvSwitchManager {
     inner: MockNvSwitchManager,
     target_versions: Mutex<Vec<String>>,
     non_rms: Mutex<bool>,
+    submitted_credentials: Mutex<Vec<Credentials>>,
 }
 
 #[async_trait]
@@ -157,6 +168,11 @@ impl NvSwitchManager for RecordingNvSwitchManager {
         endpoints: &[SwitchEndpoint],
         action: PowerAction,
     ) -> Result<Vec<SwitchComponentResult>, ComponentManagerError> {
+        self.submitted_credentials.lock().unwrap().extend(
+            endpoints
+                .iter()
+                .flat_map(|ep| [ep.bmc_credentials.clone(), ep.nvos_credentials.clone()]),
+        );
         self.inner.power_control(endpoints, action).await
     }
 
@@ -167,6 +183,12 @@ impl NvSwitchManager for RecordingNvSwitchManager {
         components: &[model::component_manager::NvSwitchComponent],
         options: &FirmwareUpdateOptions,
     ) -> Result<Vec<SwitchComponentResult>, ComponentManagerError> {
+        self.submitted_credentials.lock().unwrap().extend(
+            endpoints
+                .iter()
+                .flat_map(|ep| [ep.bmc_credentials.clone(), ep.nvos_credentials.clone()]),
+        );
+
         self.target_versions
             .lock()
             .unwrap()
@@ -227,6 +249,7 @@ impl NvSwitchManager for RecordingNvSwitchManager {
 struct RecordingPowerShelfManager {
     inner: MockPowerShelfManager,
     target_versions: Mutex<Vec<String>>,
+    submitted_credentials: Mutex<Vec<Credentials>>,
 }
 
 #[async_trait]
@@ -244,6 +267,10 @@ impl PowerShelfManager for RecordingPowerShelfManager {
         endpoints: &[PowerShelfEndpoint],
         action: PowerAction,
     ) -> Result<Vec<PowerShelfComponentResult>, ComponentManagerError> {
+        self.submitted_credentials
+            .lock()
+            .unwrap()
+            .extend(endpoints.iter().map(|ep| ep.pmc_credentials.clone()));
         self.inner.power_control(endpoints, action).await
     }
 
@@ -254,6 +281,11 @@ impl PowerShelfManager for RecordingPowerShelfManager {
         components: &[model::component_manager::PowerShelfComponent],
         options: &FirmwareUpdateOptions,
     ) -> Result<Vec<PowerShelfComponentResult>, ComponentManagerError> {
+        self.submitted_credentials
+            .lock()
+            .unwrap()
+            .extend(endpoints.iter().map(|ep| ep.pmc_credentials.clone()));
+
         self.target_versions
             .lock()
             .unwrap()
@@ -328,6 +360,7 @@ async fn compute_tray_direct_dispatch_forwards_force_update(
                 access_token: Some("test-token".to_owned()),
                 force_update,
                 bypass_state_controller: true,
+                credential_overrides: None,
                 target: Some(
                     rpc::update_component_firmware_request::Target::ComputeTrays(
                         rpc::UpdateComputeTrayFirmwareTarget {
@@ -865,6 +898,8 @@ async fn create_pre_ingestion_firmware_fixture(
             bmc_mac_address: compute_mac,
             data: rpc::ExpectedMachine {
                 chassis_serial_number: "pre-ingestion-compute".to_owned(),
+                bmc_username: "factory-compute".into(),
+                bmc_password: "factory-compute-pw".into(),
                 rack_id: Some(rack_id.clone()),
                 ..Default::default()
             }
@@ -882,6 +917,10 @@ async fn create_pre_ingestion_firmware_fixture(
                 is_primary: true,
             }],
             serial_number: "pre-ingestion-switch".to_owned(),
+            bmc_username: "factory-switch".into(),
+            bmc_password: "factory-switch-pw".into(),
+            nvos_username: Some("factory-nvos".into()),
+            nvos_password: Some("factory-nvos-pw".into()),
             rack_id: Some(rack_id.clone()),
             ..Default::default()
         },
@@ -893,6 +932,8 @@ async fn create_pre_ingestion_firmware_fixture(
         ExpectedPowerShelf {
             bmc_mac_address: shelf_mac,
             serial_number: "pre-ingestion-power-shelf".to_owned(),
+            bmc_username: "factory-shelf".into(),
+            bmc_password: "factory-shelf-pw".into(),
             rack_id: Some(rack_id),
             ..Default::default()
         },
@@ -947,6 +988,24 @@ async fn empty_version_resolves_profile_for_pre_ingestion_macs(
         [compute_mac, switch_mac, shelf_mac],
     ) = create_pre_ingestion_firmware_fixture(pool).await?;
 
+    // Direct dispatch before ingestion must work with only expected inventory
+    // credentials, and must pass those credentials through to each backend.
+    for key in [compute_mac, switch_mac, shelf_mac]
+        .map(|bmc_mac_address| CredentialKey::BmcCredentials {
+            credential_type: BmcCredentialType::BmcRoot { bmc_mac_address },
+        })
+        .into_iter()
+        .chain([CredentialKey::SwitchNvosAdmin {
+            bmc_mac_address: switch_mac,
+        }])
+    {
+        env.api
+            .credential_manager
+            .delete_credentials(&key)
+            .await
+            .map_err(|error| error.to_string())?;
+    }
+
     for (mut request, mac) in [
         (compute_request(machine_id, false).into_inner(), compute_mac),
         (switch_request(switch_id, false).into_inner(), switch_mac),
@@ -998,6 +1057,39 @@ async fn empty_version_resolves_profile_for_pre_ingestion_macs(
         power_shelf_manager.target_versions.lock().unwrap().clone(),
     ] {
         assert_eq!(versions, [FIRMWARE_OBJECT]);
+    }
+
+    for (actual, users) in [
+        (
+            compute_tray_manager
+                .submitted_credentials
+                .lock()
+                .unwrap()
+                .clone(),
+            vec!["compute"],
+        ),
+        (
+            nv_switch_manager
+                .submitted_credentials
+                .lock()
+                .unwrap()
+                .clone(),
+            vec!["switch", "nvos"],
+        ),
+        (
+            power_shelf_manager
+                .submitted_credentials
+                .lock()
+                .unwrap()
+                .clone(),
+            vec!["shelf"],
+        ),
+    ] {
+        let expected = users
+            .into_iter()
+            .map(|user| Credentials::new(format!("factory-{user}"), format!("factory-{user}-pw")))
+            .collect::<Vec<_>>();
+        assert_eq!(actual, expected);
     }
 
     Ok(())
@@ -1062,5 +1154,346 @@ async fn empty_version_resolution_fails_before_direct_rms_dispatch(
 
     assert!(fixture.compute_tray_manager.target_versions().is_empty());
 
+    Ok(())
+}
+
+fn request_credentials(switch: bool) -> rpc::ComponentCredentialOverrides {
+    let pair = |name: &str| rpc::UsernamePassword {
+        username: format!("request-{name}"),
+        password: format!("request-{name}-password"),
+    };
+    rpc::ComponentCredentialOverrides {
+        bmc: Some(pair("bmc")),
+        nvos: switch.then(|| pair("nvos")),
+    }
+}
+
+#[crate::sqlx_test]
+async fn direct_dispatch_credential_overrides_reach_power_and_firmware_backends(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use rpc::component_power_control_request::Target as PowerTarget;
+    use rpc::update_component_firmware_request::Target as FirmwareTarget;
+
+    let (fixture, [compute_mac, switch_mac, shelf_mac]) =
+        create_pre_ingestion_firmware_fixture(pool.clone()).await?;
+    let mac_list = |mac: MacAddress| rpc::MacAddressList {
+        mac_addresses: vec![mac.to_string()],
+    };
+
+    // Exercise each endpoint builder before and after ingestion. The fixture has
+    // different factory and Vault credentials, so either unwanted lookup is visible.
+    for ingested in [false, true] {
+        if ingested {
+            sqlx::query("UPDATE switches SET bmc_mac_address = $1 WHERE id = $2")
+                .bind(switch_mac)
+                .bind(fixture.switch_id)
+                .execute(&pool)
+                .await?;
+            sqlx::query("UPDATE power_shelves SET bmc_mac_address = $1 WHERE id = $2")
+                .bind(shelf_mac)
+                .bind(fixture.power_shelf_id)
+                .execute(&pool)
+                .await?;
+            sqlx::query("UPDATE machine_interfaces SET power_shelf_id = $1, interface_type = 'Bmc', association_type = 'PowerShelf' WHERE mac_address = $2")
+                .bind(fixture.power_shelf_id).bind(shelf_mac).execute(&pool).await?;
+        }
+        for (mut firmware, mac, recorded, expected) in [
+            (
+                compute_request(fixture.machine_id, ingested).into_inner(),
+                compute_mac,
+                &fixture.compute_tray_manager.submitted_credentials,
+                request_credentials(false),
+            ),
+            (
+                switch_request(fixture.switch_id, ingested).into_inner(),
+                switch_mac,
+                &fixture.nv_switch_manager.submitted_credentials,
+                request_credentials(true),
+            ),
+            (
+                power_shelf_request(fixture.power_shelf_id, ingested).into_inner(),
+                shelf_mac,
+                &fixture.power_shelf_manager.submitted_credentials,
+                request_credentials(false),
+            ),
+        ] {
+            let power_target = match firmware.target.as_mut().unwrap() {
+                FirmwareTarget::ComputeTrays(target) => {
+                    if ingested {
+                        PowerTarget::MachineIds(target.machine_ids.clone().unwrap())
+                    } else {
+                        target.machine_ids = None;
+                        target.bmc_macs = Some(mac_list(mac));
+                        PowerTarget::ComputeBmcMacs(mac_list(mac))
+                    }
+                }
+                FirmwareTarget::Switches(target) => {
+                    if ingested {
+                        PowerTarget::SwitchIds(target.switch_ids.clone().unwrap())
+                    } else {
+                        target.switch_ids = None;
+                        target.bmc_macs = Some(mac_list(mac));
+                        PowerTarget::SwitchBmcMacs(mac_list(mac))
+                    }
+                }
+                FirmwareTarget::PowerShelves(target) => {
+                    if ingested {
+                        PowerTarget::PowerShelfIds(target.power_shelf_ids.clone().unwrap())
+                    } else {
+                        target.power_shelf_ids = None;
+                        target.pmc_macs = Some(mac_list(mac));
+                        PowerTarget::PowerShelfPmcMacs(mac_list(mac))
+                    }
+                }
+                FirmwareTarget::Racks(_) => unreachable!(),
+            };
+            firmware.credential_overrides = Some(request_credentials(true));
+            let power = rpc::ComponentPowerControlRequest {
+                target: Some(power_target),
+                action: ::rpc::common::SystemPowerControl::On as i32,
+                bypass_state_controller: ingested,
+                credential_overrides: firmware.credential_overrides.clone(),
+            };
+            let results = [
+                crate::handlers::component_manager::component_power_control(
+                    &fixture.env.api,
+                    Request::new(power),
+                )
+                .await?
+                .into_inner()
+                .results,
+                crate::handlers::component_manager::update_component_firmware(
+                    &fixture.env.api,
+                    Request::new(firmware),
+                )
+                .await?
+                .into_inner()
+                .results,
+            ];
+            for results in results {
+                assert_eq!(results.len(), 1, "{mac}, ingested={ingested}");
+                assert_eq!(
+                    results[0].status,
+                    rpc::ComponentManagerStatusCode::Success as i32,
+                    "{results:?}"
+                );
+            }
+            let expected: Vec<_> = [expected.bmc, expected.nvos]
+                .into_iter()
+                .flatten()
+                .map(|pair| Credentials::new(pair.username, pair.password))
+                .collect();
+            assert_eq!(
+                *recorded.lock().unwrap(),
+                [expected.clone(), expected].concat(),
+                "{mac}, ingested={ingested}"
+            );
+            recorded.lock().unwrap().clear();
+        }
+    }
+    for mac in [compute_mac, switch_mac, shelf_mac] {
+        let stored = fixture
+            .env
+            .api
+            .credential_manager
+            .get_credentials(&CredentialKey::BmcCredentials {
+                credential_type: BmcCredentialType::BmcRoot {
+                    bmc_mac_address: mac,
+                },
+            })
+            .await
+            .map_err(|error| error.to_string())?;
+        assert_eq!(stored, Some(Credentials::new("test-user", "test-password")));
+    }
+    Ok(())
+}
+
+#[crate::sqlx_test]
+async fn credential_overrides_only_apply_to_direct_targets_in_mixed_batches(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use rpc::component_power_control_request::Target as PowerTarget;
+    use rpc::update_component_firmware_request::Target as FirmwareTarget;
+
+    let (fixture, [compute_mac, switch_mac, shelf_mac]) =
+        create_pre_ingestion_firmware_fixture(pool.clone()).await?;
+    let machine = db::machine::find_one(&pool, &fixture.machine_id, Default::default())
+        .await?
+        .unwrap();
+    let mixed_macs = |pre_ingestion: MacAddress, ingested: MacAddress| rpc::MacAddressList {
+        mac_addresses: vec![pre_ingestion.to_string(), ingested.to_string()],
+    };
+    for (mut firmware, macs, is_switch, recorded) in [
+        (
+            compute_request(fixture.machine_id, false).into_inner(),
+            mixed_macs(compute_mac, machine.status.bmc_info.mac.unwrap()),
+            false,
+            &fixture.compute_tray_manager.submitted_credentials,
+        ),
+        (
+            switch_request(fixture.switch_id, false).into_inner(),
+            mixed_macs(switch_mac, "02:00:00:00:00:01".parse()?),
+            true,
+            &fixture.nv_switch_manager.submitted_credentials,
+        ),
+        (
+            power_shelf_request(fixture.power_shelf_id, false).into_inner(),
+            mixed_macs(shelf_mac, "02:00:00:00:00:02".parse()?),
+            false,
+            &fixture.power_shelf_manager.submitted_credentials,
+        ),
+    ] {
+        let overrides = request_credentials(is_switch);
+        firmware.credential_overrides = Some(request_credentials(true));
+        let power_target = match firmware.target.as_mut().unwrap() {
+            FirmwareTarget::ComputeTrays(target) => {
+                target.machine_ids = None;
+                target.bmc_macs = Some(macs.clone());
+                PowerTarget::ComputeBmcMacs(macs)
+            }
+            FirmwareTarget::Switches(target) => {
+                target.switch_ids = None;
+                target.bmc_macs = Some(macs.clone());
+                PowerTarget::SwitchBmcMacs(macs)
+            }
+            FirmwareTarget::PowerShelves(target) => {
+                target.power_shelf_ids = None;
+                target.pmc_macs = Some(macs.clone());
+                PowerTarget::PowerShelfPmcMacs(macs)
+            }
+            FirmwareTarget::Racks(_) => unreachable!(),
+        };
+        let power = rpc::ComponentPowerControlRequest {
+            target: Some(power_target),
+            action: ::rpc::common::SystemPowerControl::ForceOff as i32,
+            credential_overrides: firmware.credential_overrides.clone(),
+            ..Default::default()
+        };
+        let results = [
+            crate::handlers::component_manager::component_power_control(
+                &fixture.env.api,
+                Request::new(power),
+            )
+            .await?
+            .into_inner()
+            .results,
+            crate::handlers::component_manager::update_component_firmware(
+                &fixture.env.api,
+                Request::new(firmware),
+            )
+            .await?
+            .into_inner()
+            .results,
+        ];
+        for results in results {
+            assert_eq!(results.len(), 2);
+            assert!(
+                results.iter().all(|result| {
+                    result.status == rpc::ComponentManagerStatusCode::Success as i32
+                }),
+                "{results:?}"
+            );
+        }
+        // Only the pre-ingestion target dispatches; the ingested target is queued.
+        let expected: Vec<_> = [overrides.bmc, overrides.nvos]
+            .into_iter()
+            .flatten()
+            .map(|pair| Credentials::new(pair.username, pair.password))
+            .collect();
+        assert_eq!(
+            *recorded.lock().unwrap(),
+            [expected.clone(), expected].concat()
+        );
+        assert_rack_activity_version(&fixture).await?;
+    }
+
+    let machine = db::machine::find_one(&pool, &fixture.machine_id, Default::default())
+        .await?
+        .unwrap();
+    assert!(matches!(
+        machine.machine_maintenance_requested.unwrap().operation,
+        model::machine::MachineMaintenanceOperation::PowerOff { graceful: false }
+    ));
+    let switches = db::switch::find_by(
+        &mut *pool.acquire().await?,
+        db::ObjectColumnFilter::One(db::switch::IdColumn, &fixture.switch_id),
+    )
+    .await?;
+    assert!(matches!(
+        switches[0]
+            .switch_maintenance_requested
+            .as_ref()
+            .unwrap()
+            .operation,
+        model::switch::SwitchMaintenanceOperation::PowerOff { graceful: false }
+    ));
+    let shelves = db::power_shelf::find_by(
+        &mut *pool.acquire().await?,
+        db::ObjectColumnFilter::One(db::power_shelf::IdColumn, &fixture.power_shelf_id),
+    )
+    .await?;
+    assert!(matches!(
+        shelves[0]
+            .power_shelf_maintenance_requested
+            .as_ref()
+            .unwrap()
+            .operation,
+        model::power_shelf::PowerShelfMaintenanceOperation::PowerOff { graceful: false }
+    ));
+    Ok(())
+}
+
+#[crate::sqlx_test]
+async fn credential_overrides_are_ignored_for_rack_updates_and_standalone_reprovisioning(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let fixture = create_firmware_object_fixture(pool.clone()).await?;
+    let host = create_managed_host_with_hardware_info_template(
+        &fixture.env,
+        HardwareInfoTemplate::Default,
+    )
+    .await;
+    let host_id: HostMachineId = host.id.into();
+    for mut request in [
+        compute_request(host_id, true).into_inner(),
+        rpc::UpdateComponentFirmwareRequest {
+            target_version: FIRMWARE_OBJECT.into(),
+            target: Some(rpc::update_component_firmware_request::Target::Racks(
+                rpc::UpdateFirmwareObjectTarget {
+                    rack_ids: Some(rpc::RackIdList {
+                        rack_ids: vec![fixture.rack_id.clone()],
+                    }),
+                },
+            )),
+            ..Default::default()
+        },
+    ] {
+        request.credential_overrides = Some(request_credentials(true));
+        let response = crate::handlers::component_manager::update_component_firmware(
+            &fixture.env.api,
+            Request::new(request),
+        )
+        .await?
+        .into_inner();
+        assert_eq!(response.results.len(), 1);
+        assert_eq!(
+            response.results[0].status,
+            rpc::ComponentManagerStatusCode::Success as i32
+        );
+    }
+    let after = db::machine::find_one(&pool, &host_id, Default::default())
+        .await?
+        .unwrap();
+    assert_eq!(after.config.firmware_autoupdate, Some(true));
+    assert_rack_activity_version(&fixture).await?;
+    assert!(
+        fixture
+            .compute_tray_manager
+            .submitted_credentials
+            .lock()
+            .unwrap()
+            .is_empty()
+    );
     Ok(())
 }

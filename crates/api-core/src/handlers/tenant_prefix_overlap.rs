@@ -25,7 +25,7 @@ mod startup;
 use std::collections::HashSet;
 
 use carbide_network::ip::prefix::IpNet;
-use carbide_network::virtualization::VpcVirtualizationType;
+use carbide_network::virtualization::{RouteTargetContributions, VpcVirtualizationType};
 use carbide_uuid::vpc::VpcId;
 use db::ObjectColumnFilter;
 pub(super) use instances::validate_affected_instances;
@@ -188,8 +188,13 @@ fn site_policy_is_isolated(runtime_config: &CarbideConfig) -> bool {
         && runtime_config.anycast_site_prefixes.is_empty()
         && runtime_config.dpu_config.service_vpc_slot_count == 0
         && runtime_config.fnn.as_ref().is_some_and(|fnn| {
-            fnn.common_internal_route_target.is_none()
-                && fnn.additional_route_target_imports.is_empty()
+            let contributions = RouteTargetContributions {
+                profile_imports: &[],
+                profile_exports: &[],
+                common_export: fnn.common_internal_route_target.as_ref(),
+                site_imports: &fnn.additional_route_target_imports,
+            };
+            !contributions.has_additional_targets()
         })
 }
 
@@ -497,11 +502,13 @@ pub(super) fn instance_network_is_nonexpanding(
                 interfaces: vec![retained.clone()],
                 auto_config: previous.auto_config,
                 service_interfaces: vec![],
+                vpc_local_interfaces: vec![],
             };
             let requested_interface = InstanceNetworkConfig {
                 interfaces: vec![requested.clone()],
                 auto_config: candidate.auto_config,
                 service_interfaces: vec![],
+                vpc_local_interfaces: vec![],
             };
             !previous_interface.is_network_config_update_requested(&requested_interface)
         })

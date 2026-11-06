@@ -15,8 +15,11 @@
  * limitations under the License.
  */
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
+use carbide_uuid::instance::InstanceId;
+use carbide_uuid::machine::{MachineId, MachineIdSource, MachineType};
 use config_version::ConfigVersion;
 use model::resource_pool::common::{self, CommonPools, EthernetPools, IbPools, VPC_DPU_LOOPBACK};
 use model::resource_pool::{
@@ -26,6 +29,9 @@ use sqlx::{Connection, PgPool};
 
 use super::*;
 
+/// Verifies loopback queries tolerate additive columns and release only DPU/VPC allocations absent
+/// from both host and service memberships, keeping each resource-pool allocation consistent with
+/// its `vpc_dpu_loopbacks` row.
 #[crate::sqlx_test]
 async fn loopback_queries_survive_added_columns(
     pool: PgPool,
@@ -149,7 +155,43 @@ async fn exercise_loopback_queries(
     )
     .await?;
 
-    delete_and_deallocate_for_vpcs(&common_pools, &dpu_id, &[selected_vpc_id], &mut txn).await?;
+    // Seed and lock an Instance with no `service_interfaces`.
+    let host_id = MachineId::new(
+        MachineIdSource::ProductBoardChassisSerial,
+        [0x61; 32],
+        MachineType::Host,
+    );
+    sqlx::query("INSERT INTO machines (id, dpf) VALUES ($1, '{}')")
+        .bind(host_id)
+        .execute(&mut *txn)
+        .await?;
+    let instance_id = InstanceId::new();
+    sqlx::query(
+        "INSERT INTO instances (id, machine_id, network_config, nvlink_config) \
+         VALUES ($1, $2, '{\"interfaces\": []}', '{\"gpu_configs\": []}')",
+    )
+    .bind(instance_id)
+    .bind(host_id)
+    .execute(&mut *txn)
+    .await?;
+    crate::instance::find_by_id_for_update(&mut txn, instance_id)
+        .await?
+        .expect("loopback owner remains lockable");
+
+    // Retain only the unrelated host membership while releasing unretained candidate loopbacks.
+    let candidate_memberships = HashSet::from([(dpu_id, selected_vpc_id), (dpu_id, other_vpc_id)]);
+    let retained_host_memberships = HashSet::from([(dpu_id, other_vpc_id)]);
+    release_unretained_instance_loopbacks(
+        &common_pools,
+        &mut txn,
+        instance_id,
+        &candidate_memberships,
+        &retained_host_memberships,
+    )
+    .await?;
+
+    // The selected DPU/VPC row and pool allocation are released while the Admin and retained host
+    // DPU/VPC rows and allocations remain.
     assert_loopback_allocations(&mut txn, &loopbacks, &[admin_vpc_id, other_vpc_id]).await?;
 
     delete_and_deallocate(&common_pools, &dpu_id, &mut txn, false).await?;

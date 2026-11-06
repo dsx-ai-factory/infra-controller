@@ -833,22 +833,30 @@ async fn test_managed_static_address_requires_dhcp_ack_after_external_assignment
     .await?;
     txn.commit().await?;
 
-    // The IPv6 assignment moves the interface to `static-assignments`,
-    // even though its IPv4 reservation still belongs to the admin prefix.
-    for (ip_address, status) in [
-        (managed_ipv4, AssignStaticAddressStatus::ReplacedDhcp),
-        (external_ipv6, AssignStaticAddressStatus::Assigned),
-    ] {
-        let response = env
-            .api()
-            .assign_static_address(Request::new(AssignStaticAddressRequest {
-                interface_id: Some(interface.id),
-                ip_address: ip_address.to_string(),
-            }))
-            .await?
-            .into_inner();
-        assert_eq!(response.status(), status);
-    }
+    let response = env
+        .api()
+        .assign_static_address(Request::new(AssignStaticAddressRequest {
+            interface_id: Some(interface.id),
+            ip_address: managed_ipv4.to_string(),
+        }))
+        .await?
+        .into_inner();
+    assert_eq!(response.status(), AssignStaticAddressStatus::ReplacedDhcp);
+
+    // AssignStaticAddress rejects this mixed-segment move (#6986), so seed the
+    // legacy state directly: external IPv6 on `static-assignments` while the
+    // managed IPv4 reservation remains in the admin prefix.
+    let mut txn = env.db_txn().await;
+    let static_segment = db::network_segment::static_assignments(&mut txn).await?;
+    db::machine_interface_address::assign_static(&mut txn, interface.id, external_ipv6).await?;
+    db::machine_interface::update_segment_id(
+        &mut txn,
+        interface.id,
+        static_segment.id,
+        static_segment.config.subdomain_id,
+    )
+    .await?;
+    txn.commit().await?;
 
     let mut txn = env.db_txn().await;
     db::bmc_suppression::upsert(

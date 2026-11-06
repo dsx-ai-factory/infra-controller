@@ -6,22 +6,23 @@ syntax = "proto3";
 package firmware_supervisor;
 
 import "mlx_device.proto";
+import "google/protobuf/duration.proto";
 
 // FirmwareSupervisor is a private Unix-socket service for one PCI-device slot.
 // The slot identity does not prove physical-card identity or reset isolation;
 // the executor separately owns the host-wide claim before admitting work.
 // Receipts survive client disconnection. RPC cancellation never cancels a
 // firmware operation, and callers must resolve an uncertain submission by its
-// original operation ID. This service is not part of the Core API.
+// original operation ID and preserve its admission token when used. This service
+// is not part of the Core API.
 // Each daemon admits at most eight journal RPC tasks across all connections;
 // excess requests return RESOURCE_EXHAUSTED without waiting for capacity.
 // Detached tasks retain their quota until journal access finishes. Execution
 // progress and observer cancellation do not consume this quota. Transport limits
 // allow 32 connected sockets and eight active HTTP/2 streams per connection;
 // excess sockets are closed. Requests and responses are limited to 128 KiB.
-// Protocol 2 adds bounded post-reset verification retries. Version-2 clients
-// may read and cancel version-1 receipts, but must not submit work to version 1:
-// it cannot honor the retry policy, including its omitted defaults.
+// The client and supervisor support one matching private API revision. Clients
+// reject a different revision during the status handshake before any operation.
 service FirmwareSupervisor {
   // Record an immutable request, or return its existing receipt. Reusing an ID
   // with different work is rejected, as is new work while a predecessor still
@@ -32,6 +33,10 @@ service FirmwareSupervisor {
   rpc SubmitFirmwareOperation(SubmitFirmwareOperationRequest) returns (SubmitFirmwareOperationResponse);
   // Return a recorded operation; an unknown ID returns NOT_FOUND.
   rpc GetFirmwareOperation(GetFirmwareOperationRequest) returns (GetFirmwareOperationResponse);
+  // Read checked work only when every immutable request field matches. A reused
+  // ID with different work returns ALREADY_EXISTS. Absence never admits work.
+  // Unlike Get, this proves which request the receipt serves.
+  rpc ObserveFirmwareUpdate(ObserveFirmwareUpdateRequest) returns (ObserveFirmwareOperationResponse);
   // Request cancellation at a safe phase boundary. This never kills an active
   // hardware mutation and does not undo effects that have already completed.
   rpc CancelFirmwareOperation(CancelFirmwareOperationRequest) returns (CancelFirmwareOperationResponse);
@@ -66,7 +71,8 @@ message SupervisorIdentity {
 // SubmitFirmwareOperationRequest identifies one immutable operation on this card.
 message SubmitFirmwareOperationRequest {
   // Stable ID containing 1-256 printable nonspace ASCII bytes. Other values
-  // return INVALID_ARGUMENT. Reuse it to resolve a lost response without dispatching again.
+  // return INVALID_ARGUMENT. Reuse it to recover its receipt; guard uncertain
+  // submission retries with expected_supervisor_instance_id.
   string operation_id = 1;
   // Omission requests a durable no-work completion with flashed=false. Admission
   // still rejects unresolved predecessors or an unavailable host mutation claim.
@@ -77,6 +83,103 @@ message SubmitFirmwareOperationRequest {
   // Required identity from the client's handshake. Omission or any mismatch
   // returns FAILED_PRECONDITION before admitting work.
   SupervisorIdentity expected_identity = 4;
+  // Presence selects digest-bound UpdateFirmware semantics and requires profile.
+  // Omission preserves the profile/no-work contract.
+  FirmwareUpdateContext update_context = 5;
+  // If present, new admission requires this exact opaque token from a prior
+  // observation (1-256 printable nonspace ASCII bytes).
+  // A mismatch (including an empty token) returns FAILED_PRECONDITION before any
+  // claim or receipt is created. A matching existing request returns its receipt
+  // even after instance replacement. Omission preserves unguarded admission.
+  // The guard also applies when update_context or profile is omitted.
+  // Clients must not replace this token during reconnection.
+  optional string expected_supervisor_instance_id = 6;
+  // Required only for a new checked SiteCache admission; forbidden for new
+  // Direct or legacy work. It is transient, outside immutable request identity
+  // and the journal. A duplicate returns its receipt without requiring this
+  // configuration and never replaces the accepted operation's runtime input.
+  CoreFirmwareDownloadConfig core_download_config = 7;
+}
+
+// FirmwareUpdateContext binds one checked workflow to its dispatch and artifacts.
+// All present fields participate in immutable request identity. None changes the
+// supervisor's internal phase ordering or permits resuming an interrupted burn.
+message FirmwareUpdateContext {
+  // Immutable caller dispatch token: 1-256 printable nonspace ASCII bytes.
+  string phase_id = 1;
+  // Required image digest and configuration digest iff the profile has config.
+  mlx_device.FirmwareArtifactDigests expected_digests = 2;
+  // Optional frozen base MAC or GUID, checked before mutation. Omission preserves
+  // the stored request fingerprint for work submitted without a stable identity.
+  mlx_device.MlxDeviceSelector expected_device = 3;
+  // Frozen transport choice; omitted Direct preserves older request hashes.
+  mlx_device.FirmwareDeliveryMode delivery_mode = 4;
+}
+
+// Scout's resolved certificate-based Core transport settings for this accepted
+// operation. Paths are absolute on the shared host filesystem. The helper uses
+// ForgeTlsClient and mints its own node JWT; no JWT or PEM bytes are transmitted.
+// Nothing in this message is stored in the durable request or fingerprint.
+// Artifact transport failures retry after 1, 2, and 4 seconds. Those retries,
+// connection retries, cache-readiness polling, and body I/O share one 30-minute
+// deadline per artifact. Refer to ../README.md#supervised-firmware-operations
+// for the complete transfer contract.
+message CoreFirmwareDownloadConfig {
+  // Required Core HTTPS origin with a host and root path, without user
+  // information, query, or fragment. Never an original artifact source URL.
+  string core_url = 1;
+  // Required absolute root-CA file path, at most 4096 UTF-8 bytes.
+  // ForgeTlsClient rereads it on each request attempt to verify Core's identity.
+  string root_ca_path = 2;
+  // Required absolute client-certificate file path, at most 4096 UTF-8 bytes.
+  // Reread for each client build and used with client_key_path for node JWTs.
+  string client_cert_path = 3;
+  // Required absolute private-key file path, at most 4096 UTF-8 bytes.
+  // Matches client_cert_path and is reread for client authentication and JWTs.
+  string client_key_path = 4;
+  // Require Core server-certificate verification. Must be true for SiteCache;
+  // false, including omission, is rejected before admission.
+  bool enforce_tls = 5;
+  // Fail client construction if the configured client certificate or key does
+  // not load. False (including omission) permits transport setup without a
+  // client certificate; it does not disable the separate node JWT requirement.
+  bool require_client_cert = 6;
+  // Bind DNS queries and connections to the management VRF when true.
+  // False (including omission) uses ordinary routing. DNS uses the shared
+  // Forge resolver with the host's system resolver configuration in either case.
+  bool use_mgmt_vrf = 7;
+  // Connection-acquisition and response-header timeout, excluding body I/O.
+  // Omission uses 300 seconds. A supplied protobuf duration must be positive
+  // and fit the host's monotonic clock; the artifact deadline also applies.
+  google.protobuf.Duration request_timeout = 8;
+  // Optional SOCKS5 proxy socket address (IPv4:port or [IPv6]:port).
+  // Omission connects without a proxy; a present empty or malformed address
+  // fails connection setup. The helper does not read proxy environment defaults.
+  optional string socks_proxy = 9;
+  // Connection retries after the initial attempt; omission or zero disables
+  // them. Scout's ForgeClientConfig factory normally supplies 3. This limit is
+  // independent of the artifact transport retries described above.
+  optional uint32 connect_retries_max = 10;
+  // Delay between connection retries; omission or zero means no delay.
+  // A supplied protobuf duration must be nonnegative and fit the monotonic
+  // clock. Scout's ForgeClientConfig factory normally supplies 20 seconds.
+  google.protobuf.Duration connect_retries_interval = 11;
+}
+
+// ObserveFirmwareUpdateRequest repeats the immutable checked submission without
+// requesting admission. Profile and context are required and validated exactly
+// as on submission. The serving instance token is returned only for absence.
+message ObserveFirmwareUpdateRequest {
+  // Original operation ID, with the bounds and reserved prefix of checked submit.
+  string operation_id = 1;
+  // Original complete profile, including options, sources and retry policy.
+  mlx_device.FirmwareFlasherProfile profile = 2;
+  // Original policy; omission means Continue and unknown values are rejected.
+  ObserverExitBehavior observer_exit_behavior = 3;
+  // Required handshake identity, including the exact execution PCI BDF.
+  SupervisorIdentity expected_identity = 4;
+  // Original phase, artifact digests and optional stable device identity.
+  FirmwareUpdateContext update_context = 5;
 }
 
 // SubmitFirmwareOperationResponse contains the durably recorded receipt.
@@ -96,6 +199,18 @@ message GetFirmwareOperationRequest {
 message GetFirmwareOperationResponse {
   // Always present on success, including when execution needs manual intervention.
   mlx_device.FirmwareOperation operation = 1;
+}
+
+// ObserveFirmwareOperationResponse distinguishes absent receipts from failed reads.
+message ObserveFirmwareOperationResponse {
+  // Exactly one result is required. An absent result is an invalid response.
+  oneof result {
+    // Recorded execution state, including an interrupted or terminal operation.
+    mlx_device.FirmwareOperation receipt = 1;
+    // No receipt exists in this service's readable journal. A failed or fenced
+    // journal returns an RPC error instead, never permission for new admission.
+    mlx_device.FirmwareOperationMissingReceipt missing_receipt = 2;
+  }
 }
 
 // CancelFirmwareOperationRequest asks an existing operation to stop safely.
@@ -119,7 +234,7 @@ message GetSupervisorStatusRequest {}
 
 // GetSupervisorStatusResponse supplies the identity checked before submission.
 message GetSupervisorStatusResponse {
-  // Private protocol version, exactly 2 for this service implementation.
+  // Private API revision. Clients require an exact match with their own revision.
   uint32 protocol_version = 1;
   // Normalized PCI slot dddd:bb:ss, not a certified physical card or an
   // independently isolated reset domain.

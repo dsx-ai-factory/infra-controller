@@ -120,6 +120,7 @@ fn build_exploration_report(
             bios_version: None,
             serial_console_ssh_port: None,
             processors: None,
+            part_number: None,
         }],
         chassis: vec![Chassis {
             model: Some(model.to_string()),
@@ -140,6 +141,7 @@ fn build_exploration_report(
                 description: None,
                 version: Some(bmc_version.to_string()),
                 release_date: None,
+                drive: None,
             }],
         }],
         machine_id,

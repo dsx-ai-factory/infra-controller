@@ -1,0 +1,50 @@
+{{- if or .Values.runner.enabled (dig "fleetup" "enabled" false .Values.suites) }}
+{{- $root := . }}
+{{/* Pod reads in each control-plane namespace for the runner and the fleetup
+     suite accounts, as enabled, named like the inventory Role by a hash of the
+     full release identity under a bounded prefix. */}}
+{{- $hash := printf "%s/%s" .Release.Namespace .Release.Name | sha256sum | trunc 10 }}
+{{- $name := printf "%s-cp-%s" (include "scale-test.fullname" . | trunc 49 | trimSuffix "-") $hash }}
+{{- $namespaces := list }}
+{{- range .Values.runner.controlPlane }}
+{{- $namespaces = append $namespaces (required "each runner.controlPlane entry needs a namespace" .namespace) }}
+{{- end }}
+{{- range $ns := uniq $namespaces }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $name }}
+  namespace: {{ $ns }}
+  labels:
+    {{- include "scale-test.labels" $root | nindent 4 }}
+rules:
+  # Pod reads only: no Service, watch, write or Secret read.
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $name }}
+  namespace: {{ $ns }}
+  labels:
+    {{- include "scale-test.labels" $root | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ $name }}
+subjects:
+  {{- if $root.Values.runner.enabled }}
+  - kind: ServiceAccount
+    name: {{ include "scale-test.jobName" (dict "root" $root "suite" "runner") }}
+    namespace: {{ $root.Release.Namespace }}
+  {{- end }}
+  {{- if dig "fleetup" "enabled" false $root.Values.suites }}
+  - kind: ServiceAccount
+    name: {{ include "scale-test.fullname" $root }}
+    namespace: {{ $root.Release.Namespace }}
+  {{- end }}
+{{- end }}
+{{- end }}

@@ -43,6 +43,17 @@ type Component struct {
 	bmcMacToID map[string]bmcID
 }
 
+// Identity links a saved Flow component UUID to its inventory identifier without
+// loading hardware state or BMC details. ExternalID is empty before linking.
+type Identity struct {
+	// ID is the internal Flow UUID used in recorded task selections.
+	ID uuid.UUID
+	// Type disambiguates external identifiers shared by different device types.
+	Type devicetypes.ComponentType
+	// ExternalID is the inventory identifier exposed by REST tray resources.
+	ExternalID string
+}
+
 // ManagementMAC returns the component's deterministic host-controller MAC.
 // Flow models the compute BMC, switch BMC, and power-shelf PMC as Host BMCs;
 // DPU controller MACs are intentionally excluded from component operations.

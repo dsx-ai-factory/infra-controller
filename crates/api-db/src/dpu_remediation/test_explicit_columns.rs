@@ -140,34 +140,17 @@ async fn exercise_remediation_queries(
         assert!(applied.succeeded);
         assert_eq!(applied.status, status);
 
-        for (operation, records) in [
-            (
-                "by remediation",
-                find_applied_remediations_by(
-                    &mut txn,
-                    ObjectColumnFilter::One(AppliedRemediationIdColumn, &expected.id),
-                )
-                .await?,
-            ),
-            (
-                "by remediation and machine",
-                find_remediations_by_remediation_id_and_machine(
-                    &mut txn,
-                    expected.id,
-                    &dpu_machine_id,
-                )
-                .await?,
-            ),
-        ] {
-            assert_eq!(records.len(), 1, "{operation}");
-            let stored = &records[0];
-            assert_eq!(stored.id, applied.id, "{operation}");
-            assert_eq!(stored.dpu_machine_id, applied.dpu_machine_id, "{operation}");
-            assert_eq!(stored.attempt, applied.attempt, "{operation}");
-            assert_eq!(stored.succeeded, applied.succeeded, "{operation}");
-            assert_eq!(stored.status, applied.status, "{operation}");
-            assert_eq!(stored.applied_time, applied.applied_time, "{operation}");
-        }
+        let records =
+            find_remediations_by_remediation_id_and_machine(&mut txn, expected.id, &dpu_machine_id)
+                .await?;
+        assert_eq!(records.len(), 1);
+        let stored = &records[0];
+        assert_eq!(stored.id, applied.id);
+        assert_eq!(stored.dpu_machine_id, applied.dpu_machine_id);
+        assert_eq!(stored.attempt, applied.attempt);
+        assert_eq!(stored.succeeded, applied.succeeded);
+        assert_eq!(stored.status, applied.status);
+        assert_eq!(stored.applied_time, applied.applied_time);
     }
 
     // Replaying after rollback exercises both INSERT branches again on the same connection.

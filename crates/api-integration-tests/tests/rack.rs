@@ -26,8 +26,7 @@ use bmc_mock::ListenerOrAddress;
 use bmc_mock::test_support::TEST_MAC_POOL;
 use carbide_utils::HostPortPair;
 use carbide_uuid::rack::{RackGroupId, RackId, RackProfileId};
-use eyre::ContextCompat;
-use futures::future::join_all;
+use eyre::{ContextCompat, WrapErr};
 use machine_a_tron::lifecycle_timings::{LifecycleTimingOverrides, PartialLifecycleTimings};
 use machine_a_tron::{
     BmcMockRegistry, DhcpType, LenovoGb300RackConfig, LogFormat, MachineATronConfig, RackConfig,
@@ -258,6 +257,7 @@ async fn run_machine_a_tron_racks_test(
         machines: BTreeMap::new(),
         carbide_api_url: format!("https://{}:{}", api_addr.ip(), api_addr.port()),
         dhcp: DhcpType::Api {},
+        bmc_dhcp_renewal_interval: Duration::from_secs(900),
         log_file: None,
         log_format: LogFormat::Compact,
         bmc_mock_port: 0,
@@ -290,25 +290,18 @@ async fn run_machine_a_tron_racks_test(
 
     let assertion_result = async {
         assert_eq!(provisionable_handles.len(), 36);
-        let machine_ids = join_all(
-            provisionable_handles
-                .iter()
-                .map(|machine_handle| async move {
-                    machine_handle
-                        .wait_until_machine_up_with_api_state("Ready", Duration::from_secs(240))
-                        .await?;
-                    Ok::<_, eyre::Report>(
-                        machine_handle
-                            .observed_machine_id()
-                            .expect("Machine ID should be set if host is ready")
-                            .to_string(),
-                    )
-                }),
-        )
-        .await
-        .into_iter()
-        .collect::<Result<Vec<_>, _>>()?;
-        assert_eq!(machine_ids.len(), 36);
+        // The test and simulators share Core's client quota, so check one host at a time.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(240);
+        for machine_handle in &provisionable_handles {
+            api_test_helper::machine_a_tron::wait_for_host_state(
+                &test_env.carbide_api_addrs,
+                machine_handle,
+                "Ready",
+                deadline.saturating_duration_since(tokio::time::Instant::now()),
+            )
+            .await
+            .wrap_err("waiting for all 36 rack hosts to become ready within 240s")?;
+        }
 
         for (rack_id, expected_profile_id, expected_power_shelf_count) in [
             (&gb200_rack_id, GB200_PROFILE_ID, 8),

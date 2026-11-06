@@ -672,6 +672,7 @@ async fn test_machine_creator_created_host_advances_through_dpu_discovery(
     let machine_creator = MachineCreator::new(
         env.pool.clone(),
         (&explorer_config).into(),
+        env.api.resource_pool_registry.clone(),
         env.common_pools.clone(),
         Arc::new(env.config.rack_profiles.clone()),
         None,
@@ -1401,7 +1402,10 @@ async fn test_dell_boss_deprovision_lockhost_honors_disable_lockdown(pool: sqlx:
         .unwrap();
         txn.commit().await.unwrap();
 
-        env.run_machine_state_controller_iteration().await;
+        // Observe LockHost's immediate successor before another host's pending
+        // work allows this host to be requeued and advance again.
+        env.run_machine_state_controller_iteration_no_requeue()
+            .await;
 
         let platform_actions = env.redfish_sim.platform_actions();
         let lockdown_actions: Vec<_> = platform_actions[platform_action_count..]
@@ -1903,8 +1907,21 @@ async fn test_failed_state_host_discovery_recovery(pool: sqlx::PgPool) {
 #[crate::sqlx_test]
 async fn test_managed_host_version_metrics(pool: sqlx::PgPool) {
     let env = create_test_env(pool).await;
-    common::api_fixtures::create_managed_host(&env).await;
-    common::api_fixtures::create_managed_host(&env).await;
+    let hosts = [
+        common::api_fixtures::create_managed_host(&env).await,
+        common::api_fixtures::create_managed_host(&env).await,
+    ];
+    for host in &hosts {
+        env.run_machine_state_controller_iteration_until_state_matches(
+            &host.id,
+            5,
+            ManagedHostState::Ready,
+        )
+        .await;
+    }
+    // Metrics describe the snapshot before a transition; collect both Ready hosts.
+    env.run_machine_state_controller_iteration_no_requeue()
+        .await;
 
     assert_eq!(
         env.test_meter
@@ -1918,19 +1935,17 @@ async fn test_managed_host_version_metrics(pool: sqlx::PgPool) {
             .unwrap(),
         r#"{fresh="true"} 0"#
     );
-    // TODO: For some reason the 2nd created Host stays in state `Discovered`
-    // and never becomes ready. Once it does, the test should be updated.
     assert_eq!(
         env.test_meter
             .formatted_metric("carbide_hosts_usable_count")
             .unwrap(),
-        r#"{fresh="true"} 1"#
+        r#"{fresh="true"} 2"#
     );
     assert_eq!(
         env.test_meter
             .formatted_metric("carbide_gpus_usable_count")
             .unwrap(),
-        r#"{fresh="true"} 1"#
+        r#"{fresh="true"} 2"#
     );
     assert_eq!(
         env.test_meter
@@ -2708,9 +2723,9 @@ async fn test_measurement_host_init_failed_to_waiting_for_measurements_to_pendin
         nras_should_fail_parsing_flag,
         &mh,
         &mut txn,
-        ManagedHostState::HostInit {
+        |job_id| ManagedHostState::HostInit {
             machine_state: MachineState::SpdmMeasuring {
-                spdm_measuring_state: SpdmMeasuringState::PollResult,
+                spdm_measuring_state: SpdmMeasuringState::PollResult(job_id),
             },
         },
     )
@@ -7576,6 +7591,7 @@ async fn test_scout_heartbeat_timeout_alert_cleared_on_instance_creation_transit
                 labels: vec![],
             }),
             allow_unhealthy_machine: true,
+            external_validation_request_id: None,
         }))
         .await
         .unwrap();
@@ -7659,6 +7675,7 @@ async fn test_scout_heartbeat_timeout_alert_not_cleared_when_unhealthy_allocatio
                 labels: vec![],
             }),
             allow_unhealthy_machine: false,
+            external_validation_request_id: None,
         }))
         .await
         .unwrap_err();

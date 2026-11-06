@@ -16,7 +16,7 @@
  */
 
 use std::path::Path;
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 use std::str::FromStr;
 use std::time::Duration;
 
@@ -31,20 +31,24 @@ use crate::device::filters::DeviceFilter;
 use crate::runner::FirmwareToolExecutor;
 use crate::runner::attempt::AttemptError;
 use crate::runner::command_builder::CommandSpec;
+use crate::runner::error::MlxRunnerError;
 
 // Match the command runner's default for one query, including output collection.
 pub(crate) const QUERY_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_QUERY_DIAGNOSTIC_BYTES: usize = 4096;
 
-/// Failures from supervised inventory queries, before validating hardware facts.
+/// Failures from inventory queries, before validating hardware facts.
 #[derive(Debug, Error)]
 pub enum DeviceDiscoveryError {
+    /// A direct synchronous query failed to start or collect its process result.
+    #[error("mlxfwmanager query failed: {0}")]
+    DirectQuery(#[from] MlxRunnerError),
     /// Process failure, including deadline, output-limit, and cleanup diagnostics.
     #[error("mlxfwmanager query failed: {0}")]
     QueryAttempt(#[from] AttemptError),
     /// The MST inventory query did not finish successfully within its limits.
     #[error("mst status failed: {0}")]
-    MstQueryAttempt(#[source] Box<AttemptError>),
+    MstQueryAttempt(#[source] MstQueryAttemptError),
     /// MST did not provide one unambiguous PCI address for a reported alias.
     #[error("invalid mst status result: {0}")]
     InvalidMstReport(String),
@@ -59,6 +63,46 @@ pub enum DeviceDiscoveryError {
         /// Tool diagnostics, limited to the first 4 KiB.
         stderr: String,
     },
+}
+
+/// An MST attempt failure stored without enlarging every discovery error.
+/// Its source exposes the concrete attempt, including process settlement evidence.
+#[derive(Debug)]
+pub struct MstQueryAttemptError(Box<AttemptError>);
+
+impl From<AttemptError> for MstQueryAttemptError {
+    fn from(error: AttemptError) -> Self {
+        Self(Box::new(error))
+    }
+}
+
+impl std::fmt::Display for MstQueryAttemptError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(self.0.as_ref(), formatter)
+    }
+}
+
+impl std::error::Error for MstQueryAttemptError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        // A boxed source's own source() skips AttemptError and loses its status
+        // and cleanup evidence. Expose the inner error itself to chain walkers.
+        Some(self.0.as_ref())
+    }
+}
+
+impl DeviceDiscoveryError {
+    /// Keep the String-returning discovery and report APIs' messages stable.
+    /// Callers deciding whether to release hardware access use the typed APIs
+    /// instead, so process completion evidence is not lost at that boundary.
+    pub(super) fn into_legacy_message(self) -> String {
+        match self {
+            Self::DirectQuery(MlxRunnerError::Io(source)) => {
+                format!("failed to build cmd: {source}")
+            }
+            Self::InvalidReport(message) => message,
+            error => error.to_string(),
+        }
+    }
 }
 
 // DevicesXml represents the root XML structure
@@ -134,13 +178,28 @@ struct GuidsXml {
 
 // discover_devices finds all devices using mlxfwmanager.
 pub fn discover_devices() -> Result<Vec<MlxDeviceInfo>, String> {
+    discover_devices_with_settlement().map_err(DeviceDiscoveryError::into_legacy_message)
+}
+
+/// `discover_devices_with_settlement` preserves process errors so callers
+/// holding hardware exclusion can distinguish an ordinary failure from a
+/// process whose termination could not be established. Like `discover_devices`,
+/// this synchronous query has no deadline; use the bounded API for supervised
+/// inventory. Valid PCI addresses also receive the Linux RDMA driver's running
+/// firmware version when available, preserving their legacy spelling. Other
+/// locators leave it absent.
+pub(crate) fn discover_devices_with_settlement() -> Result<Vec<MlxDeviceInfo>, DeviceDiscoveryError>
+{
     debug!("Running mlxfwmanager to discover devices");
 
-    let output = Command::new("mlxfwmanager")
-        .args(["--query-format", "xml"])
-        .output()
-        .map_err(|e| format!("failed to build cmd: {e}"))?;
+    let output = execute_direct_query(&["--query-format", "xml"])?;
+    discover_devices_from_direct_output(output, Path::new("/sys"))
+}
 
+fn discover_devices_from_direct_output(
+    output: Output,
+    sysfs: &Path,
+) -> Result<Vec<MlxDeviceInfo>, DeviceDiscoveryError> {
     // In cases where DPUs are returned, it looks like DPUs that are
     // currently in lockdown won't return data to mlxfwmanager. The
     // XML is still generated, just with some empty fields, and all
@@ -151,28 +210,40 @@ pub fn discover_devices() -> Result<Vec<MlxDeviceInfo>, String> {
     // to parse the XML output.
     if !matches!(output.status.code(), Some(0) | Some(1)) {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!(
+        return Err(DeviceDiscoveryError::InvalidReport(format!(
             "mlxfwmanager failed with unexpected exit code: {stderr}"
-        ));
+        )));
     }
 
-    {
-        let xml_content = String::from_utf8_lossy(&output.stdout);
-        warn!(xml = %xml_content, "mlxfwmanager XML output");
-        parse_mlxfwmanager_xml(&xml_content)
+    let xml_content = String::from_utf8_lossy(&output.stdout);
+    warn!(xml = %xml_content, "mlxfwmanager XML output");
+    let mut devices =
+        parse_mlxfwmanager_xml(&xml_content).map_err(DeviceDiscoveryError::InvalidReport)?;
+    for device in &mut devices {
+        // XML parsing strips domain `0000`; normalize only the sysfs lookup
+        // so the report keeps its legacy PCI spelling.
+        device.fw_version_running = normalize_pci_address(&device.pci_name)
+            .and_then(|pci_name| running_firmware_version(sysfs, &pci_name));
     }
+    Ok(devices)
 }
 
 // discover_device loads a specific device using mlxfwmanager.
 // The actual XML returned is still "devices", but will only
 // contain the target device.
 pub fn discover_device(device: &str) -> Result<MlxDeviceInfo, String> {
+    discover_device_with_settlement(device).map_err(DeviceDiscoveryError::into_legacy_message)
+}
+
+/// `discover_device_with_settlement` preserves the process completion evidence
+/// for one device. This synchronous query has no deadline; use
+/// [`discover_pci_devices_bounded`] for supervised inventory.
+pub fn discover_device_with_settlement(
+    device: &str,
+) -> Result<MlxDeviceInfo, DeviceDiscoveryError> {
     debug!(device, "Running mlxfwmanager to discover device");
 
-    let output = Command::new("mlxfwmanager")
-        .args(["--dev", device, "--query-format", "xml"])
-        .output()
-        .map_err(|e| format!("failed to build cmd: {e}"))?;
+    let output = execute_direct_query(&["--dev", device, "--query-format", "xml"])?;
 
     // In cases where DPUs are returned, it looks like DPUs that are
     // currently in lockdown won't return data to mlxfwmanager. The
@@ -184,24 +255,44 @@ pub fn discover_device(device: &str) -> Result<MlxDeviceInfo, String> {
     // to parse the XML output.
     if !matches!(output.status.code(), Some(0) | Some(1)) {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!(
+        return Err(DeviceDiscoveryError::InvalidReport(format!(
             "mlxfwmanager failed with unexpected exit code: {stderr}"
-        ));
+        )));
     }
 
     let xml_content = String::from_utf8_lossy(&output.stdout);
     debug!(xml = %xml_content, "mlxfwmanager XML output");
 
-    let devices = parse_mlxfwmanager_xml(&xml_content)?;
+    let devices =
+        parse_mlxfwmanager_xml(&xml_content).map_err(DeviceDiscoveryError::InvalidReport)?;
     if devices.len() > 1 {
-        return Err(format!(
+        return Err(DeviceDiscoveryError::InvalidReport(format!(
             "only expected a single device returned for device: {device}"
-        ));
+        )));
     }
     if devices.is_empty() {
-        return Err(format!("no devices returned for device: {device}"));
+        return Err(DeviceDiscoveryError::InvalidReport(format!(
+            "no devices returned for device: {device}"
+        )));
     }
     Ok(devices.into_iter().next().unwrap())
+}
+
+// Splitting spawn from wait keeps a lost child result from becoming an
+// ordinary discovery failure that authorizes another hardware operation.
+fn execute_direct_query(args: &[&str]) -> Result<Output, MlxRunnerError> {
+    let child = Command::new("mlxfwmanager")
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    child
+        .wait_with_output()
+        .map_err(|source| MlxRunnerError::ProcessUnsettled {
+            command: "mlxfwmanager query".to_string(),
+            source,
+        })
 }
 
 /// Query all devices with the same deadline and output limits as
@@ -223,11 +314,15 @@ pub async fn discover_devices_bounded() -> Result<Vec<MlxDeviceInfo>, DeviceDisc
 /// requires exactly one full PCI address in that path's device entry. Missing,
 /// repeated, or invalid mappings reject the inventory; other device facts and
 /// report order are preserved. Inventory containing only PCI addresses does not
-/// run MST. Callers must defer both queries while firmware owns the host.
+/// run MST. Reads the Linux RDMA driver's `infiniband/<device>/fw_ver` for each
+/// PCI function into `MlxDeviceInfo::fw_version_running`; missing, unreadable,
+/// empty, or ambiguous driver evidence leaves it `None`. Callers must defer
+/// both queries while firmware owns the host.
 pub async fn discover_pci_devices_bounded() -> Result<Vec<MlxDeviceInfo>, DeviceDiscoveryError> {
     discover_pci_devices_with_programs(
         Path::new("mlxfwmanager"),
         Path::new("mst"),
+        Path::new("/sys"),
         QUERY_TIMEOUT,
         &FirmwareToolExecutor::default(),
     )
@@ -238,6 +333,7 @@ pub async fn discover_pci_devices_bounded() -> Result<Vec<MlxDeviceInfo>, Device
 async fn discover_pci_devices_with_programs(
     query_program: &Path,
     mst_program: &Path,
+    sysfs: &Path,
     timeout: Duration,
     executor: &FirmwareToolExecutor,
 ) -> Result<Vec<MlxDeviceInfo>, DeviceDiscoveryError> {
@@ -250,7 +346,7 @@ async fn discover_pci_devices_with_programs(
         let output = executor
             .execute(&command, timeout)
             .await
-            .map_err(|error| DeviceDiscoveryError::MstQueryAttempt(Box::new(error)))?;
+            .map_err(|error| DeviceDiscoveryError::MstQueryAttempt(error.into()))?;
         let diagnostics = String::from_utf8_lossy(
             &output.stderr[..output.stderr.len().min(MAX_QUERY_DIAGNOSTIC_BYTES)],
         );
@@ -281,8 +377,29 @@ async fn discover_pci_devices_with_programs(
                 ))
             })?
         };
+        device.fw_version_running = running_firmware_version(sysfs, &device.pci_name);
     }
     Ok(devices)
+}
+
+/// Read the driver firmware version for exactly one PCI function. An absent,
+/// unreadable or ambiguous RDMA device leaves this optional fact unavailable.
+/// Keep this after PCI normalization so an MST path cannot choose a sysfs path.
+fn running_firmware_version(sysfs: &Path, pci_name: &str) -> Option<String> {
+    if normalize_pci_address(pci_name).as_deref() != Some(pci_name) {
+        return None;
+    }
+    let directory = sysfs
+        .join("bus/pci/devices")
+        .join(pci_name)
+        .join("infiniband");
+    let mut devices = std::fs::read_dir(directory).ok()?;
+    let device = devices.next()?.ok()?;
+    if devices.next().is_some() {
+        return None;
+    }
+    let version = std::fs::read_to_string(device.path().join("fw_ver")).ok()?;
+    parse_optional_xml_field(version.trim())
 }
 
 /// Read the selected MST entry only; a following device's metadata cannot fill
@@ -341,9 +458,14 @@ fn resolve_mst_pci_address(alias: &str, status: &str) -> Result<String, DeviceDi
     })
 }
 
-/// Validate a complete PCI function and add domain zero to abbreviated BDFs.
-/// Consumers use this same syntax check before matching or grouping devices.
-pub(crate) fn normalize_pci_address(device: &str) -> Option<String> {
+/// `normalize_pci_address` validates a PCI function without querying hardware.
+///
+/// Accepts ASCII `dddd:bb:ss.f` or `bb:ss.f` with hexadecimal domain, bus, and
+/// slot, slot `00` through `1f`, and function `0` through `7`. Returns the
+/// lowercase address, adding domain `0000` only when it was omitted. Malformed
+/// addresses and MST paths return `None`. Consumers use this same check before
+/// matching or grouping devices.
+pub fn normalize_pci_address(device: &str) -> Option<String> {
     let device = match device.len() {
         7 => format!("0000:{device}"),
         12 => device.to_string(),
@@ -515,6 +637,7 @@ pub fn parse_mlxfwmanager_xml(xml_content: &str) -> Result<Vec<MlxDeviceInfo>, S
             device_description: parse_optional_xml_field(&device_xml.description),
             part_number: parse_optional_xml_field(&device_xml.part_number),
             status: parse_optional_xml_field(&device_xml.status),
+            fw_version_running: None,
             fw_version_current: device_xml
                 .versions
                 .fw
@@ -586,33 +709,102 @@ pub fn convert_pci_name_to_address(pci_name: &str) -> Result<String, String> {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
-
-    // A sibling test's fork must not inherit a writable executable descriptor.
     #[cfg(target_os = "linux")]
-    async fn write_fixture_executable(path: &Path, script: &str) {
-        let status = tokio::time::timeout(
-            Duration::from_secs(5),
-            tokio::process::Command::new("/bin/sh")
-                .args([
-                    "-c",
-                    "set -eu; umask 077; printf '%s' \"$2\" > \"$1\"; chmod 700 \"$1\"",
-                    "fixture-writer",
-                ])
-                .arg(path)
-                .arg(script)
-                .kill_on_drop(true)
-                .status(),
-        )
-        .await
-        .expect("fixture writer must finish within its watchdog")
-        .expect("start isolated fixture writer");
-        assert!(status.success(), "fixture writer failed: {status}");
-    }
+    use crate::runner::write_fixture_executables;
 
     #[cfg(unix)]
     const DEVICE_XML: &str = r#"<Devices><Device pciName="ab:01.0" type="BlueField3" partNumber="part" psid="PSID"><Versions><FW current="32.43.1014"/></Versions></Device></Devices>"#;
 
     const MST_STATUS: &str = "MST modules:\n------------\nMST PCI module loaded\nMST PCI configuration module loaded\n\nMST devices:\n------------\n/dev/mst/mt41692_pciconf1         - PCI configuration cycles access.\n                                   domain:bus:dev.fn=0001:CA:00.1 addr.reg=88 data.reg=92 cr_bar.gw_offset=-1\n                                   Chip revision is: 00\n/dev/mst/mt41692_pciconf0         - PCI configuration cycles access.\n                                   domain:bus:dev.fn=0000:AB:01.0 addr.reg=88 data.reg=92 cr_bar.gw_offset=-1\n                                   Chip revision is: 00\n";
+
+    #[test]
+    fn direct_inventory_populates_running_firmware_without_resolving_aliases() {
+        use std::os::unix::process::ExitStatusExt;
+        use std::process::ExitStatus;
+
+        let sysfs = tempfile::tempdir().unwrap();
+        for (pci_name, version) in [
+            ("0001:ab:01.0", "32.42.1000\n"),
+            ("0000:ab:01.0", "32.41.1000\n"),
+        ] {
+            let rdma_device = sysfs
+                .path()
+                .join(format!("bus/pci/devices/{pci_name}/infiniband/mlx5_0"));
+            std::fs::create_dir_all(&rdma_device).unwrap();
+            std::fs::write(rdma_device.join("fw_ver"), version).unwrap();
+        }
+        let devices = discover_devices_from_direct_output(
+            Output {
+                status: ExitStatus::from_raw(1 << 8),
+                stdout: br#"<Devices><Device pciName="0001:ab:01.0" type="BlueField3"><Versions><FW current="32.43.1014"/></Versions></Device><Device pciName="0000:ab:01.0" type="BlueField3"><Versions><FW current="32.43.1014"/></Versions></Device><Device pciName="/dev/mst/mt41692_pciconf0" type="BlueField3"/></Devices>"#.to_vec(),
+                stderr: Vec::new(),
+            },
+            sysfs.path(),
+        )
+        .unwrap();
+
+        assert_eq!(devices.len(), 3);
+        assert_eq!(devices[0].pci_name, "0001:ab:01.0");
+        assert_eq!(devices[0].fw_version_current.as_deref(), Some("32.43.1014"));
+        assert_eq!(devices[0].fw_version_running.as_deref(), Some("32.42.1000"));
+        assert_eq!(devices[1].pci_name, "ab:01.0");
+        assert_eq!(devices[1].fw_version_current.as_deref(), Some("32.43.1014"));
+        assert_eq!(devices[1].fw_version_running.as_deref(), Some("32.41.1000"));
+        assert_eq!(devices[2].pci_name, "/dev/mst/mt41692_pciconf0");
+        assert_eq!(devices[2].fw_version_running, None);
+    }
+
+    #[test]
+    fn running_firmware_requires_one_readable_device_for_the_exact_pci_function() {
+        use carbide_test_support::value_scenarios;
+
+        #[derive(Debug)]
+        struct Input {
+            pci_name: &'static str,
+            devices: &'static [Option<&'static str>],
+        }
+
+        value_scenarios!(
+            run = |Input { pci_name, devices }| {
+                let sysfs = tempfile::tempdir().unwrap();
+                let pci_devices = sysfs.path().join("bus/pci/devices");
+                let neighbor = pci_devices.join("0000:ab:01.1/infiniband/mlx5_0");
+                std::fs::create_dir_all(&neighbor).unwrap();
+                std::fs::write(neighbor.join("fw_ver"), "32.42.1000\n").unwrap();
+                for (index, version) in devices.iter().enumerate() {
+                    let device = pci_devices
+                        .join(pci_name)
+                        .join("infiniband")
+                        .join(format!("mlx5_{index}"));
+                    std::fs::create_dir_all(&device).unwrap();
+                    if let Some(version) = version {
+                        std::fs::write(device.join("fw_ver"), version).unwrap();
+                    }
+                }
+                running_firmware_version(sysfs.path(), pci_name)
+            };
+            "exact PCI domain and function with trimmed driver version" {
+                Input { pci_name: "0001:ab:01.1", devices: &[Some(" 32.43.1014\n")] }
+                    => Some("32.43.1014".to_string()),
+            }
+            "no driver device cannot borrow another PCI function's version" {
+                Input { pci_name: "0001:ab:01.1", devices: &[] } => None,
+            }
+            "multiple driver devices are ambiguous even if only one is readable" {
+                Input { pci_name: "0001:ab:01.1", devices: &[Some("32.43.1014\n"), None] }
+                    => None,
+            }
+            "empty driver version is unavailable" {
+                Input { pci_name: "0001:ab:01.1", devices: &[Some(" \n")] } => None,
+            }
+            "missing version file is unavailable" {
+                Input { pci_name: "0001:ab:01.1", devices: &[None] } => None,
+            }
+            "unsafe PCI locator cannot select an existing path" {
+                Input { pci_name: "../outside", devices: &[Some("32.43.1014\n")] } => None,
+            }
+        );
+    }
 
     /// An MST alias gets identity only from its own unique metadata block, never
     /// from a neighboring device, repeated row, or partial PCI spelling.
@@ -686,34 +878,34 @@ mod tests {
             let directory = tempfile::tempdir().unwrap();
             std::fs::write(directory.path().join("inventory.xml"), case.xml).unwrap();
             std::fs::write(directory.path().join("mst-status"), MST_STATUS).unwrap();
+            let rdma_device = directory.path().join(format!(
+                "bus/pci/devices/{}/infiniband/mlx5_0",
+                case.addresses[0],
+            ));
+            std::fs::create_dir_all(&rdma_device).unwrap();
+            std::fs::write(rdma_device.join("fw_ver"), "32.42.1000\n").unwrap();
 
-            // Write executables in a short-lived process so another test's fork
-            // cannot inherit a writable descriptor and cause ETXTBSY.
-            let status = tokio::time::timeout(
-                Duration::from_secs(5),
-                tokio::process::Command::new("/bin/sh")
-                    .args([
-                        "-c",
-                        "set -eu; umask 077; while [ \"$#\" -gt 0 ]; do printf '%s' \"$2\" > \"$1\"; chmod 700 \"$1\"; shift 2; done",
-                        "fixture-writer",
-                    ])
-                    .arg(directory.path().join("mlxfwmanager"))
-                    .arg("#!/bin/sh\ncd -- \"${0%/*}\"\nprintf '%s\\n' \"$@\" > query-arguments\ncat inventory.xml\nexit 1\n")
-                    .arg(directory.path().join("mst"))
-                    .arg("#!/bin/sh\ncd -- \"${0%/*}\"\nprintf '%s\\n' \"$@\" > mst-arguments\ncat mst-status\n")
-                    .kill_on_drop(true)
-                    .status(),
+            write_fixture_executables(
+                directory.path(),
+                &[
+                    (
+                        "mlxfwmanager",
+                        "#!/bin/sh\ncd -- \"${0%/*}\"\nprintf '%s\\n' \"$@\" > query-arguments\ncat inventory.xml\nexit 1\n",
+                    ),
+                    (
+                        "mst",
+                        "#!/bin/sh\ncd -- \"${0%/*}\"\nprintf '%s\\n' \"$@\" > mst-arguments\ncat mst-status\n",
+                    ),
+                ],
             )
-            .await
-            .expect("fixture writer must finish within its watchdog")
-            .unwrap();
-            assert!(status.success(), "{}: fixture writer", case.scenario);
+            .await;
 
             let devices = tokio::time::timeout(
                 Duration::from_secs(5),
                 discover_pci_devices_with_programs(
                     &directory.path().join("mlxfwmanager"),
                     &directory.path().join("mst"),
+                    directory.path(),
                     QUERY_TIMEOUT,
                     &crate::runner::test_firmware_executor(),
                 ),
@@ -725,6 +917,7 @@ mod tests {
             for (device, address) in expected.iter_mut().zip(case.addresses) {
                 device.pci_name = (*address).to_string();
             }
+            expected[0].fw_version_running = Some("32.42.1000".to_string());
             assert_eq!(devices, expected, "{}", case.scenario);
             assert_eq!(
                 std::fs::read_to_string(directory.path().join("query-arguments")).unwrap(),
@@ -840,13 +1033,16 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let program = directory.path().join("mlxfwmanager");
         let locator = "/dev/mst/mt41692_pciconf0";
-        write_fixture_executable(
-            &program,
-            &format!(
-                "#!/bin/sh\ncd -- \"${{0%/*}}\"\nprintf '%s\\n' \"$@\" > arguments\n\
-                 printf '%s' '<Devices><Device pciName=\"{locator}\" type=\"BlueField3\"/></Devices>'\n\
-                 exit 1\n"
-            ),
+        write_fixture_executables(
+            directory.path(),
+            &[(
+                "mlxfwmanager",
+                &format!(
+                    "#!/bin/sh\ncd -- \"${{0%/*}}\"\nprintf '%s\\n' \"$@\" > arguments\n\
+                     printf '%s' '<Devices><Device pciName=\"{locator}\" type=\"BlueField3\"/></Devices>'\n\
+                     exit 1\n"
+                ),
+            )],
         )
         .await;
 
@@ -875,15 +1071,18 @@ mod tests {
     async fn bounded_inventory_preserves_all_devices() {
         let directory = tempfile::tempdir().unwrap();
         let program = directory.path().join("mlxfwmanager");
-        write_fixture_executable(
-            &program,
-            concat!(
-                "#!/bin/sh\ncd -- \"${0%/*}\"\nprintf '%s\\n' \"$@\" > arguments\n",
-                "printf '%s' '<Devices>",
-                "<Device pciName=\"0000:ab:01.0\" type=\"BlueField3\"/>",
-                "<Device pciName=\"0001:ab:01.0\" type=\"BlueField3\"/>",
-                "</Devices>'\nexit 1\n",
-            ),
+        write_fixture_executables(
+            directory.path(),
+            &[(
+                "mlxfwmanager",
+                concat!(
+                    "#!/bin/sh\ncd -- \"${0%/*}\"\nprintf '%s\\n' \"$@\" > arguments\n",
+                    "printf '%s' '<Devices>",
+                    "<Device pciName=\"0000:ab:01.0\" type=\"BlueField3\"/>",
+                    "<Device pciName=\"0001:ab:01.0\" type=\"BlueField3\"/>",
+                    "</Devices>'\nexit 1\n",
+                ),
+            )],
         )
         .await;
         let devices = tokio::time::timeout(
@@ -917,9 +1116,12 @@ mod tests {
     async fn bounded_inventory_reaps_a_stalled_query() {
         let directory = tempfile::tempdir().unwrap();
         let program = directory.path().join("mlxfwmanager");
-        write_fixture_executable(
-            &program,
-            "#!/bin/sh\ncd -- \"${0%/*}\"\nprintf '%s' \"$$\" > pid\nexec /bin/sleep 30\n",
+        write_fixture_executables(
+            directory.path(),
+            &[(
+                "mlxfwmanager",
+                "#!/bin/sh\ncd -- \"${0%/*}\"\nprintf '%s' \"$$\" > pid\nexec /bin/sleep 30\n",
+            )],
         )
         .await;
         let error = tokio::time::timeout(

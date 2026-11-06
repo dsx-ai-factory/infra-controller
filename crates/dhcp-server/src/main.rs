@@ -1484,7 +1484,7 @@ async fn process(
 
 /// Process one DHCPv6 datagram and send its response to the exact UDP source.
 // Roots a trace per packet, as the v4 path does.
-#[tracing::instrument(skip_all, fields(source_address = %source))]
+#[tracing::instrument(skip_all, fields(source_address = %source, circuit_id = %context.interface))]
 async fn process_v6(source: SocketAddr, packet: &[u8], mut context: V6ListenerContext) {
     let SocketAddr::V6(source) = source else {
         let error = format!("source address {source} is not IPv6");
@@ -1576,8 +1576,8 @@ mod test {
     use carbide_dhcp_server::modes::dpu::Dpu;
     use carbide_instrument::testing::{MetricsCapture, capture_logs_async};
     use carbide_rpc_utils::dhcp::{
-        DhcpTimestamps, DhcpTimestampsFilePath, ServiceConfig, ServiceInterfaceReservations,
-        ServiceLink, ServiceLinkV4, ServiceReservation,
+        DhcpTimestamps, DhcpTimestampsFilePath, ServiceConfig, ServiceDhcpInterfaceReservations,
+        ServiceDhcpReservation, ServiceLink, ServiceLinkV4,
     };
     use carbide_test_support::value_scenarios;
     use chrono::{DateTime, Utc};
@@ -1652,6 +1652,59 @@ mod test {
                 },
             );
         }
+    }
+
+    /// Per-packet span fields must identify the receiving interface even when validation drops
+    /// the packet before DHCP decoding.
+    #[tokio::test]
+    async fn ipv6_packet_span_identifies_source_and_interface() {
+        use tracing::instrument::WithSubscriber;
+        use tracing_subscriber::prelude::*;
+
+        struct PacketSpan(Arc<std::sync::Mutex<Vec<(String, String)>>>);
+
+        impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for PacketSpan {
+            fn on_new_span(
+                &self,
+                attributes: &tracing::span::Attributes<'_>,
+                _: &tracing::span::Id,
+                _: tracing_subscriber::layer::Context<'_, S>,
+            ) {
+                if attributes.metadata().name() == "process_v6" {
+                    let mut fields = self.0.lock().unwrap();
+                    attributes.record(
+                        &mut |field: &tracing::field::Field, value: &dyn std::fmt::Debug| {
+                            fields.push((field.name().to_string(), format!("{value:?}")));
+                        },
+                    );
+                }
+            }
+        }
+
+        carbide_instrument::testing::keep_callsites_enabled();
+        let fields = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::registry().with(PacketSpan(fields.clone()));
+        let context = super::V6ListenerContext {
+            socket: Arc::new(UdpSocket::bind((Ipv6Addr::LOCALHOST, 0)).await.unwrap()),
+            config: Arc::new(init(get_test_args()).await.unwrap()),
+            handler: Arc::new(Box::new(Test {})),
+            interface: "vlan200".to_string(),
+            machine_cache: Arc::new(Mutex::new(LruCache::new(
+                std::num::NonZeroUsize::new(cache::MACHINE_CACHE_SIZE).unwrap(),
+            ))),
+            dhcp_timestamps: Arc::new(Mutex::new(DhcpTimestamps::new(
+                DhcpTimestampsFilePath::NotSet,
+            ))),
+        };
+        let source = "[2001:db8::1]:547".parse().unwrap();
+        // A direct SOLICIT from the server port is rejected before decoding or sending a reply.
+        super::process_v6(source, &[u8::from(MessageTypeV6::Solicit)], context)
+            .with_subscriber(subscriber)
+            .await;
+
+        let fields = fields.lock().unwrap();
+        assert!(fields.contains(&("source_address".to_string(), source.to_string())));
+        assert!(fields.contains(&("circuit_id".to_string(), "vlan200".to_string())));
     }
 
     #[derive(Debug)]
@@ -2670,9 +2723,9 @@ mod test {
         let old_cancel = CancellationToken::new();
         let mut token = Some(old_cancel.clone());
         let mut active_service_config =
-            ServiceConfig::try_new(vec![ServiceInterfaceReservations {
+            ServiceConfig::try_new(vec![ServiceDhcpInterfaceReservations {
                 receiving_interface: "lo".to_string(),
-                reservations: vec![ServiceReservation {
+                reservations: vec![ServiceDhcpReservation {
                     attachment_id: "11111111-1111-1111-1111-111111111111".parse().unwrap(),
                     interface_ordinal: 0,
                     internal_uuid: "22222222-2222-2222-2222-222222222222".parse().unwrap(),
@@ -2882,7 +2935,7 @@ mod test {
         let old_cancel = CancellationToken::new();
         let mut token = Some(old_cancel.clone());
         // The first reservation is removed and therefore drives the retirement assertion.
-        let removed = ServiceReservation {
+        let removed = ServiceDhcpReservation {
             attachment_id: "11111111-1111-1111-1111-111111111111".parse().unwrap(),
             interface_ordinal: 0,
             internal_uuid: "22222222-2222-2222-2222-222222222222".parse().unwrap(),
@@ -2894,7 +2947,7 @@ mod test {
             }),
         };
         // The adjacent reservation survives to prove replacement does not clear the whole slot.
-        let survivor = ServiceReservation {
+        let survivor = ServiceDhcpReservation {
             attachment_id: "33333333-3333-3333-3333-333333333333".parse().unwrap(),
             interface_ordinal: 0,
             internal_uuid: "44444444-4444-4444-4444-444444444444".parse().unwrap(),
@@ -2906,12 +2959,12 @@ mod test {
             }),
         };
         let mut active_service_config =
-            ServiceConfig::try_new(vec![ServiceInterfaceReservations {
+            ServiceConfig::try_new(vec![ServiceDhcpInterfaceReservations {
                 receiving_interface: "lo".to_string(),
                 reservations: vec![removed.clone(), survivor.clone()],
             }])
             .unwrap();
-        let replacement = ServiceConfig::try_new(vec![ServiceInterfaceReservations {
+        let replacement = ServiceConfig::try_new(vec![ServiceDhcpInterfaceReservations {
             receiving_interface: "lo".to_string(),
             reservations: vec![survivor.clone()],
         }])
@@ -3057,9 +3110,9 @@ mod test {
     #[tokio::test]
     async fn packet_task_drain_joins_prepared_service_response() {
         // The exact MAC and IPv4 link drive packet selection; the remaining identities only satisfy validation.
-        let service_config = ServiceConfig::try_new(vec![ServiceInterfaceReservations {
+        let service_config = ServiceConfig::try_new(vec![ServiceDhcpInterfaceReservations {
             receiving_interface: "vlan200".to_string(),
-            reservations: vec![ServiceReservation {
+            reservations: vec![ServiceDhcpReservation {
                 attachment_id: "11111111-1111-1111-1111-111111111111".parse().unwrap(),
                 interface_ordinal: 0,
                 internal_uuid: "22222222-2222-2222-2222-222222222222".parse().unwrap(),
@@ -3957,9 +4010,9 @@ mod test {
     #[tokio::test]
     async fn service_packets_do_not_record_host_activity() {
         // Attach a service reservation to an existing host interface so an erroneous timestamp update is observable.
-        let service_config = ServiceConfig::try_new(vec![ServiceInterfaceReservations {
+        let service_config = ServiceConfig::try_new(vec![ServiceDhcpInterfaceReservations {
             receiving_interface: "vlan200".to_string(),
-            reservations: vec![ServiceReservation {
+            reservations: vec![ServiceDhcpReservation {
                 attachment_id: "11111111-1111-1111-1111-111111111111".parse().unwrap(),
                 interface_ordinal: 0,
                 internal_uuid: "22222222-2222-2222-2222-222222222222".parse().unwrap(),
