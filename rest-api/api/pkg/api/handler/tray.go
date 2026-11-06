@@ -873,6 +873,14 @@ func (pcth UpdateTrayPowerStateHandler) Handle(c echo.Context) error {
 
 	// Get tray ID from URL param
 	trayStrID := c.Param("id")
+	if c.Request().URL.RawPath != "" {
+		var decodeErr error
+		trayStrID, decodeErr = url.PathUnescape(trayStrID)
+		if decodeErr != nil {
+			logger.Warn().Err(decodeErr).Msg("invalid percent-encoding in Tray identifier")
+			return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Tray identifier in URL is invalid", nil)
+		}
+	}
 	cotel.SetAttribute(handlerSpan, attribute.String("tray_id", trayStrID))
 
 	// Parse and validate request body
