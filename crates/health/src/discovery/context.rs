@@ -31,6 +31,7 @@ use carbide_uuid::rack::RackId;
 use futures::future::join_all;
 use prometheus::{Histogram, HistogramOpts};
 use tokio::sync::Notify;
+use tokio::time::Instant;
 
 use super::DiscoveryShutdown;
 use super::reachability::ReachabilitySpec;
@@ -575,9 +576,9 @@ impl DiscoveryLoopContext {
         })
     }
 
-    /// Stops every started collector concurrently within `timeout`; collectors
+    /// Stops every started collector concurrently before `deadline`; collectors
     /// still running when it passes are abandoned and counted as `timed_out`.
-    pub(crate) async fn drain_collectors(&mut self, timeout: Duration) -> DiscoveryShutdown {
+    pub(crate) async fn drain_collectors(&mut self, deadline: Instant) -> DiscoveryShutdown {
         let collectors = self.collectors.take_all();
         let total = collectors.len();
 
@@ -592,7 +593,9 @@ impl DiscoveryLoopContext {
             closed.fetch_add(1, Ordering::SeqCst);
         });
 
-        let finished = tokio::time::timeout(timeout, join_all(stops)).await.is_ok();
+        let finished = tokio::time::timeout_at(deadline, join_all(stops))
+            .await
+            .is_ok();
         let closed = closed.load(Ordering::SeqCst);
 
         DiscoveryShutdown {
@@ -769,7 +772,9 @@ mod tests {
             Collector::spawn_task(|_| async { std::future::pending::<()>().await }),
         );
 
-        let shutdown = context.drain_collectors(Duration::from_millis(100)).await;
+        let shutdown = context
+            .drain_collectors(Instant::now() + Duration::from_millis(100))
+            .await;
 
         assert_eq!(shutdown.closed, 2);
         assert_eq!(shutdown.timed_out, 1);

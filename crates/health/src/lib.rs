@@ -22,6 +22,8 @@ use nv_redfish::bmc_http::reqwest::{
     BmcError, Client as ReqwestClient, ClientParams as ReqwestClientParams,
 };
 use prometheus::{Gauge, GaugeVec, Opts};
+use tokio::task::{JoinError, JoinHandle};
+use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 pub mod api_client;
@@ -400,10 +402,35 @@ impl discovery::DiscoveryIteration for ServiceDiscoveryIteration {
         Ok(())
     }
 
-    async fn shutdown(&mut self) -> discovery::DiscoveryShutdown {
-        self.ctx
-            .drain_collectors(self.config.shutdown_timeout)
-            .await
+    async fn shutdown(&mut self, deadline: Instant) -> discovery::DiscoveryShutdown {
+        self.ctx.drain_collectors(deadline).await
+    }
+}
+
+/// Waits for the cancelled discovery loop to return, then drains its
+/// collectors; both phases are abandoned at `deadline`.
+async fn drain_discovery<I: discovery::DiscoveryIteration>(
+    discovery: impl Future<Output = Result<I, JoinError>>,
+    deadline: Instant,
+) {
+    let drained = tokio::time::timeout_at(deadline, async {
+        let mut iteration = discovery.await?;
+        Ok::<_, JoinError>(iteration.shutdown(deadline).await)
+    })
+    .await;
+
+    match drained {
+        Ok(Ok(shutdown)) => tracing::info!(
+            closed_collector_count = shutdown.closed,
+            timed_out_collector_count = shutdown.timed_out,
+            "Collectors drained"
+        ),
+        Ok(Err(e)) => {
+            tracing::error!(error = %e, "Discovery loop join error during shutdown");
+        }
+        Err(_) => {
+            tracing::warn!("Collectors did not drain before the shutdown deadline");
+        }
     }
 }
 
@@ -413,7 +440,8 @@ impl discovery::DiscoveryIteration for ServiceDiscoveryIteration {
 /// tasks start, so invalid certificate configuration fails startup.
 ///
 /// `cancel_token` carries the shutdown signal: once cancelled, the service stops
-/// discovery and drains its collectors within the configured `shutdown_timeout`.
+/// discovery and drains its collectors before one deadline, `shutdown_timeout`
+/// after the signal.
 ///
 /// # Errors
 ///
@@ -499,7 +527,7 @@ pub async fn run_service(
 
     let config_arc = Arc::new(config);
 
-    let mut join_discovery: tokio::task::JoinHandle<discovery::DiscoveryShutdown> = tokio::spawn({
+    let mut join_discovery: JoinHandle<ServiceDiscoveryIteration> = tokio::spawn({
         let config = config_arc.clone();
         let shard_manager = ShardManager {
             shard: config.shard,
@@ -553,19 +581,11 @@ pub async fn run_service(
         biased;
 
         () = cancel_token.cancelled() => {
+            let deadline = Instant::now() + config_arc.shutdown_timeout;
             tracing::info!("Shutdown signal received; draining collectors");
 
-            // The loop observes the same cancellation and drains its collectors.
-            match join_discovery.await {
-                Ok(shutdown) => tracing::info!(
-                    closed_collector_count = shutdown.closed,
-                    timed_out_collector_count = shutdown.timed_out,
-                    "Collectors drained"
-                ),
-                Err(e) => {
-                    tracing::error!(error=?e, "Discovery loop join error during shutdown");
-                }
-            }
+            // The loop observes the same cancellation and returns its iteration.
+            drain_discovery(join_discovery, deadline).await;
         }
         res = join_listener => {
             match res {
@@ -782,6 +802,45 @@ mac = "aa:bb:cc:dd:ee:03"
                     .await
                     .unwrap_or_else(|error| panic!("{name}: {error}"));
             }
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn collector_drain_stops_waiting_at_the_shutdown_deadline() {
+        use std::time::Duration;
+
+        use carbide_instrument::testing::capture_logs_async;
+
+        struct HangingDrain;
+
+        #[async_trait]
+        impl discovery::DiscoveryIteration for HangingDrain {
+            async fn run_once(&mut self) -> Result<(), HealthError> {
+                Ok(())
+            }
+
+            async fn shutdown(&mut self, _deadline: Instant) -> discovery::DiscoveryShutdown {
+                std::future::pending().await
+            }
+        }
+
+        for (scenario, join_discovery) in [
+            (
+                "loop never returns",
+                tokio::spawn(std::future::pending::<HangingDrain>()),
+            ),
+            ("drain never finishes", tokio::spawn(async { HangingDrain })),
+        ] {
+            let deadline = Instant::now() + Duration::from_secs(20);
+
+            let ((), logs) = capture_logs_async(drain_discovery(join_discovery, deadline)).await;
+
+            assert_eq!(Instant::now(), deadline, "{scenario}");
+            assert!(
+                logs.iter().any(|log| log.level == tracing::Level::WARN
+                    && log.message == "Collectors did not drain before the shutdown deadline"),
+                "{scenario}"
+            );
         }
     }
 
