@@ -4,15 +4,20 @@
 package model
 
 import (
+	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
+	"github.com/NVIDIA/infra-controller/rest-api/sdk/standard"
 	validation "github.com/go-ozzo/ozzo-validation/v4"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/protobuf/proto"
 )
 
 const routingVpcID = "a8545cb9-97b8-475a-befb-94cab9c96606"
@@ -292,5 +297,193 @@ func routingReleaseProto() *corev1.VpcReleaseInactiveVniResult {
 			Status: &corev1.VpcStatus{Vni: cutil.GetPtr(uint32(51000))},
 		},
 		ReleasedInactiveVni: 10000,
+	}
+}
+
+func TestAPIVpcRoutingProfileDefinition_FromProto(t *testing.T) {
+	cases := []struct {
+		name   string
+		config *corev1.NamedRoutingProfileConfig
+		want   string
+	}{
+		{
+			name:   "unset properties remain null",
+			config: &corev1.NamedRoutingProfileConfig{},
+			want:   `{"routeTargetImports":null,"routeTargetsOnExports":null,"leakDefaultRouteFromUnderlay":null,"leakTenantHostRoutesToUnderlay":null,"tenantLeakCommunitiesAccepted":null,"acceptedLeaksFromUnderlay":null,"allowedAnycastPrefixes":null,"internal":null,"accessTier":null,"tenantPrefixOverlapEligible":false}`,
+		},
+		{
+			name: "full definition preserves explicit values and empty lists",
+			config: &corev1.NamedRoutingProfileConfig{
+				RouteTargetImports: &corev1.RouteTargets{Values: []*corev1.RouteTarget{
+					{
+						Asn: 64512,
+						Vni: cutil.GetPtr(uint32(0)),
+					},
+					{
+						Asn: 64514,
+					},
+					{
+						Asn:     64513,
+						VniSelf: true,
+					},
+				}},
+				RouteTargetsOnExports:          &corev1.RouteTargets{},
+				LeakDefaultRouteFromUnderlay:   cutil.GetPtr(false),
+				LeakTenantHostRoutesToUnderlay: cutil.GetPtr(true),
+				TenantLeakCommunitiesAccepted:  cutil.GetPtr(false),
+				AcceptedLeaksFromUnderlay:      &corev1.PrefixFilterPolicyEntries{Values: []*corev1.PrefixFilterPolicyEntry{{Prefix: "192.0.2.0/24"}}},
+				AllowedAnycastPrefixes:         &corev1.PrefixFilterPolicyEntries{},
+				Internal:                       cutil.GetPtr(false),
+				AccessTier:                     cutil.GetPtr(uint32(0)),
+				TenantPrefixOverlapEligible:    true,
+			},
+			want: `{"routeTargetImports":[{"asn":64512,"vni":0,"vniSelf":false},{"asn":64514,"vniSelf":false},{"asn":64513,"vniSelf":true}],"routeTargetsOnExports":[],"leakDefaultRouteFromUnderlay":false,"leakTenantHostRoutesToUnderlay":true,"tenantLeakCommunitiesAccepted":false,"acceptedLeaksFromUnderlay":["192.0.2.0/24"],"allowedAnycastPrefixes":[],"internal":false,"accessTier":0,"tenantPrefixOverlapEligible":true}`,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var profile APIVpcRoutingProfileDefinition
+			profile.FromProto(&corev1.NamedRoutingProfile{
+				Name:   "exact-name",
+				Config: tc.config,
+			})
+			assert.Equal(t, "exact-name", profile.Name)
+			data, err := json.Marshal(profile.Config)
+			require.NoError(t, err)
+			assert.JSONEq(t, tc.want, string(data))
+
+			// Exercise the generated GET decoder with the actual server response.
+			encoded, err := json.Marshal(profile)
+			require.NoError(t, err)
+			const siteID = "61b92164-4314-448c-a6b5-53b036df0739"
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				assert.Equal(t, http.MethodGet, r.Method)
+				assert.Equal(t, "/v2/org/test-org/nico/vpc/routing-profile/exact-name", r.URL.Path)
+				assert.Equal(t, siteID, r.URL.Query().Get("siteId"))
+				w.Header().Set("Content-Type", "application/json")
+				_, err := w.Write(encoded)
+				assert.NoError(t, err)
+			}))
+			t.Cleanup(server.Close)
+			config := standard.NewConfiguration()
+			config.Servers = standard.ServerConfigurations{{URL: server.URL}}
+			client := standard.NewAPIClient(config)
+			decoded, response, err := client.VPCAPI.GetVpcRoutingProfileDefinition(context.Background(), "test-org", profile.Name).SiteId(siteID).Execute()
+			require.NoError(t, err)
+			require.NotNil(t, response)
+			assert.Equal(t, http.StatusOK, response.StatusCode)
+			t.Cleanup(func() { _ = response.Body.Close() })
+			require.NotNil(t, decoded)
+			assert.Equal(t, profile.Name, decoded.Name)
+			assert.True(t, decoded.Config.Internal.IsSet())
+			assert.Equal(t, profile.Config.Internal, decoded.Config.Internal.Get())
+			assert.True(t, decoded.Config.AccessTier.IsSet())
+			if profile.Config.AccessTier == nil {
+				assert.Nil(t, decoded.Config.AccessTier.Get())
+			} else {
+				require.NotNil(t, decoded.Config.AccessTier.Get())
+				assert.Equal(t, int64(*profile.Config.AccessTier), *decoded.Config.AccessTier.Get())
+			}
+			assert.Equal(t, profile.Config.TenantPrefixOverlapEligible, decoded.Config.TenantPrefixOverlapEligible)
+			profile.FromProto(nil)
+			assert.Empty(t, profile)
+		})
+	}
+}
+
+func TestVpcRoutingProfileDefinitionConfig_UnmarshalJSON(t *testing.T) {
+	cases := []struct {
+		name    string
+		payload string
+		field   string
+	}{
+		{
+			name:    "missing internal",
+			payload: `{"accessTier":0,"tenantPrefixOverlapEligible":false}`,
+			field:   "internal",
+		},
+		{
+			name:    "missing access tier",
+			payload: `{"internal":false,"tenantPrefixOverlapEligible":false}`,
+			field:   "accessTier",
+		},
+		{
+			name:    "null nonnullable property",
+			payload: `{"internal":null,"accessTier":null,"tenantPrefixOverlapEligible":null}`,
+			field:   "tenantPrefixOverlapEligible",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var config standard.VpcRoutingProfileDefinitionConfig
+			assert.EqualError(t, json.Unmarshal([]byte(tc.payload), &config), "no value given for required property "+tc.field)
+		})
+	}
+}
+
+func TestAPIVpcRoutingProfileGetRequest_Validate(t *testing.T) {
+	cases := []struct {
+		name   string
+		siteID string
+		valid  bool
+	}{
+		{
+			name: "missing Site",
+		},
+		{
+			name:   "malformed Site",
+			siteID: "invalid",
+		},
+		{
+			name:   "valid Site",
+			siteID: "61b92164-4314-448c-a6b5-53b036df0739",
+			valid:  true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := APIVpcRoutingProfileGetRequest{SiteID: tc.siteID}
+			assert.Equal(t, tc.valid, req.Validate() == nil)
+		})
+	}
+}
+
+func TestAPIVpcRoutingProfileGetRequest_ToProto(t *testing.T) {
+	cases := []struct {
+		name    string
+		request APIVpcRoutingProfileGetRequest
+		want    *corev1.RoutingProfileSearchFilter
+	}{
+		{
+			name: "omitted",
+			want: &corev1.RoutingProfileSearchFilter{},
+		},
+		{
+			name: "false and zero",
+			request: APIVpcRoutingProfileGetRequest{
+				Internal:          cutil.GetPtr(false),
+				MinimumAccessTier: cutil.GetPtr(uint32(0)),
+			},
+			want: &corev1.RoutingProfileSearchFilter{
+				Internal:          cutil.GetPtr(false),
+				MinimumAccessTier: cutil.GetPtr(uint32(0)),
+			},
+		},
+		{
+			name: "true and maximum tier",
+			request: APIVpcRoutingProfileGetRequest{
+				Internal:          cutil.GetPtr(true),
+				MinimumAccessTier: cutil.GetPtr(uint32(4294967295)),
+			},
+			want: &corev1.RoutingProfileSearchFilter{
+				Internal:          cutil.GetPtr(true),
+				MinimumAccessTier: cutil.GetPtr(uint32(4294967295)),
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.True(t, proto.Equal(tc.want, tc.request.ToProto()))
+		})
 	}
 }

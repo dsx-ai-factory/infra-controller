@@ -597,6 +597,278 @@ func (a *VPCAPIService) GetAllVpcExecute(r ApiGetAllVpcRequest) ([]VPC, *http.Re
 	return localVarReturnValue, localVarHTTPResponse, nil
 }
 
+type ApiGetAllVpcRoutingProfileDefinitionRequest struct {
+	ctx               context.Context
+	ApiService        *VPCAPIService
+	siteId            *string
+	org               string
+	internal          *bool
+	minimumAccessTier *int64
+	pageNumber        *int32
+	pageSize          *int32
+	orderBy           *string
+}
+
+// Site whose configured routing profiles are queried
+func (r ApiGetAllVpcRoutingProfileDefinitionRequest) SiteId(siteId string) ApiGetAllVpcRoutingProfileDefinitionRequest {
+	r.siteId = &siteId
+	return r
+}
+
+// True selects internal profiles; false selects external profiles. Omission includes both. An unset configured value is treated as false.
+func (r ApiGetAllVpcRoutingProfileDefinitionRequest) Internal(internal bool) ApiGetAllVpcRoutingProfileDefinitionRequest {
+	r.internal = &internal
+	return r
+}
+
+// Inclusive minimum access tier. Lower numbers confer broader access. An unset configured tier is zero; tenants cannot query below their default tier.
+func (r ApiGetAllVpcRoutingProfileDefinitionRequest) MinimumAccessTier(minimumAccessTier int64) ApiGetAllVpcRoutingProfileDefinitionRequest {
+	r.minimumAccessTier = &minimumAccessTier
+	return r
+}
+
+// One-indexed page number
+func (r ApiGetAllVpcRoutingProfileDefinitionRequest) PageNumber(pageNumber int32) ApiGetAllVpcRoutingProfileDefinitionRequest {
+	r.pageNumber = &pageNumber
+	return r
+}
+
+// Number of profiles per page
+func (r ApiGetAllVpcRoutingProfileDefinitionRequest) PageSize(pageSize int32) ApiGetAllVpcRoutingProfileDefinitionRequest {
+	r.pageSize = &pageSize
+	return r
+}
+
+// Sort profiles by their exact configured name before pagination
+func (r ApiGetAllVpcRoutingProfileDefinitionRequest) OrderBy(orderBy string) ApiGetAllVpcRoutingProfileDefinitionRequest {
+	r.orderBy = &orderBy
+	return r
+}
+
+func (r ApiGetAllVpcRoutingProfileDefinitionRequest) Execute() ([]VpcRoutingProfileDefinition, *http.Response, error) {
+	return r.ApiService.GetAllVpcRoutingProfileDefinitionExecute(r)
+}
+
+/*
+GetAllVpcRoutingProfileDefinition List named VPC routing profiles
+
+List the full configured routing profiles the caller is eligible to see. The `internal` and `minimumAccessTier` filters have AND semantics and match the Core name-query filters. Providers' supplied filters, including omission, false, and zero, are forwarded unchanged.
+
+A privileged Tenant that supplies a minimum tier numerically below its default profile's tier receives 403 with an explanation. Otherwise the effective minimum is the maximum of the default profile's tier and the supplied minimum. Omission uses the default profile's tier. This minimum is sent to Core before discovering profile names.
+
+Results use name ordering (`NAME_ASC` by default) and standard pagination. Follow `X-Pagination` to retrieve the complete eligible list. The response is an array of full definitions, including an empty array when no profiles match. If a selected definition disappears or no longer matches the filters between the two Core reads, the response is 409; retry the query.
+
+Org must have an Infrastructure Provider or Tenant entity. Providers require `PROVIDER_ADMIN` or `PROVIDER_VIEWER` authorization and must own the selected Site. Tenants require `TENANT_ADMIN` authorization and effective TargetedInstanceCreation at that Site; a Site override takes precedence over the Ready Tenant Account's privilege. Other tenants receive 403. The Site must be Registered with native networking enabled.
+
+Tenant access is bounded by the access tier of their own default routing profile on the selected Site. An unset access tier is treated as zero for authorization. A missing or invalid default definition fails closed. Definitions preserve configured null, false, zero, and empty values; these are base profiles, before VPC overrides or effective defaults.
+
+	@param ctx context.Context - for authentication, logging, cancellation, deadlines, tracing, etc. Passed from http.Request or context.Background().
+	@param org Name of the caller organization
+	@return ApiGetAllVpcRoutingProfileDefinitionRequest
+*/
+func (a *VPCAPIService) GetAllVpcRoutingProfileDefinition(ctx context.Context, org string) ApiGetAllVpcRoutingProfileDefinitionRequest {
+	return ApiGetAllVpcRoutingProfileDefinitionRequest{
+		ApiService: a,
+		ctx:        ctx,
+		org:        org,
+	}
+}
+
+// Execute executes the request
+//
+//	@return []VpcRoutingProfileDefinition
+func (a *VPCAPIService) GetAllVpcRoutingProfileDefinitionExecute(r ApiGetAllVpcRoutingProfileDefinitionRequest) ([]VpcRoutingProfileDefinition, *http.Response, error) {
+	var (
+		localVarHTTPMethod  = http.MethodGet
+		localVarPostBody    interface{}
+		formFiles           []formFile
+		localVarReturnValue []VpcRoutingProfileDefinition
+	)
+
+	localBasePath, err := a.client.cfg.ServerURLWithContext(r.ctx, "VPCAPIService.GetAllVpcRoutingProfileDefinition")
+	if err != nil {
+		return localVarReturnValue, nil, &GenericOpenAPIError{error: err.Error()}
+	}
+
+	localVarPath := localBasePath + "/v2/org/{org}/nico/vpc/routing-profile"
+	localVarPath = strings.Replace(localVarPath, "{"+"org"+"}", url.PathEscape(parameterValueToString(r.org, "org")), -1)
+
+	localVarHeaderParams := make(map[string]string)
+	localVarQueryParams := url.Values{}
+	localVarFormParams := url.Values{}
+	if r.siteId == nil {
+		return localVarReturnValue, nil, reportError("siteId is required and must be specified")
+	}
+
+	parameterAddToHeaderOrQuery(localVarQueryParams, "siteId", r.siteId, "form", "")
+	if r.internal != nil {
+		parameterAddToHeaderOrQuery(localVarQueryParams, "internal", r.internal, "form", "")
+	}
+	if r.minimumAccessTier != nil {
+		parameterAddToHeaderOrQuery(localVarQueryParams, "minimumAccessTier", r.minimumAccessTier, "form", "")
+	}
+	if r.pageNumber != nil {
+		parameterAddToHeaderOrQuery(localVarQueryParams, "pageNumber", r.pageNumber, "form", "")
+	} else {
+		var defaultValue int32 = 1
+		parameterAddToHeaderOrQuery(localVarQueryParams, "pageNumber", defaultValue, "form", "")
+		r.pageNumber = &defaultValue
+	}
+	if r.pageSize != nil {
+		parameterAddToHeaderOrQuery(localVarQueryParams, "pageSize", r.pageSize, "form", "")
+	} else {
+		var defaultValue int32 = 20
+		parameterAddToHeaderOrQuery(localVarQueryParams, "pageSize", defaultValue, "form", "")
+		r.pageSize = &defaultValue
+	}
+	if r.orderBy != nil {
+		parameterAddToHeaderOrQuery(localVarQueryParams, "orderBy", r.orderBy, "form", "")
+	} else {
+		var defaultValue string = "NAME_ASC"
+		parameterAddToHeaderOrQuery(localVarQueryParams, "orderBy", defaultValue, "form", "")
+		r.orderBy = &defaultValue
+	}
+	// to determine the Content-Type header
+	localVarHTTPContentTypes := []string{}
+
+	// set Content-Type header
+	localVarHTTPContentType := selectHeaderContentType(localVarHTTPContentTypes)
+	if localVarHTTPContentType != "" {
+		localVarHeaderParams["Content-Type"] = localVarHTTPContentType
+	}
+
+	// to determine the Accept header
+	localVarHTTPHeaderAccepts := []string{"application/json"}
+
+	// set Accept header
+	localVarHTTPHeaderAccept := selectHeaderAccept(localVarHTTPHeaderAccepts)
+	if localVarHTTPHeaderAccept != "" {
+		localVarHeaderParams["Accept"] = localVarHTTPHeaderAccept
+	}
+	req, err := a.client.prepareRequest(r.ctx, localVarPath, localVarHTTPMethod, localVarPostBody, localVarHeaderParams, localVarQueryParams, localVarFormParams, formFiles)
+	if err != nil {
+		return localVarReturnValue, nil, err
+	}
+
+	localVarHTTPResponse, err := a.client.callAPI(req)
+	if err != nil || localVarHTTPResponse == nil {
+		return localVarReturnValue, localVarHTTPResponse, err
+	}
+
+	localVarBody, err := io.ReadAll(localVarHTTPResponse.Body)
+	localVarHTTPResponse.Body.Close()
+	localVarHTTPResponse.Body = io.NopCloser(bytes.NewBuffer(localVarBody))
+	if err != nil {
+		return localVarReturnValue, localVarHTTPResponse, err
+	}
+
+	if localVarHTTPResponse.StatusCode >= 300 {
+		newErr := &GenericOpenAPIError{
+			body:  localVarBody,
+			error: localVarHTTPResponse.Status,
+		}
+		if localVarHTTPResponse.StatusCode == 400 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 403 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 404 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 409 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 500 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 501 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 503 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 504 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+		}
+		return localVarReturnValue, localVarHTTPResponse, newErr
+	}
+
+	err = a.client.decode(&localVarReturnValue, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+	if err != nil {
+		newErr := &GenericOpenAPIError{
+			body:  localVarBody,
+			error: err.Error(),
+		}
+		return localVarReturnValue, localVarHTTPResponse, newErr
+	}
+
+	return localVarReturnValue, localVarHTTPResponse, nil
+}
+
 type ApiGetVpcRequest struct {
 	ctx             context.Context
 	ApiService      *VPCAPIService
@@ -869,6 +1141,208 @@ func (a *VPCAPIService) GetVpcRoutingProfileExecute(r ApiGetVpcRoutingProfileReq
 			return localVarReturnValue, localVarHTTPResponse, newErr
 		}
 		if localVarHTTPResponse.StatusCode == 412 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 500 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 501 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 503 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 504 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+		}
+		return localVarReturnValue, localVarHTTPResponse, newErr
+	}
+
+	err = a.client.decode(&localVarReturnValue, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+	if err != nil {
+		newErr := &GenericOpenAPIError{
+			body:  localVarBody,
+			error: err.Error(),
+		}
+		return localVarReturnValue, localVarHTTPResponse, newErr
+	}
+
+	return localVarReturnValue, localVarHTTPResponse, nil
+}
+
+type ApiGetVpcRoutingProfileDefinitionRequest struct {
+	ctx         context.Context
+	ApiService  *VPCAPIService
+	siteId      *string
+	org         string
+	profileName string
+}
+
+// Site whose configured routing profiles are queried
+func (r ApiGetVpcRoutingProfileDefinitionRequest) SiteId(siteId string) ApiGetVpcRoutingProfileDefinitionRequest {
+	r.siteId = &siteId
+	return r
+}
+
+func (r ApiGetVpcRoutingProfileDefinitionRequest) Execute() (*VpcRoutingProfileDefinition, *http.Response, error) {
+	return r.ApiService.GetVpcRoutingProfileDefinitionExecute(r)
+}
+
+/*
+GetVpcRoutingProfileDefinition Retrieve a named VPC routing profile
+
+Retrieve a full configured routing profile by its exact name. A privileged Tenant may read it only if its access tier is numerically greater than or equal to the tier of the Tenant's default; otherwise the response is 403. A name absent from the Site returns 404.
+
+Org must have an Infrastructure Provider or Tenant entity. Providers require `PROVIDER_ADMIN` or `PROVIDER_VIEWER` authorization and must own the selected Site. Tenants require `TENANT_ADMIN` authorization and effective TargetedInstanceCreation at that Site; a Site override takes precedence over the Ready Tenant Account's privilege. Other tenants receive 403. The Site must be Registered with native networking enabled.
+
+Tenant access is bounded by the access tier of their own default routing profile on the selected Site. An unset access tier is treated as zero for authorization. A missing or invalid default definition fails closed. Definitions preserve configured null, false, zero, and empty values; these are base profiles, before VPC overrides or effective defaults.
+
+	@param ctx context.Context - for authentication, logging, cancellation, deadlines, tracing, etc. Passed from http.Request or context.Background().
+	@param org Name of the caller organization
+	@param profileName Exact, case-sensitive configured profile name. URL-encode reserved characters; built-in aliases are not normalized by this GET endpoint.
+	@return ApiGetVpcRoutingProfileDefinitionRequest
+*/
+func (a *VPCAPIService) GetVpcRoutingProfileDefinition(ctx context.Context, org string, profileName string) ApiGetVpcRoutingProfileDefinitionRequest {
+	return ApiGetVpcRoutingProfileDefinitionRequest{
+		ApiService:  a,
+		ctx:         ctx,
+		org:         org,
+		profileName: profileName,
+	}
+}
+
+// Execute executes the request
+//
+//	@return VpcRoutingProfileDefinition
+func (a *VPCAPIService) GetVpcRoutingProfileDefinitionExecute(r ApiGetVpcRoutingProfileDefinitionRequest) (*VpcRoutingProfileDefinition, *http.Response, error) {
+	var (
+		localVarHTTPMethod  = http.MethodGet
+		localVarPostBody    interface{}
+		formFiles           []formFile
+		localVarReturnValue *VpcRoutingProfileDefinition
+	)
+
+	localBasePath, err := a.client.cfg.ServerURLWithContext(r.ctx, "VPCAPIService.GetVpcRoutingProfileDefinition")
+	if err != nil {
+		return localVarReturnValue, nil, &GenericOpenAPIError{error: err.Error()}
+	}
+
+	localVarPath := localBasePath + "/v2/org/{org}/nico/vpc/routing-profile/{profileName}"
+	localVarPath = strings.Replace(localVarPath, "{"+"org"+"}", url.PathEscape(parameterValueToString(r.org, "org")), -1)
+	localVarPath = strings.Replace(localVarPath, "{"+"profileName"+"}", url.PathEscape(parameterValueToString(r.profileName, "profileName")), -1)
+
+	localVarHeaderParams := make(map[string]string)
+	localVarQueryParams := url.Values{}
+	localVarFormParams := url.Values{}
+	if r.siteId == nil {
+		return localVarReturnValue, nil, reportError("siteId is required and must be specified")
+	}
+	if strlen(r.profileName) < 1 {
+		return localVarReturnValue, nil, reportError("profileName must have at least 1 elements")
+	}
+
+	parameterAddToHeaderOrQuery(localVarQueryParams, "siteId", r.siteId, "form", "")
+	// to determine the Content-Type header
+	localVarHTTPContentTypes := []string{}
+
+	// set Content-Type header
+	localVarHTTPContentType := selectHeaderContentType(localVarHTTPContentTypes)
+	if localVarHTTPContentType != "" {
+		localVarHeaderParams["Content-Type"] = localVarHTTPContentType
+	}
+
+	// to determine the Accept header
+	localVarHTTPHeaderAccepts := []string{"application/json"}
+
+	// set Accept header
+	localVarHTTPHeaderAccept := selectHeaderAccept(localVarHTTPHeaderAccepts)
+	if localVarHTTPHeaderAccept != "" {
+		localVarHeaderParams["Accept"] = localVarHTTPHeaderAccept
+	}
+	req, err := a.client.prepareRequest(r.ctx, localVarPath, localVarHTTPMethod, localVarPostBody, localVarHeaderParams, localVarQueryParams, localVarFormParams, formFiles)
+	if err != nil {
+		return localVarReturnValue, nil, err
+	}
+
+	localVarHTTPResponse, err := a.client.callAPI(req)
+	if err != nil || localVarHTTPResponse == nil {
+		return localVarReturnValue, localVarHTTPResponse, err
+	}
+
+	localVarBody, err := io.ReadAll(localVarHTTPResponse.Body)
+	localVarHTTPResponse.Body.Close()
+	localVarHTTPResponse.Body = io.NopCloser(bytes.NewBuffer(localVarBody))
+	if err != nil {
+		return localVarReturnValue, localVarHTTPResponse, err
+	}
+
+	if localVarHTTPResponse.StatusCode >= 300 {
+		newErr := &GenericOpenAPIError{
+			body:  localVarBody,
+			error: localVarHTTPResponse.Status,
+		}
+		if localVarHTTPResponse.StatusCode == 400 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 403 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 404 {
 			var v NICoAPIError
 			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
 			if err != nil {

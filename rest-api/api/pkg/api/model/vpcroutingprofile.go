@@ -12,6 +12,7 @@ import (
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 	validation "github.com/go-ozzo/ozzo-validation/v4"
+	validationis "github.com/go-ozzo/ozzo-validation/v4/is"
 )
 
 const maxVpcRoutingVni = 16777215
@@ -246,4 +247,95 @@ func checkVpcRoutingVersionAdvanced(before, after string) error {
 		return errors.New("Core did not acknowledge the next configuration version")
 	}
 	return nil
+}
+
+// APIVpcRoutingProfileGetRequest selects a Site's configured profile definitions.
+type APIVpcRoutingProfileGetRequest struct {
+	SiteID            string  `query:"siteId"`
+	Internal          *bool   `query:"internal"`
+	MinimumAccessTier *uint32 `query:"minimumAccessTier"`
+}
+
+// Validate requires an explicit Site for these site-local definitions.
+func (r *APIVpcRoutingProfileGetRequest) Validate() error {
+	return validation.ValidateStruct(r,
+		validation.Field(&r.SiteID, validation.Required, validationis.UUID),
+	)
+}
+
+// ToProto preserves omitted filters and explicit false or zero values.
+func (r *APIVpcRoutingProfileGetRequest) ToProto() *corev1.RoutingProfileSearchFilter {
+	return &corev1.RoutingProfileSearchFilter{
+		Internal:          r.Internal,
+		MinimumAccessTier: r.MinimumAccessTier,
+	}
+}
+
+// APIVpcRoutingProfileDefinition is a named base definition, before VPC overrides.
+type APIVpcRoutingProfileDefinition struct {
+	Name   string                               `json:"name"`
+	Config APIVpcRoutingProfileDefinitionConfig `json:"config"`
+}
+
+// APIVpcRoutingProfileDefinitionConfig preserves unset versus explicit values.
+type APIVpcRoutingProfileDefinitionConfig struct {
+	APIVpcRoutingProfileOverrides
+	Internal                    *bool   `json:"internal"`
+	AccessTier                  *uint32 `json:"accessTier"`
+	TenantPrefixOverlapEligible bool    `json:"tenantPrefixOverlapEligible"`
+}
+
+// FromProto maps every configured property without applying effective defaults.
+func (p *APIVpcRoutingProfileDefinition) FromProto(raw *corev1.NamedRoutingProfile) {
+	*p = APIVpcRoutingProfileDefinition{}
+	if raw == nil {
+		return
+	}
+	p.Name = raw.Name
+	config := raw.GetConfig()
+	if config == nil {
+		return
+	}
+	p.Config.LeakDefaultRouteFromUnderlay = config.LeakDefaultRouteFromUnderlay
+	p.Config.LeakTenantHostRoutesToUnderlay = config.LeakTenantHostRoutesToUnderlay
+	p.Config.TenantLeakCommunitiesAccepted = config.TenantLeakCommunitiesAccepted
+	if config.RouteTargetImports != nil {
+		targets := make(APIVpcRouteTargets, 0, len(config.RouteTargetImports.Values))
+		for _, target := range config.RouteTargetImports.Values {
+			targets = append(targets, APIVpcRouteTarget{
+				ASN:     target.GetAsn(),
+				VNI:     target.Vni,
+				VniSelf: target.GetVniSelf(),
+			})
+		}
+		p.Config.RouteTargetImports = &targets
+	}
+	if config.RouteTargetsOnExports != nil {
+		targets := make(APIVpcRouteTargets, 0, len(config.RouteTargetsOnExports.Values))
+		for _, target := range config.RouteTargetsOnExports.Values {
+			targets = append(targets, APIVpcRouteTarget{
+				ASN:     target.GetAsn(),
+				VNI:     target.Vni,
+				VniSelf: target.GetVniSelf(),
+			})
+		}
+		p.Config.RouteTargetsOnExports = &targets
+	}
+	if config.AcceptedLeaksFromUnderlay != nil {
+		prefixes := make([]string, 0, len(config.AcceptedLeaksFromUnderlay.Values))
+		for _, prefix := range config.AcceptedLeaksFromUnderlay.Values {
+			prefixes = append(prefixes, prefix.GetPrefix())
+		}
+		p.Config.AcceptedLeaksFromUnderlay = &prefixes
+	}
+	if config.AllowedAnycastPrefixes != nil {
+		prefixes := make([]string, 0, len(config.AllowedAnycastPrefixes.Values))
+		for _, prefix := range config.AllowedAnycastPrefixes.Values {
+			prefixes = append(prefixes, prefix.GetPrefix())
+		}
+		p.Config.AllowedAnycastPrefixes = &prefixes
+	}
+	p.Config.Internal = config.Internal
+	p.Config.AccessTier = config.AccessTier
+	p.Config.TenantPrefixOverlapEligible = config.TenantPrefixOverlapEligible
 }
