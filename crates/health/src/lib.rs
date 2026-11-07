@@ -354,6 +354,7 @@ fn build_data_sink(
             mapper,
             &metrics_manager,
             &config.metrics.prefix,
+            sink_workers,
         )?;
 
         for sink in otlp_sinks {

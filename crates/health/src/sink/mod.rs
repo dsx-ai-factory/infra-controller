@@ -56,7 +56,7 @@ pub(crate) use self::dedup_queue::DedupQueue;
 pub(crate) use self::otlp::OtlpSink;
 #[cfg(feature = "bench-hooks")]
 pub use self::otlp::OtlpSink;
-pub(crate) use self::shutdown::SinkWorkers;
+pub(crate) use self::shutdown::{DeliveryCounts, SinkWorkers};
 use crate::HealthError;
 
 /// An immutable observation and metric identity shared within one composite fanout.

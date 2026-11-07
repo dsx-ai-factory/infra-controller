@@ -17,6 +17,7 @@
 
 use std::sync::Arc;
 
+use tokio_util::sync::CancellationToken;
 use tonic::transport::Channel;
 
 use super::collector_logs::ExportLogsServiceRequest;
@@ -25,26 +26,43 @@ use super::convert::build_export_request;
 use super::{OtlpExport, OtlpExportResponse, OtlpSignal, run_drain};
 use crate::config::OtlpTargetConfig;
 use crate::sink::otlp::OtlpQueue;
-use crate::sink::{CollectorEvent, EventContext};
+use crate::sink::{CollectorEvent, DeliveryCounts, EventContext};
 
 pub(crate) struct OtlpDrainTask {
     queue: Arc<OtlpQueue>,
     target: OtlpTargetConfig,
+    flush_token: CancellationToken,
+    counts: DeliveryCounts,
 }
 
 impl OtlpDrainTask {
-    pub(crate) fn new(queue: Arc<OtlpQueue>, target: OtlpTargetConfig) -> Self {
-        Self { queue, target }
+    pub(crate) fn new(
+        queue: Arc<OtlpQueue>,
+        target: OtlpTargetConfig,
+        flush_token: CancellationToken,
+        counts: DeliveryCounts,
+    ) -> Self {
+        Self {
+            queue,
+            target,
+            flush_token,
+            counts,
+        }
     }
 
     pub(crate) async fn run(self) {
         let include_alert_details = self.target.include_alert_details;
-        run_drain(self.queue, self.target, OtlpSignal::Logs, move |channel| {
-            LogsExport {
+        run_drain(
+            self.queue,
+            self.target,
+            OtlpSignal::Logs,
+            self.flush_token,
+            self.counts,
+            move |channel| LogsExport {
                 client: LogsServiceClient::new(channel),
                 include_alert_details,
-            }
-        })
+            },
+        )
         .await;
     }
 }

@@ -32,8 +32,10 @@ use tokio_util::sync::CancellationToken;
 
 /// Delivery progress of one sink's workers, in records.
 ///
-/// Records replaced while waiting in a queue or a staged batch are never
-/// started, so they are neither delivered nor dropped.
+/// A record is one queued entry: a health report, a log record, or a metric
+/// observation, which can encode several OTLP data points. Records replaced
+/// while waiting in a queue or a staged batch are never started, so they are
+/// neither delivered nor dropped.
 #[derive(Clone, Default)]
 pub(crate) struct DeliveryCounts(Arc<Counts>);
 
