@@ -19,6 +19,8 @@
 
 use std::fmt;
 
+use serde::{Deserialize, Deserializer, Serialize};
+
 #[derive(
     Clone,
     Copy,
@@ -29,8 +31,7 @@ use std::fmt;
     PartialEq,
     clap::ValueEnum,
     clap::Parser,
-    serde::Serialize,
-    serde::Deserialize,
+    Serialize,
 )]
 pub enum BMCVendor {
     Lenovo,
@@ -43,9 +44,20 @@ pub enum BMCVendor {
     Liteon,
     Delta,
     Sushy,
-    #[serde(other)]
     #[default]
     Unknown,
+}
+
+/// Case-insensitive deserialize so lowercased figment/env map keys (e.g. `dell`)
+/// resolve to the matching vendor instead of silently becoming [`BMCVendor::Unknown`].
+impl<'de> Deserialize<'de> for BMCVendor {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Ok(BMCVendor::from(value.as_str()))
+    }
 }
 
 impl fmt::Display for BMCVendor {
@@ -378,6 +390,29 @@ mod tests {
             "unknown system vendors" {
                 "Acme Corp" => BMCVendor::Unknown,
                 "dell inc." => BMCVendor::Unknown,
+            }
+        );
+    }
+
+    #[test]
+    fn bmc_vendor_deserializes_case_insensitively() {
+        use serde::de::IntoDeserializer;
+        use serde::de::value::{Error as ValueError, StrDeserializer};
+
+        value_scenarios!(
+            run = |input: &str| {
+                let deserializer: StrDeserializer<'_, ValueError> = input.into_deserializer();
+                BMCVendor::deserialize(deserializer).unwrap()
+            };
+            "pascal, lower, and mixed case map to the same vendor" {
+                "Dell" => BMCVendor::Dell,
+                "dell" => BMCVendor::Dell,
+                "DELL" => BMCVendor::Dell,
+                "GigaComputing" => BMCVendor::GigaComputing,
+                "gigacomputing" => BMCVendor::GigaComputing,
+            }
+            "unrecognized names become Unknown" {
+                "Acme" => BMCVendor::Unknown,
             }
         );
     }
