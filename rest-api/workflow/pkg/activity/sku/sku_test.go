@@ -12,12 +12,26 @@ import (
 	"testing"
 	"time"
 
+	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/grpcproxy"
+	swe "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/error"
+	sc "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/client/site"
 	"github.com/google/uuid"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 	"github.com/uptrace/bun"
+	commonpb "go.temporal.io/api/common/v1"
+	enumspb "go.temporal.io/api/enums/v1"
+	failurepb "go.temporal.io/api/failure/v1"
+	historypb "go.temporal.io/api/history/v1"
+	"go.temporal.io/api/serviceerror"
+	workflowpb "go.temporal.io/api/workflow/v1"
+	workflowservice "go.temporal.io/api/workflowservice/v1"
+	tclient "go.temporal.io/sdk/client"
+	tmocks "go.temporal.io/sdk/mocks"
+	"go.temporal.io/sdk/temporal"
 
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
@@ -52,8 +66,9 @@ func TestManageSku_UpdateSkusInDB(t *testing.T) {
 		run  func(*testing.T)
 	}{
 		{name: "reconcile create update delete", run: testManageSkuReconcileCreateUpdateDelete},
+		{name: "fair recovery preserves projection and retries local cleanup", run: testManageSkuDeletionRecovery},
 		{name: "nil components and associations clear while omitted device type survives", run: testManageSkuNilCollectionsClearAndOmittedDeviceTypeSurvives},
-		{name: "failed inventory skips reconciliation", run: testManageSkuInventoryStatusFailedSkipsReconciliation},
+		{name: "failed inventory skips projection", run: testManageSkuFailedInventorySkipsProjection},
 		{name: "paged deletion", run: testManageSkuPagedDeletion},
 		{name: "update respects freshness", run: testManageSkuUpdateRespectsStaleInventoryThreshold},
 		{name: "edit committed before update survives", run: testManageSkuEditBeforeUpdateSurvives},
@@ -414,7 +429,7 @@ func testManageSkuNilCollectionsClearAndOmittedDeviceTypeSurvives(t *testing.T) 
 	}
 }
 
-func testManageSkuInventoryStatusFailedSkipsReconciliation(t *testing.T) {
+func testManageSkuFailedInventorySkipsProjection(t *testing.T) {
 	ctx := context.Background()
 	_ = config.GetTestConfig()
 
@@ -441,6 +456,7 @@ func testManageSkuInventoryStatusFailedSkipsReconciliation(t *testing.T) {
 	}
 
 	assert.NoError(t, ms.UpdateSkusInDB(ctx, site.ID, inv))
+	assert.NoError(t, ms.UpdateSkusInDB(ctx, uuid.New(), inv), "failed inventory for an unknown Site remains a no-op")
 
 	// Ensure original remains and no changes happened
 	ssd := cdbm.NewSkuDAO(dbSession)
@@ -812,7 +828,7 @@ func testManageSkuDeleteErrorContinuesAndRetries(t *testing.T) {
 	}()
 	_, err = dbSession.DB.ExecContext(ctx, fmt.Sprintf("CREATE TRIGGER fail_delete BEFORE DELETE ON sku FOR EACH ROW WHEN (OLD.id = '%s') EXECUTE FUNCTION fail_sku_delete()", row.ID))
 	require.NoError(t, err)
-	deleted, err := dao.DeleteIfUnchanged(ctx, nil, row.ID, rows[0].Updated)
+	deleted, err := dao.DeleteIfUnchanged(ctx, nil, row.ID, site.ID, rows[0].Updated)
 	require.False(t, deleted)
 	require.ErrorContains(t, err, "injected database failure")
 	hook := &testSkuBeforeDeleteHook{rowID: row.ID}
@@ -834,4 +850,142 @@ func testManageSkuDeleteErrorContinuesAndRetries(t *testing.T) {
 	require.NoError(t, ms.UpdateSkusInDB(ctx, site.ID, inventory))
 	_, err = dao.Get(ctx, nil, row.ID)
 	require.ErrorIs(t, err, cdb.ErrDoesNotExist)
+}
+
+func testManageSkuDeletionRecovery(t *testing.T) {
+	ctx := context.Background()
+	session := cwu.TestInitDB(t)
+	defer session.Close()
+	cwu.TestSetupSchema(t, session)
+	user := cwu.TestBuildUser(t, session, uuid.NewString(), []string{"sku-recovery-org"}, []string{"FORGE_PROVIDER_ADMIN"})
+	provider := cwu.TestBuildInfrastructureProvider(t, session, "sku-recovery-provider", "sku-recovery-org", user)
+	site := cwu.TestBuildSite(t, session, provider, "sku-recovery-site", cdbm.SiteStatusRegistered, nil, user)
+	dao := cdbm.NewSkuDAO(session)
+	for _, id := range []string{"a-unknown", "b-success", "c-rejected"} {
+		_, err := dao.Create(ctx, nil, cdbm.SkuCreateInput{SkuID: id, SiteID: site.ID, Description: "saved description"})
+		require.NoError(t, err)
+		err = cdb.WithTx(ctx, session, func(tx *cdb.Tx) error {
+			_, err := dao.GetForUpdate(ctx, tx, id)
+			if err != nil {
+				return err
+			}
+			var runID *string
+			if id != "b-success" {
+				runID = cutil.GetPtr(id + "-run")
+			}
+			applied, err := dao.SetDeletion(ctx, tx, id, site.ID, nil, &cdbm.SkuDeletion{WorkflowID: id, RunID: runID})
+			require.True(t, applied)
+			return err
+		})
+		require.NoError(t, err)
+	}
+	unrelated, err := dao.Create(ctx, nil, cdbm.SkuCreateInput{SkuID: "unrelated", SiteID: site.ID, Description: "original unrelated description"})
+	require.NoError(t, err)
+	ageSku(ctx, t, session, unrelated.ID)
+	stc := &tmocks.Client{}
+	unknown, success := &tmocks.WorkflowRun{}, &tmocks.WorkflowRun{}
+	stc.On("GetWorkflow", mock.Anything, "a-unknown", "a-unknown-run").Return(unknown)
+	unknown.On("GetWithOptions", mock.Anything, mock.Anything, tclient.WorkflowRunGetOptions{DisableFollowingRuns: true}).Return(func(ctx context.Context, _ any, _ tclient.WorkflowRunGetOptions) error {
+		<-ctx.Done()
+		return serviceerror.NewNotFound("history unavailable")
+	}).Once()
+	unknown.On("GetWithOptions", mock.Anything, mock.Anything, tclient.WorkflowRunGetOptions{DisableFollowingRuns: true}).Return(serviceerror.NewNotFound("history still unavailable")).Once()
+	stc.On("DescribeWorkflowExecution", mock.Anything, "b-success", "").Return(&workflowservice.DescribeWorkflowExecutionResponse{WorkflowExecutionInfo: &workflowpb.WorkflowExecutionInfo{Type: &commonpb.WorkflowType{Name: grpcproxy.Core.WorkflowName}, Status: enumspb.WORKFLOW_EXECUTION_STATUS_COMPLETED, Execution: &commonpb.WorkflowExecution{RunId: "b-success-run"}}}, nil).Twice()
+	stc.On("GetWorkflowHistory", mock.Anything, "b-success", "b-success-run", false, enumspb.HISTORY_EVENT_FILTER_TYPE_ALL_EVENT).Return(&testSkuOriginalHistory{events: []*historypb.HistoryEvent{
+		{EventId: 1, EventType: enumspb.EVENT_TYPE_WORKFLOW_EXECUTION_STARTED, Attributes: &historypb.HistoryEvent_WorkflowExecutionStartedEventAttributes{WorkflowExecutionStartedEventAttributes: &historypb.WorkflowExecutionStartedEventAttributes{WorkflowType: &commonpb.WorkflowType{Name: grpcproxy.Core.WorkflowName}, OriginalExecutionRunId: "b-success-run", FirstExecutionRunId: "b-success-run", Attempt: 1}}},
+		{EventId: 2, EventType: enumspb.EVENT_TYPE_WORKFLOW_EXECUTION_COMPLETED, Attributes: &historypb.HistoryEvent_WorkflowExecutionCompletedEventAttributes{WorkflowExecutionCompletedEventAttributes: &historypb.WorkflowExecutionCompletedEventAttributes{}}},
+	}}).Once()
+	stc.On("GetWorkflow", mock.Anything, "b-success", "b-success-run").Return(success).Once()
+	success.On("GetWithOptions", mock.Anything, mock.Anything, tclient.WorkflowRunGetOptions{DisableFollowingRuns: true}).Run(func(args mock.Arguments) {
+		args.Get(1).(*grpcproxy.Response).ResponseJSON = []byte(`{}`)
+	}).Return(nil).Once()
+	converter := temporal.GetDefaultFailureConverter()
+	rejection := converter.FailureToError(&failurepb.Failure{Cause: converter.ErrorToFailure(temporal.NewNonRetryableApplicationError("Core rejected deletion", swe.ErrTypeNICoFailedPrecondition, nil)), FailureInfo: &failurepb.Failure_ActivityFailureInfo{ActivityFailureInfo: &failurepb.ActivityFailureInfo{ActivityType: &commonpb.ActivityType{Name: "InvokeCoreGRPCOnSite"}, ActivityId: "delete", ScheduledEventId: 5, StartedEventId: 6}}})
+	rejected := &tmocks.WorkflowRun{}
+	stc.On("GetWorkflow", mock.Anything, "c-rejected", "c-rejected-run").Return(rejected).Once()
+	rejected.On("GetWithOptions", mock.Anything, mock.Anything, tclient.WorkflowRunGetOptions{DisableFollowingRuns: true}).Return(rejection).Once()
+	stc.On("DescribeWorkflowExecution", mock.Anything, "c-rejected", "").Return(&workflowservice.DescribeWorkflowExecutionResponse{WorkflowExecutionInfo: &workflowpb.WorkflowExecutionInfo{Status: enumspb.WORKFLOW_EXECUTION_STATUS_FAILED, Execution: &commonpb.WorkflowExecution{RunId: "c-rejected-run"}}}, nil).Once()
+	stc.On("GetWorkflowHistory", mock.Anything, "c-rejected", "c-rejected-run", false, enumspb.HISTORY_EVENT_FILTER_TYPE_ALL_EVENT).Return(&testSkuOriginalHistory{events: []*historypb.HistoryEvent{
+		{EventId: 1, EventType: enumspb.EVENT_TYPE_WORKFLOW_EXECUTION_STARTED, Attributes: &historypb.HistoryEvent_WorkflowExecutionStartedEventAttributes{WorkflowExecutionStartedEventAttributes: &historypb.WorkflowExecutionStartedEventAttributes{WorkflowType: &commonpb.WorkflowType{Name: grpcproxy.Core.WorkflowName}, OriginalExecutionRunId: "c-rejected-run", FirstExecutionRunId: "c-rejected-run", Attempt: 1}}},
+		{EventId: 5, EventType: enumspb.EVENT_TYPE_ACTIVITY_TASK_SCHEDULED, Attributes: &historypb.HistoryEvent_ActivityTaskScheduledEventAttributes{ActivityTaskScheduledEventAttributes: &historypb.ActivityTaskScheduledEventAttributes{ActivityId: "delete", ActivityType: &commonpb.ActivityType{Name: "InvokeCoreGRPCOnSite"}}}},
+		{EventId: 6, EventType: enumspb.EVENT_TYPE_ACTIVITY_TASK_STARTED, Attributes: &historypb.HistoryEvent_ActivityTaskStartedEventAttributes{ActivityTaskStartedEventAttributes: &historypb.ActivityTaskStartedEventAttributes{ScheduledEventId: 5, Attempt: 1}}},
+		{EventId: 8, EventType: enumspb.EVENT_TYPE_WORKFLOW_EXECUTION_FAILED, Attributes: &historypb.HistoryEvent_WorkflowExecutionFailedEventAttributes{WorkflowExecutionFailedEventAttributes: &historypb.WorkflowExecutionFailedEventAttributes{}}},
+	}}).Once()
+	pool := sc.NewClientPool(nil)
+	pool.IDClientMap[site.ID.String()] = stc
+	ms := NewManageSku(session, pool)
+	ms.deletionHistoryBudget = 500 * time.Millisecond
+	failedInventory := &corev1.SkuInventory{InventoryStatus: corev1.InventoryStatus_INVENTORY_STATUS_FAILED}
+	require.NoError(t, ms.UpdateSkusInDB(ctx, site.ID, failedInventory))
+	first, err := dao.Get(ctx, nil, "a-unknown")
+	require.NoError(t, err)
+	require.NotNil(t, first.Deletion.LastObserved)
+	second, err := dao.Get(ctx, nil, "b-success")
+	require.NoError(t, err)
+	assert.Nil(t, second.Deletion.LastObserved, "history budget must leave the second attempt for another activity")
+
+	_, err = session.DB.ExecContext(ctx, `CREATE OR REPLACE FUNCTION fail_sku_inventory_cleanup() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected inventory cleanup failure'; END $$`)
+	require.NoError(t, err)
+	defer func() {
+		_, cleanupErr := session.DB.ExecContext(ctx, "DROP FUNCTION fail_sku_inventory_cleanup() CASCADE")
+		require.NoError(t, cleanupErr)
+	}()
+	_, err = session.DB.ExecContext(ctx, "CREATE TRIGGER fail_sku_inventory_cleanup BEFORE DELETE ON sku FOR EACH ROW WHEN (OLD.id = 'b-success') EXECUTE FUNCTION fail_sku_inventory_cleanup()")
+	require.NoError(t, err)
+	// The unobserved second attempt now precedes the unavailable first history.
+	// A row-local cleanup failure must leave unrelated inventory writes committed.
+	inventory := &corev1.SkuInventory{InventoryStatus: corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS, Skus: []*corev1.Sku{
+		{Id: "b-success"}, {Id: unrelated.ID, Description: cutil.GetPtr("updated unrelated description")},
+	}}
+	var logs bytes.Buffer
+	previousLogger := log.Logger
+	log.Logger = zerolog.New(&logs)
+	err = ms.UpdateSkusInDB(ctx, site.ID, inventory)
+	log.Logger = previousLogger
+	require.NoError(t, err)
+	require.Contains(t, logs.String(), "injected inventory cleanup failure")
+	require.Contains(t, logs.String(), "b-success")
+	updated, err := dao.Get(ctx, nil, unrelated.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "updated unrelated description", updated.Description)
+	second, err = dao.Get(ctx, nil, "b-success")
+	require.NoError(t, err)
+	assert.True(t, second.Deletion.Confirmed)
+	assert.Equal(t, cutil.GetPtr("b-success-run"), second.Deletion.RunID)
+	require.NotNil(t, second.Deletion.LastObserved)
+	first, err = dao.Get(ctx, nil, "a-unknown")
+	require.NoError(t, err)
+	assert.False(t, first.Deletion.Confirmed)
+	retained, err := dao.Get(ctx, nil, "c-rejected")
+	require.NoError(t, err)
+	assert.Nil(t, retained.Deletion, "verified rejection releases only its own intent")
+	assert.Equal(t, "saved description", retained.Description)
+
+	_, err = session.DB.ExecContext(ctx, "DROP TRIGGER fail_sku_inventory_cleanup ON sku")
+	require.NoError(t, err)
+	restarted := NewManageSku(session, nil)
+	require.NoError(t, restarted.UpdateSkusInDB(ctx, site.ID, inventory))
+	_, err = dao.Get(ctx, nil, "b-success")
+	require.ErrorIs(t, err, cdb.ErrDoesNotExist, "the stale report must not recreate a just-resolved SKU")
+	first, err = dao.Get(ctx, nil, "a-unknown")
+	require.NoError(t, err)
+	assert.Equal(t, "saved description", first.Description)
+	require.NotNil(t, first.Deletion)
+	assert.False(t, first.Deletion.Confirmed, "inventory absence cannot resolve uncertain deletion")
+	stc.AssertExpectations(t)
+	success.AssertExpectations(t)
+	rejected.AssertExpectations(t)
+	unknown.AssertExpectations(t)
+	for _, call := range stc.Calls {
+		assert.NotEqual(t, "ExecuteWorkflow", call.Method)
+	}
+}
+
+type testSkuOriginalHistory struct{ events []*historypb.HistoryEvent }
+
+func (h *testSkuOriginalHistory) HasNext() bool { return len(h.events) > 0 }
+func (h *testSkuOriginalHistory) Next() (*historypb.HistoryEvent, error) {
+	event := h.events[0]
+	h.events = h.events[1:]
+	return event, nil
 }

@@ -37,7 +37,7 @@ type ExpectedMachineUpdateRequest struct {
 	FallbackDPUSerialNumbers []string `json:"fallbackDPUSerialNumbers,omitempty"`
 	// Complete expected host NIC list. Omission or null preserves the current list; an explicit empty list clears it.
 	Interfaces []ExpectedMachineInterface `json:"interfaces,omitempty"`
-	// Optional ID of an existing SKU at this Expected Machine's Site. Omission or null preserves the current SKU association in single and batch PATCH requests. REST rejects an empty string with HTTP 400. PATCH cannot remove the SKU association.
+	// Optional ID of an existing SKU at this Expected Machine's Site. Omission or null preserves the current SKU association in single and batch PATCH requests. REST rejects an empty string with HTTP 400. A supplied SKU with a pending deletion is rejected with HTTP 422 for single requests and HTTP 400 for batch requests. PATCH cannot remove the SKU association.
 	SkuId NullableString `json:"skuId,omitempty"`
 	// Optional rack identifier for this component
 	RackId NullableString `json:"rackId,omitempty"`

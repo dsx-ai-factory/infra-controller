@@ -6,6 +6,7 @@ package model
 import (
 	"context"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -15,6 +16,7 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/util"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"github.com/uptrace/bun/extra/bundebug"
 	otrace "go.opentelemetry.io/otel/trace"
 )
@@ -251,6 +253,98 @@ func TestSiteSQLDAO_GetByID(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestSiteSQLDAO_GetForShare(t *testing.T) {
+	t.Run("shared readers hold a Site status change until both finish", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		dbSession := util.GetTestDBSession(t, false)
+		defer dbSession.Close()
+		setupSchema(t, dbSession)
+		ip := &InfrastructureProvider{ID: uuid.New(), Name: "shared-site-provider", Org: "shared-site-org"}
+		_, err := dbSession.DB.NewInsert().Model(ip).Exec(ctx)
+		require.NoError(t, err)
+		dao := NewSiteDAO(dbSession)
+		site, err := dao.Create(ctx, nil, SiteCreateInput{Name: "shared-site", Org: ip.Org, InfrastructureProviderID: ip.ID, Status: SiteStatusRegistered, CreatedBy: uuid.New()})
+		require.NoError(t, err)
+
+		first, err := db.BeginTx(ctx, dbSession, nil)
+		require.NoError(t, err)
+		defer func() { _ = first.Rollback() }()
+		second, err := db.BeginTx(ctx, dbSession, nil)
+		require.NoError(t, err)
+		var workers sync.WaitGroup
+		defer func() {
+			cancel()
+			_ = first.Rollback()
+			_ = second.Rollback()
+			workers.Wait()
+		}()
+		observed, err := dao.GetForShare(ctx, first, site.ID)
+		require.NoError(t, err)
+		assert.Equal(t, site.ID, observed.ID)
+
+		// A stronger row lock would make this independent reader wait. Keep that
+		// failure bounded while exercising the public accessor in both transactions.
+		_, err = second.GetBunTx().ExecContext(ctx, "SET LOCAL lock_timeout = '1s'")
+		require.NoError(t, err)
+		observed, err = dao.GetForShare(ctx, second, site.ID)
+		require.NoError(t, err)
+		assert.Equal(t, site.ID, observed.ID)
+		var secondPID int
+		err = second.GetBunTx().NewSelect().ColumnExpr("pg_backend_pid()").Scan(ctx, &secondPID)
+		require.NoError(t, err)
+
+		ready := make(chan int, 1)
+		done := make(chan error, 1)
+		workers.Go(func() {
+			done <- db.WithTx(ctx, dbSession, func(tx *db.Tx) error {
+				var pid int
+				err := tx.GetBunTx().NewSelect().ColumnExpr("pg_backend_pid()").Scan(ctx, &pid)
+				if err != nil {
+					return err
+				}
+				ready <- pid
+				_, err = dao.Update(ctx, tx, SiteUpdateInput{SiteID: site.ID, Status: cutil.GetPtr(SiteStatusError)})
+				return err
+			})
+		})
+		var writerPID int
+		select {
+		case writerPID = <-ready:
+		case err = <-done:
+			t.Fatal("Site status writer finished before blocking: ", err)
+		case <-ctx.Done():
+			t.Fatal("Site status writer did not start: ", ctx.Err())
+		}
+		require.Eventually(t, func() bool {
+			var blockers int
+			err := dbSession.DB.NewSelect().ColumnExpr("cardinality(pg_blocking_pids(?))", writerPID).Scan(ctx, &blockers)
+			return err == nil && blockers > 0
+		}, 5*time.Second, 10*time.Millisecond, "shared Site readers must block a status change")
+
+		require.NoError(t, first.Commit())
+		require.Eventually(t, func() bool {
+			var blockedBySecond bool
+			err := dbSession.DB.NewSelect().ColumnExpr("? = ANY(pg_blocking_pids(?))", secondPID, writerPID).Scan(ctx, &blockedBySecond)
+			return err == nil && blockedBySecond
+		}, 5*time.Second, 10*time.Millisecond, "the second reader must still exclude the status change")
+		observed, err = dao.GetByID(ctx, nil, site.ID, nil, false, false)
+		require.NoError(t, err)
+		assert.Equal(t, SiteStatusRegistered, observed.Status)
+
+		require.NoError(t, second.Commit())
+		select {
+		case err = <-done:
+			require.NoError(t, err)
+		case <-ctx.Done():
+			t.Fatal("Site status writer did not finish after reader release: ", ctx.Err())
+		}
+		observed, err = dao.GetByID(ctx, nil, site.ID, nil, false, false)
+		require.NoError(t, err)
+		assert.Equal(t, SiteStatusError, observed.Status)
+	})
 }
 
 func TestSiteSQLDAO_GetAll(t *testing.T) {

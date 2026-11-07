@@ -1199,7 +1199,7 @@ func NewAPIRoutes(dbSession *cdb.Session, tc tClient.Client, tnc tClient.Namespa
 		{
 			Path:    apiPathPrefix + "/sku/:id",
 			Method:  http.MethodDelete,
-			Handler: apiHandler.NewDeleteSkuHandler(dbSession, scp),
+			Handler: apiHandler.NewDeleteSkuHandler(dbSession, scp, cfg),
 		},
 		// Task endpoints (Flow). /rack/task/* and /task/* share get/cancel
 		// handlers; filtered lists are also exposed under /rack/{id}/task and

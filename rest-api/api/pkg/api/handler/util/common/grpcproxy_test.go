@@ -20,7 +20,10 @@ import (
 	temporalCommon "go.temporal.io/api/common/v1"
 	temporalEnums "go.temporal.io/api/enums/v1"
 	temporalFailure "go.temporal.io/api/failure/v1"
+	historypb "go.temporal.io/api/history/v1"
 	"go.temporal.io/api/serviceerror"
+	workflowpb "go.temporal.io/api/workflow/v1"
+	workflowservice "go.temporal.io/api/workflowservice/v1"
 	tclient "go.temporal.io/sdk/client"
 	tmocks "go.temporal.io/sdk/mocks"
 	tp "go.temporal.io/sdk/temporal"
@@ -571,4 +574,84 @@ func TestExecuteFlowGRPC(t *testing.T) {
 		assert.Equal(t, http.StatusGatewayTimeout, err.Code)
 		assert.Equal(t, "Flow proxy request timed out", err.Message)
 	})
+}
+
+func TestExecuteCoreGRPCWithRunID(t *testing.T) {
+	cases := []struct {
+		name                                 string
+		bindErr                              error
+		getErr                               error
+		emptyRun, resume, unbound, duplicate bool
+		wantCode                             int
+	}{
+		{name: "fresh attempt binds before await"},
+		{name: "duplicate start binds verified original before await", duplicate: true},
+		{name: "binding failure never awaits or releases", bindErr: errors.New("binding commit failed"), wantCode: http.StatusInternalServerError},
+		{name: "missing acknowledged run stays unbound", emptyRun: true, wantCode: http.StatusServiceUnavailable},
+		{name: "recovery observes exact stored run", resume: true},
+		{name: "missing namespace leaves original result unobserved", resume: true, getErr: serviceerror.NewNamespaceNotFound("missing-site"), wantCode: http.StatusServiceUnavailable},
+		{name: "missing unbound original never dispatches", resume: true, unbound: true, wantCode: http.StatusServiceUnavailable},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			stc, run := &tmocks.Client{}, &tmocks.WorkflowRun{}
+			bound := false
+			runID := ""
+			if tc.unbound {
+				stc.On("DescribeWorkflowExecution", mock.Anything, "attempt", "").Return(nil, serviceerror.NewNotFound("original unavailable")).Once()
+			}
+			if tc.resume && !tc.unbound {
+				runID = "original-run"
+				stc.On("GetWorkflow", mock.Anything, "attempt", runID).Return(run).Once()
+			} else if tc.duplicate {
+				stc.On("ExecuteWorkflow", mock.Anything, mock.Anything, grpcproxy.Core.WorkflowName, mock.Anything).Return(nil, &serviceerror.WorkflowExecutionAlreadyStarted{RunId: "original-run"}).Once()
+				stc.On("DescribeWorkflowExecution", mock.Anything, "attempt", "").Return(&workflowservice.DescribeWorkflowExecutionResponse{WorkflowExecutionInfo: &workflowpb.WorkflowExecutionInfo{Type: &temporalCommon.WorkflowType{Name: grpcproxy.Core.WorkflowName}, Status: temporalEnums.WORKFLOW_EXECUTION_STATUS_COMPLETED, Execution: &temporalCommon.WorkflowExecution{RunId: "original-run"}}}, nil).Twice()
+				stc.On("GetWorkflowHistory", mock.Anything, "attempt", "original-run", false, temporalEnums.HISTORY_EVENT_FILTER_TYPE_ALL_EVENT).Return(&boundProxyHistory{events: []*historypb.HistoryEvent{
+					{EventId: 1, EventType: temporalEnums.EVENT_TYPE_WORKFLOW_EXECUTION_STARTED, Attributes: &historypb.HistoryEvent_WorkflowExecutionStartedEventAttributes{WorkflowExecutionStartedEventAttributes: &historypb.WorkflowExecutionStartedEventAttributes{WorkflowType: &temporalCommon.WorkflowType{Name: grpcproxy.Core.WorkflowName}, OriginalExecutionRunId: "original-run", FirstExecutionRunId: "original-run", Attempt: 1}}},
+					{EventId: 2, EventType: temporalEnums.EVENT_TYPE_WORKFLOW_EXECUTION_COMPLETED, Attributes: &historypb.HistoryEvent_WorkflowExecutionCompletedEventAttributes{WorkflowExecutionCompletedEventAttributes: &historypb.WorkflowExecutionCompletedEventAttributes{}}},
+				}}).Once()
+				stc.On("GetWorkflow", mock.Anything, "attempt", "original-run").Return(run).Once()
+			} else if !tc.unbound {
+				stc.On("ExecuteWorkflow", mock.Anything, mock.Anything, grpcproxy.Core.WorkflowName, mock.Anything).Return(run, nil).Once()
+				acknowledged := "original-run"
+				if tc.emptyRun {
+					acknowledged = ""
+				}
+				run.On("GetRunID").Return(acknowledged).Once()
+			}
+			if tc.wantCode == 0 || tc.getErr != nil {
+				run.On("GetWithOptions", mock.Anything, mock.Anything, tclient.WorkflowRunGetOptions{DisableFollowingRuns: true}).Run(func(args mock.Arguments) {
+					assert.True(t, tc.resume || bound)
+					args.Get(1).(*grpcproxy.Response).ResponseJSON = []byte(`{}`)
+				}).Return(tc.getErr).Once()
+			}
+			apiErr, observed := ExecuteCoreGRPCWithRunID(context.Background(), stc, corev1.Forge_DeleteSku_FullMethodName, &corev1.SkuIdList{Ids: []string{"sku"}}, &emptypb.Empty{}, "attempt", runID, !tc.resume, func(runID string) error {
+				assert.Equal(t, "original-run", runID)
+				bound = tc.bindErr == nil
+				return tc.bindErr
+			})
+			if tc.wantCode == 0 {
+				require.Nil(t, apiErr)
+				assert.True(t, observed)
+			} else {
+				require.NotNil(t, apiErr)
+				assert.Equal(t, tc.wantCode, apiErr.Code)
+				assert.False(t, observed)
+			}
+			if tc.resume {
+				stc.AssertNotCalled(t, "ExecuteWorkflow", mock.Anything, mock.Anything, mock.Anything, mock.Anything)
+			}
+			stc.AssertExpectations(t)
+			run.AssertExpectations(t)
+		})
+	}
+}
+
+type boundProxyHistory struct{ events []*historypb.HistoryEvent }
+
+func (h *boundProxyHistory) HasNext() bool { return len(h.events) > 0 }
+func (h *boundProxyHistory) Next() (*historypb.HistoryEvent, error) {
+	event := h.events[0]
+	h.events = h.events[1:]
+	return event, nil
 }

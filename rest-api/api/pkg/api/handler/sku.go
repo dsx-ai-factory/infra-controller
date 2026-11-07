@@ -17,6 +17,7 @@ import (
 	"github.com/labstack/echo/v4"
 	"go.opentelemetry.io/otel/attribute"
 	tclient "go.temporal.io/sdk/client"
+	"google.golang.org/protobuf/types/known/emptypb"
 	"google.golang.org/protobuf/types/known/structpb"
 
 	"github.com/NVIDIA/infra-controller/rest-api/api/internal/config"
@@ -343,6 +344,13 @@ func (csh CreateSkuHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, apiErr.Code, apiErr.Message, apiErr.Data)
 	}
 
+	apiErr = checkSkuMutationAllowed(ctx, csh.dbSession, apiReq.ID, uuid.MustParse(siteID), true)
+	if apiErr != nil {
+		if apiErr.Code >= http.StatusInternalServerError {
+			logger.Error().Err(apiErr.Diagnosis()).Str("skuID", apiReq.ID).Str("siteID", siteID).Msg("failed to check SKU mutation state")
+		}
+		return cutil.NewAPIErrorResponse(c, apiErr.Code, apiErr.Message, nil)
+	}
 	logger.Info().Str("skuID", apiReq.ID).Str("siteID", siteID).Msg("creating SKU via Core proxy")
 	var ids corev1.SkuIdList
 	apiErr = common.ExecuteCoreGRPC(ctx, stc, corev1.Forge_CreateSku_FullMethodName, apiReq.ToProto(), &ids, siteID)
@@ -389,11 +397,22 @@ func (csh CreateSkuHandler) Handle(c echo.Context) error {
 		}
 		skuDAO := cdbm.NewSkuDAO(csh.dbSession)
 		err = cdb.WithTx(ctx, csh.dbSession, func(tx *cdb.Tx) error {
-			err := tx.TryAcquireAdvisoryLock(ctx, cdb.GetAdvisoryLockIDFromString(projected.ID), nil)
+			_, err := cdbm.NewSiteDAO(csh.dbSession).GetForShare(ctx, tx, projected.SiteID)
+			if err != nil {
+				return err
+			}
+			err = tx.TryAcquireAdvisoryLock(ctx, cdb.GetAdvisoryLockIDFromString(projected.ID), nil)
 			if err != nil {
 				return err
 			}
 
+			existing, lookupErr := skuDAO.Get(ctx, tx, projected.ID)
+			if lookupErr != nil && !errors.Is(lookupErr, cdb.ErrDoesNotExist) {
+				return lookupErr
+			}
+			if lookupErr == nil && existing.Deletion != nil {
+				return cutil.NewAPIError(http.StatusConflict, "SKU deletion is pending", nil)
+			}
 			_, err = skuDAO.Create(ctx, tx, cdbm.SkuCreateInput{
 				SkuID:                projected.ID,
 				SiteID:               projected.SiteID,
@@ -408,6 +427,10 @@ func (csh CreateSkuHandler) Handle(c echo.Context) error {
 		})
 	}
 	if err != nil {
+		var conflict *cutil.APIError
+		if errors.As(err, &conflict) {
+			return conflict.Send(c)
+		}
 		errorChecker := cdb.PostgresErrorChecker{}
 		if errorChecker.IsUniqueConstraintError(err) {
 			message := fmt.Sprintf(
@@ -500,6 +523,14 @@ func (ush UpdateSkuHandler) Handle(c echo.Context) error {
 	})
 	if apiErr != nil {
 		return cutil.NewAPIErrorResponse(c, apiErr.Code, apiErr.Message, apiErr.Data)
+	}
+
+	apiErr = checkSkuMutationAllowed(ctx, ush.dbSession, skuID, savedSKU.SiteID, false)
+	if apiErr != nil {
+		if apiErr.Code >= http.StatusInternalServerError {
+			logger.Error().Err(apiErr.Diagnosis()).Str("skuID", skuID).Str("siteID", siteID).Msg("failed to check SKU mutation state")
+		}
+		return cutil.NewAPIErrorResponse(c, apiErr.Code, apiErr.Message, nil)
 	}
 
 	// All Core calls share one wait budget. Keep DB work on the request context
@@ -611,7 +642,11 @@ func (ush UpdateSkuHandler) Handle(c echo.Context) error {
 		}
 
 		err = cdb.WithTx(ctx, ush.dbSession, func(tx *cdb.Tx) error {
-			err := tx.TryAcquireAdvisoryLock(ctx, cdb.GetAdvisoryLockIDFromString(projected.ID), nil)
+			_, err := cdbm.NewSiteDAO(ush.dbSession).GetForShare(ctx, tx, projected.SiteID)
+			if err != nil {
+				return err
+			}
+			err = tx.TryAcquireAdvisoryLock(ctx, cdb.GetAdvisoryLockIDFromString(projected.ID), nil)
 			if err != nil {
 				return err
 			}
@@ -619,6 +654,9 @@ func (ush UpdateSkuHandler) Handle(c echo.Context) error {
 			existing, err := skuDAO.Get(ctx, tx, projected.ID)
 			if err != nil {
 				return err
+			}
+			if existing.Deletion != nil {
+				return cutil.NewAPIError(http.StatusConflict, "SKU deletion is pending", nil)
 			}
 			if existing.SiteID != projected.SiteID {
 				return fmt.Errorf("SKU %q already exists for Site %q", projected.ID, existing.SiteID)
@@ -664,6 +702,10 @@ func (ush UpdateSkuHandler) Handle(c echo.Context) error {
 		})
 	}
 	if err != nil {
+		var conflict *cutil.APIError
+		if errors.As(err, &conflict) {
+			return conflict.Send(c)
+		}
 		logger.Error().Err(err).Str("skuID", skuID).Str("siteID", siteID).
 			Msg("SKU updated in Core but failed to update REST DB")
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "SKU was updated in Core but failed to update REST DB", nil)
@@ -680,18 +722,18 @@ func (ush UpdateSkuHandler) Handle(c echo.Context) error {
 	return c.JSON(http.StatusOK, apiResponse)
 }
 
+const skuDeletionPersistenceTimeout = 5 * time.Second
+
 // DeleteSkuHandler deletes one unused SKU from a Site's Core service.
 type DeleteSkuHandler struct {
 	dbSession *cdb.Session
 	scp       *sc.ClientPool
+	cfg       *config.Config
 }
 
 // NewDeleteSkuHandler returns a new DeleteSkuHandler.
-func NewDeleteSkuHandler(dbSession *cdb.Session, scp *sc.ClientPool) DeleteSkuHandler {
-	return DeleteSkuHandler{
-		dbSession: dbSession,
-		scp:       scp,
-	}
+func NewDeleteSkuHandler(dbSession *cdb.Session, scp *sc.ClientPool, cfg *config.Config) DeleteSkuHandler {
+	return DeleteSkuHandler{dbSession: dbSession, scp: scp, cfg: cfg}
 }
 
 // Handle godoc
@@ -726,6 +768,7 @@ func (dsh DeleteSkuHandler) Handle(c echo.Context) error {
 		logger.Error().Err(err).Str("skuID", skuID).Msg("error retrieving SKU from DB")
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve SKU, DB error", nil)
 	}
+	logger = logger.With().Str("skuID", skuID).Str("siteID", savedSKU.SiteID.String()).Logger()
 	authInput := common.AuthorizeProviderSiteForCoreInput{
 		Ctx:       ctx,
 		Logger:    logger,
@@ -735,37 +778,226 @@ func (dsh DeleteSkuHandler) Handle(c echo.Context) error {
 		User:      dbUser,
 		SiteID:    savedSKU.SiteID.String(),
 	}
-	if len(savedSKU.AssociatedMachineIds) > 0 {
-		// Authorize the caller before revealing associations. Rejecting an
-		// in-use SKU needs neither a Registered Site nor a Temporal client.
-		_, apiErr := common.AuthorizeProviderSite(authInput)
-		if apiErr != nil {
-			return cutil.NewAPIErrorResponse(c, apiErr.Code, apiErr.Message, apiErr.Data)
-		}
-		logger.Warn().Str("skuID", skuID).Msg("SKU is associated with machines and cannot be deleted")
-		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "SKU is associated with machines and cannot be deleted", nil)
-	}
-
-	stc, siteID, apiErr := common.AuthorizeProviderSiteForCore(authInput)
+	// Authorization precedes association and reference disclosure. Confirmed
+	// local cleanup needs neither a Registered Site nor a Temporal connection.
+	_, apiErr := common.AuthorizeProviderSite(authInput)
 	if apiErr != nil {
 		return cutil.NewAPIErrorResponse(c, apiErr.Code, apiErr.Message, apiErr.Data)
 	}
-
+	canStart := savedSKU.Deletion == nil
+	capturedWorkflowID := ""
+	if savedSKU.Deletion != nil {
+		capturedWorkflowID = savedSKU.Deletion.WorkflowID
+	}
+	var stc tclient.Client
+	siteID := savedSKU.SiteID.String()
+	if canStart {
+		if len(savedSKU.AssociatedMachineIds) > 0 {
+			return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "SKU is associated with machines and cannot be deleted", nil)
+		}
+		if dsh.scp == nil {
+			return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve client for Site", nil)
+		}
+		// Resolve local prerequisites before recording an attempt. An unavailable
+		// client cannot have dispatched Core and must not leave an unbound fence.
+		stc, siteID, apiErr = common.AuthorizeProviderSiteForCore(authInput)
+		if apiErr != nil {
+			return cutil.NewAPIErrorResponse(c, apiErr.Code, apiErr.Message, apiErr.Data)
+		}
+	}
+	startNewAttempt := false
+	err = cdb.WithTx(ctx, dsh.dbSession, func(tx *cdb.Tx) error {
+		site, err := cdbm.NewSiteDAO(dsh.dbSession).GetForShare(ctx, tx, savedSKU.SiteID)
+		if err != nil {
+			return err
+		}
+		err = tx.TryAcquireAdvisoryLock(ctx, cdb.GetAdvisoryLockIDFromString(skuID), nil)
+		if err != nil {
+			return err
+		}
+		current, err := skuDAO.GetForUpdate(ctx, tx, skuID)
+		if err != nil {
+			return err
+		}
+		if current.SiteID != savedSKU.SiteID {
+			return cutil.NewAPIError(http.StatusConflict, "SKU Site changed during deletion", nil)
+		}
+		if current.Deletion != nil && !canStart && current.Deletion.WorkflowID != capturedWorkflowID {
+			return cutil.NewAPIError(http.StatusConflict, "SKU deletion attempt changed; retry the request", nil)
+		}
+		savedSKU = current
+		if current.Deletion != nil {
+			return nil
+		}
+		if !canStart {
+			return cutil.NewAPIError(http.StatusConflict, "SKU deletion attempt changed; retry the request", nil)
+		}
+		if len(current.AssociatedMachineIds) > 0 {
+			return cutil.NewAPIError(http.StatusBadRequest, "SKU is associated with machines and cannot be deleted", nil)
+		}
+		referenced, err := skuDAO.HasExpectedMachineReferences(ctx, tx, skuID)
+		if err != nil {
+			return err
+		}
+		if referenced {
+			return cutil.NewAPIError(http.StatusBadRequest, "SKU is referenced by Expected Machines and cannot be deleted", nil)
+		}
+		if dsh.cfg == nil || !dsh.cfg.GetSkuDeletionRecoveryEnabled() {
+			return nil
+		}
+		if site.Status != cdbm.SiteStatusRegistered {
+			return cutil.NewAPIError(http.StatusBadRequest, "Site must be Registered to delete SKU", nil)
+		}
+		deletion := &cdbm.SkuDeletion{WorkflowID: "core-grpc-DeleteSku-" + uuid.NewString()}
+		applied, err := skuDAO.SetDeletion(ctx, tx, skuID, current.SiteID, nil, deletion)
+		if err != nil {
+			return err
+		}
+		if !applied {
+			return errors.New("SKU deletion intent was not persisted")
+		}
+		current.Deletion = deletion
+		startNewAttempt = true
+		return nil
+	})
+	if err != nil {
+		if errors.Is(err, cdb.ErrDoesNotExist) {
+			return cutil.NewAPIErrorResponse(c, http.StatusNotFound, "Could not find SKU with the specified ID", nil)
+		}
+		if errors.Is(err, cdb.ErrXactAdvisoryLockFailed) {
+			return cutil.NewAPIErrorResponse(c, http.StatusConflict, "SKU is being updated; retry the request", nil)
+		}
+		return common.HandleTxError(c, logger, err, "Failed to prepare SKU deletion, DB error")
+	}
+	if savedSKU.Deletion != nil && savedSKU.Deletion.Confirmed {
+		applied := false
+		applied, err = skuDAO.ResolveDeletion(ctx, skuID, savedSKU.SiteID, savedSKU.Deletion.WorkflowID, true)
+		if err == nil && !applied {
+			err = skuCleanupNotApplied(ctx, skuDAO, skuID)
+		}
+		if err != nil {
+			return common.HandleTxError(c, logger, err, "Core deleted SKU but local cleanup failed")
+		}
+		return c.NoContent(http.StatusNoContent)
+	}
+	if startNewAttempt && ctx.Err() != nil {
+		// No workflow invocation occurred. Release only this request's matching
+		// intent, using a separate bound so cancellation cannot skip the DB cleanup.
+		releaseCtx, cancelRelease := context.WithTimeout(context.WithoutCancel(ctx), skuDeletionPersistenceTimeout)
+		defer cancelRelease()
+		_, releaseErr := skuDAO.ResolveDeletion(releaseCtx, skuID, savedSKU.SiteID, savedSKU.Deletion.WorkflowID, false)
+		if releaseErr != nil {
+			return common.HandleTxError(c, logger, releaseErr, "Failed to release undispatched SKU deletion")
+		}
+		return cutil.NewAPIErrorResponse(c, http.StatusGatewayTimeout, "SKU deletion timed out before Core dispatch", nil)
+	}
+	if savedSKU.Deletion != nil && !startNewAttempt {
+		if dsh.scp == nil {
+			return cutil.NewAPIErrorResponse(c, http.StatusServiceUnavailable, "Failed to retrieve client for pending SKU deletion", nil)
+		}
+		stc, err = dsh.scp.GetClientByID(savedSKU.SiteID)
+		if err != nil {
+			return cutil.NewAPIErrorResponse(c, http.StatusServiceUnavailable, "Failed to retrieve client for pending SKU deletion", nil)
+		}
+	}
 	logger.Info().Str("skuID", skuID).Str("siteID", siteID).Msg("deleting SKU via Core proxy")
-	apiErr = common.ExecuteCoreGRPC(ctx, stc, corev1.Forge_DeleteSku_FullMethodName, &corev1.SkuIdList{Ids: []string{skuID}}, nil, siteID)
-	if apiErr != nil {
-		if apiErr.Code != http.StatusNotFound {
+	if savedSKU.Deletion == nil {
+		// Activation requires quiescing legacy mutations and enabling every API
+		// writer before resuming them. Existing intents never enter this branch.
+		apiErr = common.ExecuteCoreGRPC(ctx, stc, corev1.Forge_DeleteSku_FullMethodName, &corev1.SkuIdList{Ids: []string{skuID}}, nil, siteID)
+		if apiErr != nil && apiErr.Code != http.StatusNotFound {
 			logAPIError(logger, apiErr, "failed to delete SKU via Core proxy")
 			return cutil.NewAPIErrorResponse(c, apiErr.Code, apiErr.Message, nil)
 		}
-		logger.Warn().Str("skuID", skuID).Str("siteID", siteID).Msg("SKU not found in Core, removing stale REST DB record")
+		applied := false
+		applied, err = skuDAO.DeleteIfUnchanged(ctx, nil, skuID, savedSKU.SiteID, savedSKU.Updated)
+		if err == nil && !applied {
+			err = skuCleanupNotApplied(ctx, skuDAO, skuID)
+		}
+	} else {
+		deletion := savedSKU.Deletion
+		runID := ""
+		if deletion.RunID != nil {
+			runID = *deletion.RunID
+		}
+		var observed bool
+		// Core deletion is ID-only. This attempt fences cooperating REST writers
+		// and local cleanup; it cannot fence a SKU recreated directly in Core.
+		apiErr, observed = common.ExecuteCoreGRPCWithRunID(ctx, stc, corev1.Forge_DeleteSku_FullMethodName,
+			&corev1.SkuIdList{Ids: []string{skuID}}, &emptypb.Empty{}, deletion.WorkflowID, runID, startNewAttempt,
+			func(runID string) error {
+				// The start was acknowledged even if the caller stopped waiting.
+				bindCtx, cancelBind := context.WithTimeout(context.WithoutCancel(ctx), skuDeletionPersistenceTimeout)
+				defer cancelBind()
+				return skuDAO.BindDeletionRun(bindCtx, skuID, savedSKU.SiteID, deletion.WorkflowID, runID)
+			})
+		if observed {
+			confirmed := apiErr == nil || apiErr.Code == http.StatusNotFound
+			completionCtx, cancelCompletion := context.WithTimeout(context.WithoutCancel(ctx), skuDeletionPersistenceTimeout)
+			applied, resolveErr := skuDAO.ResolveDeletion(completionCtx, skuID, savedSKU.SiteID, deletion.WorkflowID, confirmed)
+			err = resolveErr
+			if err == nil && !applied {
+				current, lookupErr := skuDAO.Get(completionCtx, nil, skuID)
+				switch {
+				case errors.Is(lookupErr, cdb.ErrDoesNotExist):
+				case lookupErr != nil:
+					err = lookupErr
+				case !confirmed && current.SiteID == savedSKU.SiteID && current.Deletion == nil:
+					// Another observer already released this rejection. Keep the original
+					// Core error instead of replacing it with a local cleanup conflict.
+				default:
+					err = cutil.NewAPIError(http.StatusConflict, "SKU changed while Core deletion was running; local record retained", nil)
+				}
+			}
+			cancelCompletion()
+		}
+		if err == nil && apiErr != nil && (!observed || apiErr.Code != http.StatusNotFound) {
+			logAPIError(logger, apiErr, "SKU deletion result did not confirm completion")
+			return cutil.NewAPIErrorResponse(c, apiErr.Code, apiErr.Message, nil)
+		}
 	}
-	err = skuDAO.Delete(ctx, nil, skuID)
 	if err != nil {
-		logger.Error().Err(err).Str("skuID", skuID).Msg("failed to delete SKU from REST DB")
-		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to delete SKU from REST DB", nil)
+		return common.HandleTxError(c, logger, err, "Failed to delete SKU from REST DB")
 	}
-
-	logger.Info().Str("skuID", skuID).Str("siteID", siteID).Msg("finishing API handler")
 	return c.NoContent(http.StatusNoContent)
+}
+
+// checkSkuMutationAllowed reloads the local fence before a Core create/update.
+// Projection writes repeat this check because a delete can start during the RPC.
+func checkSkuMutationAllowed(ctx context.Context, session *cdb.Session, skuID string, siteID uuid.UUID, allowMissing bool) *cutil.APIError {
+	_, err := cdbm.NewSiteDAO(session).GetByID(ctx, nil, siteID, nil, false, false)
+	if err != nil {
+		if errors.Is(err, cdb.ErrDoesNotExist) {
+			return cutil.NewAPIError(http.StatusNotFound, "Could not find Site for the SKU", nil)
+		}
+		return cutil.NewAPIError(http.StatusInternalServerError, "Failed to check SKU Site", nil).WithCause(err)
+	}
+	sku, err := cdbm.NewSkuDAO(session).Get(ctx, nil, skuID)
+	if errors.Is(err, cdb.ErrDoesNotExist) && allowMissing {
+		return nil
+	}
+	if errors.Is(err, cdb.ErrDoesNotExist) {
+		return cutil.NewAPIError(http.StatusNotFound, "Could not find SKU with the specified ID", nil)
+	}
+	if err != nil {
+		return cutil.NewAPIError(http.StatusInternalServerError, "Failed to check SKU deletion state", nil).WithCause(err)
+	}
+	if sku.SiteID != siteID {
+		return cutil.NewAPIError(http.StatusConflict, "SKU belongs to another Site", nil)
+	}
+	if sku.Deletion != nil {
+		return cutil.NewAPIError(http.StatusConflict, "SKU deletion is pending", nil)
+	}
+	return nil
+}
+
+func skuCleanupNotApplied(ctx context.Context, dao cdbm.SkuDAO, skuID string) error {
+	_, err := dao.Get(ctx, nil, skuID)
+	if errors.Is(err, cdb.ErrDoesNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	return cutil.NewAPIError(http.StatusConflict, "SKU changed while Core deletion was running; local record retained", nil)
 }

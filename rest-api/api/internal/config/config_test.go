@@ -592,3 +592,24 @@ func TestConfig_GetTracingServiceName(t *testing.T) {
 }
 
 func ptr(s string) *string { return &s }
+
+func TestConfig_GetSkuDeletionRecoveryEnabled(t *testing.T) {
+	cases := []struct {
+		name, config, env string
+		want              bool
+	}{
+		{name: "omission disables new intents", config: "{}"},
+		{name: "file enables new intents", config: "api:\n  skuDeletionRecovery:\n    enabled: true\n", want: true},
+		{name: "environment disables file activation", config: "api:\n  skuDeletionRecovery:\n    enabled: true\n", env: "false"},
+		{name: "environment enables omitted setting", config: "{}", env: "true", want: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv(strings.ToUpper(ConfigSkuDeletionRecoveryEnabled), tc.env)
+			c := &Config{v: newAPIConfigViper()}
+			c.v.SetConfigFile(writeConfigForTest(t, tc.config))
+			require.NoError(t, c.v.ReadInConfig())
+			assert.Equal(t, tc.want, c.GetSkuDeletionRecoveryEnabled())
+		})
+	}
+}

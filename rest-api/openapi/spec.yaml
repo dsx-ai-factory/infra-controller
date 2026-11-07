@@ -6878,7 +6878,7 @@ paths:
       summary: Create SKU
       operationId: create-sku
       description: |-
-        Create a SKU.
+        Create a SKU. A pending deletion of the same saved SKU or an ID saved for another Site rejects creation with `409`. If deletion starts during the Core call, `409` preserves the saved deletion attempt; Core creation may already have completed.
 
         The Org must have an Infrastructure Provider that owns the Site. The user must have an authorization role with the `PROVIDER_ADMIN` suffix.
       requestBody:
@@ -6898,6 +6898,12 @@ paths:
           $ref: '#/components/responses/ValidationError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+        '409':
+          $ref: '#/components/responses/ConflictError'
+        '500':
+          $ref: '#/components/responses/GenericHttpError'
       tags:
         - SKU
   '/v2/org/{org}/nico/sku/{skuId}':
@@ -6982,6 +6988,14 @@ paths:
       description: |-
         Delete an unused SKU. The Site is determined from the saved SKU record.
 
+        Machine associations and public or pending Expected Machine references reject deletion with `400` before Core is called.
+
+        SKU deletion recovery is disabled by default. When enabled, a pending deletion prevents new attachments and SKU mutations. Retrying a pending deletion checks the original request without sending another Core deletion. Confirmed success or a verified Core not-found reply permits local cleanup; if cleanup fails, a later DELETE retries only that cleanup. If REST cannot verify the original result, the SKU stays unavailable for mutation. Recovery does not release it based only on elapsed time.
+
+        When recovery is disabled and no deletion attempt was saved, retrying a timed-out request can send another Core deletion. Verify the current Site and SKU state before retrying; a retry can target a SKU recreated with the same ID. An existing saved attempt still uses the original request without another Core deletion, even when recovery is disabled.
+
+        A request that initially reads one pending attempt returns `409` if another attempt replaces it before preparation. A changed Site is also a conflict. With recovery disabled, a concurrent local update retains the record and returns `409`. A SKU removed before preparation completes returns `404`.
+
         The Org must have an Infrastructure Provider that owns the SKU's Site. The user must have an authorization role with the `PROVIDER_ADMIN` suffix.
       responses:
         '204':
@@ -6992,6 +7006,22 @@ paths:
           $ref: '#/components/responses/ForbiddenError'
         '404':
           $ref: '#/components/responses/NotFoundError'
+        '409':
+          $ref: '#/components/responses/ConflictError'
+        '412':
+          description: Core rejected deletion because a required condition was not met.
+          $ref: '#/components/responses/GenericHttpError'
+        '500':
+          $ref: '#/components/responses/GenericHttpError'
+        '501':
+          description: The Site Agent or Core does not implement this deletion call.
+          $ref: '#/components/responses/GenericHttpError'
+        '503':
+          description: The Site or original deletion result is unavailable. When recovery is enabled, an unverified original attempt remains pending and a retry does not send another deletion.
+          $ref: '#/components/responses/GenericHttpError'
+        '504':
+          description: The request timed out. A retry of a saved deletion attempt checks its original request without another Core deletion, even if recovery is disabled. Without a saved attempt, verify the current Site and SKU state before retrying because Core may already have completed the deletion.
+          $ref: '#/components/responses/GenericHttpError'
       tags:
         - SKU
     patch:
@@ -6999,6 +7029,7 @@ paths:
       operationId: update-sku
       description: |-
         Update selected mutable fields on a SKU. The Site is determined from the saved SKU record.
+        An existing pending deletion or a concurrent change to the saved SKU's Site rejects updates with `409` before Core is called. If deletion starts during the Core call, `409` preserves the saved deletion attempt; the Core update may already have completed.
 
         Fields omitted from the request retain their current values. If a user updates the components field,
         the schema version will be updated to the current version (5).
@@ -7023,6 +7054,10 @@ paths:
           $ref: '#/components/responses/ForbiddenError'
         '404':
           $ref: '#/components/responses/NotFoundError'
+        '409':
+          $ref: '#/components/responses/ConflictError'
+        '500':
+          $ref: '#/components/responses/GenericHttpError'
       tags:
         - SKU
   '/v2/org/{org}/nico/infiniband-partition':
@@ -31704,7 +31739,7 @@ components:
           type:
             - string
             - 'null'
-          description: Optional ID of an existing SKU at this Expected Machine's Site. Omission or null leaves the SKU association unset. REST rejects an empty string with HTTP 400.
+          description: Optional ID of an existing SKU at this Expected Machine's Site. Omission or null leaves the SKU association unset. REST rejects an empty string with HTTP 400. A SKU with a pending deletion is rejected with HTTP 422 for single requests and HTTP 400 for batch requests.
         rackId:
           type:
             - string
@@ -31892,7 +31927,7 @@ components:
           type:
             - string
             - 'null'
-          description: Optional ID of an existing SKU at this Expected Machine's Site. Omission or null preserves the current SKU association in single and batch PATCH requests. REST rejects an empty string with HTTP 400. PATCH cannot remove the SKU association.
+          description: Optional ID of an existing SKU at this Expected Machine's Site. Omission or null preserves the current SKU association in single and batch PATCH requests. REST rejects an empty string with HTTP 400. A supplied SKU with a pending deletion is rejected with HTTP 422 for single requests and HTTP 400 for batch requests. PATCH cannot remove the SKU association.
         rackId:
           type:
             - string

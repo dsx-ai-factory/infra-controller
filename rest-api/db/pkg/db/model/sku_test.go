@@ -5,6 +5,7 @@ package model
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -514,6 +515,8 @@ func TestSkuSQLDAO_GetForAttachment(t *testing.T) {
 			require.ErrorIs(t, err, db.ErrDoesNotExist)
 		})
 	}
+	t.Run("waiting admission rechecks committed deletion intent", testSkuAttachmentSeesCommittedIntent)
+
 }
 
 func TestSkuSQLDAO_GetAll(t *testing.T) {
@@ -700,6 +703,7 @@ func TestSkuSQLDAO_Update(t *testing.T) {
 			name    string
 			input   SkuUpdateInput
 			wantErr bool
+			pending bool
 			noWrite bool
 		}{
 			{
@@ -731,14 +735,30 @@ func TestSkuSQLDAO_Update(t *testing.T) {
 				input:   SkuUpdateInput{SkuID: row.ID, ExpectedUpdated: &older},
 				noWrite: true,
 			},
+			{name: "pending deletion rejects the exact current version", input: SkuUpdateInput{SkuID: row.ID, Description: &description}, pending: true, wantErr: true},
 		}
 		for _, tc := range cases {
 			t.Run(tc.name, func(t *testing.T) {
 				_, err := dbSession.DB.NewUpdate().Model((*SKU)(nil)).
 					Set("updated = ?", updated).Set("description = ?", "original description").Where("id = ?", row.ID).Exec(ctx)
 				require.NoError(t, err)
+				if tc.pending {
+					err = db.WithTx(ctx, dbSession, func(tx *db.Tx) error {
+						_, err := ssd.GetForUpdate(ctx, tx, row.ID)
+						if err != nil {
+							return err
+						}
+						applied, err := ssd.SetDeletion(ctx, tx, row.ID, site.ID, nil, &SkuDeletion{WorkflowID: "update-fence"})
+						require.True(t, applied)
+						return err
+					})
+					require.NoError(t, err)
+				}
 				before, err := ssd.Get(ctx, nil, row.ID)
 				require.NoError(t, err)
+				if tc.pending {
+					tc.input.ExpectedUpdated = &before.Updated
+				}
 				updatesBefore := hook.updates
 				got, err := ssd.Update(ctx, nil, tc.input)
 				if tc.wantErr {
@@ -821,6 +841,7 @@ func TestSkuSQLDAO_DeleteIfUnchanged(t *testing.T) {
 	user := TestBuildUser(t, dbSession, "test-user", "test-org", []string{"admin"})
 	ip := TestBuildInfrastructureProvider(t, dbSession, "test-provider", "test-org", user)
 	site := TestBuildSite(t, dbSession, ip, "test-site", user)
+	otherSite := TestBuildSite(t, dbSession, ip, "other-site", user)
 	existing := testSkuCreateSkus(ctx, t, dbSession, site.ID)
 	dao := NewSkuDAO(dbSession)
 	beforeUpdate := existing[1]
@@ -831,9 +852,25 @@ func TestSkuSQLDAO_DeleteIfUnchanged(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, afterUpdate.Updated.After(beforeUpdate.Updated))
 
+	pending, err := dao.Create(ctx, nil, SkuCreateInput{SkuID: "pending", SiteID: site.ID})
+	require.NoError(t, err)
+	err = db.WithTx(ctx, dbSession, func(tx *db.Tx) error {
+		_, err := dao.GetForUpdate(ctx, tx, pending.ID)
+		if err != nil {
+			return err
+		}
+		applied, err := dao.SetDeletion(ctx, tx, pending.ID, site.ID, nil, &SkuDeletion{WorkflowID: "delete-fence"})
+		require.True(t, applied)
+		return err
+	})
+	require.NoError(t, err)
+	pending, err = dao.Get(ctx, nil, pending.ID)
+	require.NoError(t, err)
+
 	tests := []struct {
 		name        string
 		id          string
+		siteID      *uuid.UUID
 		updated     time.Time
 		wantDeleted bool
 		want        *SKU
@@ -856,6 +893,8 @@ func TestSkuSQLDAO_DeleteIfUnchanged(t *testing.T) {
 			updated: existing[2].Updated.Add(time.Hour),
 			want:    &existing[2],
 		},
+		{name: "foreign Site preserves an unchanged row", id: existing[2].ID, siteID: &otherSite.ID, updated: existing[2].Updated, want: &existing[2]},
+		{name: "pending deletion preserves the exact current version", id: pending.ID, updated: pending.Updated, want: pending},
 		{
 			name:    "absent row preserves another row with the same timestamp",
 			id:      "absent-sku",
@@ -864,7 +903,11 @@ func TestSkuSQLDAO_DeleteIfUnchanged(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			deleted, err := dao.DeleteIfUnchanged(ctx, nil, tc.id, tc.updated)
+			expectedSite := site.ID
+			if tc.siteID != nil {
+				expectedSite = *tc.siteID
+			}
+			deleted, err := dao.DeleteIfUnchanged(ctx, nil, tc.id, expectedSite, tc.updated)
 			require.NoError(t, err)
 			assert.Equal(t, tc.wantDeleted, deleted)
 
@@ -918,4 +961,129 @@ func TestSkuSQLDAO_Create_DefaultAssociatedMachineIds(t *testing.T) {
 	// Verify the retrieved record also has an empty string array
 	assert.NotNil(t, retrieved.AssociatedMachineIds)
 	assert.Equal(t, []string{}, retrieved.AssociatedMachineIds)
+}
+
+func testSkuAttachmentSeesCommittedIntent(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	session := testSKUInitDB(t)
+	defer session.Close()
+	testSKUSetupSchema(t, session)
+	user := TestBuildUser(t, session, "deletion-user", "deletion-org", []string{"admin"})
+	provider := TestBuildInfrastructureProvider(t, session, "deletion-provider", "deletion-org", user)
+	site := TestBuildSite(t, session, provider, "deletion-site", user)
+	dao := NewSkuDAO(session)
+	_, err := dao.Create(ctx, nil, SkuCreateInput{SkuID: "admission-sku", SiteID: site.ID})
+	require.NoError(t, err)
+	gate, err := db.BeginTx(ctx, session, nil)
+	require.NoError(t, err)
+	_, err = dao.GetForUpdate(ctx, gate, "admission-sku")
+	require.NoError(t, err)
+	ready, done := make(chan int, 1), make(chan error, 1)
+	var workers sync.WaitGroup
+	workers.Go(func() {
+		done <- db.WithTx(ctx, session, func(tx *db.Tx) error {
+			var pid int
+			err := tx.GetBunTx().NewSelect().ColumnExpr("pg_backend_pid()").Scan(ctx, &pid)
+			if err != nil {
+				return err
+			}
+			ready <- pid
+			skus, err := dao.GetForAttachment(ctx, tx, site.ID, []string{"admission-sku"})
+			if err != nil {
+				return err
+			}
+			if len(skus) != 0 {
+				return fmt.Errorf("pending SKU was admitted: %v", skus)
+			}
+			return nil
+		})
+	})
+	defer func() { cancel(); _ = gate.Rollback(); workers.Wait() }()
+	var pid int
+	select {
+	case pid = <-ready:
+	case <-ctx.Done():
+		t.Fatal("attachment lookup did not start", ctx.Err())
+	}
+	require.Eventually(t, func() bool {
+		var blockers int
+		err := session.DB.NewSelect().ColumnExpr("cardinality(pg_blocking_pids(?))", pid).Scan(ctx, &blockers)
+		return err == nil && blockers > 0
+	}, 5*time.Second, 10*time.Millisecond)
+	applied, err := dao.SetDeletion(ctx, gate, "admission-sku", site.ID, nil, &SkuDeletion{WorkflowID: "pending-delete"})
+	require.NoError(t, err)
+	require.True(t, applied)
+	require.NoError(t, gate.Commit())
+	require.NoError(t, <-done)
+	stored, err := dao.Get(ctx, nil, "admission-sku")
+	require.NoError(t, err)
+	require.NotNil(t, stored.Deletion)
+	assert.Equal(t, "pending-delete", stored.Deletion.WorkflowID)
+}
+
+func TestSkuSQLDAO_DeleteConfirmed(t *testing.T) {
+	cases := []struct {
+		name                                       string
+		differentAttempt, differentSite, recreated bool
+		want                                       bool
+	}{
+		{name: "same incarnation deletes despite corrected Created", want: true},
+		{name: "old completion preserves a later attempt", differentAttempt: true},
+		{name: "foreign Site completion preserves its row", differentSite: true},
+		{name: "recreated row starts without the old attempt", recreated: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			session := testSKUInitDB(t)
+			defer session.Close()
+			testSKUSetupSchema(t, session)
+			user := TestBuildUser(t, session, "deletion-user", "deletion-org", []string{"admin"})
+			provider := TestBuildInfrastructureProvider(t, session, "deletion-provider", "deletion-org", user)
+			site := TestBuildSite(t, session, provider, "deletion-site", user)
+			dao := NewSkuDAO(session)
+			row, err := dao.Create(ctx, nil, SkuCreateInput{SkuID: "sku", SiteID: site.ID})
+			require.NoError(t, err)
+			correctedCreated := row.Created.Add(-time.Hour)
+			_, err = dao.Update(ctx, nil, SkuUpdateInput{SkuID: row.ID, Created: &correctedCreated})
+			require.NoError(t, err)
+			if !tc.recreated {
+				err = db.WithTx(ctx, session, func(tx *db.Tx) error {
+					_, err := dao.GetForUpdate(ctx, tx, row.ID)
+					if err != nil {
+						return err
+					}
+					applied, err := dao.SetDeletion(ctx, tx, row.ID, site.ID, nil, &SkuDeletion{WorkflowID: "current-attempt", Confirmed: true})
+					require.True(t, applied)
+					return err
+				})
+				require.NoError(t, err)
+			}
+			expectedWorkflow := "current-attempt"
+			if tc.differentAttempt {
+				expectedWorkflow = "old-attempt"
+			}
+			expectedSite := site.ID
+			if tc.differentSite {
+				expectedSite = uuid.New()
+			}
+			deleted, err := dao.DeleteConfirmed(ctx, nil, row.ID, expectedSite, expectedWorkflow)
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, deleted)
+			stored, err := dao.Get(ctx, nil, row.ID)
+			if tc.want {
+				require.ErrorIs(t, err, db.ErrDoesNotExist)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, site.ID, stored.SiteID)
+			assert.True(t, stored.Created.Equal(correctedCreated))
+			if tc.recreated {
+				assert.Nil(t, stored.Deletion)
+			} else {
+				assert.Equal(t, "current-attempt", stored.Deletion.WorkflowID)
+			}
+		})
+	}
 }
