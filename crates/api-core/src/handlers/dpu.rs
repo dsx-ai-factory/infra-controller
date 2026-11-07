@@ -628,6 +628,7 @@ async fn get_managed_host_network_config_inner(
     let mut network_virtualization_type = VpcVirtualizationType::EthernetVirtualizer;
 
     let mut use_fnn_over_admin_nw = false;
+    let mut admin_l3_only = false;
 
     // If FNN config is enabled, we should use it in admin network.
     if let Some(fnn) = &api.runtime_config.fnn
@@ -635,6 +636,7 @@ async fn get_managed_host_network_config_inner(
         && admin.enabled
     {
         use_fnn_over_admin_nw = true;
+        admin_l3_only = admin.l3_only;
         network_virtualization_type = VpcVirtualizationType::Fnn;
     }
     let use_vpc_vrf_loopback = api
@@ -673,6 +675,7 @@ async fn get_managed_host_network_config_inner(
         &dpu_machine_id,
         ethernet_virtualization::AdminNetworkOptions {
             fnn_enabled: use_fnn_over_admin_nw,
+            l3_only: admin_l3_only,
             common_pools: &api.common_pools,
             booturl: &booturl_override,
             use_vpc_vrf_loopback,
@@ -1158,6 +1161,10 @@ async fn get_managed_host_network_config_inner(
     let resp = rpc::ManagedHostNetworkConfigResponse {
         service_interfaces,
         service_vpc_slot_inventory: Some(service_vpc_slot_inventory),
+        accepted_lldp_snapshot_fingerprint: dpu_snapshot
+            .network_status_observation
+            .as_ref()
+            .and_then(|status| status.accepted_lldp_snapshot_fingerprint.clone()),
         instance_id: snapshot.instance.as_ref().map(|instance| instance.id),
         asn,
         dhcp_servers: api
@@ -1278,9 +1285,20 @@ pub(crate) async fn get_managed_host_network_config(
     request: Request<rpc::ManagedHostNetworkConfigRequest>,
 ) -> Result<tonic::Response<rpc::ManagedHostNetworkConfigResponse>, tonic::Status> {
     log_request_data(&request);
+    let authenticated_machine_id = crate::auth::authenticated_machine_id(&request)?;
 
     let request = request.into_inner();
     let dpu_machine_id: DpuMachineId = convert_and_log_machine_id(request.dpu_machine_id.as_ref())?;
+
+    // Bind machine credentials to their DPU while RBAC permits administrative and service callers.
+    if authenticated_machine_id
+        .is_some_and(|authenticated| authenticated != MachineId::from(dpu_machine_id))
+    {
+        return Err(CarbideError::PermissionDeniedError(
+            "machine identity does not match the requested DPU".to_string(),
+        )
+        .into());
+    }
 
     let resp = get_managed_host_network_config_inner(api, dpu_machine_id).await?;
 
@@ -1389,13 +1407,112 @@ pub(crate) async fn update_agent_reported_inventory(
     Ok(Response::new(()))
 }
 
+/// Records DPU network status and optional LLDP.
 pub(crate) async fn record_dpu_network_status(
     api: &Api,
     request: Request<rpc::DpuNetworkStatus>,
 ) -> Result<Response<()>, tonic::Status> {
     log_request_data(&request);
 
-    let request = request.into_inner();
+    process_dpu_network_status(api, request.into_inner()).await?;
+    Ok(Response::new(()))
+}
+
+/// Validates and stores an attached LLDP report and its accepted fingerprint.
+async fn handle_dpu_lldp_report(
+    txn: &mut sqlx::PgConnection,
+    dpu_machine_id: &DpuMachineId,
+    report: rpc::LldpReport,
+    supplied_fingerprint: Option<&[u8]>,
+) -> Result<(), CarbideError> {
+    let result = rpc::LldpReportResult::try_from(report.result).map_err(|_| {
+        CarbideError::InvalidArgument(format!("unknown LLDP report result {}", report.result))
+    })?;
+
+    let accepted_fingerprint = match result {
+        rpc::LldpReportResult::Updated => {
+            let computed = ::rpc::lldp_snapshot::fingerprint(&report.interfaces);
+            if let Some(supplied) = supplied_fingerprint
+                && supplied != computed.as_slice()
+            {
+                return Err(CarbideError::InvalidArgument(
+                    "LLDP snapshot fingerprint does not match the attached interfaces".to_string(),
+                ));
+            }
+            Some(computed)
+        }
+        rpc::LldpReportResult::Unchanged => {
+            if let Some(supplied) = supplied_fingerprint {
+                // Read after the status update locked the row; the earlier DPU
+                // snapshot may be stale.
+                let accepted =
+                    db::machine::lock_accepted_lldp_snapshot_fingerprint(txn, dpu_machine_id)
+                        .await?;
+                validate_unchanged_lldp_fingerprint(supplied, accepted.as_deref())?;
+            }
+            None
+        }
+        rpc::LldpReportResult::CollectionFailed => {
+            if supplied_fingerprint.is_some() {
+                return Err(CarbideError::InvalidArgument(
+                    "LLDP collection failure must not identify a snapshot".to_string(),
+                ));
+            }
+            None
+        }
+        rpc::LldpReportResult::Unspecified => None,
+    };
+
+    lldp::handle_lldp_report(txn, dpu_machine_id, report).await?;
+    if let Some(fingerprint) = accepted_fingerprint {
+        db::machine::update_accepted_lldp_snapshot_fingerprint(txn, dpu_machine_id, &fingerprint)
+            .await?;
+    }
+    Ok(())
+}
+
+fn validate_unchanged_lldp_fingerprint(
+    supplied: &[u8],
+    accepted: Option<&[u8]>,
+) -> Result<(), CarbideError> {
+    if accepted != Some(supplied) {
+        return Err(CarbideError::InvalidArgument(
+            "unchanged LLDP snapshot fingerprint does not match the accepted snapshot".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod lldp_fingerprint_validation_tests {
+    use carbide_test_support::Outcome::*;
+    use carbide_test_support::scenarios;
+
+    use super::validate_unchanged_lldp_fingerprint;
+
+    #[test]
+    fn unchanged_fingerprint_requires_exact_stored_acceptance() {
+        scenarios!(
+            run = |(supplied, accepted): (Vec<u8>, Option<Vec<u8>>)| {
+                validate_unchanged_lldp_fingerprint(&supplied, accepted.as_deref()).map_err(drop)
+            };
+            "accepted snapshot" {
+                (vec![0x0a], Some(vec![0x0a])) => Yields(()),
+            }
+            "rejected snapshot" {
+                (vec![0x0b], Some(vec![0x0a])) => Fails,
+                (vec![0x0a], None) => Fails,
+            }
+        );
+    }
+}
+
+/// Applies a DPU status report. LLDP rejection is reported to agents that cannot
+/// read the accepted fingerprint from their network configuration.
+async fn process_dpu_network_status(
+    api: &Api,
+    mut request: rpc::DpuNetworkStatus,
+) -> Result<(), tonic::Status> {
     let dpu_machine_id: DpuMachineId = convert_and_log_machine_id(request.dpu_machine_id.as_ref())?;
 
     let mut txn = api.txn_begin().await?;
@@ -1530,8 +1647,33 @@ pub(crate) async fn record_dpu_network_status(
         .await?;
     }
 
-    if let Some(lldp) = request.lldp {
-        lldp::handle_lldp_report(&mut txn, &dpu_machine_id, lldp).await?;
+    // Isolate LLDP so rejection does not roll back operational status.
+    let mut lldp_error = None;
+    if let Some(lldp) = request.lldp.take() {
+        let mut lldp_savepoint = db::Transaction::begin_inner(txn.as_pgconn()).await?;
+        match handle_dpu_lldp_report(
+            lldp_savepoint.as_pgconn(),
+            &dpu_machine_id,
+            lldp,
+            request.lldp_snapshot_fingerprint.as_deref(),
+        )
+        .await
+        {
+            Ok(()) => {
+                lldp_savepoint.commit().await?;
+            }
+            Err(error) => {
+                // SQL errors leave the savepoint aborted; roll it back before
+                // continuing.
+                lldp_savepoint.rollback().await?;
+                tracing::warn!(
+                    %dpu_machine_id,
+                    error = %error,
+                    "LLDP report rejected",
+                );
+                lldp_error = Some(error);
+            }
+        }
     }
 
     txn.commit().await?;
@@ -1605,7 +1747,14 @@ pub(crate) async fn record_dpu_network_status(
         });
     }
 
-    Ok(Response::new(()))
+    // Agents that send no fingerprint learn of LLDP rejection only through the RPC status;
+    // operational status is already committed at this point.
+    if let Some(error) = lldp_error
+        && request.lldp_snapshot_fingerprint.is_none()
+    {
+        return Err(error.into());
+    }
+    Ok(())
 }
 
 async fn wakeup_host_state_handler_by_dpu_id(
@@ -1613,13 +1762,12 @@ async fn wakeup_host_state_handler_by_dpu_id(
     dpu_machine_id: &DpuMachineId,
 ) -> Result<(), DatabaseError> {
     let host_machines_by_dpu_ids =
-        db::machine::lookup_host_machine_ids_by_dpu_ids(&mut api.db_reader(), &[*dpu_machine_id])
-            .await?;
+        db::machine::DpuHostAssociations::load(&mut api.db_reader(), &[*dpu_machine_id]).await?;
 
-    if let Some(host_machine_id) = host_machines_by_dpu_ids.get(dpu_machine_id)
+    if let Some(host_machine_id) = host_machines_by_dpu_ids.host_machine_id(dpu_machine_id)
         && let Err(err) = api
             .machine_state_handler_enqueuer
-            .enqueue_object(host_machine_id)
+            .enqueue_object(&host_machine_id)
             .await
     {
         carbide_instrument::emit(StateHandlerWakeupFailed {

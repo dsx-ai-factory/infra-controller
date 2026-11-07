@@ -573,7 +573,20 @@ async fn handle_firmware_upgrade_action(
         "[firmware_upgrade] received upgrade task",
     );
 
-    let result = firmware_upgrade::handle_firmware_upgrade(&http_client, &task).await;
+    let supervisor_config = SupervisorConfig::from_env().map_err(|error| {
+        let cause = match error {
+            SupervisorLaunchError::Environment(_) => {
+                "MLX_FIRMWARE_SUPERVISOR_LAUNCH must contain valid Unicode".to_string()
+            }
+            SupervisorLaunchError::Io { operation, source, .. } => format!("{operation}: {source}"),
+            error => error.to_string(),
+        };
+        CarbideClientError::GenericError(format!(
+            "{cause}; firmware script was not attempted; repair configuration while the task remains pending"
+        ))
+    })?;
+    let result =
+        firmware_upgrade::handle_firmware_upgrade(&http_client, &task, &supervisor_config).await;
 
     tracing::info!(
         success = result.success,

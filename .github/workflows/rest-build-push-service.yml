@@ -16,7 +16,7 @@ on:
         required: true
         type: string
       binary_name:
-        description: 'Binary name in artifacts (e.g., api, migrations, sitemgr)'
+        description: 'Binary name in artifacts (e.g., api, migrations, site-manager)'
         required: true
         type: string
       binary_path:

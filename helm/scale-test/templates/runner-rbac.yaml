@@ -1,0 +1,58 @@
+{{- if .Values.runner.enabled }}
+{{- $name := include "scale-test.jobName" (dict "root" . "suite" "runner") }}
+# The production runner's own account, apart from the test fixtures' account,
+# which alone may delete a Lease or a result ConfigMap.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "scale-test.labels" . | nindent 4 }}
+automountServiceAccountToken: true
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "scale-test.labels" . | nindent 4 }}
+rules:
+  # The site lock: claimed, renewed and released, never deleted. A create cannot be scoped to a name.
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["create"]
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    resourceNames: [{{ .Values.runner.lockName | quote }}]
+    verbs: ["get", "update"]
+  # The result ConfigMap, <runId>-result by the config default: claimed, then written by compare-and-swap, never deleted.
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["create"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: [{{ printf "%s-result" .Values.runner.runId | quote }}]
+    verbs: ["get", "update"]
+  # The MAT Pods and Services fleet-up reads. No ClusterRole, watch or Secret read.
+  - apiGroups: [""]
+    resources: ["pods", "services"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "scale-test.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ $name }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ $name }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}

@@ -23,7 +23,7 @@ use std::time::Duration;
 
 use bmc_explorer::test_support::generate_managed_host_reports;
 use bmc_mock::HardwareType;
-use carbide_site_explorer::config::{SiteExplorerConfig, SiteExplorerExploreMode};
+use carbide_site_explorer::config::SiteExplorerConfig;
 use carbide_test_harness::network::segment::TestNetworkSegment;
 use carbide_test_harness::prelude::*;
 use carbide_test_harness::test_support::fixture_config::{
@@ -3294,8 +3294,7 @@ async fn test_site_explorer_audit_exploration_results(
         rotate_switch_nvos_credentials: Arc::new(false.into()),
         dpu_policy: None,
         deprecated_force_dpu_nic_mode: None,
-        // Tests use MockEndpointExplorer. So this doesn't affect anything.
-        explore_mode: SiteExplorerExploreMode::NvRedfish,
+        deprecated_explore_mode: None,
         explore_drive_firmware: false,
     };
     let explorer = env.test_site_explorer(explorer_config);

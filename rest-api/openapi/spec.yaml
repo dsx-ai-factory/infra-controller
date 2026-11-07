@@ -402,6 +402,10 @@ paths:
         Retrieve Service Account status for current org
 
         API service must be configured for Service Account access at the time of deployment. It cannot be enabled or disabled via API.
+
+        `enabled` is returned `true` when:
+        - Custom JWT issuer auth is configured and `isServiceAccount` is `true` in claim mapping for the org in request
+        - Keycloak auth is configured with `keycloak.serviceAccount` set to `true`, the token is a client credentials token, `keycloak.serviceAccountOrgs` lists the org in request, and the token carries both roles with both `PROVIDER_ADMIN` and `TENANT_ADMIN` suffix
       parameters: []
       tags:
         - Service Account
@@ -4643,7 +4647,7 @@ paths:
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '409':
-          description: An Expected Machine with a conflicting identity already exists, or an Expected Inventory mutation requiring exclusive access is in progress for the same Site. Lock conflicts are rejected before data is mutated and can be retried. Exclusive access is required for complete inventory replacements or deletions, batch Expected Machine creation, and batch Expected Machine updates that set chassis serial numbers.
+          description: An Expected Machine with a conflicting identity already exists, or an Expected Inventory mutation requiring exclusive access is in progress for the same Site. Lock conflicts are rejected before data is mutated and can be retried. Exclusive access is required for complete inventory replacements or deletions, batch Expected Machine creation, and batch Expected Machine updates that set chassis serial numbers. An earlier unconfirmed batch creation also blocks a create using its reserved MAC address or chassis serial number at this Site. Wait for batch reconciliation before retrying that identity.
           $ref: '#/components/responses/ConflictError'
         '422':
           description: The supplied `skuId` does not identify a SKU at this Expected Machine's Site. REST checks your access to the Site before looking up the SKU.
@@ -4779,7 +4783,7 @@ paths:
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '409':
-          description: Another Expected Inventory mutation or Expected Machine inventory reconciliation is already in progress for the same Site. This complete Expected Machine replacement is rejected before data is mutated and can be retried.
+          description: Another Expected Inventory mutation or Expected Machine inventory reconciliation is in progress, or an earlier Expected Machine batch creation is awaiting confirmation at this Site. This complete replacement is rejected before mutation because it would also replace pending machines. Retry after the conflicting operation or batch reconciliation finishes.
           $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Machine
@@ -4808,7 +4812,7 @@ paths:
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '409':
-          description: Another Expected Inventory mutation or Expected Machine inventory reconciliation is already in progress for the same Site. This complete Expected Machine deletion is rejected before data is mutated and can be retried.
+          description: Another Expected Inventory mutation or Expected Machine inventory reconciliation is in progress, or an earlier Expected Machine batch creation is awaiting confirmation at this Site. This complete deletion is rejected before mutation because it would also delete pending machines. Retry after the conflicting operation or batch reconciliation finishes.
           $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Machine
@@ -5058,7 +5062,7 @@ paths:
         '404':
           $ref: '#/components/responses/NotFoundError'
         '409':
-          description: An Expected Inventory mutation requiring exclusive access is already in progress for the same Site. This Expected Machine update is rejected before data is mutated and can be retried. Exclusive access is required for complete inventory replacements or deletions, batch Expected Machine creation, and batch Expected Machine updates that set chassis serial numbers.
+          description: An Expected Inventory mutation requiring exclusive access is already in progress for the same Site. This Expected Machine update is rejected before data is mutated and can be retried. Exclusive access is required for complete inventory replacements or deletions, batch Expected Machine creation, and batch Expected Machine updates that set chassis serial numbers. An earlier unconfirmed batch creation also blocks updates to its reserved machine IDs or chassis serial numbers. Wait for batch reconciliation before retrying those identities.
           $ref: '#/components/responses/ConflictError'
         '422':
           description: The supplied `skuId` does not identify a SKU at this Expected Machine's Site. REST checks your access to the Site before looking up the SKU.
@@ -5104,7 +5108,7 @@ paths:
         '404':
           $ref: '#/components/responses/NotFoundError'
         '409':
-          description: An Expected Inventory mutation requiring exclusive access is already in progress for the same Site. This Expected Machine deletion is rejected before data is mutated and can be retried. Exclusive access is required for complete inventory replacements or deletions, batch Expected Machine creation, and batch Expected Machine updates that set chassis serial numbers.
+          description: An Expected Inventory mutation requiring exclusive access is already in progress for the same Site. This Expected Machine deletion is rejected before data is mutated and can be retried. Exclusive access is required for complete inventory replacements or deletions, batch Expected Machine creation, and batch Expected Machine updates that set chassis serial numbers. An earlier unconfirmed batch creation also blocks deletion of its reserved machine IDs. Wait for batch reconciliation before retrying those IDs.
           $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Machine
@@ -5127,6 +5131,12 @@ paths:
         Alternatively, Tenant Admins with `TargetedInstanceCreation` capability can also create Expected Machines if they have an account with the Site's Infrastructure Provider.
 
         Maximum batch size: 100 Expected Machines per request.
+
+        A successful response confirms that Core created every requested machine and REST saved the corresponding records. HTTP 500 can mean the batch was rejected or that REST could not confirm or save its creation. The status alone does not establish whether creation succeeded or may still finish.
+
+        When durable batch recovery is enabled on the server, REST reserves the requested machine IDs, MAC addresses, and chassis serial numbers until it can confirm creation or establish failure. Durable batch recovery is disabled by default. Creates, updates, and deletes using those identities return HTTP 409 while confirmation is pending. The reservation also blocks replacement or deletion of all Expected Machines at the Site.
+
+        Check Expected Machine inventory before retrying an unconfirmed request. A missing machine is not proof that creation failed. If the server cannot establish the result, a batch with durable recovery keeps its reservation without automatic expiration.
       requestBody:
         content:
           application/json:
@@ -5177,8 +5187,11 @@ paths:
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '409':
-          description: Another Expected Inventory mutation or Expected Machine inventory reconciliation is already in progress for the same Site. This batch Expected Machine creation is rejected before data is mutated and can be retried.
+          description: A conflicting Expected Inventory mutation or Expected Machine inventory reconciliation is in progress, or an earlier batch creation is awaiting confirmation for a submitted MAC address or chassis serial number at this Site. This batch is rejected before dispatch to Core. Retry after the conflicting operation or batch reconciliation finishes; a conflict does not establish whether the earlier batch was created.
           $ref: '#/components/responses/ConflictError'
+        '500':
+          description: The batch was rejected, or REST could not schedule, confirm, or save its creation. Core may already have created the machines or may still finish. With durable recovery enabled, an unconfirmed batch retains its identity reservations, so retrying can return HTTP 409. Check inventory before retrying; a missing record is not proof that creation failed.
+          $ref: '#/components/responses/GenericHttpError'
       tags:
         - Expected Machine
     patch:
@@ -5247,7 +5260,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/NICoAPIError'
         '409':
-          description: One or more target Expected Machines changed before they could be locked, or a conflicting Expected Inventory mutation is in progress for the same Site. Batches that set chassis serial numbers require exclusive access and can conflict with other Expected Inventory mutations or Expected Machine inventory reconciliation. Batches that omit `chassisSerialNumber` or set it to null use shared access and can conflict with complete inventory replacements or deletions and Expected Machine batches that set serial numbers. The batch can be retried.
+          description: One or more target Expected Machines changed before they could be locked, or a conflicting Expected Inventory mutation is in progress for the same Site. Batches that set chassis serial numbers require exclusive access and can conflict with other Expected Inventory mutations or Expected Machine inventory reconciliation. Batches that omit `chassisSerialNumber` or set it to null use shared access and can conflict with complete inventory replacements or deletions and Expected Machine batches that set serial numbers. The batch can be retried. An earlier unconfirmed batch creation also blocks a batch update targeting its reserved machine IDs or chassis serial numbers. Wait for batch reconciliation before retrying those identities.
           $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Machine
@@ -6675,7 +6688,44 @@ paths:
               schema:
                 $ref: '#/components/schemas/ExpectedSwitch'
         '400':
-          $ref: '#/components/responses/ValidationError'
+          description: |-
+            Invalid request data or an Expected Switch update that cannot be applied. This includes:
+
+            - An invalid Expected Switch ID, a body `id` that does not match the URL ID, or malformed request data.
+            - Changing the physical BMC MAC address through `bmcMacAddress`.
+            - An empty `nvosInterfaces` list, invalid or duplicate NVOS MAC addresses, or more than one interface marked primary.
+            - Setting `nvosInterfaces[].ipAddress` when the replacement list does not contain exactly one interface, or supplying an empty, malformed, unspecified, multicast, or IPv4 limited-broadcast NVOS address.
+            - An invalid non-empty `bmcIpAddress`, invalid credentials or metadata, or a partial NVOS credential update without the corresponding stored username or password.
+
+            Field validation errors include details in `data`. Other rejections may return `data: null` and explain the failure in `message`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NICoAPIError'
+              examples:
+                invalid-nvos-ip-address:
+                  value:
+                    source: nico
+                    message: Failed to validate ExpectedSwitch update request data
+                    data:
+                      nvosInterfaces: ipAddress must be a valid IPv4 or IPv6 address that is not unspecified, multicast, or limited broadcast
+                nvos-ip-address-requires-single-interface:
+                  value:
+                    source: nico
+                    message: Failed to validate ExpectedSwitch update request data
+                    data:
+                      nvosInterfaces: ipAddress requires exactly one nvosInterfaces entry
+                immutable-bmc-mac-address:
+                  value:
+                    source: nico
+                    message: Failed to validate Expected Switch update data
+                    data:
+                      bmcMacAddress: BMC MAC address cannot be changed after creation
+                mismatched-expected-switch-id:
+                  value:
+                    source: nico
+                    message: If provided, Expected Switch ID specified in request data must match URL request value
+                    data: null
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '404':
@@ -14435,6 +14485,7 @@ paths:
                   $ref: '#/components/schemas/Tray'
               examples:
                 example-1:
+                  summary: Compute tray
                   value:
                     - id: fm100ht4v4mce2qstjnl8970nnj3ie6ecek4mtjn27pea4kre5gsa49jg0g
                       type: Compute
@@ -14451,6 +14502,51 @@ paths:
                         slotId: 1
                         trayIdx: 0
                         hostId: 1
+                      rackId: rack-01
+                      nvLinkDomainId: 59202b81-65fb-45ec-b3b8-91ab0ad3f34a
+                      nvosPorts: null
+                      taskStats:
+                        pendingTaskCount: 0
+                        activeTaskCount: 0
+                      health: null
+                nvswitch:
+                  summary: NVSwitch tray
+                  value:
+                    - id: c52f20b1-384d-4b1d-9e2e-42af3eb3e77a
+                      type: NVSwitch
+                      name: rack-01-nvswitch-01
+                      manufacturer: NVIDIA
+                      model: NVL-Switch
+                      serialNumber: MT2541X000123
+                      description: '{"nvos_ip":"192.0.2.20","rack_role":"nvlink-fabric"}'
+                      firmwareVersion: 2.1.0
+                      powerState: 'on'
+                      operationStatus: Ready
+                      leakStatus: NoLeak
+                      leakHandlingStatus: None
+                      position:
+                        slotId: 19
+                        trayIdx: 0
+                        hostId: 0
+                      bmcs:
+                        - type: BmcTypeHost
+                          macAddress: '02:00:00:01:00:10'
+                          ipAddress: 192.0.2.10
+                      nvosPorts:
+                        - mac: '02:00:00:01:00:20'
+                          servicePort: 22
+                          addresses:
+                            - addressFamily: IPv4
+                              address: 192.0.2.20
+                            - addressFamily: IPv6
+                              address: '2001:db8:1::20'
+                          isPrimary: true
+                        - mac: '02:00:00:01:00:21'
+                          servicePort: null
+                          addresses:
+                            - addressFamily: IPv4
+                              address: 198.51.100.21
+                          isPrimary: false
                       rackId: rack-01
                       nvLinkDomainId: 59202b81-65fb-45ec-b3b8-91ab0ad3f34a
                       taskStats:
@@ -16057,10 +16153,60 @@ paths:
                       hostId: 1
                     rackId: rack-01
                     nvLinkDomainId: 59202b81-65fb-45ec-b3b8-91ab0ad3f34a
+                    nvosPorts: null
                     taskStats:
                       pendingTaskCount: 0
                       activeTaskCount: 0
                     health: null
+                nvswitch:
+                  summary: NVSwitch tray
+                  description: Illustrative NVSwitch inventory with separate BMC and NVOS addresses; the primary NVOS port has both IPv4 and IPv6 addresses.
+                  value:
+                    id: c52f20b1-384d-4b1d-9e2e-42af3eb3e77a
+                    type: NVSwitch
+                    name: rack-01-nvswitch-01
+                    manufacturer: NVIDIA
+                    model: NVL-Switch
+                    serialNumber: MT2541X000123
+                    description: '{"nvos_ip":"192.0.2.20","rack_role":"nvlink-fabric"}'
+                    firmwareVersion: 2.1.0
+                    powerState: 'on'
+                    operationStatus: Ready
+                    leakStatus: NoLeak
+                    leakHandlingStatus: None
+                    position:
+                      slotId: 19
+                      trayIdx: 0
+                      hostId: 0
+                    bmcs:
+                      - type: BmcTypeHost
+                        macAddress: '02:00:00:01:00:10'
+                        ipAddress: 192.0.2.10
+                    nvosPorts:
+                      - mac: '02:00:00:01:00:20'
+                        servicePort: 22
+                        addresses:
+                          - addressFamily: IPv4
+                            address: 192.0.2.20
+                          - addressFamily: IPv6
+                            address: '2001:db8:1::20'
+                        isPrimary: true
+                      - mac: '02:00:00:01:00:21'
+                        servicePort: null
+                        addresses:
+                          - addressFamily: IPv4
+                            address: 198.51.100.21
+                        isPrimary: false
+                    rackId: rack-01
+                    nvLinkDomainId: 59202b81-65fb-45ec-b3b8-91ab0ad3f34a
+                    taskStats:
+                      pendingTaskCount: 0
+                      activeTaskCount: 0
+                    health:
+                      source: switch-aggregate-health
+                      observedAt: '2026-11-05T14:30:00Z'
+                      successes: []
+                      alerts: []
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '404':
@@ -27181,10 +27327,14 @@ components:
     Tray:
       title: Tray
       type: object
+      x-go-has-nullable-required-properties: true
+      x-go-nullable-required-properties:
+        - nvosPorts
       description: 'Tray represents a component within a rack (e.g. compute node, NVSwitch, power shelf)'
       required:
         - health
         - nvLinkDomainId
+        - nvosPorts
         - taskStats
       examples:
         - id: fm100ht4v4mce2qstjnl8970nnj3ie6ecek4mtjn27pea4kre5gsa49jg0g
@@ -27208,12 +27358,58 @@ components:
               ipAddress: 192.168.1.100
           rackId: rack-01
           nvLinkDomainId: 59202b81-65fb-45ec-b3b8-91ab0ad3f34a
+          nvosPorts: null
           taskStats:
             pendingTaskCount: 3
             activeTaskCount: 1
           health:
             source: aggregate-host-health
             observedAt: '2026-09-28T12:00:00Z'
+            successes: []
+            alerts: []
+        - id: c52f20b1-384d-4b1d-9e2e-42af3eb3e77a
+          type: NVSwitch
+          name: rack-01-nvswitch-01
+          manufacturer: NVIDIA
+          model: NVL-Switch
+          serialNumber: MT2541X000123
+          description: '{"nvos_ip":"192.0.2.20","rack_role":"nvlink-fabric"}'
+          firmwareVersion: 2.1.0
+          powerState: 'on'
+          operationStatus: Ready
+          leakStatus: NoLeak
+          leakHandlingStatus: None
+          position:
+            slotId: 19
+            trayIdx: 0
+            hostId: 0
+          bmcs:
+            - type: BmcTypeHost
+              macAddress: '02:00:00:01:00:10'
+              ipAddress: 192.0.2.10
+          nvosPorts:
+            - mac: '02:00:00:01:00:20'
+              servicePort: 22
+              addresses:
+                - addressFamily: IPv4
+                  address: 192.0.2.20
+                - addressFamily: IPv6
+                  address: '2001:db8:1::20'
+              isPrimary: true
+            - mac: '02:00:00:01:00:21'
+              servicePort: null
+              addresses:
+                - addressFamily: IPv4
+                  address: 198.51.100.21
+              isPrimary: false
+          rackId: rack-01
+          nvLinkDomainId: 59202b81-65fb-45ec-b3b8-91ab0ad3f34a
+          taskStats:
+            pendingTaskCount: 0
+            activeTaskCount: 0
+          health:
+            source: switch-aggregate-health
+            observedAt: '2026-11-05T14:30:00Z'
             successes: []
             alerts: []
       properties:
@@ -27242,7 +27438,7 @@ components:
           description: Serial number of the tray
         description:
           type: string
-          description: Description of the tray
+          description: Description of the tray.
         firmwareVersion:
           type: string
           description: Firmware version of the tray
@@ -27276,6 +27472,12 @@ components:
           description: BMC (Baseboard Management Controller) entries for the tray
           items:
             $ref: '#/components/schemas/BMCInfo'
+        nvosPorts:
+          x-go-required-nullable: true
+          type: [array, 'null']
+          description: Observed NVOS management ports for NVSwitch trays, including ports without addresses. Empty when no port data is available; null for other tray types.
+          items:
+            $ref: '#/components/schemas/SwitchNvosPortInfo'
         rackId:
           type: string
           description: ID of the Rack this Tray belongs to
@@ -27291,6 +27493,59 @@ components:
             - $ref: '#/components/schemas/AggregateHealth'
             - type: 'null'
           description: Latest Core aggregate health snapshot synchronized by Flow. Null when Core reports no aggregate health, including before the first successful inventory sync.
+    SwitchNvosPortInfo:
+      title: SwitchNvosPortInfo
+      type: object
+      x-go-has-nullable-required-properties: true
+      x-go-nullable-required-properties:
+        - mac
+        - servicePort
+      description: Observed NVOS management port.
+      required: [mac, servicePort, addresses, isPrimary]
+      properties:
+        mac:
+          type: [string, 'null']
+          description: MAC address of the NVOS management port, or null when unavailable.
+        servicePort:
+          type: [integer, 'null']
+          format: int64
+          minimum: 0
+          maximum: 4294967295
+          description: TCP service port for NVOS, or null when unavailable.
+        addresses:
+          type: array
+          description: Observed IP addresses. Empty when the port has no addresses.
+          items:
+            $ref: '#/components/schemas/IPAddress'
+        isPrimary:
+          type: boolean
+          description: Whether this is the operator-declared primary (eth0) NVOS port.
+      examples:
+        - mac: '00:11:22:33:44:55'
+          servicePort: 22
+          addresses:
+            - addressFamily: IPv4
+              address: 192.0.2.20
+          isPrimary: true
+    IPAddress:
+      title: IPAddress
+      type: object
+      description: IP address and its address family.
+      required: [addressFamily, address]
+      properties:
+        addressFamily:
+          type: string
+          enum:
+            - Unspecified
+            - IPv4
+            - IPv6
+          description: Address family reported for this IP address.
+        address:
+          type: string
+          description: IPv4 or IPv6 address.
+      examples:
+        - addressFamily: IPv4
+          address: 192.0.2.20
     TrayPosition:
       title: TrayPosition
       type: object
@@ -32650,6 +32905,13 @@ components:
           type: string
           pattern: '^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$'
           description: MAC address of this NVOS ethernet port.
+        ipAddress:
+          type:
+            - string
+            - 'null'
+          minLength: 1
+          description: Optional static IPv4 or IPv6 address. May be set only when the Expected Switch has exactly one NVOS interface. It must not be unspecified, multicast, or IPv4 limited broadcast.
+          example: '192.0.2.20'
         isPrimary:
           type: boolean
           description: Whether this port is the primary (eth0) NVOS port that NICo manages through RMS. At most one port per switch can be primary; when no port is marked, the first port on a multi-port switch defaults to primary and a single-port switch is always its own primary.
@@ -33014,9 +33276,11 @@ components:
           writeOnly: true
           description: NvOS password for the Expected Switch. Omission or null preserves the value. A non-empty value can be supplied without nvOsUsername. Provide both fields when setting NVOS credentials for the first time.
         nvosInterfaces:
-          type: array
+          type:
+            - array
+            - 'null'
           minItems: 1
-          description: Replace the Expected Switch's NVOS ethernet port set. Omission preserves the stored ports; an empty array is rejected because a switch must keep at least one NVOS port. Mark one entry primary to choose eth0. The deprecated `nvosMacAddresses` field is ignored even when both fields are supplied.
+          description: Replace the Expected Switch's NVOS ethernet port set, including its optional static IP address. Omission or null preserves the stored ports and address; an empty array is rejected because a switch must keep at least one NVOS port. A supplied list without an ipAddress clears the previous NVOS address. Mark one entry primary to choose eth0. The deprecated `nvosMacAddresses` field is ignored even when both fields are supplied.
           items:
             $ref: '#/components/schemas/NvosInterface'
         nvosMacAddresses:
@@ -35327,12 +35591,14 @@ components:
             This is determined per request from how the token's issuer is configured
             at deployment time (the issuer config in the `nico-rest-api-config`
             ConfigMap); it cannot be toggled via the API. Rules by issuer origin:
-              - `keycloak`: true for a client-credentials (service-to-service) token —
-                i.e. the token carries a client ID — when the issuer is deployed with
-                `keycloak.serviceAccount: true`.
+              - `keycloak`: true for a client-credentials (service-to-service) token
+                that holds both `PROVIDER_ADMIN` and `TENANT_ADMIN` in the requested
+                org, when the issuer is deployed with `keycloak.serviceAccount: true`
+                and the org is listed in `keycloak.serviceAccountOrgs`. Disconnected
+                mode allows only one listed org.
               - `custom`: true when the `claimMapping` matched for this org sets
-                `isServiceAccount: true`. Only permitted when the API runs in
-                disconnected mode.
+                `isServiceAccount: true`. Disconnected mode allows only one such
+                mapping.
               - `kas-ssa` / `kas-legacy`: always false; service accounts are not
                 supported for these origins.
 

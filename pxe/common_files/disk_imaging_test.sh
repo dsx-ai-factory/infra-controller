@@ -76,6 +76,7 @@ set_blkid_result() {
 }
 
 blkid() {
+	printf '%s\n' "$@" >"$temp_dir/blkid-args"
 	printf '%s' "$mock_blkid_stdout"
 	printf '%s' "$mock_blkid_stderr" >&2
 	return "$mock_blkid_status"
@@ -619,6 +620,23 @@ set_blkid_result 0 "/dev/targetp16" ""
 resolved=$(resolve_fstab_mount_device /boot /dev/target "$fstab") ||
 	fail "PARTLABEL /boot entry was not resolved"
 assert_eq "PARTLABEL /boot device" "/dev/targetp16" "$resolved"
+
+echo "fstab: Ubuntu /boot UUID device path"
+boot_uuid=12345678-1234-5678-9abc-123456789abc
+printf '%s\n' "/dev/disk/by-uuid/$boot_uuid /boot ext4 defaults 0 2" >"$fstab"
+set_blkid_result 0 "/dev/targetp16" ""
+resolve_boot_partition "$fstab" >/dev/null ||
+	fail "UUID device-path /boot entry was not resolved"
+assert_eq "UUID device-path partition" "/dev/targetp16" "$boot_part"
+assert_eq "UUID device-path source" "fstab" "$boot_part_source"
+grep -Fxq -- "UUID=$boot_uuid" "$temp_dir/blkid-args" ||
+	fail "UUID device path was not resolved by its filesystem identifier"
+set_blkid_result 0 "/dev/otherp1" ""
+if resolve_boot_partition "$fstab" >/dev/null 2>&1; then
+	fail "UUID device path on another disk was accepted"
+fi
+assert_log_contains \
+	"Device /dev/otherp1 with UUID=$boot_uuid is not exclusively backed by image disk /dev/target"
 
 echo "fstab: /boot on another disk"
 printf '%s\n' 'LABEL=BOOT	/boot	ext4	defaults	0 2' >"$fstab"

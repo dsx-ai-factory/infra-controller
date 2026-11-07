@@ -68,7 +68,23 @@ impl Virsh<'_> {
             }
             _ => None,
         };
-        let output = self.virsh_output(&arguments, input.as_deref()).await?;
+        self.checked_output(&arguments, input.as_deref()).await
+    }
+
+    /// Runs caller-supplied arguments without input, as for a prepared command.
+    pub(super) async fn execute_arguments(
+        &self,
+        arguments: &[std::ffi::OsString],
+    ) -> eyre::Result<Output> {
+        self.checked_output(arguments, None).await
+    }
+
+    async fn checked_output(
+        &self,
+        arguments: &[std::ffi::OsString],
+        input: Option<&str>,
+    ) -> eyre::Result<Output> {
+        let output = self.virsh_output(arguments, input).await?;
         if output.status.success() {
             Ok(output)
         } else {

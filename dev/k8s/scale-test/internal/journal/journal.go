@@ -217,6 +217,15 @@ func (j *Journal) Path() string { return j.path }
 // journal whose append is stuck.
 func (j *Journal) Freeze() { j.frozen.Store(true) }
 
+// Unsettled is true when any op this run lacks a proven clean outcome (one
+// stays open) or a journal write has failed. A site released while Unsettled
+// must stay needsCleanup: a write it recorded may still land on the fleet.
+func (j *Journal) Unsettled() bool {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	return j.broken != nil || len(j.open) > 0
+}
+
 // Close freezes the journal and closes its file. Unlike Freeze, it waits for
 // an append in progress.
 func (j *Journal) Close() error {

@@ -287,7 +287,7 @@ NICo uses two Redfish client libraries concurrently. **nv-redfish** is replacing
 
 | Library | Version | Language | Used For | Location in Code |
 |---|---|---|---|---|
-| [libredfish](https://github.com/NVIDIA/libredfish) | v0.43.11 | Rust | Site Explorer: discovery, boot config, power control, BIOS, account management | `crates/site-explorer/`, via `crates/redfish/` |
+| [libredfish](https://github.com/NVIDIA/libredfish) | v0.43.11 | Rust | Site Explorer: vendor detection, boot config, power control, BIOS, account management | `crates/site-explorer/`, via `crates/redfish/` |
 | [nv-redfish](https://github.com/NVIDIA/nv-redfish) | 0.7.1 | Rust | Site Explorer exploration and hardware health inventory collection | `crates/site-explorer/`, `crates/redfish/`, `crates/health/src/` |
 
 **libredfish** provides a `Redfish` trait with vendor-specific implementations (Dell, HPE, Lenovo, Supermicro, NVIDIA DPU/GB200/GH200/Viking). It handles the full breadth of BMC operations.

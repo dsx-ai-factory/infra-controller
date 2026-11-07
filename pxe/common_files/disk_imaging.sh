@@ -530,8 +530,13 @@ function resolve_fstab_mount_device() {
 			identifier_type=${spec%%=*}
 			identifier=$(printf '%b' "${spec#*=}")
 			;;
+		/dev/disk/by-uuid/?*)
+			# Resolve the identifier on the image disk, not through a host symlink.
+			identifier_type=UUID
+			identifier=${spec#/dev/disk/by-uuid/}
+			;;
 		*)
-			echo "$fstab names $mountpoint by [$spec], which cannot be resolved on $disk; only UUID=, LABEL=, PARTUUID= and PARTLABEL= sources are supported, set bootfs_uuid to select the partition explicitly" | tee "$log_output" >&2
+			echo "$fstab names $mountpoint by [$spec], which cannot be resolved on $disk; only UUID=, LABEL=, PARTUUID=, PARTLABEL= and /dev/disk/by-uuid/ sources are supported, set bootfs_uuid to select the partition explicitly" | tee "$log_output" >&2
 			return 3
 			;;
 	esac

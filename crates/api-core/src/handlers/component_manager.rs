@@ -64,6 +64,11 @@ use crate::handlers::firmware::load_desired_firmware_version_entries;
 
 #[cfg(test)]
 mod credentials_tests;
+#[allow(
+    dead_code,
+    reason = "Staged for the passive handler in https://github.com/dsx-ai-factory/infra-controller/issues/8633"
+)]
+mod firmware_details;
 pub(crate) mod power_details;
 
 const MACHINE_POWER_OVERRIDE_SOURCE: &str = "component_power_control";
@@ -3684,9 +3689,12 @@ fn validate_component_reset_options(
         .into());
     }
     match action {
-        rpc::ComponentResetAction::SdnFactoryReset => Ok(()),
+        rpc::ComponentResetAction::SdnFactoryReset
+        | rpc::ComponentResetAction::NvosFactoryReset => Ok(()),
         _ => Err(component_manager_error_to_status(
-            ComponentManagerError::Unsupported("only SDN factory reset is implemented".into()),
+            ComponentManagerError::Unsupported(
+                "only SDN and NVOS factory reset are implemented".into(),
+            ),
         )),
     }
 }
@@ -3781,19 +3789,25 @@ async fn dispatch_component_reset(
                 .batch_reset_sdn_factory_default(endpoints, domain_name)
                 .await
         }
-        rpc::ComponentResetAction::BmcReset
-        | rpc::ComponentResetAction::BmcFactoryReset
-        | rpc::ComponentResetAction::NvosFactoryReset => Err(ComponentManagerError::Unsupported(
-            "only SDN factory reset is implemented".into(),
-        )),
+        rpc::ComponentResetAction::NvosFactoryReset => {
+            cm.nv_switch
+                .batch_reset_switch_factory_default(endpoints, domain_name)
+                .await
+        }
+        rpc::ComponentResetAction::BmcReset | rpc::ComponentResetAction::BmcFactoryReset => {
+            Err(ComponentManagerError::Unsupported(
+                "only SDN and NVOS factory reset are implemented".into(),
+            ))
+        }
         rpc::ComponentResetAction::Unspecified => Err(ComponentManagerError::InvalidArgument(
             "a recognized reset action is required".into(),
         )),
     };
     match outcome {
-        Ok(outcomes) => outcomes
+        Ok(responses) => responses
             .into_iter()
-            .map(|outcome| {
+            .map(|response| {
+                let outcome = response.result;
                 let mut result = mac_result(
                     &outcome.bmc_mac,
                     if outcome.success {
@@ -3930,11 +3944,14 @@ async fn get_component_reset_statuses(
         rpc::ComponentResetAction::SdnFactoryReset => {
             cm.nv_switch.get_sdn_factory_reset_status(bmc_macs).await
         }
-        rpc::ComponentResetAction::BmcReset
-        | rpc::ComponentResetAction::BmcFactoryReset
-        | rpc::ComponentResetAction::NvosFactoryReset => Err(ComponentManagerError::Unsupported(
-            "only SDN factory reset is implemented".into(),
-        )),
+        rpc::ComponentResetAction::NvosFactoryReset => {
+            cm.nv_switch.get_nvos_factory_reset_status(bmc_macs).await
+        }
+        rpc::ComponentResetAction::BmcReset | rpc::ComponentResetAction::BmcFactoryReset => {
+            Err(ComponentManagerError::Unsupported(
+                "only SDN and NVOS factory reset are implemented".into(),
+            ))
+        }
         rpc::ComponentResetAction::Unspecified => Err(ComponentManagerError::InvalidArgument(
             "a recognized reset action is required".into(),
         )),

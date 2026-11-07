@@ -46,6 +46,16 @@ pub fn is_overlap_constraint(constraint: Option<&str>) -> bool {
     )
 }
 
+/// Identifies the one-prefix-per-family index for mutation precondition errors.
+pub fn is_family_constraint(constraint: Option<&str>) -> bool {
+    constraint == Some("network_prefix_family")
+}
+
+/// Identifies a reused authoritative DHCPv6 relay link-address.
+pub fn is_dhcpv6_link_address_constraint(constraint: Option<&str>) -> bool {
+    constraint == Some("network_prefix_dhcpv6_link_address")
+}
+
 fn ip_to_u128(ip: IpAddr) -> u128 {
     match ip {
         IpAddr::V4(ip) => u128::from(u32::from(ip)),

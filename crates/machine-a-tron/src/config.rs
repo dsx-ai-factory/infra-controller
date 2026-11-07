@@ -1093,6 +1093,9 @@ pub struct MachineATronContext {
     pub forge_api_client: ForgeApiClient,
     pub dhcp_client: crate::dhcp_wrapper::DhcpClient,
     pub mac_address_pool: Arc<Mutex<MacAddressPool>>,
+    /// Test-only fixed delay for every scheduled BMC DHCP retry, replacing backoff and jitter.
+    #[cfg(test)]
+    pub(crate) bmc_dhcp_retry_delay: Option<Duration>,
 }
 
 impl MachineATronContext {
@@ -1140,6 +1143,7 @@ scout_run_interval = "5s"
             forge_api_client,
             dhcp_client: crate::dhcp_wrapper::DhcpClient::Api(api_client),
             mac_address_pool: Arc::new(Mutex::new(MacAddressPool::new_pool(pool_config))),
+            bmc_dhcp_retry_delay: None,
         })
     }
 }

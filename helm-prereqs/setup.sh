@@ -2930,28 +2930,33 @@ echo "NICo REST site-agent deployed and bootstrap complete (FLOW_GRPC_ENABLED=${
 # fails for any transient reason the NicoClient stays nil permanently and
 # all inventory activities panic.  Detect failure and restart the pod so it
 # gets a fresh attempt with the same correct config.
-echo "Verifying site-agent NICo Core gRPC connection..."
-_CONNECTED=false
-for _i in $(seq 1 24); do
-    _POD="$(kubectl get pods -n nico-rest \
-        -l "app.kubernetes.io/name=nico-rest-site-agent" \
-        -o name 2>/dev/null | head -1 || true)"
-    if [ -n "${_POD}" ] && \
-       kubectl logs -n nico-rest "${_POD}" --since=5m 2>/dev/null \
-           | grep -q "NicoClient: successfully connected to server"; then
-        _CONNECTED=true
-        echo "Site-agent successfully connected to NICo Core gRPC"
-        break
-    fi
-    echo "  Waiting for gRPC connection (${_i}/24)..."
-    sleep 5
-done
+_wait_for_site_agent_connection() {
+    local _i _pod
+    for _i in $(seq 1 24); do
+        _pod="$(kubectl get pods -n nico-rest \
+            -l "app.kubernetes.io/name=nico-rest-site-agent" \
+            -o name 2>/dev/null | head -1 || true)"
+        # Consume the log stream so pipefail cannot mistake SIGPIPE for failure.
+        if [ -n "${_pod}" ] && \
+           kubectl logs -n nico-rest "${_pod}" --since=5m 2>/dev/null \
+               | grep -F "CoreGrpcClient: Successfully connected to server" >/dev/null; then
+            echo "Site-agent successfully connected to NICo Core gRPC"
+            return 0
+        fi
+        echo "  Waiting for gRPC connection (${_i}/24)..."
+        sleep 5
+    done
+    return 1
+}
 
-if [ "${_CONNECTED}" = "false" ]; then
+echo "Verifying site-agent NICo Core gRPC connection..."
+if ! _wait_for_site_agent_connection; then
     echo "WARNING: site-agent did not confirm gRPC connection — restarting pod for retry..."
     kubectl rollout restart statefulset/nico-rest-site-agent -n nico-rest
     kubectl rollout status statefulset/nico-rest-site-agent -n nico-rest --timeout=120s
-    echo "Site-agent pod restarted — gRPC connection will be retried"
+    if ! _wait_for_site_agent_connection; then
+        echo "WARNING: Could not confirm the site-agent's NICo Core gRPC connection after restart. Setup will continue; verify connectivity manually." >&2
+    fi
 fi
 
 echo ""

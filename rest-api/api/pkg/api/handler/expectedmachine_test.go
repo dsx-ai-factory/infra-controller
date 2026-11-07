@@ -38,6 +38,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/uptrace/bun"
 	"github.com/uptrace/bun/extra/bundebug"
+	tclient "go.temporal.io/sdk/client"
 	tmocks "go.temporal.io/sdk/mocks"
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
@@ -70,6 +71,8 @@ func testExpectedMachineInitDB(t *testing.T) *cdb.Session {
 	err = dbSession.DB.ResetModel(ctx, (*cdbm.TenantSite)(nil))
 	assert.Nil(t, err)
 	err = dbSession.DB.ResetModel(ctx, (*cdbm.SKU)(nil))
+	assert.Nil(t, err)
+	err = dbSession.DB.ResetModel(ctx, (*cdbm.PendingExpectedMachine)(nil))
 	assert.Nil(t, err)
 	err = dbSession.DB.ResetModel(ctx, (*cdbm.InstanceType)(nil))
 	assert.Nil(t, err)
@@ -155,6 +158,7 @@ func (h *testExpectedMachineSKULookupFailureHook) BeforeQuery(ctx context.Contex
 func (h *testExpectedMachineSKULookupFailureHook) AfterQuery(context.Context, *bun.QueryEvent) {}
 
 func TestCreateExpectedMachineHandler_Handle(t *testing.T) {
+	t.Run("pending batch identity conflict", func(t *testing.T) { testExpectedMachinePendingOverlap(t, "single create") })
 	scenarios := []struct {
 		name string
 		run  func(*testing.T)
@@ -1615,6 +1619,7 @@ func TestBmcMacUnchanged(t *testing.T) {
 }
 
 func TestUpdateExpectedMachineHandler_Handle(t *testing.T) {
+	t.Run("pending batch identity conflict", func(t *testing.T) { testExpectedMachinePendingOverlap(t, "single update") })
 	t.Run("complete mutation conflict", func(t *testing.T) {
 		testExpectedMachineMutationRejectsInventoryLock(t, expectedMachineMutationLockCase{mutation: "single update"})
 	})
@@ -2267,6 +2272,7 @@ func testUpdateExpectedMachineBmcIpAddress(t *testing.T) {
 }
 
 func TestDeleteExpectedMachineHandler_Handle(t *testing.T) {
+	t.Run("pending batch identity conflict", func(t *testing.T) { testExpectedMachinePendingOverlap(t, "single delete") })
 	t.Run("complete mutation conflict", func(t *testing.T) {
 		testExpectedMachineMutationRejectsInventoryLock(t, expectedMachineMutationLockCase{mutation: "single delete"})
 	})
@@ -2852,6 +2858,11 @@ func TestTenantWithTargetedInstanceCreationCapability(t *testing.T) {
 
 // TestCreateExpectedMachinesHandler_Handle tests the batch create handler
 func TestCreateExpectedMachinesHandler_Handle(t *testing.T) {
+	t.Run("default-off legacy batch creation", testExpectedMachineLegacyBatch)
+	t.Run("enabled durable batch recovery", testExpectedMachineBatchRecovery)
+	t.Run("admission failure does not dispatch", testExpectedMachineBatchAdmissionFailure)
+
+	t.Run("pending batch identity conflict", func(t *testing.T) { testExpectedMachinePendingOverlap(t, "batch create") })
 	mutationTests := []struct {
 		name string
 		run  func(*testing.T)
@@ -2894,7 +2905,7 @@ func TestCreateExpectedMachinesHandler_Handle(t *testing.T) {
 	dbSession := testExpectedMachineInitDB(t)
 	defer dbSession.Close()
 
-	cfg := common.GetTestConfig()
+	cfg := expectedMachineBatchRecoveryConfig(t)
 
 	// Prepare client pool for workflow calls
 	tcfg, _ := cfg.GetTemporalConfig()
@@ -2920,7 +2931,7 @@ func TestCreateExpectedMachinesHandler_Handle(t *testing.T) {
 	// Add mock temporal client for the site
 	mockTemporalClient := &tmocks.Client{}
 	mockWorkflowRun := &tmocks.WorkflowRun{}
-	mockWorkflowRun.On("GetID").Return("test-workflow-id")
+	mockWorkflowRun.On("GetRunID").Return("batch-create-run")
 
 	// Track workflow request to generate corresponding results
 	var capturedRequest interface{}
@@ -2934,8 +2945,8 @@ func TestCreateExpectedMachinesHandler_Handle(t *testing.T) {
 		}).
 		Return(mockWorkflowRun, nil)
 
-	// Mock Get to populate results based on captured request
-	mockWorkflowRun.Mock.On("Get", mock.Anything, mock.Anything).
+	// Mock the exact run result based on the captured request
+	mockWorkflowRun.Mock.On("GetWithOptions", mock.Anything, mock.Anything, tclient.WorkflowRunGetOptions{DisableFollowingRuns: true}).
 		Run(func(args mock.Arguments) {
 			// Cast result to BatchExpectedMachineOperationResponse and populate
 			if resultPtr, ok := args.Get(1).(*corev1.BatchExpectedMachineOperationResponse); ok {
@@ -3745,6 +3756,7 @@ func TestExpectedMachineUpdateFields(t *testing.T) {
 }
 
 func TestUpdateExpectedMachinesHandler_Handle(t *testing.T) {
+	t.Run("pending batch identity conflict", func(t *testing.T) { testExpectedMachinePendingOverlap(t, "batch update") })
 	tests := []struct {
 		name string
 		run  func(*testing.T)

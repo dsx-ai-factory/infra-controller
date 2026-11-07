@@ -27,6 +27,8 @@ use bmc_mock::{
     ActionError, Callbacks, DeviceEffect, HardwareType, HostMachineInfo, HostnameQuerying,
     MachineInfo, POWER_CYCLE_DELAY, ResourceResetType,
 };
+#[cfg(test)]
+use eyre::WrapErr;
 use nv_redfish::schema::resource::PowerState;
 use tokio::task::JoinHandle;
 use uuid::Uuid;
@@ -155,6 +157,7 @@ impl PowerShelfActor {
     ) -> Self {
         let (fsm, actions) = PowerShelfFsm::init(false);
         let first_run_delay = Some(first_run_offset(config.run_interval_idle));
+        let bmc_recovery = app_context.bmc_dhcp_recovery(Duration::ZERO);
         Self {
             mat_id: Uuid::new_v4(),
             machine_config_section,
@@ -168,7 +171,7 @@ impl PowerShelfActor {
             bmc_injection: Arc::new(InjectionStore::new()),
             _bmc_mock: None,
             bmc_dhcp_info: None,
-            bmc_recovery: Default::default(),
+            bmc_recovery,
             fsm,
             actions: actions.into_iter().collect(),
             first_run_delay,
@@ -204,6 +207,7 @@ impl PowerShelfActor {
         live_state.bmc_persistence =
             crate::bmc_mock_wrapper::BmcPersistence::from_saved(persisted.bmc_state);
         let first_run_delay = Some(first_run_offset(config.run_interval_idle));
+        let bmc_recovery = app_context.bmc_dhcp_recovery(Duration::ZERO);
         Self {
             mat_id: persisted.mat_id,
             machine_config_section,
@@ -214,7 +218,7 @@ impl PowerShelfActor {
             bmc_injection: Arc::new(InjectionStore::new()),
             _bmc_mock: None,
             bmc_dhcp_info: None,
-            bmc_recovery: Default::default(),
+            bmc_recovery,
             fsm,
             actions: actions.into_iter().collect(),
             first_run_delay,
@@ -515,6 +519,8 @@ enum PowerShelfMessage {
     PowerCycleExpired,
     DhcpRetryExpired,
     SetPaused(bool),
+    #[cfg(test)]
+    InboxBarrier(tokio::sync::oneshot::Sender<()>),
     Bmc(BmcCommand),
     Stop,
 }
@@ -538,6 +544,10 @@ impl ActorCallbacks<PowerShelfMessage> for PowerShelfActor {
             PowerShelfMessage::Stop => return ActorResult::Stop,
             PowerShelfMessage::SetPaused(paused) => {
                 self.fsm_event(if paused { Event::Pause } else { Event::Resume })
+            }
+            #[cfg(test)]
+            PowerShelfMessage::InboxBarrier(reply) => {
+                let _ = reply.send(());
             }
             PowerShelfMessage::Bmc(BmcCommand::SetSystemPower { request, reply }) => {
                 let result = self.set_system_power(request);
@@ -612,6 +622,20 @@ impl PowerShelfHandle {
 
     pub(crate) fn pause(&self) -> eyre::Result<()> {
         self.0.mailbox.send(PowerShelfMessage::SetPaused(true))?;
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(super) async fn pause_and_wait(&self, timeout: Duration) -> eyre::Result<()> {
+        self.pause()?;
+        let (reply, acknowledged) = tokio::sync::oneshot::channel();
+        self.0
+            .mailbox
+            .send(PowerShelfMessage::InboxBarrier(reply))?;
+        tokio::time::timeout(timeout, acknowledged)
+            .await
+            .wrap_err("timed out waiting for power-shelf pause")?
+            .wrap_err("power shelf stopped before acknowledging pause")?;
         Ok(())
     }
 

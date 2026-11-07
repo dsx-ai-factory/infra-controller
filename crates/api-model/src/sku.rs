@@ -89,7 +89,9 @@ impl<'r> FromRow<'r, PgRow> for Sku {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+/// `SkuComponents` holds a complete hardware definition. Equality compares every
+/// component field, including collection order.
+#[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
 pub struct SkuComponents {
     pub chassis: SkuComponentChassis,
     pub cpus: Vec<SkuComponentCpu>,
@@ -102,7 +104,7 @@ pub struct SkuComponents {
     pub tpm: Option<SkuComponentTpm>,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, Default)]
+#[derive(Clone, Debug, Deserialize, Serialize, Default, Eq, PartialEq)]
 pub struct SkuComponentChassis {
     pub vendor: String,
     pub model: String,

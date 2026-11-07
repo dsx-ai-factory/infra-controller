@@ -155,6 +155,7 @@ impl StateControllerIO for MachineStateControllerIO {
                 DpuInitState::WaitingForNetworkInstall => "waitingfornetworkinstall",
                 DpuInitState::WaitingForNetworkConfig => "waitingfornetworkconfig",
                 DpuInitState::WaitingForPlatformConfiguration => "waitingforplatformconfiguration",
+                DpuInitState::WaitingForUefiRestart => "waitingforuefirestart",
                 DpuInitState::PollingBiosSetup => "pollingbiossetup",
                 // The observed-Off wait remains part of the existing
                 // operator-facing power-cycle metric.
@@ -233,7 +234,7 @@ impl StateControllerIO for MachineStateControllerIO {
         fn spdm_measuring_state_name(spdm_measuring_state: &SpdmMeasuringState) -> &'static str {
             match spdm_measuring_state {
                 SpdmMeasuringState::TriggerMeasurements => "triggermeasurements",
-                SpdmMeasuringState::PollResult => "pollresult",
+                SpdmMeasuringState::PollResult(..) => "pollresult",
             }
         }
 

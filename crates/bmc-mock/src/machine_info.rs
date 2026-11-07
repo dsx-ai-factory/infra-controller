@@ -1419,7 +1419,7 @@ mod tests {
             };
             let config =
                 host.system_config(Arc::new(crate::test_support::TestCallbacks::default()));
-            let options = config.systems[0]
+            let options = config.systems.as_ref().expect("supported Systems")[0]
                 .boot_options
                 .as_ref()
                 .expect("boot inventory");

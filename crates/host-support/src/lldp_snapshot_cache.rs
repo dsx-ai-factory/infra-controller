@@ -23,6 +23,44 @@ use ::rpc::forge::{InterfaceLldp, LldpReport, LldpReportResult};
 
 use crate::lldp_collector::{LldpCollectorResult, LldpNeighbor};
 
+/// Classification result for DPU status reporting.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FingerprintedLldpReport {
+    pub report: LldpReport,
+    pub snapshot_fingerprint: Option<Vec<u8>>,
+}
+
+/// Classifies a DPU collection against the exact snapshot Core reports as
+/// accepted.
+///
+/// An absent or different Core fingerprint keeps a successful snapshot as
+/// `UPDATED`. Collection failures have no snapshot identifier and never erase
+/// Core's last accepted topology.
+pub fn classify_against_accepted_snapshot(
+    collected: LldpCollectorResult<Vec<LldpNeighbor>>,
+    accepted_fingerprint: Option<&[u8]>,
+) -> FingerprintedLldpReport {
+    let Ok(neighbors) = collected else {
+        return FingerprintedLldpReport {
+            report: report(LldpReportResult::CollectionFailed, vec![]),
+            snapshot_fingerprint: None,
+        };
+    };
+
+    let interfaces = canonical_interfaces(neighbors);
+    let snapshot_fingerprint = ::rpc::lldp_snapshot::fingerprint(&interfaces);
+    let report = if accepted_fingerprint == Some(snapshot_fingerprint.as_slice()) {
+        report(LldpReportResult::Unchanged, vec![])
+    } else {
+        report(LldpReportResult::Updated, interfaces)
+    };
+
+    FingerprintedLldpReport {
+        report,
+        snapshot_fingerprint: Some(snapshot_fingerprint),
+    }
+}
+
 /// Classifies each LLDP collection against the last snapshot nico-api
 /// acknowledged. Hold one instance across the poll loop so the cache persists
 /// between iterations.
@@ -53,19 +91,7 @@ impl LldpSnapshotCache {
             return report(LldpReportResult::CollectionFailed, vec![]);
         };
 
-        let mut interfaces: Vec<InterfaceLldp> = neighbors
-            .into_iter()
-            .map(|neighbor| InterfaceLldp {
-                mac_address: neighbor.local_mac,
-                lldp: Some(neighbor.switch),
-            })
-            .collect();
-
-        // `lldpcli` imposes no order on its output, and one local interface can
-        // see several neighbors, each contributing an entry with the same MAC.
-        // Sort by the full link identity before the cache comparison so that a
-        // merely reordered snapshot does not read as a changed one.
-        interfaces.sort_by(|left, right| link_identity(left).cmp(&link_identity(right)));
+        let interfaces = canonical_interfaces(neighbors);
 
         if self.last_reported.as_deref() == Some(interfaces.as_slice()) {
             return report(LldpReportResult::Unchanged, vec![]);
@@ -85,6 +111,21 @@ impl LldpSnapshotCache {
             LldpReportResult::Unchanged | LldpReportResult::Unspecified => {}
         }
     }
+}
+
+fn canonical_interfaces(neighbors: Vec<LldpNeighbor>) -> Vec<InterfaceLldp> {
+    let mut interfaces = neighbors
+        .into_iter()
+        .map(|neighbor| InterfaceLldp {
+            mac_address: neighbor.local_mac,
+            lldp: Some(neighbor.switch),
+        })
+        .collect::<Vec<_>>();
+
+    // `lldpcli` imposes no order on its output, and one local interface can see
+    // several neighbors, each contributing an entry with the same MAC.
+    interfaces.sort_by(|left, right| link_identity(left).cmp(&link_identity(right)));
+    interfaces
 }
 
 fn report(result: LldpReportResult, interfaces: Vec<InterfaceLldp>) -> LldpReport {
@@ -147,9 +188,62 @@ mod tests {
         }
     }
 
-    /// One neighbor on one port, the simplest snapshot the collector can yield.
     fn one_neighbor() -> Vec<LldpNeighbor> {
         vec![neighbor("aa:bb:cc:dd:ee:ff", "p0", "p0")]
+    }
+
+    #[test]
+    fn accepted_fingerprint_only_suppresses_the_matching_snapshot() {
+        let snapshot_a = classify_against_accepted_snapshot(Ok(one_neighbor()), None);
+        let accepted = snapshot_a.snapshot_fingerprint.unwrap();
+        let snapshot_b = vec![neighbor("aa:bb:cc:dd:ee:ff", "p0", "p1")];
+
+        let repeated_a =
+            classify_against_accepted_snapshot(Ok(one_neighbor()), Some(accepted.as_slice()));
+        let changed_b =
+            classify_against_accepted_snapshot(Ok(snapshot_b), Some(accepted.as_slice()));
+
+        assert_eq!(result_of(&repeated_a.report), LldpReportResult::Unchanged);
+        assert_eq!(result_of(&changed_b.report), LldpReportResult::Updated);
+    }
+
+    #[test]
+    fn absent_accepted_fingerprint_never_suppresses_a_snapshot() {
+        let first = classify_against_accepted_snapshot(Ok(one_neighbor()), None);
+        let retry = classify_against_accepted_snapshot(Ok(one_neighbor()), None);
+
+        assert_eq!(result_of(&first.report), LldpReportResult::Updated);
+        assert_eq!(result_of(&retry.report), LldpReportResult::Updated);
+    }
+
+    #[test]
+    fn accepted_empty_snapshot_is_unchanged() {
+        let initial = classify_against_accepted_snapshot(Ok(vec![]), None);
+        let accepted = initial.snapshot_fingerprint.unwrap();
+
+        let repeated = classify_against_accepted_snapshot(Ok(vec![]), Some(accepted.as_slice()));
+
+        assert_eq!(result_of(&repeated.report), LldpReportResult::Unchanged);
+    }
+
+    #[test]
+    fn collection_recovery_uses_the_persisted_core_fingerprint() {
+        let initial = classify_against_accepted_snapshot(Ok(one_neighbor()), None);
+        let accepted = initial.snapshot_fingerprint.unwrap();
+        let failed = classify_against_accepted_snapshot(
+            Err(LldpCollectorError::Lldp("collector unavailable".into())),
+            Some(accepted.as_slice()),
+        );
+
+        let recovered =
+            classify_against_accepted_snapshot(Ok(one_neighbor()), Some(accepted.as_slice()));
+
+        assert_eq!(
+            result_of(&failed.report),
+            LldpReportResult::CollectionFailed
+        );
+        assert!(failed.snapshot_fingerprint.is_none());
+        assert_eq!(result_of(&recovered.report), LldpReportResult::Unchanged);
     }
 
     // The first snapshot is a fresh one; once nico-api has acknowledged it, an
