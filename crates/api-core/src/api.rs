@@ -4374,13 +4374,15 @@ impl Api {
     ///
     /// This performs up to three credential-store lookups and is invoked per
     /// admin-UI page render; that cost is acceptable for the low-traffic admin
-    /// UI. The checked keys are the shared
-    /// [`carbide_secrets::credentials::REQUIRED_SITE_DEFAULT_CREDENTIAL_KEYS`],
-    /// which the site explorer's `check_preconditions` also iterates, so the two
-    /// cannot drift apart.
+    /// UI. The checked keys come from the shared
+    /// [`carbide_site_explorer::required_site_default_credential_keys`]
+    /// selection, which the site explorer's `check_preconditions` also uses, so
+    /// the two cannot drift apart.
     pub async fn missing_default_credentials(&self) -> Vec<DefaultCredential> {
         let mut missing = Vec::new();
-        for key in carbide_secrets::credentials::REQUIRED_SITE_DEFAULT_CREDENTIAL_KEYS {
+        for key in carbide_site_explorer::required_site_default_credential_keys(
+            self.runtime_config.site_explorer.dpu_policy,
+        ) {
             match self.credential_manager.get_credentials(&key).await {
                 // Configured iff a non-empty password is stored.
                 Ok(Some(Credentials::UsernamePassword { password, .. }))

@@ -22,9 +22,28 @@ use carbide_secrets::credentials::{
     REQUIRED_SITE_DEFAULT_CREDENTIAL_KEYS,
 };
 use mac_address::MacAddress;
+use model::expected_machine::HostDpuPolicy;
 use model::site_explorer::EndpointExplorationError;
 
 use super::metrics::SiteExplorationMetrics;
+
+/// The site-wide default credentials endpoint exploration requires for the
+/// site-wide `dpu_policy`. Site Explorer's precondition check and the admin
+/// UI's "default credentials not set" warning both use this selection.
+///
+/// Sites without managed DPUs (`ignore`) do not need the DPU UEFI site
+/// default. Every other site policy, including an unset one,
+/// requires all of [`REQUIRED_SITE_DEFAULT_CREDENTIAL_KEYS`].
+pub fn required_site_default_credential_keys(
+    site_dpu_policy: Option<HostDpuPolicy>,
+) -> impl Iterator<Item = CredentialKey> {
+    REQUIRED_SITE_DEFAULT_CREDENTIAL_KEYS
+        .into_iter()
+        .filter(move |key| {
+            site_dpu_policy != Some(HostDpuPolicy::Ignore)
+                || !matches!(key, CredentialKey::DpuUefi { .. })
+        })
+}
 
 pub(super) fn get_bmc_root_credential_key(bmc_mac_address: MacAddress) -> CredentialKey {
     CredentialKey::BmcCredentials {
@@ -112,12 +131,12 @@ impl CredentialClient {
 
     pub(super) async fn check_preconditions(
         &self,
+        site_dpu_policy: Option<HostDpuPolicy>,
         _metrics: &mut SiteExplorationMetrics,
     ) -> Result<(), EndpointExplorationError> {
-        // The required site-wide default credentials (site-wide BMC root, DPU
-        // UEFI, host UEFI) come from the shared canonical list so this check and
-        // the admin UI's "default credentials not set" warning cannot drift.
-        for credential_key in REQUIRED_SITE_DEFAULT_CREDENTIAL_KEYS {
+        // The shared selection keeps this check and the admin UI's "default
+        // credentials not set" warning from drifting.
+        for credential_key in required_site_default_credential_keys(site_dpu_policy) {
             if let Some(e) = self.get_credentials(&credential_key).await.err() {
                 return Err(EndpointExplorationError::MissingCredentials {
                     key: credential_key.to_key_str().to_string(),
@@ -265,9 +284,12 @@ mod tests {
     use std::sync::Arc;
 
     use carbide_secrets::credentials::{
-        BmcCredentialType, CredentialKey, CredentialWriter, Credentials,
+        BmcCredentialType, CredentialKey, CredentialType, CredentialWriter, Credentials,
     };
     use carbide_secrets::test_support::credentials::TestCredentialManager;
+    use carbide_test_support::Outcome::*;
+    use carbide_test_support::{Case, check_cases_async};
+    use model::expected_machine::HostDpuPolicy;
     use model::site_explorer::EndpointExplorationError;
 
     use super::CredentialClient;
@@ -279,7 +301,7 @@ mod tests {
         let mut metrics = SiteExplorationMetrics::new();
 
         let error = credential_client
-            .check_preconditions(&mut metrics)
+            .check_preconditions(None, &mut metrics)
             .await
             .expect_err("missing site credentials should fail preconditions");
 
@@ -290,6 +312,104 @@ mod tests {
         assert_eq!(metrics.endpoint_explorations, 0);
         assert_eq!(metrics.endpoint_explorations_success, 0);
         assert!(metrics.endpoint_explorations_failures_by_type.is_empty());
+    }
+
+    struct PreconditionInput {
+        site_dpu_policy: Option<HostDpuPolicy>,
+        stored: Vec<(CredentialKey, &'static str)>,
+    }
+
+    const BMC_ROOT: CredentialKey = CredentialKey::BmcCredentials {
+        credential_type: BmcCredentialType::SiteWideRoot,
+    };
+    const HOST_UEFI: CredentialKey = CredentialKey::HostUefi {
+        credential_type: CredentialType::SiteDefault,
+    };
+    const DPU_UEFI: CredentialKey = CredentialKey::DpuUefi {
+        credential_type: CredentialType::SiteDefault,
+    };
+
+    #[tokio::test]
+    async fn check_preconditions_requires_dpu_uefi_unless_site_ignores_dpus() {
+        let host_only = || vec![(BMC_ROOT, "bmc"), (HOST_UEFI, "host")];
+        let missing = |key: CredentialKey| FailsWith(key.to_key_str().into_owned());
+        check_cases_async(
+            [
+                Case {
+                    scenario: "ignore site without a DPU UEFI default",
+                    input: PreconditionInput {
+                        site_dpu_policy: Some(HostDpuPolicy::Ignore),
+                        stored: host_only(),
+                    },
+                    expect: Yields(()),
+                },
+                Case {
+                    scenario: "ignore site with the blank seeded DPU UEFI default",
+                    input: PreconditionInput {
+                        site_dpu_policy: Some(HostDpuPolicy::Ignore),
+                        stored: vec![(BMC_ROOT, "bmc"), (HOST_UEFI, "host"), (DPU_UEFI, "")],
+                    },
+                    expect: Yields(()),
+                },
+                Case {
+                    scenario: "unset site policy still requires DPU UEFI",
+                    input: PreconditionInput {
+                        site_dpu_policy: None,
+                        stored: host_only(),
+                    },
+                    expect: missing(DPU_UEFI),
+                },
+                Case {
+                    scenario: "manage site still requires DPU UEFI",
+                    input: PreconditionInput {
+                        site_dpu_policy: Some(HostDpuPolicy::Manage),
+                        stored: host_only(),
+                    },
+                    expect: missing(DPU_UEFI),
+                },
+                Case {
+                    scenario: "nic site still requires DPU UEFI",
+                    input: PreconditionInput {
+                        site_dpu_policy: Some(HostDpuPolicy::Nic),
+                        stored: host_only(),
+                    },
+                    expect: missing(DPU_UEFI),
+                },
+                Case {
+                    scenario: "ignore site still requires the BMC root",
+                    input: PreconditionInput {
+                        site_dpu_policy: Some(HostDpuPolicy::Ignore),
+                        stored: vec![(HOST_UEFI, "host")],
+                    },
+                    expect: missing(BMC_ROOT),
+                },
+                Case {
+                    scenario: "ignore site still requires host UEFI",
+                    input: PreconditionInput {
+                        site_dpu_policy: Some(HostDpuPolicy::Ignore),
+                        stored: vec![(BMC_ROOT, "bmc")],
+                    },
+                    expect: missing(HOST_UEFI),
+                },
+            ],
+            |input| async move {
+                let manager = Arc::new(TestCredentialManager::default());
+                for (key, password) in input.stored {
+                    manager
+                        .set_credentials(&key, &Credentials::new("", password))
+                        .await
+                        .unwrap();
+                }
+                CredentialClient::new(manager)
+                    .check_preconditions(input.site_dpu_policy, &mut SiteExplorationMetrics::new())
+                    .await
+                    .map_err(|error| match error {
+                        EndpointExplorationError::MissingCredentials { key, .. } => key,
+                        other => format!("{other:?}"),
+                    })
+            },
+        )
+        .await;
     }
 
     #[tokio::test]

@@ -127,7 +127,7 @@ vault:
       data:
         UsernamePassword:
           username: ""
-          password: ""          # SITE SECRET: your DPU UEFI password — populate per site
+          password: ""          # SITE SECRET: your DPU UEFI password — populate per site; not required when [site_explorer] dpu_policy = "ignore"
     - path: "machines/all_hosts/site_default/uefi-metadata-items/auth"
       data:
         UsernamePassword:

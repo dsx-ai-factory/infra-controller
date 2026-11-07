@@ -35,6 +35,7 @@ use carbide_secrets::credentials::{
 use carbide_secrets::test_support::credentials::TestCredentialManager;
 use carbide_test_harness::prelude::*;
 use mac_address::MacAddress;
+use model::expected_machine::HostDpuPolicy;
 use rpc::forge::{
     CredentialCreationRequest, CredentialDeletionRequest, CredentialType as RpcCredentialType,
     GetBmcCredentialsRequest,
@@ -856,6 +857,42 @@ async fn test_missing_default_credentials(pool: PgPool) {
         missing.is_empty(),
         "expected no missing defaults, got {missing:?}"
     );
+}
+
+/// A site that ignores DPUs does not warn about the DPU UEFI default, but still
+/// warns about the BMC root and host UEFI defaults until they are set.
+#[sqlx_test]
+async fn ignore_site_does_not_report_dpu_uefi_as_missing(pool: PgPool) {
+    let mut config = default_config::get();
+    config.site_explorer.dpu_policy = Some(HostDpuPolicy::Ignore);
+    let (env, credential_manager) = init_with_runtime_config(pool, config).await;
+    let bmc_root = CredentialKey::BmcCredentials {
+        credential_type: BmcCredentialType::SiteWideRoot,
+    };
+    let host_uefi = CredentialKey::HostUefi {
+        credential_type: CredentialType::SiteDefault,
+    };
+    let missing_keys = || async {
+        env.api()
+            .missing_default_credentials()
+            .await
+            .iter()
+            .map(|credential| default_credential_key(credential).to_owned())
+            .collect::<Vec<_>>()
+    };
+
+    assert_eq!(
+        missing_keys().await,
+        [bmc_root.to_key_str(), host_uefi.to_key_str()]
+    );
+
+    for key in [&bmc_root, &host_uefi] {
+        credential_manager
+            .set_credentials(key, &Credentials::new("", "configured"))
+            .await
+            .unwrap();
+    }
+    assert!(missing_keys().await.is_empty());
 }
 
 #[sqlx_test]
