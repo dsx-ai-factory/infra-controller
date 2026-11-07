@@ -95,6 +95,7 @@ nv-redfish = { workspace = true, features = [
   "oem-nvidia",
   "power-supplies",
   "processors",
+  "resource-serialization",
   "sensors",
   "storages",
   "telemetry-service",

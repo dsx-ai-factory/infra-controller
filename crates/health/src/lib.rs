@@ -57,7 +57,7 @@ use crate::limiter::{BucketLimiter, NoopLimiter, RateLimiter};
 use crate::metrics::{BmcLatencyMetrics, MetricsManager, run_metrics_server};
 use crate::processor::{
     BmcIntrusionEventProcessor, EventProcessingPipeline, EventProcessor, HealthReportProcessor,
-    LeakEventProcessor, NmxcDomainStateProcessor, RackLeakProcessor,
+    LeakEventProcessor, NmxcDomainStateProcessor, RackLeakProcessor, ResourceStatusProcessor,
 };
 use crate::sharding::ShardManager;
 use crate::sink::event_mapper::{OpenBmcEventMapper, RedfishEventMapper};
@@ -303,6 +303,10 @@ fn build_data_sink(
         processors.push(Arc::new(RackLeakProcessor::new(
             rack_leak_cfg.leaking_tray_threshold,
         )));
+    }
+
+    if config.processors.resource_status.is_enabled() {
+        processors.push(Arc::new(ResourceStatusProcessor::new()));
     }
 
     if let Configurable::Enabled(ref sink_cfg) = config.sinks.log_file {
