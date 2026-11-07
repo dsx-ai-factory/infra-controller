@@ -118,10 +118,11 @@ type ManagerImpl struct {
 	maxWaitingPerRack   int
 	defaultQueueTimeout time.Duration
 
-	ctx       context.Context
-	cancel    context.CancelFunc
-	startOnce sync.Once
-	stopOnce  sync.Once
+	ctx         context.Context
+	cancel      context.CancelFunc
+	startOnce   sync.Once
+	stopOnce    sync.Once
+	reconcileWG sync.WaitGroup
 }
 
 // New creates a new task manager.
@@ -182,6 +183,8 @@ func (m *ManagerImpl) Start(ctx context.Context) error {
 		m.cancel = cancel
 
 		m.promoter.Start(startCtx)
+		m.reconcileWG.Add(1)
+		go m.reconcileLoop(startCtx)
 	})
 
 	return startErr
@@ -194,6 +197,7 @@ func (m *ManagerImpl) Stop(ctx context.Context) {
 			m.cancel()
 		}
 
+		m.reconcileWG.Wait()
 		if m.executor != nil {
 			if err := m.executor.Stop(ctx); err != nil {
 				log.Warn().Err(err).Msg("failed to stop executor")

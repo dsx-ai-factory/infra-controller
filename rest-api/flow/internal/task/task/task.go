@@ -98,6 +98,15 @@ type ExecutionRequest struct {
 	Async bool
 }
 
+// ExecutionStatus is an authoritative execution-engine snapshot. FinishedAt is
+// the engine's close time, not the time Flow observed the closure. Message
+// describes orchestration status and does not verify hardware effects.
+type ExecutionStatus struct {
+	Status     taskcommon.TaskStatus
+	FinishedAt *time.Time
+	Message    string
+}
+
 // ExecutionResponse holds the result of a task execution submission.
 type ExecutionResponse struct {
 	ExecutionID string

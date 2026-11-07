@@ -1340,3 +1340,10 @@ func TestFireNow(t *testing.T) {
 func (m *mockTaskStore) ListTaskContextForRack(_ context.Context, _ uuid.UUID) ([]taskdef.TaskContextMetadata, error) {
 	panic("unexpected task context read")
 }
+
+func (s *mockTaskStore) ListTasksForReconciliation(context.Context, taskcommon.ExecutorType, uuid.UUID, int) ([]*taskdef.Task, error) {
+	panic("unexpected ListTasksForReconciliation")
+}
+func (s *mockTaskStore) FinishTaskExecution(context.Context, *taskdef.Task, *taskdef.ExecutionStatus) (bool, error) {
+	panic("unexpected FinishTaskExecution")
+}
