@@ -1605,11 +1605,12 @@ func TestExpectedMachineSQLDAO_CreateMultiple(t *testing.T) {
 	_, _, ctx = testCommonTraceProviderSetup(t, ctx)
 
 	tests := []struct {
-		desc               string
-		inputs             []ExpectedMachineCreateInput
-		expectError        bool
-		expectedCount      int
-		verifyChildSpanner bool
+		desc                     string
+		inputs                   []ExpectedMachineCreateInput
+		expectError              bool
+		expectedCount            int
+		verifyChildSpanner       bool
+		wantRetainBmcCredentials []bool
 	}{
 		{
 			desc: "create batch of three expected machines",
@@ -1671,6 +1672,16 @@ func TestExpectedMachineSQLDAO_CreateMultiple(t *testing.T) {
 			expectError:   false,
 			expectedCount: 1,
 		},
+		{
+			desc: "omitted BMC credential retention is stored as false",
+			inputs: []ExpectedMachineCreateInput{
+				{ExpectedMachineID: uuid.New(), SiteID: site.ID, BmcMacAddress: "00:1B:44:11:3A:C5", ChassisSerialNumber: "CHASSIS-RETAIN-OMITTED", CreatedBy: user.ID},
+				{ExpectedMachineID: uuid.New(), SiteID: site.ID, BmcMacAddress: "00:1B:44:11:3A:C6", ChassisSerialNumber: "CHASSIS-RETAIN-FALSE", RetainBmcCredentials: cutil.GetPtr(false), CreatedBy: user.ID},
+				{ExpectedMachineID: uuid.New(), SiteID: site.ID, BmcMacAddress: "00:1B:44:11:3A:C7", ChassisSerialNumber: "CHASSIS-RETAIN-TRUE", RetainBmcCredentials: cutil.GetPtr(true), CreatedBy: user.ID},
+			},
+			expectedCount:            3,
+			wantRetainBmcCredentials: []bool{false, false, true},
+		},
 	}
 
 	for _, tc := range tests {
@@ -1690,6 +1701,11 @@ func TestExpectedMachineSQLDAO_CreateMultiple(t *testing.T) {
 					assert.Equal(t, Labels(tc.inputs[i].Labels), em.Labels)
 					assert.NotZero(t, em.Created)
 					assert.NotZero(t, em.Updated)
+					if tc.wantRetainBmcCredentials != nil {
+						stored, err := emsd.Get(ctx, nil, em.ID, nil, false)
+						require.NoError(t, err)
+						assert.Equal(t, cutil.GetPtr(tc.wantRetainBmcCredentials[i]), stored.RetainBmcCredentials)
+					}
 				}
 			}
 
@@ -1976,12 +1992,13 @@ func TestExpectedMachineSQLDAO_UpdateMultiple(t *testing.T) {
 
 	// Create test expected machines
 	em1, err := emsd.Create(ctx, nil, ExpectedMachineCreateInput{
-		ExpectedMachineID:   uuid.New(),
-		SiteID:              site.ID,
-		BmcMacAddress:       "00:1B:44:11:3A:D1",
-		ChassisSerialNumber: "CHASSIS-UPDATE-001",
-		ServerName:          cutil.GetPtr("original-server-1"),
-		CreatedBy:           user.ID,
+		ExpectedMachineID:    uuid.New(),
+		SiteID:               site.ID,
+		BmcMacAddress:        "00:1B:44:11:3A:D1",
+		ChassisSerialNumber:  "CHASSIS-UPDATE-001",
+		ServerName:           cutil.GetPtr("original-server-1"),
+		CreatedBy:            user.ID,
+		RetainBmcCredentials: cutil.GetPtr(true),
 	})
 	assert.Nil(t, err)
 
@@ -1994,7 +2011,8 @@ func TestExpectedMachineSQLDAO_UpdateMultiple(t *testing.T) {
 		Labels: map[string]string{
 			"original": "label",
 		},
-		CreatedBy: user.ID,
+		CreatedBy:            user.ID,
+		RetainBmcCredentials: cutil.GetPtr(true),
 	})
 	assert.Nil(t, err)
 
@@ -2015,11 +2033,12 @@ func TestExpectedMachineSQLDAO_UpdateMultiple(t *testing.T) {
 	_, _, ctx = testCommonTraceProviderSetup(t, ctx)
 
 	tests := []struct {
-		desc               string
-		inputs             []ExpectedMachineUpdateInput
-		expectError        bool
-		expectedCount      int
-		verifyChildSpanner bool
+		desc                     string
+		inputs                   []ExpectedMachineUpdateInput
+		expectError              bool
+		expectedCount            int
+		verifyChildSpanner       bool
+		wantRetainBmcCredentials map[uuid.UUID]bool
 	}{
 		{
 			desc: "batch update three expected machines",
@@ -2085,6 +2104,15 @@ func TestExpectedMachineSQLDAO_UpdateMultiple(t *testing.T) {
 			expectError:   false,
 			expectedCount: 1,
 		},
+		{
+			desc: "BMC credential retention updates only the rows that set it",
+			inputs: []ExpectedMachineUpdateInput{
+				{ExpectedMachineID: em1.ID, RetainBmcCredentials: cutil.GetPtr(false)},
+				{ExpectedMachineID: em2.ID, ChassisSerialNumber: cutil.GetPtr("CHASSIS-RETAIN-OMITTED")},
+			},
+			expectedCount:            2,
+			wantRetainBmcCredentials: map[uuid.UUID]bool{em1.ID: false, em2.ID: true},
+		},
 	}
 
 	for _, tc := range tests {
@@ -2117,6 +2145,11 @@ func TestExpectedMachineSQLDAO_UpdateMultiple(t *testing.T) {
 						assert.Equal(t, tc.inputs[i].Interfaces, em.Interfaces)
 					}
 				}
+			}
+			for id, want := range tc.wantRetainBmcCredentials {
+				stored, err := emsd.Get(ctx, nil, id, nil, false)
+				require.NoError(t, err)
+				assert.Equal(t, cutil.GetPtr(want), stored.RetainBmcCredentials)
 			}
 
 			if tc.verifyChildSpanner {
