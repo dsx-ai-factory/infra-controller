@@ -317,7 +317,7 @@ func TestMachine_NewAPIMachine(t *testing.T) {
 					},
 				},
 			},
-			BmcInfo: &corev1.BmcInfo{
+			BmcInfo: &corev1.BmcInfo{ //nolint:staticcheck // Exercise the legacy BMC representation.
 				Ip:  cutil.GetPtr("10.100.1.1"),
 				Mac: cutil.GetPtr("00-B0-D0-63-C2-26"),
 			},

@@ -331,10 +331,13 @@ func insertPhoneHome(documentRoot *yaml.Node, url string) error {
 	}
 
 	phoneHomeValueNode := &yaml.Node{}
-	if err := phoneHomeValueNode.Encode(map[string]string{
+	// cloud-init warns when tries is omitted even though it falls back to 10.
+	err := phoneHomeValueNode.Encode(map[string]any{
 		SitePhoneHomeUrl:  url,
 		SitePhoneHomePost: SitePhoneHomePostAll,
-	}); err != nil {
+		"tries":           10,
+	})
+	if err != nil {
 		return fmt.Errorf("failed to encode phone-home block: %w", err)
 	}
 
