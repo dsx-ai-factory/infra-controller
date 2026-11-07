@@ -125,8 +125,17 @@ store:
 # journal and result.json go on the shared run-data claim (persistence), which
 # the runner keeps on uninstall. A new runId is a new run. checkStore false is
 # a diagnostic run, which is never go.
+#
+# command ingestion runs `/scale-test ingestion` instead, under the same config,
+# account, RBAC and claim: it registers the served MAT inventory in nico-api and
+# times ten stages to Ready. It writes, so dryRun must be true (journal the plan,
+# send nothing) or false. It has no helm test. The README sizes the budgets.
 runner:
   enabled: false
+  command: fleet-up
+  dryRun: null
+  writes:
+    concurrency: {rack: 8, host: 8, switch: 8, powerShelf: 8}
   runId: ""
   lockName: nico-scale-test-site-lock
   # The NICo control-plane pods that must be Ready, besides the MAT pods: at
@@ -135,9 +144,9 @@ runner:
   controlPlane: []
   checkStore: true
   readinessSeconds: 300
-  finalizeSeconds: 600
-  wholeRunSeconds: 900
-  activeDeadlineSeconds: 1200 # over wholeRunSeconds plus the 90 s shutdown budget
+  finalizeSeconds: 1800 # the summaries and end reads after the stage window
+  wholeRunSeconds: 6600 # a 4800 s (80 min) stage window: wholeRunSeconds - finalizeSeconds
+  activeDeadlineSeconds: 6720 # over wholeRunSeconds plus the 90 s shutdown budget
 
 # The Job deadline and the go test timeout for each suite, both positive
 # integer seconds (the timeout renders as a Go duration such as 480s).

@@ -435,7 +435,7 @@ func matServiceFrom(s corev1.Service) MatService {
 
 func podFrom(p corev1.Pod) PodInfo {
 	info := PodInfo{
-		Name: p.Name, Labels: p.Labels, Annotations: p.Annotations, Phase: string(p.Status.Phase),
+		Name: p.Name, UID: string(p.UID), Labels: p.Labels, Annotations: p.Annotations, Phase: string(p.Status.Phase),
 		CreatedAt: p.CreationTimestamp.UTC(), IP: p.Status.PodIP,
 	}
 	if p.CreationTimestamp.IsZero() {

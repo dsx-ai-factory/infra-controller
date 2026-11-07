@@ -240,7 +240,7 @@ func TestKube(t *testing.T) {
 				`"nvidia-infra-controller/mat-machine-id":"m1","nvidia-infra-controller/mat-id":"7"},` +
 				`"annotations":{"nvidia-infra-controller/mat-bmc-ip":"10.0.0.1","nvidia-infra-controller/mat-hardware-type":"gb200"}},` +
 				`"spec":{"externalIPs":["10.0.0.1","bad","2001:db8::1"]}}`
-			pod := `{"metadata":{"name":"mat-0","creationTimestamp":"2026-01-02T03:04:05Z","labels":{"app":"x"}},` +
+			pod := `{"metadata":{"name":"mat-0","uid":"u-0","creationTimestamp":"2026-01-02T03:04:05Z","labels":{"app":"x"}},` +
 				`"status":{"phase":"Running","podIP":"10.1.2.3","conditions":[{"type":"Ready","status":"True"}],` +
 				`"containerStatuses":[{"restartCount":2}],"initContainerStatuses":[{"restartCount":3}]}}`
 			list := func(kind, item string) http.HandlerFunc {
@@ -259,7 +259,7 @@ func TestKube(t *testing.T) {
 				ExternalIPs: []netip.Addr{netip.MustParseAddr("10.0.0.1"), netip.MustParseAddr("2001:db8::1")},
 			}, nil}, "service")
 			is(t, [2]any{pods[0], err2}, [2]any{PodInfo{
-				Name: "mat-0", Labels: map[string]string{"app": "x"}, Phase: "Running",
+				Name: "mat-0", UID: "u-0", Labels: map[string]string{"app": "x"}, Phase: "Running",
 				Ready: true, CreatedAt: at.UTC(), Restarts: 5, IP: "10.1.2.3",
 			}, nil}, "pod")
 		}},
