@@ -59,6 +59,8 @@ func sshKeyGroupFindByIDs(ctx context.Context, grpcClient *cClient.CoreGrpcClien
 	grpcServiceClient := grpcClient.GrpcServiceClient()
 	list, err := grpcServiceClient.FindTenantKeysetsByIds(ctx, &corev1.TenantKeysetsByIdsRequest{
 		KeysetIds: ids,
+		// Cloud inventory recovery needs the public keys to reconstruct an orphaned keyset.
+		IncludeKeyData: true,
 	})
 	if err != nil {
 		return nil, err

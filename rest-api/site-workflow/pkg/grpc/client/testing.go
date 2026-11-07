@@ -631,12 +631,16 @@ func (mcgsc *MockCoreGrpcServiceClient) FindTenantKeysetsByIds(ctx context.Conte
 	out := &corev1.TenantKeySetList{}
 	if in != nil {
 		for _, id := range in.KeysetIds {
-			out.Keyset = append(out.Keyset, &corev1.TenantKeyset{
+			keyset := &corev1.TenantKeyset{
 				KeysetIdentifier: &corev1.TenantKeysetIdentifier{
 					OrganizationId: id.OrganizationId,
 					KeysetId:       id.KeysetId,
 				},
-			})
+			}
+			if in.IncludeKeyData {
+				keyset.KeysetContent = &corev1.TenantKeysetContent{}
+			}
+			out.Keyset = append(out.Keyset, keyset)
 		}
 	}
 

@@ -108,6 +108,13 @@ type SSHKeyGroupFilterInput struct {
 	Versions       []string
 	Statuses       []string
 	SearchQuery    *string
+	IncludeDeleted bool
+}
+
+// SSHKeyGroupClearInput identifies nullable SSH Key Group fields to clear.
+type SSHKeyGroupClearInput struct {
+	SSHKeyGroupID uuid.UUID
+	Deleted       bool
 }
 
 var _ bun.BeforeAppendModelHook = (*SSHKeyGroup)(nil)
@@ -144,6 +151,8 @@ type SSHKeyGroupDAO interface {
 	GenerateAndUpdateVersion(ctx context.Context, tx *db.Tx, id uuid.UUID) (*SSHKeyGroup, error)
 	//
 	Update(ctx context.Context, tx *db.Tx, input SSHKeyGroupUpdateInput) (*SSHKeyGroup, error)
+	//
+	Clear(ctx context.Context, tx *db.Tx, input SSHKeyGroupClearInput) (*SSHKeyGroup, error)
 	//
 	Delete(ctx context.Context, tx *db.Tx, id uuid.UUID) error
 }
@@ -229,6 +238,9 @@ func (skgsd SSHKeyGroupSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter SSH
 	skgs := []SSHKeyGroup{}
 
 	query := db.GetIDB(tx, skgsd.dbSession).NewSelect().Model(&skgs)
+	if filter.IncludeDeleted {
+		query = query.WhereAllWithDeleted()
+	}
 
 	if filter.Names != nil {
 		query = query.Where("skg.name IN (?)", bun.In(filter.Names))
@@ -417,6 +429,40 @@ func (skgsd SSHKeyGroupSQLDAO) Update(ctx context.Context, tx *db.Tx, input SSHK
 		return nil, err
 	}
 	return nv, nil
+}
+
+// Clear clears selected nullable fields on an SSHKeyGroup.
+func (skgsd SSHKeyGroupSQLDAO) Clear(ctx context.Context, tx *db.Tx, input SSHKeyGroupClearInput) (_ *SSHKeyGroup, retErr error) {
+	ctx, sshKeyGroupDAOSpan := cotel.StartSpan(ctx, "SSHKeyGroupDAO.Clear")
+	defer func() { cotel.EndSpan(sshKeyGroupDAOSpan, retErr) }()
+	cotel.SetAttribute(sshKeyGroupDAOSpan, attribute.String("id", input.SSHKeyGroupID.String()))
+
+	skg := &SSHKeyGroup{ID: input.SSHKeyGroupID}
+	updatedFields := []string{}
+	if input.Deleted {
+		updatedFields = append(updatedFields, "deleted")
+	}
+	if len(updatedFields) > 0 {
+		updatedFields = append(updatedFields, "updated")
+		query := db.GetIDB(tx, skgsd.dbSession).
+			NewUpdate().
+			Model(skg).
+			Column(updatedFields...).
+			Where("skg.id = ?", input.SSHKeyGroupID)
+		if input.Deleted {
+			query = query.WhereAllWithDeleted()
+		}
+		_, err := query.Exec(ctx)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	updated, err := skgsd.GetByID(ctx, tx, input.SSHKeyGroupID, nil)
+	if err != nil {
+		return nil, err
+	}
+	return updated, nil
 }
 
 // Delete deletes an SSHKeyGroup by ID

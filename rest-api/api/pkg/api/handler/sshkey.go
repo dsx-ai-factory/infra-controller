@@ -893,6 +893,19 @@ func (dskh DeleteSSHKeyHandler) Handle(c echo.Context) error {
 	var skgsasToSync []cdbm.SSHKeyGroupSiteAssociation
 
 	err = cdb.WithTx(ctx, dskh.dbSession, func(tx *cdb.Tx) error {
+		// Inventory recovery uses this Tenant-scoped lock before adopting Site
+		// keysets. Hold it before discovering associations so recovery cannot add
+		// an association after this deletion's snapshot.
+		derr := tx.TryAcquireAdvisoryLock(
+			ctx,
+			cdb.GetAdvisoryLockIDFromString("ssh-key-group-recovery-"+tenant.ID.String()),
+			nil,
+		)
+		if derr != nil {
+			logger.Error().Err(derr).Msg("failed to acquire Tenant SSH Key recovery lock")
+			return cutil.NewAPIError(http.StatusInternalServerError, "Failed to delete SSH Key, could not acquire data store lock", nil)
+		}
+
 		skas, _, derr := skaDAO.GetAll(ctx, tx, cdbm.SSHKeyAssociationFilterInput{SSHKeyIDs: []uuid.UUID{sk.ID}}, cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)}, []string{cdbm.SSHKeyGroupRelationName})
 		if derr != nil {
 			logger.Error().Err(derr).Msg("error retrieving SSH Key association from DB")
