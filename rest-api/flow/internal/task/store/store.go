@@ -51,12 +51,12 @@ type Store interface {
 	// GetTasks retrieves tasks by their IDs.
 	GetTasks(ctx context.Context, ids []uuid.UUID) ([]*taskdef.Task, error)
 
- // ListTasksForReconciliation returns at most limit scheduled pending/running
- // tasks of the given executor, ordered by UUID strictly after afterID.
- ListTasksForReconciliation(ctx context.Context, executor taskcommon.ExecutorType, afterID uuid.UUID, limit int) ([]*taskdef.Task, error)
- // FinishTaskExecution atomically closes a still-active task only if its
- // execution ID matches the snapshot. False means a concurrent change won.
- FinishTaskExecution(ctx context.Context, task *taskdef.Task, status *taskdef.ExecutionStatus) (bool, error)
+	// ListTasksForReconciliation returns at most limit scheduled pending/running
+	// tasks of the given executor, ordered by UUID strictly after afterID.
+	ListTasksForReconciliation(ctx context.Context, executor taskcommon.ExecutorType, afterID uuid.UUID, limit int) ([]*taskdef.Task, error)
+	// FinishTaskExecution atomically closes a still-active task only if its
+	// execution ID matches the snapshot. False means a concurrent change won.
+	FinishTaskExecution(ctx context.Context, task *taskdef.Task, status *taskdef.ExecutionStatus) (bool, error)
 
 	// ListTasks lists tasks matching the given criteria.
 	ListTasks(ctx context.Context, options *taskcommon.TaskListOptions, pagination *dbquery.Pagination) ([]*taskdef.Task, int32, error)

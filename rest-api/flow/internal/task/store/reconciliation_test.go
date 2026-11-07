@@ -54,7 +54,7 @@ func TestPostgresStore_FinishTaskExecution(t *testing.T) {
 			require.NoError(t, err)
 			if tc.changed {
 				require.Equal(t, taskcommon.TaskStatusTerminated, got.Status)
-				require.Equal(t, closed, *got.FinishedAt)
+				require.Equal(t, closed, got.FinishedAt.UTC())
 			} else {
 				require.Equal(t, tc.status, got.Status)
 				require.Equal(t, "original", got.Message)
