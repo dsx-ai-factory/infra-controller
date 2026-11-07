@@ -335,7 +335,7 @@ async fn query(
                     .await
                     .map_err(|error| match error {
                         RackManagerError::ApiInvocationError(status) => {
-                            tracing::debug!(category = "rpc", rpc_code = ?status.code(), rack_id,
+                            tracing::debug!(category = "rpc", grpc_status_code = ?status.code(), rack_id,
                                 node_count = batch.len(), "RMS firmware inventory RPC failed");
                             if status.code() == tonic::Code::Unimplemented {
                                 FirmwareReadError::Unsupported
