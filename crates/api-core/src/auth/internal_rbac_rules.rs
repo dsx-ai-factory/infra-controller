@@ -367,7 +367,7 @@ impl InternalRBACRules {
         x.perm("AdminForceDeleteSwitch", vec![ForgeAdminCLI, Machineatron]);
         x.perm(
             "DecommissionSwitch",
-            vec![ForgeAdminCLI, Machineatron, Flow],
+            vec![ForgeAdminCLI, Machineatron, SiteAgent, Flow],
         );
         x.perm(
             "AdminForceDeletePowerShelf",
@@ -857,7 +857,7 @@ impl InternalRBACRules {
         x.perm("CreatePowerShelf", vec![ForgeAdminCLI, Machineatron]);
         x.perm(
             "DecommissionPowerShelf",
-            vec![ForgeAdminCLI, Machineatron, Flow],
+            vec![ForgeAdminCLI, Machineatron, SiteAgent, Flow],
         );
         x.perm("DeletePowerShelf", vec![ForgeAdminCLI, Machineatron]);
         x.perm(
@@ -1659,6 +1659,8 @@ mod rbac_rule_tests {
             "CreateCredential",
             "CreateSku",
             "DecommissionManagedHost",
+            "DecommissionPowerShelf",
+            "DecommissionSwitch",
             "DeleteSku",
             "GetCredentialRotationStatus",
             "InsertPowerShelfHealthReport",

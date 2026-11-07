@@ -2489,6 +2489,9 @@ func (h DecommissionMachineHandler) Handle(c echo.Context) error {
 	if machine.IsMissingOnSite {
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Machine is missing on site, unable to decommission", nil)
 	}
+	if machine.IsAssigned {
+		return cutil.NewAPIErrorResponse(c, http.StatusPreconditionFailed, "Machine is currently in use by an Instance and cannot be decommissioned", nil)
+	}
 	if machine.Site == nil {
 		logger.Error().Msg("Related Site was not returned for Machine DB entity")
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Site details for Machine, DB error", nil)
