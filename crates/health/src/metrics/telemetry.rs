@@ -527,5 +527,4 @@ impl<W: Write> Write for CancellableWriter<'_, W> {
 }
 
 #[cfg(test)]
-#[path = "telemetry_tests.rs"]
 mod tests;
