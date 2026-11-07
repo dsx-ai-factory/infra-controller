@@ -1,0 +1,146 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Kind-specific Helm values for nico-api (Core).
+# Applied via `helm upgrade --install --values` when KIND_CORE=true.
+#
+# Workarounds for Kind e2e (documented in dev/kind-full-stack.md):
+#
+# TLS:   ECDSA required — Rustls rejects RSA. Override global.certificate.
+# Vault: Production mode with Kubernetes SA auth (setup-kind-vault.sh configures
+#        the K8s auth method and binds it to the core-grpc SA in nico-system).
+#        automountServiceAccountToken=true; Core detects the SA token and uses K8s auth.
+# DB:    DISABLE_TLS_ENFORCEMENT=1 — in-cluster Postgres has no TLS.
+# Auth:  Real Casbin policy; trusted-certificate principal covers all in-cluster callers.
+# Pools: vpc-vni required — Core exits at startup without it.
+
+## Deploy as "core-grpc" so the Service resolves at the site-agent's hardcoded
+## default: core-grpc.nico-system.svc.cluster.local:1079
+nameOverride: core-grpc
+namespaceOverride: nico-system
+
+global:
+  image:
+    ## repository and tag are set by HELM_SET in the Makefile
+    pullPolicy: Never
+  certificate:
+    issuerRef:
+      kind: ClusterIssuer
+      name: nico-rest-ca-issuer
+      group: cert-manager.io
+    privateKey:
+      ## ECDSA required: Rustls rejects RSA certificates.
+      algorithm: ECDSA
+      size: 256
+
+## Legacy alias creates a forge-system namespace — not needed in Kind.
+legacyAlias:
+  enabled: false
+
+## Keep automountServiceAccountToken enabled so Core can use Kubernetes SA auth
+## to authenticate to Vault (the production auth path). Vault is configured with
+## the Kubernetes auth method and a role bound to the core-grpc SA.
+automountServiceAccountToken: true
+
+## Relaxed resources for a single-node Kind cluster.
+resources:
+  limits:
+    cpu: 2
+    memory: 4Gi
+  requests:
+    cpu: 500m
+    memory: 512Mi
+
+## No PostgreSQL primary node in Kind to prefer co-location with.
+databaseAffinity:
+  enabled: false
+
+## RMS is not deployed in Kind.
+rms:
+  enabled: false
+
+## Use mock component backends so Core starts without real hardware services.
+componentManager:
+  enabled: true
+  computeTrayBackend: "mock"
+  nvSwitchBackend: "mock"
+  powerShelfBackend: "mock"
+  computeTrayUseStateController: false
+  nvSwitchUseStateController: false
+  powerShelfUseStateController: false
+
+## In-cluster Postgres has no TLS; disable SSL enforcement in the migration job.
+migrationJob:
+  sslMode: disable
+
+## Real Casbin policy (bundled in the chart) grants trusted-certificate full access.
+## The site-agent and machine-a-tron certs are issued by nico-rest-ca-issuer, which
+## Core trusts as its admin root CA, so they satisfy the trusted-certificate principal
+## and pass all policy checks without needing permissive_mode.
+## admin_root_cafile_path points at the SPIFFE CA (already mounted) so no separate
+## nico-roots secret content is needed beyond the secret existing.
+auth:
+  permissiveMode: false
+  adminRootCafilePath: "/var/run/secrets/spiffe.io/ca.crt"
+  namespace: "nico-system"
+
+## DPF operator is not deployed in Kind.
+dpf:
+  rbacCreate: false
+
+## Vault in production standalone mode (TLS disabled internally; Kind-only).
+## Core uses Kubernetes SA auth to authenticate to Vault (the natural path
+## when automountServiceAccountToken is true and the Vault K8s auth method
+## is configured with a role bound to the core-grpc SA in nico-system).
+vaultClusterInfo:
+  VAULT_SERVICE: "http://vault.vault.svc.cluster.local:8200"
+  NICO_VAULT_MOUNT: "secret"
+  NICO_VAULT_PKI_MOUNT: "pki"
+
+## Database connection. Rendered into the nico-system-nico-database-config
+## ConfigMap by the chart when databaseConfig is non-empty.
+databaseConfig:
+  DB_HOST: "postgres.postgres"
+  DB_PORT: "5432"
+  DB_NAME: "nico"
+
+env:
+  VAULT_PKI_ROLE_NAME: "nico-cluster"
+  RUST_BACKTRACE: "full"
+  RUST_LIB_BACKTRACE: "0"
+
+## Disable DB TLS enforcement: in-cluster Postgres does not serve TLS.
+## VAULT_TOKEN is not set; Core uses Kubernetes SA auth to Vault instead.
+extraEnv:
+  - name: DISABLE_TLS_ENFORCEMENT
+    value: "1"
+
+## Site configuration. Includes the four required resource pools and the
+## machine-a-tron BMC network (used when KIND_MAT=true KIND_CORE=true).
+siteConfig:
+  enabled: true
+  nicoApiSiteConfig: |
+    allow_insecure_discovery = true
+
+    [pools.lo-ip]
+    type   = "ipv4"
+    prefix = "172.20.0.0/16"
+
+    [pools.vlan-id]
+    type   = "integer"
+    ranges = [{ start = "100", end = "4000" }]
+
+    [pools.vni]
+    type   = "integer"
+    ranges = [{ start = "1000", end = "100000" }]
+
+    [pools.vpc-vni]
+    type   = "integer"
+    ranges = [{ start = "200000", end = "300000" }]
+
+    [networks.MAT-BMC-SERVICES]
+    type          = "underlay"
+    prefix        = "192.168.102.0/24"
+    gateway       = "192.168.102.1"
+    mtu           = 1500
+    reserve_first = 5
