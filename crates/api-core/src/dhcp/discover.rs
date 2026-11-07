@@ -181,12 +181,25 @@ fn ensure_dhcpv6_enabled(segment: &NetworkSegment) -> Result<(), CarbideError> {
     }
 }
 
+/// Extract string representations of IPv4 NTP servers only, preserving the
+/// DHCPv4 option 42 contract. Kea renders `DhcpRecord.ntp_servers` as DHCPv4
+/// option 42 (an IPv4 address list), so IPv6 entries are excluded.
+fn filter_ipv4_ntp_strings(servers: &[IpAddr]) -> Vec<String> {
+    servers
+        .iter()
+        .filter_map(|ip| match ip {
+            IpAddr::V4(v4) => Some(v4.to_string()),
+            IpAddr::V6(_) => None,
+        })
+        .collect()
+}
+
 /// Build an options-only DHCPv6 response for a segment without observing an interface.
 async fn options_only_dhcpv6_record_from_segment(
     txn: &mut PgConnection,
     mac_address: MacAddress,
     segment: &NetworkSegment,
-    ntp_servers: &[Ipv4Addr],
+    ntp_servers: &[IpAddr],
 ) -> Result<rpc::DhcpRecord, CarbideError> {
     // Preserve the cache invalidation marker returned by normal DHCP records.
     let last_invalidation_time = db::dhcp_record::last_invalidation_time(&mut *txn).await?;
@@ -204,7 +217,7 @@ async fn options_only_dhcpv6_record_from_segment(
         gateway: None,
         booturl: None,
         last_invalidation_time: Some(last_invalidation_time.into()),
-        ntp_servers: ntp_servers.iter().map(ToString::to_string).collect(),
+        ntp_servers: filter_ipv4_ntp_strings(ntp_servers),
     })
 }
 
@@ -213,7 +226,7 @@ async fn options_only_dhcpv6_record_from_interface(
     txn: &mut PgConnection,
     machine_interface: &MachineInterfaceSnapshot,
     segment: &NetworkSegment,
-    ntp_servers: &[Ipv4Addr],
+    ntp_servers: &[IpAddr],
 ) -> Result<rpc::DhcpRecord, CarbideError> {
     // Resolve FQDN metadata from the interface domain when one is attached.
     let fqdn_domain_id = machine_interface.domain_id.or(segment.config.subdomain_id);
@@ -245,7 +258,7 @@ async fn options_only_dhcpv6_record_from_interface(
         gateway: None,
         booturl: None,
         last_invalidation_time: Some(last_invalidation_time.into()),
-        ntp_servers: ntp_servers.iter().map(ToString::to_string).collect(),
+        ntp_servers: filter_ipv4_ntp_strings(ntp_servers),
     })
 }
 
@@ -408,7 +421,7 @@ async fn handle_overlay_from_dpa(
     dpa_if: &mut DpaInterface,
     macaddr: MacAddress,
     desired_addr: IpAddr,
-    ntp_servers: &[Ipv4Addr],
+    ntp_servers: &[IpAddr],
 ) -> Result<Option<Response<rpc::DhcpRecord>>, CarbideError> {
     let IpAddr::V4(ip_v4_addr) = desired_addr else {
         return Err(CarbideError::internal(
@@ -437,7 +450,7 @@ async fn handle_overlay_from_dpa(
         mtu: SPX_MTU,
         fqdn: String::new(),
         prefix,
-        ntp_servers: ntp_servers.iter().map(ToString::to_string).collect(),
+        ntp_servers: filter_ipv4_ntp_strings(ntp_servers),
     })))
 }
 
@@ -448,7 +461,7 @@ async fn handle_underlay_from_dpa(
     dpa_if: &mut DpaInterface,
     macaddr: MacAddress,
     relay_address: String,
-    ntp_servers: &[Ipv4Addr],
+    ntp_servers: &[IpAddr],
 ) -> Result<Option<Response<rpc::DhcpRecord>>, CarbideError> {
     // The relay address and the mac address should differ only in bit 0
     let relay_addr = relay_address.parse::<Ipv4Addr>()?;
@@ -478,7 +491,7 @@ async fn handle_underlay_from_dpa(
         mtu: SPX_MTU,
         fqdn: String::new(),
         prefix,
-        ntp_servers: ntp_servers.iter().map(ToString::to_string).collect(),
+        ntp_servers: filter_ipv4_ntp_strings(ntp_servers),
     })))
 }
 
@@ -1032,12 +1045,7 @@ pub(crate) async fn discover_dhcp(
 
     txn.commit().await?;
 
-    record.ntp_servers = api
-        .runtime_config
-        .ntp_servers
-        .iter()
-        .map(ToString::to_string)
-        .collect();
+    record.ntp_servers = filter_ipv4_ntp_strings(&api.runtime_config.ntp_servers);
 
     Ok(Response::new(record))
 }
